@@ -145,10 +145,18 @@ fn oden_capsec_decide(
   Ok(())
 }
 
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-0 capsec is armed and configured through env vars by design; this is the spike's control surface, not steady-state config."
+)]
 fn oden_capsec_active() -> bool {
   std::env::var_os("ODEN_CAPSEC_SPIKE").is_some()
 }
 
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-0 capsec grants are supplied through an env var; a real policy source replaces this."
+)]
 fn oden_capsec_policy_from_env() -> OdenPolicy {
   let mut policy = OdenPolicy::new(oden_capsec_mode());
   if let Ok(grants) = std::env::var("ODEN_CAPSEC_GRANT") {
@@ -177,6 +185,10 @@ fn oden_capsec_policy_from_env() -> OdenPolicy {
   policy
 }
 
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-0 capsec mode is selected through env vars; the spike's control surface."
+)]
 fn oden_capsec_mode() -> OdenMode {
   if let Ok(mode) = std::env::var("ODEN_CAPSEC_MODE") {
     match mode.as_str() {
@@ -193,6 +205,10 @@ fn oden_capsec_mode() -> OdenMode {
   }
 }
 
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-0 capsec reads the project root from an env var, falling back to cwd; a real config source replaces this."
+)]
 fn oden_capsec_principal() -> OdenPrincipal {
   let project_root = std::env::var("ODEN_CAPSEC_ROOT").unwrap_or_else(|_| {
     std::env::current_dir()

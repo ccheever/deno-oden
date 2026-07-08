@@ -1,0 +1,9 @@
+[WILDCARD][oden-seal-selftest] PASS slot-key-not-globally-registered
+[oden-seal-selftest] PASS user-var-cannot-read-oden-slot
+[oden-seal-selftest] PASS user-var-read-returns-own-value
+[oden-seal-selftest] PASS oden-slot-preserved-during-scope
+[oden-seal-selftest] PASS oden-slot-preserved-after-scope
+[oden-seal-selftest] PASS forged-symbol-does-not-collide
+[oden-seal-selftest] ALL PASS
+[WILDCARD]cond1 sealed: PASS
+cond2 coexists: PASS
