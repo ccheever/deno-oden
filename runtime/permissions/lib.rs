@@ -93,9 +93,12 @@ fn format_permission_error(name: &'static str) -> String {
 // seed of the real hook (which will call oden_policy::Policy::decide and, unlike
 // this textual read, key on script IDs). Kept tiny and env-gated so it is inert
 // on any ordinary Deno build.
-fn oden_capsec_spike(api: &str, target: &str) {
+fn oden_capsec_decide(
+  api: &str,
+  target: &str,
+) -> Result<(), PermissionCheckError> {
   if std::env::var_os("ODEN_CAPSEC_SPIKE").is_none() {
-    return;
+    return Ok(());
   }
   let frames = MAYBE_CURRENT_STACKTRACE
     .lock()
@@ -106,12 +109,40 @@ fn oden_capsec_spike(api: &str, target: &str) {
     .iter()
     .find_map(|f| oden_principal_of(f))
     .unwrap_or_else(|| "root".to_string());
-  let decision = if principal == "root" {
-    "allow(ambient)"
+  let enforce = std::env::var_os("ODEN_CAPSEC_ENFORCE").is_some();
+  let granted = oden_spike_granted(&principal, target);
+  let deny = enforce && principal != "root" && !granted;
+  let verdict = if principal == "root" {
+    "allow(ambient root)"
+  } else if !enforce {
+    "audit(would consult grants)"
+  } else if granted {
+    "allow(granted)"
   } else {
-    "DECIDE(consult grants)"
+    "DENY(no grant)"
   };
-  eprintln!("[oden-capsec spike] {api}:{target} caller={principal} -> {decision}");
+  eprintln!("[oden-capsec] {api}:{target} caller={principal} -> {verdict}");
+  if deny {
+    return Err(PermissionCheckError::PermissionDenied(PermissionDeniedError {
+      access: format!("{api} access to {target:?}"),
+      name: "capsec",
+      custom_message: Some(format!(
+        "oden capsec: package \"{principal}\" is not granted {api}:{target}"
+      )),
+      state: PermissionState::Denied,
+    }));
+  }
+  Ok(())
+}
+
+// Spike grant surface: ODEN_CAPSEC_GRANT="pkg=TARGET,pkg2=TARGET2". The real hook
+// replaces this with oden_policy::Policy::decide over the resolved artifact.
+fn oden_spike_granted(principal: &str, target: &str) -> bool {
+  let Ok(grants) = std::env::var("ODEN_CAPSEC_GRANT") else {
+    return false;
+  };
+  let needle = format!("{principal}={target}");
+  grants.split(',').any(|g| g.trim() == needle)
 }
 
 // Nearest USER frame → principal. Skips runtime/deputy frames (ext:/node:/deno:)
@@ -4439,7 +4470,7 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn check_env(&self, var: &str) -> Result<(), PermissionCheckError> {
-    oden_capsec_spike("env", var);
+    oden_capsec_decide("env", var)?;
     self.inner.lock().env.check(var, None)?;
     Ok(())
   }
