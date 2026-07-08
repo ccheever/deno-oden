@@ -85,6 +85,56 @@ fn format_permission_error(name: &'static str) -> String {
   }
 }
 
+// --- Oden capsec Phase-0 attribution spike (LLP 0001) ----------------------
+// De-risks the load-bearing claim: at the permission funnel, the acting package
+// is recoverable from the op-dispatch call stack. Active only when
+// ODEN_CAPSEC_SPIKE is set (and DENO_TRACE_PERMISSIONS populates the stack); it
+// PRINTS an attribution + a would-be decision — it does not enforce. This is the
+// seed of the real hook (which will call oden_policy::Policy::decide and, unlike
+// this textual read, key on script IDs). Kept tiny and env-gated so it is inert
+// on any ordinary Deno build.
+fn oden_capsec_spike(api: &str, target: &str) {
+  if std::env::var_os("ODEN_CAPSEC_SPIKE").is_none() {
+    return;
+  }
+  let frames = MAYBE_CURRENT_STACKTRACE
+    .lock()
+    .as_ref()
+    .map(|s| s())
+    .unwrap_or_default();
+  let principal = frames
+    .iter()
+    .find_map(|f| oden_principal_of(f))
+    .unwrap_or_else(|| "root".to_string());
+  let decision = if principal == "root" {
+    "allow(ambient)"
+  } else {
+    "DECIDE(consult grants)"
+  };
+  eprintln!("[oden-capsec spike] {api}:{target} caller={principal} -> {decision}");
+}
+
+// Nearest USER frame → principal. Skips runtime/deputy frames (ext:/node:/deno:)
+// exactly as the plan's stack walk does; node_modules → the package, other
+// first-party file → root. (Textual, spike-only; the real hook keys on script
+// IDs, which names cannot forge.)
+fn oden_principal_of(frame: &str) -> Option<String> {
+  if frame.contains("ext:") || frame.contains("node:") || frame.contains("deno:") {
+    return None;
+  }
+  if let Some(idx) = frame.find("/node_modules/") {
+    let rest = &frame[idx + "/node_modules/".len()..];
+    let name = rest.split('/').next().unwrap_or("");
+    if !name.is_empty() {
+      return Some(name.to_string());
+    }
+  }
+  if frame.contains("file:") {
+    return Some("root".to_string());
+  }
+  None
+}
+
 fn write_audit<T>(flag_name: &str, value: T)
 where
   T: Serialize,
@@ -4389,6 +4439,7 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn check_env(&self, var: &str) -> Result<(), PermissionCheckError> {
+    oden_capsec_spike("env", var);
     self.inner.lock().env.check(var, None)?;
     Ok(())
   }
