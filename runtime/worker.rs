@@ -1330,6 +1330,26 @@ fn common_runtime(opts: CommonRuntimeOptions) -> JsRuntime {
 pub fn create_permissions_stack_trace_callback()
 -> deno_core::OpStackTraceCallback {
   Box::new(|stack: Vec<deno_core::error::JsStackFrame>| {
+    let oden_stack = stack
+      .iter()
+      .map(|frame| {
+        let locator = match (frame.isolate_id, frame.script_id) {
+          (Some(isolate_id), Some(script_id)) => {
+            deno_core::error::oden_script_locator(isolate_id, script_id)
+          }
+          _ => None,
+        };
+        deno_permissions::prompter::OdenStackFrame {
+          isolate_id: frame.isolate_id,
+          script_id: frame.script_id,
+          locator,
+          display_name: frame.file_name.clone(),
+        }
+      })
+      .collect::<Vec<_>>();
+    deno_permissions::prompter::set_current_oden_stacktrace(Box::new(
+      move || oden_stack.clone(),
+    ));
     deno_permissions::prompter::set_current_stacktrace(Box::new(move || {
       stack
         .iter()

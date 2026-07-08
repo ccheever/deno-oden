@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
@@ -9,6 +10,8 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 
 use boxed_error::Boxed;
 use deno_error::JsError;
@@ -561,6 +564,10 @@ impl JsErrorClass for JsError {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct JsStackFrame {
+  #[serde(default)]
+  pub isolate_id: Option<usize>,
+  #[serde(default)]
+  pub script_id: Option<usize>,
   pub type_name: Option<String>,
   pub function_name: Option<String>,
   pub method_name: Option<String>,
@@ -580,6 +587,78 @@ pub struct JsStackFrame {
   pub is_promise_all: bool,
   pub is_wasm: bool,
   pub promise_index: Option<i64>,
+}
+
+static ODEN_SCRIPT_LOCATORS: LazyLock<Mutex<HashMap<(usize, usize), String>>> =
+  LazyLock::new(|| Mutex::new(HashMap::new()));
+
+// Oden Phase 0 uses V8 script IDs as the unforgeable stack-frame key. The
+// locator registry is intentionally tiny here; loader ownership hardening builds
+// on the same key in later phases.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+const _: () = assert!(
+  std::mem::size_of::<v8::UnsafeRawIsolatePtr>()
+    == std::mem::size_of::<usize>()
+);
+
+pub fn oden_isolate_key(ptr: v8::UnsafeRawIsolatePtr) -> usize {
+  // SAFETY: UnsafeRawIsolatePtr is #[repr(transparent)] over a pointer-sized
+  // V8 isolate pointer; the compile-time assert above keeps that assumption
+  // explicit.
+  unsafe { std::mem::transmute::<v8::UnsafeRawIsolatePtr, usize>(ptr) }
+}
+
+pub fn oden_register_script_locator(
+  isolate: v8::UnsafeRawIsolatePtr,
+  script_id: usize,
+  locator: &str,
+) {
+  if script_id == usize::MAX {
+    return;
+  }
+  ODEN_SCRIPT_LOCATORS
+    .lock()
+    .unwrap()
+    .insert((oden_isolate_key(isolate), script_id), locator.to_string());
+}
+
+pub fn oden_register_script_locator_global(script_id: usize, locator: &str) {
+  if script_id == usize::MAX {
+    return;
+  }
+  ODEN_SCRIPT_LOCATORS
+    .lock()
+    .unwrap()
+    .insert((0, script_id), locator.to_string());
+}
+
+pub fn oden_script_locator(
+  isolate_id: usize,
+  script_id: usize,
+) -> Option<String> {
+  let locators = ODEN_SCRIPT_LOCATORS.lock().unwrap();
+  locators
+    .get(&(isolate_id, script_id))
+    .or_else(|| locators.get(&(0, script_id)))
+    .cloned()
+}
+
+pub fn capture_op_stack_frames(
+  scope: &mut v8::PinScope,
+  isolate: v8::UnsafeRawIsolatePtr,
+) -> Vec<JsStackFrame> {
+  let Some(stack) = v8::StackTrace::current_stack_trace(scope, 32) else {
+    return Vec::new();
+  };
+  let isolate_id = oden_isolate_key(isolate);
+  let frame_count = stack.get_frame_count();
+  (0..frame_count)
+    .filter_map(|i| {
+      stack.get_frame(scope, i).map(|frame| {
+        JsStackFrame::from_v8_stack_frame(scope, isolate_id, frame)
+      })
+    })
+    .collect()
 }
 
 /// Applies source map to the given location
@@ -673,6 +752,8 @@ impl JsStackFrame {
     column_number: Option<i64>,
   ) -> Self {
     Self {
+      isolate_id: None,
+      script_id: None,
       type_name: None,
       function_name: None,
       method_name: None,
@@ -687,6 +768,53 @@ impl JsStackFrame {
       is_async: false,
       is_promise_all: false,
       is_wasm: false,
+      promise_index: None,
+    }
+  }
+
+  pub fn from_v8_stack_frame<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    isolate_id: usize,
+    frame: v8::Local<'s, v8::StackFrame>,
+  ) -> Self {
+    fn non_empty_string<'s, 'i>(
+      scope: &mut v8::PinScope<'s, 'i>,
+      value: Option<v8::Local<'s, v8::String>>,
+    ) -> Option<String> {
+      value
+        .map(|s| s.to_rust_string_lossy(scope))
+        .filter(|s| !s.is_empty())
+    }
+
+    let script_id = frame.get_script_id();
+    let script_id = (script_id != usize::MAX).then_some(script_id);
+    let line_number = frame.get_line_number();
+    let line_number = (line_number != usize::MAX && line_number != 0)
+      .then_some(line_number as i64);
+    let column_number = frame.get_column();
+    let column_number = (column_number != usize::MAX && column_number != 0)
+      .then_some(column_number as i64);
+    let file_name =
+      non_empty_string(scope, frame.get_script_name_or_source_url(scope))
+        .or_else(|| non_empty_string(scope, frame.get_script_name(scope)));
+
+    Self {
+      isolate_id: Some(isolate_id),
+      script_id,
+      type_name: None,
+      function_name: non_empty_string(scope, frame.get_function_name(scope)),
+      method_name: None,
+      file_name,
+      line_number,
+      column_number,
+      eval_origin: None,
+      is_top_level: Some(true),
+      is_eval: frame.is_eval(),
+      is_native: !frame.is_user_javascript(),
+      is_constructor: frame.is_constructor(),
+      is_async: false,
+      is_promise_all: false,
+      is_wasm: frame.is_wasm(),
       promise_index: None,
     }
   }
@@ -768,6 +896,8 @@ impl JsStackFrame {
     };
 
     Some(Self {
+      isolate_id: None,
+      script_id: None,
       file_name,
       line_number,
       column_number,
@@ -2662,6 +2792,8 @@ mod tests {
     deno_core::scope!(scope, runtime);
 
     let frame = JsStackFrame {
+      isolate_id: None,
+      script_id: None,
       type_name: Some("Foo".to_string()),
       function_name: Some("bar".to_string()),
       method_name: None,

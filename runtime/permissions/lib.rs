@@ -34,15 +34,23 @@ use url::Url;
 
 pub mod broker;
 mod ipc_pipe;
+mod oden_policy;
 pub mod prompter;
 mod runtime_descriptor_parser;
 pub mod which;
 
+use prompter::MAYBE_CURRENT_ODEN_STACKTRACE;
 use prompter::MAYBE_CURRENT_STACKTRACE;
 use prompter::PERMISSION_EMOJI;
 use prompter::permission_prompt;
 pub use runtime_descriptor_parser::RuntimePermissionDescriptorParser;
 
+use self::oden_policy::Decision as OdenDecision;
+use self::oden_policy::Family as OdenFamily;
+use self::oden_policy::Mode as OdenMode;
+use self::oden_policy::Policy as OdenPolicy;
+use self::oden_policy::Principal as OdenPrincipal;
+use self::oden_policy::Request as OdenRequest;
 use self::prompter::PromptResponse;
 use self::which::WhichSys;
 
@@ -85,85 +93,141 @@ fn format_permission_error(name: &'static str) -> String {
   }
 }
 
-// --- Oden capsec Phase-0 attribution spike (LLP 0001) ----------------------
-// De-risks the load-bearing claim: at the permission funnel, the acting package
-// is recoverable from the op-dispatch call stack. Active only when
-// ODEN_CAPSEC_SPIKE is set (and DENO_TRACE_PERMISSIONS populates the stack); it
-// PRINTS an attribution + a would-be decision — it does not enforce. This is the
-// seed of the real hook (which will call oden_policy::Policy::decide and, unlike
-// this textual read, key on script IDs). Kept tiny and env-gated so it is inert
-// on any ordinary Deno build.
+// --- Oden capsec Phase-0 engine hook (LLP 0001) -----------------------------
+// Env-gated and inert by default. When armed, the permission layer resolves the
+// acting principal from V8 script IDs captured at op dispatch and asks the
+// fork-local copy of oden_policy for a layer-2 decision. Display names remain
+// diagnostics only; sourceURL can forge them.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
 fn oden_capsec_decide(
-  api: &str,
+  family: OdenFamily,
+  action: &str,
   target: &str,
+  api_name: Option<&str>,
 ) -> Result<(), PermissionCheckError> {
-  if std::env::var_os("ODEN_CAPSEC_SPIKE").is_none() {
+  if !oden_capsec_active() {
     return Ok(());
   }
-  let frames = MAYBE_CURRENT_STACKTRACE
-    .lock()
-    .as_ref()
-    .map(|s| s())
-    .unwrap_or_default();
-  let principal = frames
-    .iter()
-    .find_map(|f| oden_principal_of(f))
-    .unwrap_or_else(|| "root".to_string());
-  let enforce = std::env::var_os("ODEN_CAPSEC_ENFORCE").is_some();
-  let granted = oden_spike_granted(&principal, target);
-  let deny = enforce && principal != "root" && !granted;
-  let verdict = if principal == "root" {
-    "allow(ambient root)"
-  } else if !enforce {
-    "audit(would consult grants)"
-  } else if granted {
-    "allow(granted)"
-  } else {
-    "DENY(no grant)"
+  let policy = oden_capsec_policy_from_env();
+  let principal = oden_capsec_principal();
+  let req = OdenRequest {
+    family,
+    action: action.to_string(),
+    target: target.to_string(),
   };
-  eprintln!("[oden-capsec] {api}:{target} caller={principal} -> {verdict}");
-  if deny {
-    return Err(PermissionCheckError::PermissionDenied(PermissionDeniedError {
-      access: format!("{api} access to {target:?}"),
-      name: "capsec",
-      custom_message: Some(format!(
-        "oden capsec: package \"{principal}\" is not granted {api}:{target}"
-      )),
-      state: PermissionState::Denied,
-    }));
+  let decision = policy.decide(&principal, &req);
+  let principal_label = principal.label();
+  let verdict = match (&principal, &decision) {
+    (principal, OdenDecision::Allow) if principal.is_ambient() => {
+      "allow(ambient)"
+    }
+    (_, OdenDecision::Allow) => "allow(granted)",
+    (_, OdenDecision::AllowRecord) => "audit(record)",
+    (_, OdenDecision::Deny) => "DENY(no grant)",
+  };
+  let api = api_name.unwrap_or_else(|| family.name());
+  eprintln!(
+    "[oden-capsec] {api}:{target} caller={principal_label} -> {verdict}"
+  );
+  if decision == OdenDecision::Deny {
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("{api} access to {target:?}"),
+        name: "capsec",
+        custom_message: Some(format!(
+          "oden capsec: principal \"{principal_label}\" is not granted {}:{action}:{target}",
+          family.name()
+        )),
+        state: PermissionState::Denied,
+      },
+    ));
   }
   Ok(())
 }
 
-// Spike grant surface: ODEN_CAPSEC_GRANT="pkg=TARGET,pkg2=TARGET2". The real hook
-// replaces this with oden_policy::Policy::decide over the resolved artifact.
-fn oden_spike_granted(principal: &str, target: &str) -> bool {
-  let Ok(grants) = std::env::var("ODEN_CAPSEC_GRANT") else {
-    return false;
-  };
-  let needle = format!("{principal}={target}");
-  grants.split(',').any(|g| g.trim() == needle)
+fn oden_capsec_active() -> bool {
+  std::env::var_os("ODEN_CAPSEC_SPIKE").is_some()
 }
 
-// Nearest USER frame → principal. Skips runtime/deputy frames (ext:/node:/deno:)
-// exactly as the plan's stack walk does; node_modules → the package, other
-// first-party file → root. (Textual, spike-only; the real hook keys on script
-// IDs, which names cannot forge.)
-fn oden_principal_of(frame: &str) -> Option<String> {
-  if frame.contains("ext:") || frame.contains("node:") || frame.contains("deno:") {
-    return None;
-  }
-  if let Some(idx) = frame.find("/node_modules/") {
-    let rest = &frame[idx + "/node_modules/".len()..];
-    let name = rest.split('/').next().unwrap_or("");
-    if !name.is_empty() {
-      return Some(name.to_string());
+fn oden_capsec_policy_from_env() -> OdenPolicy {
+  let mut policy = OdenPolicy::new(oden_capsec_mode());
+  if let Ok(grants) = std::env::var("ODEN_CAPSEC_GRANT") {
+    let entries = if grants.contains(';') {
+      grants.split(';').collect::<Vec<_>>()
+    } else {
+      grants.split(',').collect::<Vec<_>>()
+    };
+    for entry in entries {
+      let Some((selector, grant_str)) = entry.split_once('=') else {
+        continue;
+      };
+      let selector = selector.trim();
+      if selector.is_empty() {
+        continue;
+      }
+      let grant_str = grant_str.trim();
+      let grant_str = if grant_str.contains(':') {
+        Cow::Borrowed(grant_str)
+      } else {
+        Cow::Owned(format!("env:read:{grant_str}"))
+      };
+      policy.grant(selector, &grant_str);
     }
   }
-  if frame.contains("file:") {
-    return Some("root".to_string());
+  policy
+}
+
+fn oden_capsec_mode() -> OdenMode {
+  if let Ok(mode) = std::env::var("ODEN_CAPSEC_MODE") {
+    match mode.as_str() {
+      "off" | "permissive" => return OdenMode::Permissive,
+      "audit" => return OdenMode::Audit,
+      "enforce" => return OdenMode::Enforce,
+      _ => {}
+    }
   }
-  None
+  if std::env::var_os("ODEN_CAPSEC_ENFORCE").is_some() {
+    OdenMode::Enforce
+  } else {
+    OdenMode::Audit
+  }
+}
+
+fn oden_capsec_principal() -> OdenPrincipal {
+  let project_root = std::env::var("ODEN_CAPSEC_ROOT").unwrap_or_else(|_| {
+    std::env::current_dir()
+      .map(|p| p.to_string_lossy().into_owned())
+      .unwrap_or_else(|_| String::new())
+  });
+  let frames = MAYBE_CURRENT_ODEN_STACKTRACE
+    .lock()
+    .as_ref()
+    .map(|s| s())
+    .unwrap_or_default();
+  for frame in frames {
+    let principal = match frame.locator.as_deref() {
+      Some(locator) => oden_policy::classify(locator, &project_root),
+      None if oden_capsec_runtime_display(frame.display_name.as_deref()) => {
+        continue;
+      }
+      None if frame.script_id.is_some() => OdenPrincipal::Quarantine,
+      None => continue,
+    };
+    if principal == OdenPrincipal::Runtime {
+      continue;
+    }
+    return principal;
+  }
+  OdenPrincipal::NoUser
+}
+
+fn oden_capsec_runtime_display(display_name: Option<&str>) -> bool {
+  let Some(display_name) = display_name else {
+    return false;
+  };
+  display_name.starts_with("ext:")
+    || display_name.starts_with("node:")
+    || display_name.starts_with("deno:")
 }
 
 fn write_audit<T>(flag_name: &str, value: T)
@@ -4264,6 +4328,15 @@ impl PermissionsContainer {
     blind_requested: Option<&str>,
     api_name: Option<&str>,
   ) -> Result<CheckedPath<'a>, PermissionCheckError> {
+    if oden_capsec_active() {
+      let target = path.to_string_lossy().into_owned();
+      if access_kind.is_read() {
+        oden_capsec_decide(OdenFamily::Fs, "read", &target, api_name)?;
+      }
+      if access_kind.is_write() {
+        oden_capsec_decide(OdenFamily::Fs, "write", &target, api_name)?;
+      }
+    }
     let path = {
       let mut inner = self.inner.lock();
       if inner.all_granted() {
@@ -4339,6 +4412,7 @@ impl PermissionsContainer {
     &self,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(OdenFamily::Fs, "read", "*", Some(api_name))?;
     self
       .inner
       .lock()
@@ -4349,6 +4423,9 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn query_read_all(&self) -> bool {
+    if oden_capsec_active() {
+      return false;
+    }
     self.inner.lock().read.query(None) == PermissionState::Granted
   }
 
@@ -4357,6 +4434,7 @@ impl PermissionsContainer {
     &self,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(OdenFamily::Fs, "write", "*", Some(api_name))?;
     self.inner.lock().write.check_all(Some(api_name))?;
     Ok(())
   }
@@ -4367,6 +4445,14 @@ impl PermissionsContainer {
     path: Cow<'a, Path>,
     api_name: &str,
   ) -> Result<CheckedPath<'a>, PermissionCheckError> {
+    if oden_capsec_active() {
+      oden_capsec_decide(
+        OdenFamily::Fs,
+        "write",
+        &path.to_string_lossy(),
+        Some(api_name),
+      )?;
+    }
     let mut inner = self.inner.lock();
     let inner = &mut inner.write;
     if inner.is_allow_all() {
@@ -4405,6 +4491,14 @@ impl PermissionsContainer {
     path: Cow<'a, Path>,
     api_name: &str,
   ) -> Result<CheckedPath<'a>, PermissionCheckError> {
+    if oden_capsec_active() {
+      oden_capsec_decide(
+        OdenFamily::Fs,
+        "write",
+        &path.to_string_lossy(),
+        Some(api_name),
+      )?;
+    }
     let mut inner = self.inner.lock();
     let inner = &mut inner.write;
     if inner.is_allow_all() {
@@ -4437,6 +4531,12 @@ impl PermissionsContainer {
     cmd: &RunQueryDescriptor,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(
+      OdenFamily::Run,
+      "run",
+      &cmd.display_name(),
+      Some(api_name),
+    )?;
     self.inner.lock().run.check(cmd, Some(api_name))?;
     Ok(())
   }
@@ -4446,6 +4546,7 @@ impl PermissionsContainer {
     &mut self,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(OdenFamily::Run, "run", "*", Some(api_name))?;
     self.inner.lock().run.check_all(Some(api_name))?;
     Ok(())
   }
@@ -4470,13 +4571,14 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn check_env(&self, var: &str) -> Result<(), PermissionCheckError> {
-    oden_capsec_decide("env", var)?;
+    oden_capsec_decide(OdenFamily::Env, "read", var, None)?;
     self.inner.lock().env.check(var, None)?;
     Ok(())
   }
 
   #[inline(always)]
   pub fn check_env_all(&self) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(OdenFamily::Env, "read", "*", None)?;
     self.inner.lock().env.check_all()?;
     Ok(())
   }
@@ -4489,6 +4591,7 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn check_ffi_all(&self) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(OdenFamily::Ffi, "load", "*", None)?;
     self.inner.lock().ffi.check_all()?;
     Ok(())
   }
@@ -4673,6 +4776,12 @@ impl PermissionsContainer {
     url: &Url,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(
+      OdenFamily::Network,
+      "fetch",
+      url.as_str(),
+      Some(api_name),
+    )?;
     let mut inner = self.inner.lock();
     audit_and_skip_check_if_is_permission_fully_granted!(
       inner.net,
@@ -4690,19 +4799,17 @@ impl PermissionsContainer {
     host: &(T, Option<u16>),
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
+    let hostname = Host::parse_for_query(host.0.as_ref())?;
+    let descriptor = NetDescriptor(hostname, host.1.map(Into::into));
+    let target = descriptor.display_name().into_owned();
+    oden_capsec_decide(OdenFamily::Network, "fetch", &target, Some(api_name))?;
     let mut inner = self.inner.lock();
     let inner = &mut inner.net;
     audit_and_skip_check_if_is_permission_fully_granted!(
       inner,
       NetDescriptor::flag_name(),
-      {
-        let hostname = Host::parse_for_query(host.0.as_ref())?;
-        let descriptor = NetDescriptor(hostname, host.1.map(Into::into));
-        descriptor.display_name().into_owned()
-      }
+      target
     );
-    let hostname = Host::parse_for_query(host.0.as_ref())?;
-    let descriptor = NetDescriptor(hostname, host.1.map(Into::into));
     inner.check(&descriptor, Some(api_name))?;
     Ok(())
   }
@@ -4730,11 +4837,13 @@ impl PermissionsContainer {
     port: u32,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
+    let target = format!("{cid}:{port}");
+    oden_capsec_decide(OdenFamily::Network, "fetch", &target, Some(api_name))?;
     let mut inner = self.inner.lock();
     audit_and_skip_check_if_is_permission_fully_granted!(
       inner.net,
       NetDescriptor::flag_name(),
-      format!("{cid}:{port}")
+      target
     );
     let desc = NetDescriptor(Host::Vsock(cid), Some(port));
     inner.net.check(&desc, Some(api_name))?;
@@ -4759,11 +4868,13 @@ impl PermissionsContainer {
     path: &Path,
     api_name: Option<&str>,
   ) -> Result<(), PermissionCheckError> {
+    let target = format!("unix:{}", path.display());
+    oden_capsec_decide(OdenFamily::Network, "fetch", &target, api_name)?;
     let mut inner = self.inner.lock();
     audit_and_skip_check_if_is_permission_fully_granted!(
       inner.net,
       NetDescriptor::flag_name(),
-      format!("unix:{}", path.display())
+      target
     );
     let desc = NetDescriptor(Host::UnixSocket(path.to_path_buf()), None);
     inner.net.check(&desc, api_name)?;
@@ -4775,6 +4886,14 @@ impl PermissionsContainer {
     &mut self,
     path: Cow<'a, Path>,
   ) -> Result<Cow<'a, Path>, PermissionCheckError> {
+    if oden_capsec_active() {
+      oden_capsec_decide(
+        OdenFamily::Ffi,
+        "load",
+        &path.to_string_lossy(),
+        None,
+      )?;
+    }
     let mut inner = self.inner.lock();
     let inner = &mut inner.ffi;
     if inner.is_allow_all() {
@@ -4792,6 +4911,7 @@ impl PermissionsContainer {
   pub fn check_ffi_partial_no_path(
     &mut self,
   ) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(OdenFamily::Ffi, "load", "*", None)?;
     let mut inner = self.inner.lock();
     let inner = &mut inner.ffi;
     if !inner.is_allow_all() {
@@ -4808,6 +4928,14 @@ impl PermissionsContainer {
     &mut self,
     path: Cow<'a, Path>,
   ) -> Result<Cow<'a, Path>, PermissionCheckError> {
+    if oden_capsec_active() {
+      oden_capsec_decide(
+        OdenFamily::Ffi,
+        "load",
+        &path.to_string_lossy(),
+        None,
+      )?;
+    }
     let mut inner = self.inner.lock();
     let inner = &mut inner.ffi;
     if inner.is_allow_all() {
