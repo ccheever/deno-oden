@@ -56,8 +56,16 @@ pub(crate) static MAYBE_CURRENT_STACKTRACE: Lazy<
   Mutex<Option<GetFormattedStackFn>>,
 > = Lazy::new(|| Mutex::new(None));
 
+pub(crate) static MAYBE_CURRENT_ODEN_STACKTRACE: Lazy<
+  Mutex<Option<GetOdenStackFn>>,
+> = Lazy::new(|| Mutex::new(None));
+
 pub fn set_current_stacktrace(get_stack: GetFormattedStackFn) {
   *MAYBE_CURRENT_STACKTRACE.lock() = Some(get_stack);
+}
+
+pub fn set_current_oden_stacktrace(get_stack: GetOdenStackFn) {
+  *MAYBE_CURRENT_ODEN_STACKTRACE.lock() = Some(get_stack);
 }
 
 pub fn permission_prompt(
@@ -106,6 +114,15 @@ pub fn lock_terminal_input() -> std::sync::MutexGuard<'static, ()> {
 pub type PromptCallback = Box<dyn FnMut() + Send + Sync>;
 
 pub type GetFormattedStackFn = Box<dyn Fn() -> Vec<String> + Send + Sync>;
+pub type GetOdenStackFn = Box<dyn Fn() -> Vec<OdenStackFrame> + Send + Sync>;
+
+#[derive(Clone, Debug)]
+pub struct OdenStackFrame {
+  pub isolate_id: Option<usize>,
+  pub script_id: Option<usize>,
+  pub locator: Option<String>,
+  pub display_name: Option<String>,
+}
 
 pub trait PermissionPrompter: Send + Sync {
   fn prompt(

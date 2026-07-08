@@ -252,11 +252,12 @@ pub(crate) fn with_stack_trace(
 
   gs_quote!(generator_state(opctx, scope, opstate) =>
     (if #opctx.enable_stack_trace {
-      let stack_trace_msg = deno_core::v8::String::empty(&mut #scope);
-      let stack_trace_error = deno_core::v8::Exception::error(&mut #scope, stack_trace_msg.into());
-      let js_error = deno_core::error::JsError::from_v8_exception(&mut #scope, stack_trace_error);
+      // Oden captures raw V8 frames here so the permission layer can key on
+      // script IDs instead of forgeable display names.
+      // @ref llp/0001-adding-capability-security-to-deno.plan.md
+      let frames = deno_core::error::capture_op_stack_frames(&mut #scope, #opctx.isolate);
       let mut op_state = ::std::cell::RefCell::borrow_mut(&#opstate);
-      op_state.op_stack_trace_callback.as_ref().unwrap()(js_error.frames)
+      op_state.op_stack_trace_callback.as_ref().unwrap()(frames)
     })
   )
 }

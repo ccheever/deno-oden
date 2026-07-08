@@ -987,6 +987,16 @@ impl ModuleMap {
     }
 
     let module = maybe_module.unwrap();
+    // Register ESM module script IDs for Oden's op-boundary attribution.
+    // @ref llp/0001-adding-capability-security-to-deno.plan.md
+    if let Some(script_id) = module.script_id()
+      && script_id >= 0
+    {
+      crate::error::oden_register_script_locator_global(
+        script_id as usize,
+        name.as_str(),
+      );
+    }
 
     // V8 does not support creating code caches while also snapshotting,
     // and it's not needed anyway, as the snapshot already contains it.
