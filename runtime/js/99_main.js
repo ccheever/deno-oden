@@ -17,6 +17,7 @@ import {
   op_internal_log,
   op_main_module,
   op_node_has_child_ipc_pipe,
+  op_oden_capsec_flags,
   op_ppid,
   op_proto_get_attempted,
   op_proto_set_attempted,
@@ -41,6 +42,7 @@ const {
   ObjectAssign,
   ObjectDefineProperties,
   ObjectDefineProperty,
+  ObjectFreeze,
   ObjectGetOwnPropertyDescriptors,
   ObjectHasOwn,
   ObjectIsExtensible,
@@ -731,6 +733,130 @@ function removeImportedOps() {
   }
 }
 
+// --- Oden capsec Phase-0: CPED seal (LLP 0001 async attribution) ------------
+// The raw continuation-preserved-embedder-data (CPED) primitives - the async
+// context get/set and `AsyncVariable` - are the forgery surface for async
+// attribution: any code that reaches them can overwrite the scheduling
+// principal Oden stores in a dedicated slot. LLP 0001 gates sound enforce on a
+// seal that removes them from user reach while keeping `AsyncLocalStorage` /
+// `node:async_hooks` working. Eager consumers (ext/web timers) and lazy node
+// polyfills both destructure these into their own bindings at module
+// evaluation, so stripping them from the *only* user-reachable core view
+// (`Deno[Deno.internal].core`, assigned above) leaves those closures intact.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+const ODEN_SEALED_CORE_KEYS = [
+  "getAsyncContext",
+  "setAsyncContext",
+  "scopeAsyncContext",
+  "AsyncVariable",
+  "kNoAsyncContextRestore",
+];
+
+function odenSealAsyncContext() {
+  const realCore = internals.core;
+  const sealed = { __proto__: null };
+  const keys = ObjectKeys(realCore);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (ArrayPrototypeIncludes(ODEN_SEALED_CORE_KEYS, k)) {
+      continue;
+    }
+    sealed[k] = realCore[k];
+  }
+  internals.core = ObjectFreeze(sealed);
+}
+
+// Trusted bootstrap conformance check for LLP 0001's foreign-key-preserving
+// (condition 3) and non-forgeable-slot (condition 4) requirements. It runs with
+// the raw primitives still live (before `odenSealAsyncContext`) and drives the
+// exact `AsyncVariable` machinery that `AsyncLocalStorage` is built on: it
+// plants an Oden principal slot keyed by a unique unregistered Symbol and
+// asserts the slot survives a user-style context scope and is unreachable by an
+// attacker-built async variable. Conditions 1 (sealed) and 2 (ALS coexists) are
+// proven in user space against the sealed binary. Gated by
+// ODEN_CAPSEC_SEAL_SELFTEST.
+function odenSealSelfTest() {
+  const rawGet = internals.core.getAsyncContext;
+  const rawSet = internals.core.setAsyncContext;
+  const AsyncVariable = internals.core.AsyncVariable;
+  const results = [];
+  const record = (name, ok) => results.push({ name, ok: !!ok });
+
+  // A slot key user code cannot construct: a unique Symbol that is *not* in the
+  // global (Symbol.for) registry and is never exposed on a reachable object.
+  const kOden = Symbol("oden.principal");
+  record(
+    "slot-key-not-globally-registered",
+    Symbol.for("oden.principal") !== kOden,
+  );
+
+  const savedContext = rawGet();
+  try {
+    const base = (savedContext === null || savedContext === undefined)
+      ? { __proto__: null }
+      : savedContext;
+    rawSet({ __proto__: null, ...base, [kOden]: "root" });
+
+    // Condition 3: an AsyncVariable scope (what ALS.run rides) must preserve
+    // the symbol-keyed Oden slot. Deno's AsyncVariable clones the context by
+    // object spread, which copies enumerable symbol-keyed properties - the
+    // load-bearing behavior. Verify during and after the scope.
+    const userVar = new AsyncVariable();
+    let slotDuring;
+    const prev = userVar.enter("user-value");
+    try {
+      slotDuring = rawGet()?.[kOden];
+      // Condition 4: the user's variable is keyed by a private field, so its
+      // read yields the user value, never the Oden slot.
+      record("user-var-cannot-read-oden-slot", userVar.get() !== "root");
+      record(
+        "user-var-read-returns-own-value",
+        userVar.get() === "user-value",
+      );
+    } finally {
+      rawSet(prev);
+    }
+    record("oden-slot-preserved-during-scope", slotDuring === "root");
+    record("oden-slot-preserved-after-scope", rawGet()?.[kOden] === "root");
+
+    // Condition 4: a plain user-built context object cannot address the slot.
+    const forged = {
+      __proto__: null,
+      [Symbol("oden.principal")]: "attacker",
+    };
+    record("forged-symbol-does-not-collide", forged[kOden] === undefined);
+  } finally {
+    rawSet(savedContext);
+  }
+
+  let allOk = true;
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (!r.ok) {
+      allOk = false;
+    }
+    internals.core.print(
+      `[oden-seal-selftest] ${r.ok ? "PASS" : "FAIL"} ${r.name}\n`,
+      true,
+    );
+  }
+  internals.core.print(
+    `[oden-seal-selftest] ${allOk ? "ALL PASS" : "FAILURES PRESENT"}\n`,
+    true,
+  );
+}
+
+function odenMaybeSealAsyncContext() {
+  const flags = op_oden_capsec_flags();
+  if ((flags & 1) === 0) {
+    return;
+  }
+  if ((flags & 2) !== 0) {
+    odenSealSelfTest();
+  }
+  odenSealAsyncContext();
+}
+
 // FIXME(bartlomieju): temporarily add whole `Deno.core` to
 // `Deno[Deno.internal]` namespace. It should be removed and only necessary
 // methods should be left there.
@@ -976,6 +1102,10 @@ function bootstrapMainRuntime(runtimeOptions, warmup = false) {
       });
     }
 
+    // Seal the CPED primitives before ops are stripped and user code runs.
+    // @ref llp/0001-adding-capability-security-to-deno.plan.md
+    odenMaybeSealAsyncContext();
+
     removeImportedOps();
 
     performance.setTimeOrigin();
@@ -1155,6 +1285,10 @@ function bootstrapWorkerRuntime(
 
     performance.setTimeOrigin();
     globalThis_ = globalThis;
+
+    // Seal the CPED primitives in workers too, before user code runs.
+    // @ref llp/0001-adding-capability-security-to-deno.plan.md
+    odenMaybeSealAsyncContext();
 
     // Remove bootstrapping data from the global scope. Lazy-loaded IIFE
     // scripts (`ext:.../*.js`) and the synthetic_esm backing-script path

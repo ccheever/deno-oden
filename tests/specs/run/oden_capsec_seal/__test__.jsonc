@@ -1,0 +1,29 @@
+{
+  "tests": {
+    // Armed: the four LLP 0001 seal conditions hold. Bootstrap self-test lines
+    // (stderr) cover conditions 3 and 4; user-space lines cover 1 and 2.
+    "armed_with_selftest": {
+      "args": "run main.mjs",
+      "envs": {
+        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_SEAL_SELFTEST": "1"
+      },
+      "output": "armed.out",
+      "exitCode": 0
+    },
+    // Armed without the self-test flag: the seal still applies.
+    "armed_no_selftest": {
+      "args": "run main.mjs",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1" },
+      "output": "armed_no_selftest.out",
+      "exitCode": 0
+    },
+    // Capsec off: ordinary Deno behavior is unchanged, so the primitives remain
+    // reachable (cond1 FAIL is expected here) while AsyncLocalStorage works.
+    "baseline_inert": {
+      "args": "run main.mjs",
+      "output": "baseline.out",
+      "exitCode": 0
+    }
+  }
+}

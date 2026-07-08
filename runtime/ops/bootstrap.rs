@@ -21,6 +21,7 @@ deno_core::extension!(
     op_bootstrap_stderr_no_color,
     op_bootstrap_unstable_args,
     op_bootstrap_is_from_unconfigured_runtime,
+    op_oden_capsec_flags,
     op_proto_set_attempted,
     op_proto_get_attempted,
     op_snapshot_options,
@@ -163,6 +164,31 @@ pub fn op_bootstrap_stderr_no_color(_state: &mut OpState) -> bool {
 #[op2(fast)]
 pub fn op_bootstrap_is_from_unconfigured_runtime(state: &mut OpState) -> bool {
   state.borrow::<IsFromUnconfiguredRuntime>().0
+}
+
+// Oden capsec Phase-0: report whether the capability layer is armed so trusted
+// bootstrap JS can seal the continuation-preserved-embedder-data primitives
+// (LLP 0001 §Async attribution) before user code runs. Bit 0 = capsec active
+// (`ODEN_CAPSEC_SPIKE`); bit 1 = run the seal self-test (`ODEN_CAPSEC_SEAL_SELFTEST`).
+// Called once at bootstrap, before `removeImportedOps()`, so it never enters the
+// steady-state op surface. Reading the env here (not from a snapshot-baked value)
+// keeps the seal a per-process runtime decision.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+#[op2(fast)]
+#[smi]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-0 capsec is armed through env vars by design; this op is the bootstrap-time read of that control surface."
+)]
+pub fn op_oden_capsec_flags() -> u32 {
+  let mut flags = 0u32;
+  if std::env::var_os("ODEN_CAPSEC_SPIKE").is_some() {
+    flags |= 1;
+  }
+  if std::env::var_os("ODEN_CAPSEC_SEAL_SELFTEST").is_some() {
+    flags |= 2;
+  }
+  flags
 }
 
 // Called (at most once) from the disabled `Object.prototype.__proto__` setter
