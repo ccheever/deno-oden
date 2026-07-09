@@ -110,7 +110,6 @@ fn oden_capsec_decide(
   }
   oden_capsec_readiness_gate()?;
   let policy = oden_capsec_policy_from_env();
-  let principal = oden_capsec_principal();
   // Normalize fs targets to an absolute, lexically-folded path so a relative
   // op (`./data/x`) matches an fs grant scope (also resolved absolute) and a
   // `..` escape resolves out of its granted scope. Non-fs targets pass through.
@@ -124,26 +123,71 @@ fn oden_capsec_decide(
     action: action.to_string(),
     target: normalized_target,
   };
-  let decision = policy.decide(&principal, &req);
-  let principal_label = principal.label();
-  let verdict = match (&principal, &decision) {
-    (principal, OdenDecision::Allow) if principal.is_ambient() => {
-      "allow(ambient)"
-    }
-    (_, OdenDecision::Allow) => "allow(granted)",
-    (_, OdenDecision::AllowRecord) => "audit(record)",
-    (_, OdenDecision::Deny) => "DENY(no grant)",
-  };
-  let api = api_name.unwrap_or_else(|| family.name());
-  // Suggest the grant that would allow a would-deny/deny (audit-as-conversation).
-  let suggestion = if matches!(decision, OdenDecision::Deny)
-    || (matches!(decision, OdenDecision::AllowRecord)
-      && !principal.is_ambient())
-  {
-    oden_suggested_grant_token(&principal, family, action, &req.target)
+
+  // Precedence row 3 (opt-in stack-intersection): if this capability class is
+  // deputy-armed AND the live call chain plus the CPED scheduling principal
+  // implicate more than one distinct non-ambient principal, decide over the
+  // whole set (least privilege) so a deputy cannot launder a scheduler's
+  // authority. Every other case -- every unarmed class, and the collapsed
+  // single-principal case -- takes the byte-identical rows 1/2/4 path below.
+  let intersection = if oden_capsec_deputy_class_armed(family, &req.action) {
+    let constrained =
+      OdenPolicy::constrained_principals(&oden_capsec_principal_set());
+    (constrained.len() >= 2).then_some(constrained)
   } else {
     None
   };
+
+  let (decision, principal_label, is_ambient_allow, suggestion) =
+    match &intersection {
+      Some(set) => {
+        let decision = policy.decide_set(set, &req);
+        let label = format!(
+          "[{}]",
+          set
+            .iter()
+            .map(OdenPrincipal::label)
+            .collect::<Vec<_>>()
+            .join(",")
+        );
+        // Suggest a grant for every ungranted member of the intersection.
+        let toks: Vec<String> = set
+          .iter()
+          .filter(|p| !policy.grants(p, &req))
+          .filter_map(|p| {
+            oden_suggested_grant_token(p, family, action, &req.target)
+              .map(|t| format!("{}={}", p.label(), t))
+          })
+          .collect();
+        let suggestion = (!toks.is_empty()).then(|| toks.join(" ; "));
+        (decision, label, false, suggestion)
+      }
+      None => {
+        let principal = oden_capsec_principal();
+        let decision = policy.decide(&principal, &req);
+        let is_ambient_allow =
+          principal.is_ambient() && decision == OdenDecision::Allow;
+        // Suggest the grant that would allow a would-deny/deny
+        // (audit-as-conversation).
+        let suggestion = if matches!(decision, OdenDecision::Deny)
+          || (matches!(decision, OdenDecision::AllowRecord)
+            && !principal.is_ambient())
+        {
+          oden_suggested_grant_token(&principal, family, action, &req.target)
+        } else {
+          None
+        };
+        (decision, principal.label(), is_ambient_allow, suggestion)
+      }
+    };
+
+  let verdict = match (&decision, is_ambient_allow) {
+    (OdenDecision::Allow, true) => "allow(ambient)",
+    (OdenDecision::Allow, false) => "allow(granted)",
+    (OdenDecision::AllowRecord, _) => "audit(record)",
+    (OdenDecision::Deny, _) => "DENY(no grant)",
+  };
+  let api = api_name.unwrap_or_else(|| family.name());
   eprintln!(
     "[oden-capsec] {api}:{target} caller={principal_label} -> {verdict}"
   );
@@ -718,6 +762,14 @@ struct OdenPolicyFile {
   mode: Option<String>,
   #[serde(default)]
   grants: std::collections::HashMap<String, String>,
+  // Opt-in stack-intersection arming (LLP 0001 precedence row 3). Names the
+  // capability classes (`env`, `env:read`, `fs:write`, or `*`) for which a
+  // deputy must not launder a scheduler's authority: for an armed class the
+  // decision intersects every non-ambient principal on the call chain plus the
+  // CPED scheduling principal. Empty by default, so default enforce (rows 1/2/4)
+  // is unaffected.
+  #[serde(default, rename = "deputyClasses")]
+  deputy_classes: Vec<String>,
 }
 
 // The real policy source: `.oden/policy.json` in the project root — the same
@@ -930,6 +982,95 @@ fn oden_capsec_principal() -> OdenPrincipal {
   // the body of `oden_detached_scheduling_principal` in libs/core/error.rs
   // (the single seam), not this fallthrough (ENG-23785).
   OdenPrincipal::NoUser
+}
+
+// The full set of principals implicated in the current op, for stack-
+// intersection (precedence row 3): every distinct non-ambient principal live on
+// the call chain, plus the appended CPED scheduling principal(s) — the single
+// scheduling locator (row 2) and the carried scheduling stack set
+// (call-boundary attribution). Order is nearest-frame first, scheduler(s) last;
+// duplicates collapse so self-scheduling is a single entry. Empty only when
+// nothing is attributable, in which case the fail-closed sentinel stands in so
+// the intersection denies rather than silently widening.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md (Async attribution row 3)
+fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
+  let project_root = oden_capsec_project_root();
+  let mut out: Vec<OdenPrincipal> = Vec::new();
+  fn push(out: &mut Vec<OdenPrincipal>, principal: OdenPrincipal) {
+    if principal != OdenPrincipal::Runtime && !out.contains(&principal) {
+      out.push(principal);
+    }
+  }
+  // The live call chain (the "stack" of the stack-intersection).
+  let frames = MAYBE_CURRENT_ODEN_STACKTRACE
+    .lock()
+    .as_ref()
+    .map(|s| s())
+    .unwrap_or_default();
+  for frame in frames {
+    match frame.locator.as_deref() {
+      Some(locator) => {
+        push(&mut out, oden_policy::classify(locator, &project_root));
+      }
+      None if oden_capsec_runtime_display(frame.display_name.as_deref()) => {}
+      None if frame.script_id.is_some() => {
+        push(&mut out, OdenPrincipal::Quarantine);
+      }
+      None => {}
+    }
+  }
+  // Row-3 append: the CPED scheduling principal (who scheduled this callback).
+  if let Some(locator) = prompter::current_oden_cped_locator() {
+    push(&mut out, oden_policy::classify(&locator, &project_root));
+  }
+  // Seam for call-boundary attribution: the carried scheduling stack set fed by
+  // a scheduling-boundary stamp. Empty today (the boundary stamp is the async
+  // detached-deputy / schedule-before-first-op residual — see the ticket), so
+  // this is a no-op until that lands; wired here so the intersection picks it up
+  // the moment it does, without re-touching the decision path.
+  for locator in prompter::current_oden_cped_stack() {
+    push(&mut out, oden_policy::classify(&locator, &project_root));
+  }
+  if out.is_empty() {
+    out.push(OdenPrincipal::NoUser);
+  }
+  out
+}
+
+// Deputy-class arming (LLP 0001 precedence row 3), opt-in. A capability class is
+// armed by the policy file's `deputyClasses` array and/or the
+// ODEN_CAPSEC_DEPUTY_CLASSES env (comma-separated); each entry is a family
+// (`env`), a family:action (`fs:write`), or `*` for all classes. Empty by
+// default, so default enforce (rows 1/2/4) is never intersected.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-4 deputy-class arming is opt-in through the policy file and an env var; the spike's control surface."
+)]
+fn oden_capsec_deputy_classes() -> Vec<String> {
+  let mut classes: Vec<String> = oden_capsec_policy_file()
+    .map(|f| f.deputy_classes)
+    .unwrap_or_default();
+  if let Ok(env) = std::env::var("ODEN_CAPSEC_DEPUTY_CLASSES") {
+    for c in env.split(',') {
+      let c = c.trim();
+      if !c.is_empty() {
+        classes.push(c.to_string());
+      }
+    }
+  }
+  classes
+}
+
+fn oden_capsec_deputy_class_armed(family: OdenFamily, action: &str) -> bool {
+  let classes = oden_capsec_deputy_classes();
+  if classes.is_empty() {
+    return false;
+  }
+  let fam = family.name();
+  let fam_action = format!("{fam}:{action}");
+  classes
+    .iter()
+    .any(|c| c == "*" || c == fam || c == fam_action.as_str())
 }
 
 fn oden_capsec_runtime_display(display_name: Option<&str>) -> bool {

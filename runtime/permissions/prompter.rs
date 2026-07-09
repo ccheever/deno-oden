@@ -67,6 +67,20 @@ pub(crate) static MAYBE_CURRENT_ODEN_STACKTRACE: Lazy<
 pub(crate) static MAYBE_CURRENT_ODEN_CPED_LOCATOR: Lazy<Mutex<Option<String>>> =
   Lazy::new(|| Mutex::new(None));
 
+// Oden CPED scheduling-principal *stack set* carried on the continuation — the
+// seam for call-boundary attribution (precedence row 3). Where the single
+// locator above records the last package to stamp the slot, this is intended to
+// record the set of packages implicated at a scheduling boundary, so a callback
+// scheduled through a deputy (the detached-deputy / schedule-before-first-op
+// case) carries its scheduler into the intersection. Unset today: the
+// snapshot-scoped boundary stamp that would feed it is the async residual noted
+// on the ticket (reading the op-dispatch slot instead is unsound — it pollutes
+// later synchronous ops by unrelated packages).
+// @ref llp/0001-adding-capability-security-to-deno.plan.md (Async attribution row 3)
+pub(crate) static MAYBE_CURRENT_ODEN_CPED_STACK: Lazy<
+  Mutex<Option<Vec<String>>>,
+> = Lazy::new(|| Mutex::new(None));
+
 pub fn set_current_stacktrace(get_stack: GetFormattedStackFn) {
   *MAYBE_CURRENT_STACKTRACE.lock() = Some(get_stack);
 }
@@ -81,6 +95,14 @@ pub fn set_current_oden_cped_locator(locator: Option<String>) {
 
 pub(crate) fn current_oden_cped_locator() -> Option<String> {
   MAYBE_CURRENT_ODEN_CPED_LOCATOR.lock().clone()
+}
+
+pub fn set_current_oden_cped_stack(stack: Option<Vec<String>>) {
+  *MAYBE_CURRENT_ODEN_CPED_STACK.lock() = stack;
+}
+
+pub(crate) fn current_oden_cped_stack() -> Vec<String> {
+  MAYBE_CURRENT_ODEN_CPED_STACK.lock().clone().unwrap_or_default()
 }
 
 pub fn permission_prompt(
