@@ -1,0 +1,34 @@
+{
+  // Stack-intersection + opt-in deputyClasses (LLP 0001 async-attribution
+  // precedence row 3, ENG-23785). A trusted deputy granted env:read:SECRET reads
+  // SECRET on a caller's behalf -- the confused-deputy shape. Nearest-frame
+  // attribution (row 1) attributes the read to the granted deputy alone, so an
+  // ungranted caller launders its authority. When the env:read class is armed as
+  // a deputyClass, the decision intersects the whole call chain: [deputy-dep,
+  // evil-dep] denies (evil-dep ungranted); a direct root call collapses to
+  // [deputy-dep] and allows (no false denial). Arming is opt-in: the same
+  // laundering is allowed by default (row 1), proving rows 1/2/4 are unchanged.
+  "tests": {
+    // Armed via ODEN_CAPSEC_DEPUTY_CLASSES: laundering denied, direct call allowed.
+    "armed_deputy_class_denies_laundering": {
+      "args": "run --allow-env app.js",
+      "envs": {
+        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_DEPUTY_CLASSES": "env:read",
+        "SECRET": "s3cret"
+      },
+      "output": "armed.out",
+      "exitCode": 0
+    },
+    // Unarmed (default): the deputy laundering is allowed (row 1). Opt-in proof.
+    "unarmed_default_allows_via_row1": {
+      "args": "run --allow-env app.js",
+      "envs": {
+        "ODEN_CAPSEC_SPIKE": "1",
+        "SECRET": "s3cret"
+      },
+      "output": "unarmed.out",
+      "exitCode": 0
+    }
+  }
+}

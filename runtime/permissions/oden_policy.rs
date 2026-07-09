@@ -341,6 +341,21 @@ impl Policy {
       .extend(Grant::parse_many(grant_str));
   }
 
+  /// Mode-independent grant check: does this principal, on its own, hold a
+  /// capability covering `req`? Ambient principals (root/runtime) always do;
+  /// the fail-closed sentinels (no-user/quarantine) never do. This is the raw
+  /// predicate `decide` and `decide_set` layer mode semantics on top of.
+  pub fn grants(&self, principal: &Principal, req: &Request) -> bool {
+    if principal.is_ambient() {
+      return true;
+    }
+    principal
+      .selector()
+      .and_then(|s| self.packages.get(&s))
+      .map(|g| covers(g, req))
+      .unwrap_or(false)
+  }
+
   pub fn decide(&self, principal: &Principal, req: &Request) -> Decision {
     if self.mode == Mode::Permissive {
       return Decision::Allow;
@@ -348,11 +363,7 @@ impl Policy {
     if principal.is_ambient() {
       return Decision::Allow;
     }
-    let granted = principal
-      .selector()
-      .and_then(|s| self.packages.get(&s))
-      .map(|g| covers(g, req))
-      .unwrap_or(false);
+    let granted = self.grants(principal, req);
 
     match (granted, self.mode) {
       (true, Mode::Enforce) => Decision::Allow,
@@ -361,6 +372,53 @@ impl Policy {
       (false, Mode::Audit) => Decision::AllowRecord,
       (_, Mode::Permissive) => Decision::Allow,
     }
+  }
+
+  /// Stack-intersection decision (LLP 0001 async-attribution precedence row 3).
+  /// Given every principal implicated in an op — the distinct non-ambient
+  /// package principals live on the stack, plus any appended CPED scheduling
+  /// principal(s) — the op is allowed under enforce only if *every* one of them
+  /// independently satisfies the request (least privilege across the call
+  /// chain). A single ungranted principal (`[deputy, evil]` with `evil`
+  /// ungranted) denies, closing deputy laundering. Ambient principals impose no
+  /// constraint and duplicates collapse, so a package scheduling its own
+  /// callback (`[evil, evil]` -> `[evil]`) is decided exactly as the
+  /// single-principal path — no false denials. An all-ambient (or empty) set is
+  /// unconstrained; the caller supplies the row-4 sentinel when nothing is
+  /// implicated.
+  pub fn decide_set(&self, principals: &[Principal], req: &Request) -> Decision {
+    if self.mode == Mode::Permissive {
+      return Decision::Allow;
+    }
+    let constrained = Self::constrained_principals(principals);
+    if constrained.is_empty() {
+      return Decision::Allow;
+    }
+    let all_granted = constrained.iter().all(|p| self.grants(p, req));
+    match self.mode {
+      Mode::Enforce if all_granted => Decision::Allow,
+      Mode::Enforce => Decision::Deny,
+      Mode::Audit => Decision::AllowRecord,
+      Mode::Permissive => Decision::Allow,
+    }
+  }
+
+  /// The distinct, constraint-bearing principals of a set: ambient principals
+  /// (root/runtime) dropped, order preserved, duplicates collapsed. The
+  /// fail-closed sentinels (no-user/quarantine) are kept — they are never
+  /// granted, so their presence denies, which is the intended fail-closed
+  /// behavior for an unattributable frame in the intersection.
+  pub fn constrained_principals(principals: &[Principal]) -> Vec<Principal> {
+    let mut out: Vec<Principal> = Vec::new();
+    for p in principals {
+      if p.is_ambient() {
+        continue;
+      }
+      if !out.contains(p) {
+        out.push(p.clone());
+      }
+    }
+    out
   }
 }
 
@@ -414,5 +472,99 @@ mod tests {
       ),
       Decision::Deny,
     );
+  }
+
+  // --- Stack-intersection / deputyClasses (precedence row 3) ----------------
+
+  fn pkg(name: &str) -> Principal {
+    Principal::Package {
+      name: name.into(),
+      version: None,
+    }
+  }
+
+  fn req_secret() -> Request {
+    Request {
+      family: Family::Env,
+      action: "read".into(),
+      target: "SECRET".into(),
+    }
+  }
+
+  #[test]
+  fn stack_intersection_denies_when_scheduler_ungranted() {
+    // A trusted deputy is granted SECRET; the evil scheduler is not. Row 1
+    // alone (nearest frame = deputy) would allow. The stack-intersection set
+    // [deputy, evil] must deny because evil is ungranted -- deputy laundering
+    // is closed.
+    let mut policy = Policy::new(Mode::Enforce);
+    policy.grant("deputy-dep", "env:read:SECRET");
+    assert_eq!(
+      policy.decide_set(&[pkg("deputy-dep"), pkg("evil-dep")], &req_secret()),
+      Decision::Deny,
+    );
+  }
+
+  #[test]
+  fn stack_intersection_allows_when_all_granted() {
+    let mut policy = Policy::new(Mode::Enforce);
+    policy.grant("deputy-dep", "env:read:SECRET");
+    policy.grant("evil-dep", "env:read:SECRET");
+    assert_eq!(
+      policy.decide_set(&[pkg("deputy-dep"), pkg("evil-dep")], &req_secret()),
+      Decision::Allow,
+    );
+  }
+
+  #[test]
+  fn self_scheduling_collapses_without_false_denial() {
+    // A package scheduling its own callback yields [evil, evil], which collapses
+    // to [evil]; a grant to evil allows, exactly as the single-principal path.
+    let mut policy = Policy::new(Mode::Enforce);
+    policy.grant("evil-dep", "env:read:SECRET");
+    assert_eq!(
+      policy.decide_set(&[pkg("evil-dep"), pkg("evil-dep")], &req_secret()),
+      Decision::Allow,
+    );
+  }
+
+  #[test]
+  fn ambient_principals_impose_no_constraint() {
+    // root on the stack beneath a granted package does not deny; an all-ambient
+    // set is unconstrained.
+    let mut policy = Policy::new(Mode::Enforce);
+    policy.grant("evil-dep", "env:read:SECRET");
+    assert_eq!(
+      policy.decide_set(&[Principal::Root, pkg("evil-dep")], &req_secret()),
+      Decision::Allow,
+    );
+    assert_eq!(
+      policy.decide_set(&[Principal::Root, Principal::Runtime], &req_secret()),
+      Decision::Allow,
+    );
+  }
+
+  #[test]
+  fn no_user_sentinel_in_set_fails_closed() {
+    // An unattributable frame (no-user) in the intersection denies under
+    // enforce even alongside a granted package -- fail closed, never launder.
+    let mut policy = Policy::new(Mode::Enforce);
+    policy.grant("deputy-dep", "env:read:SECRET");
+    assert_eq!(
+      policy.decide_set(&[pkg("deputy-dep"), Principal::NoUser], &req_secret()),
+      Decision::Deny,
+    );
+  }
+
+  #[test]
+  fn constrained_principals_drops_ambient_and_dedupes() {
+    let set = Policy::constrained_principals(&[
+      Principal::Root,
+      pkg("evil-dep"),
+      Principal::Runtime,
+      pkg("evil-dep"),
+      pkg("deputy-dep"),
+    ]);
+    assert_eq!(set, vec![pkg("evil-dep"), pkg("deputy-dep")]);
   }
 }
