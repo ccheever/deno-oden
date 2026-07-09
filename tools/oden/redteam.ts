@@ -236,19 +236,28 @@ const CHECKLIST: HoleClass[] = [
     note:
       "the freeze walk makes the primordials non-writable under ODEN_CAPSEC_LOCKDOWN; default-on-under-enforce is deferred (ENG-23781) pending ext/node lazy-write repairs",
   },
-  // --- Async call-boundary (the one sound-but-restrictive residual) ----------
+  // --- Async call-boundary (stack-intersection + opt-in deputyClasses) -------
   {
     category: "attribution-laundering",
     attack:
-      "schedule-before-first-op detached callback attributes soundly but over-denies",
+      "confused deputy: a granted package reads on an ungranted caller's behalf (synchronous)",
+    status: "closed",
+    tests: ["oden_capsec_deputy_intersection"],
+    note:
+      "opt-in deputyClasses arm stack-intersection (row 3): the decision constrains every non-ambient principal on the live call chain, so an ungranted caller beneath a granted deputy denies ([deputy, evil]); self-scheduling collapses without false denials; unarmed classes decide exactly as rows 1/2/4",
+  },
+  {
+    category: "attribution-laundering",
+    attack:
+      "async detached-deputy / schedule-before-first-op: scheduler present only in the CPED",
     status: "residual",
     residual: {
       ticket: "ENG-23785",
       why:
-        "sound today (fails closed to no-user, never launders); the non-over-denying fix is call-boundary attribution (row 3), scheduled Phase 4",
+        "the synchronous confused deputy is closed by stack-intersection (oden_capsec_deputy_intersection); the async case — scheduler carried only in the CPED with a granted deputy frame live, or a callback scheduled before its first op — needs a snapshot-scoped scheduling-boundary stamp to feed the intersection. Reading the op-dispatch slot for it was measured to be unsound (it pollutes later synchronous ops of unrelated packages with a false denial), so it stays a documented residual: sound today (fails closed to no-user, never launders)",
     },
     note:
-      "NOT an open laundering hole — module-eval stamping was measured to launder and was rejected; the residual is over-denial ergonomics, not soundness",
+      "NOT an open laundering hole — module-eval stamping was measured to launder and was rejected; the residual is the async-detached over-denial, whose sound closure is the call-boundary boundary stamp",
   },
 ];
 
