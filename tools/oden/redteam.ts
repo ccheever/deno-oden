@@ -81,7 +81,7 @@ const CHECKLIST: HoleClass[] = [
     status: "closed",
     tests: ["oden_capsec_cped_async", "oden_capsec_deferral_channels"],
     note:
-      "the CPED scheduling principal rides every deferral channel (timers, microtask, nextTick, setImmediate, AsyncResource, promise reactions)",
+      "the CPED scheduling principal rides all 9 enumerated deferral channels (timers, microtask, promise reactions, nextTick, setImmediate, AsyncResource, dynamic-import continuation, op-completion continuation, FinalizationRegistry cleanup)",
   },
   {
     category: "attribution-laundering",
