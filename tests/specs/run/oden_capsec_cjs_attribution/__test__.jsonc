@@ -1,0 +1,20 @@
+{
+  // Script-creation coverage (LLP 0001): a CommonJS dependency is attributed to
+  // its package (not blanket-quarantined), and a forged //# sourceURL in eval'd
+  // code cannot impersonate it -- attribution keys on the unforgeable script id.
+  // Audit mode records + allows (exit 0).
+  "tests": {
+    "cjs_attribution_and_sourceurl_redteam": {
+      "args": "run --allow-env --allow-read app.js",
+      "envs": {
+        "DENO_TRACE_PERMISSIONS": "1",
+        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_MODE": "audit",
+        "HOME": "/home/x",
+        "SECRET": "s3cret"
+      },
+      "output": "cjs.out",
+      "exitCode": 0
+    }
+  }
+}
