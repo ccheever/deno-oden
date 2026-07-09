@@ -1,0 +1,1 @@
+{"mode":"enforce","grants":{"lib-dep":"env:read:SECRET"}}

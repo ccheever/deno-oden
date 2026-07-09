@@ -54,17 +54,37 @@ pub const fn op_async_stack_trace() -> ::deno_core::_ops::OpDecl {
             };
             let opstate = &opctx.state;
             if opctx.enable_stack_trace {
-                let stack_trace_msg = deno_core::v8::String::empty(&mut scope);
-                let stack_trace_error = deno_core::v8::Exception::error(
+                let frames = deno_core::error::capture_op_stack_frames(
                     &mut scope,
-                    stack_trace_msg.into(),
+                    opctx.isolate,
                 );
-                let js_error = deno_core::error::JsError::from_v8_exception(
+                let oden_sched = deno_core::error::oden_read_schedule_slot(&mut scope);
+                let oden_cped = deno_core::error::oden_capture_stamp_and_read(
                     &mut scope,
-                    stack_trace_error,
+                    &frames,
+                    &oden_sched,
                 );
+                let display_frames = if deno_core::error::oden_trace_display_enabled() {
+                    let stack_trace_msg = deno_core::v8::String::empty(&mut scope);
+                    let stack_trace_error = deno_core::v8::Exception::error(
+                        &mut scope,
+                        stack_trace_msg.into(),
+                    );
+                    Some(
+                        deno_core::error::JsError::from_v8_exception(
+                                &mut scope,
+                                stack_trace_error,
+                            )
+                            .frames,
+                    )
+                } else {
+                    None
+                };
                 let mut op_state = ::std::cell::RefCell::borrow_mut(&opstate);
-                op_state.op_stack_trace_callback.as_ref().unwrap()(js_error.frames)
+                op_state
+                    .op_stack_trace_callback
+                    .as_ref()
+                    .unwrap()(frames, oden_cped, oden_sched, display_frames)
             }
             let result = { Self::call() };
             let promise_id = deno_core::_ops::to_i32_option(&args.get(0))

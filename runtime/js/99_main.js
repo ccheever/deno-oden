@@ -1009,6 +1009,11 @@ function odenTameAndFreezeError() {
 
 function odenMaybeSealAsyncContext() {
   const flags = op_oden_capsec_flags();
+  // Runtime-per-isolate arming signal for trusted lazy extension modules. This
+  // is deliberately written during runtime bootstrap instead of cached while
+  // building the startup snapshot. The node timer implementation reads it at
+  // the real async-context capture seam for ENG-23881.
+  internals.odenCapsecArmed = (flags & 1) !== 0;
   if ((flags & 1) === 0) {
     return;
   }

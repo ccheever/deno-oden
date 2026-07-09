@@ -1549,10 +1549,9 @@ fn oden_capsec_principal() -> OdenPrincipal {
     }
   }
   // Precedence row 4: no live user frame and no scheduling principal — the
-  // fail-closed sentinel, never root. The schedule-before-first-op case lands
-  // here today; its sound closure is call-boundary attribution, which replaces
-  // the body of `oden_detached_scheduling_principal` in libs/core/error.rs
-  // (the single seam), not this fallthrough (ENG-23785).
+  // fail-closed sentinel, never root. A genuine timer/immediate boundary now
+  // carries schedule-before-first-op through ENG-23881; this fallthrough remains
+  // for contexts with no attributable boundary at all.
   OdenPrincipal::NoUser
 }
 
@@ -1601,11 +1600,9 @@ fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
   if let Some(locator) = prompter::current_oden_cped_locator() {
     push(&mut out, oden_principal_index::resolve_locator(&locator));
   }
-  // Seam for call-boundary attribution: the carried scheduling stack set fed by
-  // a scheduling-boundary stamp. Empty today (the boundary stamp is the async
-  // detached-deputy / schedule-before-first-op residual — see the ticket), so
-  // this is a no-op until that lands; wired here so the intersection picks it up
-  // the moment it does, without re-touching the decision path.
+  // The complete stack captured at the genuine async schedule boundary
+  // (ENG-23881). It is callback-scoped, so appending it closes nested async
+  // deputies without contaminating unrelated later synchronous work.
   for locator in prompter::current_oden_cped_stack() {
     push(&mut out, oden_principal_index::resolve_locator(&locator));
   }

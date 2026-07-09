@@ -2,7 +2,7 @@
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const {
   createTimer: createTimer_,
   cancelTimer: cancelTimer_,
@@ -51,6 +51,21 @@ const { ERR_OUT_OF_RANGE } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
 const lazyProcess = core.createLazyLoader("node:process");
+
+// Oden (ENG-23881): globalThis.setTimeout/setInterval are the node:timers
+// implementations in this runtime, and this is their actual async-context
+// capture seam. Under capsec, ask Rust for a FRESH copy of the current context
+// carrying the scheduling package's snapshot-scoped principal. The callback
+// alone receives that copy; the scheduler's live continuation is never
+// mutated. The runtime bootstrap writes `odenCapsecArmed` per isolate, so the
+// unarmed path remains the exact upstream getAsyncContext() call and no
+// snapshot-build value is cached here.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md (Async attribution row 3)
+function odenScheduleAsyncContext() {
+  return internals.odenCapsecArmed
+    ? core.ops.op_oden_schedule_context()
+    : getAsyncContext();
+}
 
 // Timeout values > TIMEOUT_MAX are set to 1.
 const TIMEOUT_MAX = 2 ** 31 - 1;
@@ -174,7 +189,7 @@ function Timeout(callback, after, args, isRepeat, isRefed, isSystem) {
 Timeout.prototype[createTimer] = function () {
   const self = this;
   const callback = this._onTimeout;
-  const asyncContext = getAsyncContext();
+  const asyncContext = odenScheduleAsyncContext();
   const asyncId = this._asyncId;
   const triggerAsyncId = this._triggerAsyncId;
   // Fast path: when no async_hooks are registered, the emit* calls are
@@ -404,7 +419,7 @@ const runImmediates = core.runImmediates;
 
 class Immediate {
   constructor(unboundCallback, ...args) {
-    const asyncContext = getAsyncContext();
+    const asyncContext = odenScheduleAsyncContext();
     // Match Node's `immediate._onImmediate(...argv)` invocation: the callback's
     // `this` is the Immediate instance, not the global.
     const self = this;

@@ -757,9 +757,10 @@ fn oden_cped_resolve(token: u64) -> Option<String> {
     .cloned()
 }
 
-// Red-team hook: when ODEN_CAPSEC_FORGE_CPED is set, a stamp writes a token that
-// is NOT in the registry (real token + a large offset), so the detached read
-// exercises the stale/unknown-token invariant. Inert unless set.
+// Red-team hook: when ODEN_CAPSEC_FORGE_CPED is set, an acting-principal stamp
+// writes a token that is NOT in the registry (real token + a large offset), so
+// a detached non-boundary read exercises the stale/unknown-token invariant.
+// Inert unless set; the schedule slot has its own independent hook below.
 #[allow(
   clippy::disallowed_methods,
   reason = "capsec red-team forge hook is an env-gated test control surface."
@@ -772,11 +773,190 @@ fn oden_cped_forge_offset() -> u64 {
   }
 }
 
+#[allow(
+  clippy::disallowed_methods,
+  reason = "capsec red-team forge hook is an env-gated test control surface."
+)]
+fn oden_schedule_forge_offset() -> u64 {
+  if std::env::var_os("ODEN_CAPSEC_FORGE_SCHEDULE").is_some() {
+    1_000_000_000
+  } else {
+    0
+  }
+}
+
 fn oden_cped_slot_symbol<'s>(
   scope: &mut v8::PinScope<'s, '_>,
 ) -> Option<v8::Local<'s, v8::Symbol>> {
   let desc = v8::String::new(scope, "oden.principal.slot")?;
   Some(v8::Symbol::for_api(scope, desc))
+}
+
+// The schedule slot (ENG-23881) is a SECOND continuation-preserved slot, keyed
+// by its own `Symbol::for_api` (also unreachable from JS). It differs from the
+// principal slot above in *who writes it and when*: the principal slot is
+// stamped at every gated op dispatch (so it tracks "who is acting now"), while
+// the schedule slot is written ONLY at a genuine async schedule boundary
+// (timers/immediates), into a FRESH context object handed to the
+// callback — never into the scheduler's own live continuation. That is what
+// makes it snapshot-scoped: it rides the scheduled callback's continuation and
+// nothing else, so it never pollutes the scheduler's post-schedule synchronous
+// code or a sibling schedule (the failure mode that made the op-dispatch-slot
+// approach unsound in ENG-23785). Read for the row-2 detached fallback and the
+// row-3 intersection.
+fn oden_cped_schedule_symbol<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+) -> Option<v8::Local<'s, v8::Symbol>> {
+  let desc = v8::String::new(scope, "oden.schedule.slot")?;
+  Some(v8::Symbol::for_api(scope, desc))
+}
+
+#[allow(
+  clippy::print_stderr,
+  reason = "capsec stale-token invariant emits an audit signal to stderr"
+)]
+pub fn oden_read_schedule_slot(scope: &mut v8::PinScope) -> Vec<String> {
+  const INVALID_SCHEDULE_TOKEN_LOCATOR: &str =
+    "data:oden-invalid-schedule-token";
+
+  fn invalid_schedule_slot(message: &str) -> Vec<String> {
+    eprintln!("[oden-capsec] {message} -> quarantine sentinel (audit)");
+    vec![INVALID_SCHEDULE_TOKEN_LOCATOR.to_string()]
+  }
+
+  if !oden_capsec_armed() {
+    return Vec::new();
+  }
+  let cped = scope.get_continuation_preserved_embedder_data();
+  let Ok(obj) = v8::Local::<v8::Object>::try_from(cped) else {
+    return Vec::new();
+  };
+  let Some(sym) = oden_cped_schedule_symbol(scope) else {
+    return Vec::new();
+  };
+  let Some(val) = obj.get(scope, sym.into()) else {
+    return Vec::new();
+  };
+  if val.is_undefined() || val.is_null() {
+    return Vec::new();
+  }
+  let Ok(tokens) = v8::Local::<v8::Array>::try_from(val) else {
+    return invalid_schedule_slot("non-array value in schedule slot");
+  };
+  if tokens.length() == 0 {
+    return invalid_schedule_slot("empty schedule slot");
+  }
+  let mut out = Vec::new();
+  for i in 0..tokens.length() {
+    let Some(value) = tokens.get_index(scope, i) else {
+      return invalid_schedule_slot("missing token in schedule slot");
+    };
+    if !value.is_number() {
+      return invalid_schedule_slot("non-token value in schedule slot");
+    }
+    let Some(raw_token) = value.number_value(scope) else {
+      return invalid_schedule_slot("unreadable token in schedule slot");
+    };
+    if !raw_token.is_finite() || raw_token.fract() != 0.0 || raw_token < 1.0 {
+      return invalid_schedule_slot("invalid token in schedule slot");
+    }
+    let token = raw_token as u64;
+    match oden_cped_resolve(token) {
+      Some(locator) if !out.contains(&locator) => out.push(locator),
+      Some(_) => {}
+      None => {
+        return invalid_schedule_slot(&format!(
+          "stale/unknown schedule token {token}"
+        ));
+      }
+    }
+  }
+  out
+}
+
+/// The scheduling principal stack: every distinct live frame with a registered
+/// locator at the schedule call, nearest first. Capturing the complete stack is
+/// what preserves an ungranted caller underneath a granted deputy; storing only
+/// the nearest frame would reopen the nested async confused-deputy hole.
+/// Internal runtime frames carry no locator and are skipped. Locators register
+/// into the global (`isolate_id = 0`) registry, so ids resolve without threading
+/// the exact isolate through the schedule op.
+fn oden_schedule_principals_from_stack(
+  scope: &mut v8::PinScope,
+) -> Vec<String> {
+  let Some(stack) = v8::StackTrace::current_stack_trace(scope, 32) else {
+    return Vec::new();
+  };
+  let mut out = Vec::new();
+  for i in 0..stack.get_frame_count() {
+    if let Some(frame) = stack.get_frame(scope, i) {
+      let sid = frame.get_script_id();
+      if sid != usize::MAX
+        && let Some(loc) = oden_script_locator(0, sid)
+        && !out.contains(&loc)
+      {
+        out.push(loc);
+      }
+    }
+  }
+  out
+}
+
+/// Build the async-context object to hand a genuine async schedule
+/// (timer/immediate): a FRESH copy of the current
+/// continuation-preserved data with the schedule slot set to the complete
+/// scheduling-principal stack as opaque tokens. Returns the current CPED
+/// unchanged when disarmed or when no scheduling principal is on the stack.
+/// **Never writes the live CPED** —
+/// the timer wrapper captures the returned object for the callback only, so the
+/// scheduling principal rides the callback's continuation without polluting the
+/// scheduler's own synchronous continuation or a sibling schedule. This is the
+/// snapshot-scoped scheduling-boundary stamp (ENG-23881).
+/// @ref llp/0001-adding-capability-security-to-deno.plan.md (Async attribution row 3)
+pub fn oden_build_schedule_context<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Value> {
+  let cped = scope.get_continuation_preserved_embedder_data();
+  if !oden_capsec_armed() {
+    return cped;
+  }
+  let locators = oden_schedule_principals_from_stack(scope);
+  if locators.is_empty() {
+    return cped;
+  }
+  let Some(sym) = oden_cped_schedule_symbol(scope) else {
+    return cped;
+  };
+  let mut token_values = Vec::with_capacity(locators.len());
+  for locator in locators {
+    let token = oden_cped_intern(&locator) + oden_schedule_forge_offset();
+    token_values.push(v8::Number::new(scope, token as f64).into());
+  }
+  let value = v8::Array::new_with_elements(scope, &token_values);
+  // A fresh object copying the current CPED's own keys forward (so a coexisting
+  // AsyncLocalStorage keeps its slots and the principal slot rides through), then
+  // the schedule slot on top. Returned, not set — the live continuation is
+  // untouched.
+  let new_obj = v8::Object::new(scope);
+  if let Ok(old) = v8::Local::<v8::Object>::try_from(cped) {
+    let args = v8::GetPropertyNamesArgsBuilder::new()
+      .mode(v8::KeyCollectionMode::OwnOnly)
+      .property_filter(v8::PropertyFilter::ALL_PROPERTIES)
+      .index_filter(v8::IndexFilter::IncludeIndices)
+      .key_conversion(v8::KeyConversionMode::KeepNumbers)
+      .build();
+    if let Some(names) = old.get_own_property_names(scope, args) {
+      for i in 0..names.length() {
+        if let Some(key) = names.get_index(scope, i)
+          && let Some(val) = old.get(scope, key)
+        {
+          new_obj.set(scope, key, val);
+        }
+      }
+    }
+  }
+  new_obj.set(scope, sym.into(), value.into());
+  new_obj.into()
 }
 
 #[allow(
@@ -865,22 +1045,24 @@ fn oden_live_principal_locator(frames: &[JsStackFrame]) -> Option<String> {
     })
 }
 
-/// THE schedule-time seam (ENG-23785). Derive the scheduling principal for a
-/// detached continuation — an op dispatched with no live user frame on the
-/// stack. Today the only source is the CPED slot, which a package stamps at
-/// its first gated op; code that schedules a callback *before* any op leaves
-/// the slot empty, so this returns `None` and the permission layer falls to
-/// the fail-closed `no-user` sentinel (precedence row 4) — a false deny,
-/// never a false allow. Sound closure is call-boundary attribution
-/// (stack-intersection, LLP 0001 Phase 4): re-establish the principal when
-/// execution crosses into a different package's function/module so a callee
-/// cannot inherit its caller's authority, then consult that register here
-/// when the slot is empty. That replacement happens in the body of this
-/// function and nowhere else; `None` must keep meaning "fail closed".
+/// THE schedule-time seam (ENG-23785/ENG-23881). Derive the scheduling
+/// principal for a detached continuation — an op dispatched with no live user
+/// frame on the stack. A genuine callback-only boundary snapshot is authoritative
+/// when present; otherwise the established op-stamped slot remains the row-2
+/// fallback. `None` keeps meaning fail closed (precedence row 4).
 fn oden_detached_scheduling_principal(
   scope: &mut v8::PinScope,
+  schedule_principals: &[String],
 ) -> Option<String> {
-  oden_read_cped_slot(scope)
+  // A genuine schedule-boundary snapshot outranks the inherited principal slot:
+  // the latter may still name an unrelated earlier actor (including root). The
+  // snapshot is scoped to this callback and therefore is the authoritative
+  // scheduler. If this continuation has no schedule snapshot, preserve the
+  // established row-2 fallback to the op-stamped principal slot.
+  schedule_principals
+    .first()
+    .cloned()
+    .or_else(|| oden_read_cped_slot(scope))
 }
 
 /// At op dispatch: if a live user frame is present, stamp its locator into the
@@ -893,6 +1075,7 @@ fn oden_detached_scheduling_principal(
 pub fn oden_capture_stamp_and_read(
   scope: &mut v8::PinScope,
   frames: &[JsStackFrame],
+  schedule_principals: &[String],
 ) -> Option<String> {
   if !oden_capsec_armed() {
     return None;
@@ -904,7 +1087,7 @@ pub fn oden_capture_stamp_and_read(
       }
       None
     }
-    None => oden_detached_scheduling_principal(scope),
+    None => oden_detached_scheduling_principal(scope, schedule_principals),
   }
 }
 

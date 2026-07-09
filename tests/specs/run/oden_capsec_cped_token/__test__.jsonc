@@ -1,8 +1,9 @@
 {
   // CPED token invariants (ENG-23775): the slot holds an opaque token, not the
   // locator, resolved through a Rust-side registry. Under the ODEN_CAPSEC_FORGE_CPED
-  // red-team hook a stamp writes an UNREGISTERED token, so the detached row-2
-  // reads resolve a stale/unknown token -> the no-user fail-closed sentinel + a
+  // red-team hook a stamp writes an UNREGISTERED token, so detached microtask
+  // row-2 reads (which deliberately avoid the separate timer/immediate boundary
+  // slot) resolve a stale/unknown token -> the no-user fail-closed sentinel + a
   // stale-token audit signal, never the scheduler. Row-1 (live-frame) ops still
   // attribute correctly. Proves a leaked/forged token names nothing.
   "tests": {

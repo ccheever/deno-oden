@@ -1,0 +1,51 @@
+{
+  // Snapshot-scoped scheduling-boundary attribution (ENG-23881). These five
+  // cases pin the acceptance contract: schedule-before-first-op attributes to
+  // the package, an armed async deputy intersects with its scheduler, a later
+  // unrelated package's own op is not polluted by an earlier principal, and
+  // both the unarmed deputy class and wholly-unarmed runtime stay unchanged.
+  "tests": {
+    "schedule_before_first_op_attributes_to_dependency": {
+      "args": "run --allow-env before_first_op.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_audit.json",
+        "SECRET": "s3cret"
+      },
+      "output": "before_first_op.out",
+      "exitCode": 0
+    },
+    "forged_schedule_token_fails_closed": {
+      "args": "run --allow-env before_first_op.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_audit.json",
+        "ODEN_CAPSEC_FORGE_SCHEDULE": "1",
+        "SECRET": "s3cret"
+      },
+      "output": "forged_schedule_token.out",
+      "exitCode": 0
+    },
+    "armed_async_deputy_denies_without_sync_pollution": {
+      "args": "run --allow-env deputy.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_armed.json",
+        "SECRET": "s3cret"
+      },
+      "output": "armed.out",
+      "exitCode": 0
+    },
+    "unarmed_deputy_class_preserves_row_one": {
+      "args": "run --allow-env deputy.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_unarmed.json",
+        "SECRET": "s3cret"
+      },
+      "output": "unarmed_class.out",
+      "exitCode": 0
+    },
+    "runtime_without_capsec_preserves_timers": {
+      "args": "run runtime_unarmed.js",
+      "output": "runtime_unarmed.out",
+      "exitCode": 0
+    }
+  }
+}

@@ -242,8 +242,14 @@ impl ExternalOpsTracker {
 // the human-facing permission-prompt trace keeps upstream's capture, paid
 // only when tracing is explicitly on.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md
-pub type OpStackTraceCallback =
-  Box<dyn Fn(Vec<JsStackFrame>, Option<String>, Option<Vec<JsStackFrame>>)>;
+pub type OpStackTraceCallback = Box<
+  dyn Fn(
+    Vec<JsStackFrame>,
+    Option<String>,
+    Vec<String>,
+    Option<Vec<JsStackFrame>>,
+  ),
+>;
 
 /// Maintains the resources and ops inside a JS runtime.
 pub struct OpState {

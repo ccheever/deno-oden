@@ -72,10 +72,10 @@ pub(crate) static MAYBE_CURRENT_ODEN_CPED_LOCATOR: Lazy<Mutex<Option<String>>> =
 // locator above records the last package to stamp the slot, this is intended to
 // record the set of packages implicated at a scheduling boundary, so a callback
 // scheduled through a deputy (the detached-deputy / schedule-before-first-op
-// case) carries its scheduler into the intersection. Unset today: the
-// snapshot-scoped boundary stamp that would feed it is the async residual noted
-// on the ticket (reading the op-dispatch slot instead is unsound — it pollutes
-// later synchronous ops by unrelated packages).
+// case) carries its scheduler into the intersection. ENG-23881 populates this
+// from the callback-only snapshot captured at the genuine timer/immediate
+// boundary. Reading the long-lived op-dispatch slot here remains forbidden: it
+// pollutes later synchronous ops by unrelated packages.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md (Async attribution row 3)
 pub(crate) static MAYBE_CURRENT_ODEN_CPED_STACK: Lazy<
   Mutex<Option<Vec<String>>>,

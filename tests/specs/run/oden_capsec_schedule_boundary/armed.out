@@ -1,0 +1,7 @@
+[WILDCARD]env:SECRET caller=evil-dep -> DENY(no grant)
+[WILDCARD]env:SECRET caller=lib-dep -> allow(granted)
+[WILDCARD]sync-own: s3cret
+[WILDCARD]env:SECRET caller=[lib-dep,evil-dep] -> DENY(no grant)
+[WILDCARD]async-deputy: NotCapable
+[WILDCARD]env:SECRET caller=[lib-dep,evil-dep] -> DENY(no grant)
+[WILDCARD]nested-async-deputy: NotCapable

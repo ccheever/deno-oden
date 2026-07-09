@@ -247,14 +247,10 @@ const CHECKLIST: HoleClass[] = [
     category: "attribution-laundering",
     attack:
       "async detached-deputy / schedule-before-first-op: scheduler present only in the CPED",
-    status: "residual",
-    residual: {
-      ticket: "ENG-23881",
-      why:
-        "the synchronous confused deputy is closed by stack-intersection (oden_capsec_deputy_intersection); the async case — scheduler carried only in the CPED with a granted deputy frame live, or a callback scheduled before its first op — needs a snapshot-scoped scheduling-boundary stamp to feed the intersection. Reading the op-dispatch slot for it was measured to be unsound (it pollutes later synchronous ops of unrelated packages with a false denial), so it stays a documented residual: sound today (fails closed to no-user, never launders)",
-    },
+    status: "closed",
+    tests: ["oden_capsec_schedule_boundary"],
     note:
-      "NOT an open laundering hole — module-eval stamping was measured to launder and was rejected; the residual is the async-detached over-denial, whose sound closure is the call-boundary boundary stamp",
+      "a genuine timer/immediate schedule captures the complete live principal stack into a fresh callback-only CPED object; the boundary snapshot outranks the inherited op-stamped actor, closes schedule-before-first-op, and intersects nested async deputies without polluting unrelated synchronous work; armed, unarmed-class, and wholly-unarmed cases are fixture-pinned",
   },
   // --- Authority-flow handles / attenuators (ENG-23784) ----------------------
   {
@@ -378,9 +374,9 @@ function render(): string {
     out.push(
       "**GO** — every attack class in the inherited hole checklist is either " +
         "closed with a guarding fixture or a documented residual with an owning " +
-        "ticket. No undocumented open holes. The residuals are sound-but-restrictive " +
-        "(schedule-before-first-op fails closed) or deferred by design (lockdown " +
-        "default-on in audit/permissive, eval-to-caller, per-family owner-checks).",
+        "ticket. No undocumented open holes. The remaining residuals are the " +
+        "default-denied inspector/WASI story, fail-closed eval-to-caller, and " +
+        "per-family resource owner-check wiring.",
     );
   } else {
     out.push("**NO-GO** — open holes / missing fixtures:");
