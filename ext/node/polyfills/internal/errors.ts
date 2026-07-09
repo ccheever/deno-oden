@@ -103,6 +103,25 @@ const lazyLoadAssert = () => {
 
 const kIsNodeError = Symbol("kIsNodeError");
 
+// Assignment-shaped own-property definition. Under Oden capsec lockdown the
+// Error prototypes are frozen, so a plain `this.name = ...` / `this.toString =
+// ...` in an error constructor throws: the inherited property is non-writable
+// and strict-mode assignment refuses to shadow it (the SES "override
+// mistake"). Defining the own property directly has the same semantics as the
+// assignment (own, writable, enumerable, configurable) and works whether or
+// not the prototypes are frozen. Part of the ext/node lazy-write audit
+// (ENG-23781).
+// @ref llp/0001-adding-capability-security-to-deno.plan.md (Compartments and lockdown)
+function defineShadowedProperty(obj, key, value) {
+  ObjectDefineProperty(obj, key, {
+    __proto__: null,
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
+
 /**
  * @see https://github.com/nodejs/node/blob/f3eb224/lib/internal/errors.js
  */
@@ -135,7 +154,7 @@ class AbortError extends Error {
     }
     super(message, options);
     this.code = "ABORT_ERR";
-    this.name = "AbortError";
+    defineShadowedProperty(this, "name", "AbortError");
   }
 }
 
@@ -431,7 +450,7 @@ class NodeErrorAbstraction extends Error {
   constructor(name: string, code: string, message: string) {
     super(message);
     this.code = code;
-    this.name = name;
+    defineShadowedProperty(this, "name", name);
     this.stack = this.stack &&
       `${name} [${this.code}]${
         StringPrototypeSlice(this.stack, this.name.length)
@@ -453,9 +472,9 @@ class NodeSyntaxError extends NodeErrorAbstraction implements SyntaxError {
   constructor(code: string, message: string) {
     super(SyntaxError.prototype.name, code, message);
     ObjectSetPrototypeOf(this, SyntaxErrorPrototype);
-    this.toString = function () {
+    defineShadowedProperty(this, "toString", function () {
       return `${this.name} [${this.code}]: ${this.message}`;
-    };
+    });
   }
 }
 
@@ -463,9 +482,9 @@ class NodeRangeError extends NodeErrorAbstraction {
   constructor(code: string, message: string) {
     super(RangeError.prototype.name, code, message);
     ObjectSetPrototypeOf(this, RangeErrorPrototype);
-    this.toString = function () {
+    defineShadowedProperty(this, "toString", function () {
       return `${this.name} [${this.code}]: ${this.message}`;
-    };
+    });
   }
 }
 
@@ -473,9 +492,9 @@ class NodeTypeError extends NodeErrorAbstraction implements TypeError {
   constructor(code: string, message: string) {
     super(TypeError.prototype.name, code, message);
     ObjectSetPrototypeOf(this, TypeErrorPrototype);
-    this.toString = function () {
+    defineShadowedProperty(this, "toString", function () {
       return `${this.name} [${this.code}]: ${this.message}`;
-    };
+    });
   }
 }
 
@@ -483,9 +502,9 @@ class NodeURIError extends NodeErrorAbstraction implements URIError {
   constructor(code: string, message: string) {
     super(URIError.prototype.name, code, message);
     ObjectSetPrototypeOf(this, URIErrorPrototype);
-    this.toString = function () {
+    defineShadowedProperty(this, "toString", function () {
       return `${this.name} [${this.code}]: ${this.message}`;
-    };
+    });
   }
 }
 
@@ -653,9 +672,9 @@ function makeNodeErrorWithCode(Base: typeof Error, key: string) {
       );
       this.code = key;
       this[kIsNodeError] = true;
-      this.toString = function () {
+      defineShadowedProperty(this, "toString", function () {
         return `${this.name} [${this.code}]: ${this.message}`;
-      };
+      });
     }
   };
 }
@@ -2136,8 +2155,8 @@ class ERR_REQUIRE_ASYNC_MODULE extends NodeError {
       "ERR_REQUIRE_ASYNC_MODULE",
       `require() cannot be used on an ESM graph with top-level await. Use import() instead. To see where the top-level await comes from, use --stack-trace-limit=100 and inspect the dependency graph. Requiring ${filename}. From ${parentFilename}`,
     );
-    this.name = `Error [${this.code}]`;
-    this.toString = nodeErrorToStringWithEmbeddedCode;
+    defineShadowedProperty(this, "name", `Error [${this.code}]`);
+    defineShadowedProperty(this, "toString", nodeErrorToStringWithEmbeddedCode);
   }
 }
 class ERR_REQUIRE_CYCLE_MODULE extends NodeError {
@@ -2146,8 +2165,8 @@ class ERR_REQUIRE_CYCLE_MODULE extends NodeError {
       "ERR_REQUIRE_CYCLE_MODULE",
       `Cannot require() ES Module ${filename} in a cycle. (from ${parentFilename})`,
     );
-    this.name = `Error [${this.code}]`;
-    this.toString = nodeErrorToStringWithEmbeddedCode;
+    defineShadowedProperty(this, "name", `Error [${this.code}]`);
+    defineShadowedProperty(this, "toString", nodeErrorToStringWithEmbeddedCode);
   }
 }
 function nodeErrorToStringWithEmbeddedCode(this: NodeErrorAbstraction) {

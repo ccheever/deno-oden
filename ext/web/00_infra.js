@@ -21,6 +21,7 @@ const {
   Error,
   JSONStringify,
   NumberPrototypeToString,
+  ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
   RegExpPrototypeTest,
   SafeArrayIterator,
@@ -383,7 +384,15 @@ function httpTrim(s) {
 class AssertionError extends Error {
   constructor(msg) {
     super(msg);
-    this.name = "AssertionError";
+    // Define, not assign: `name` is non-writable via the frozen
+    // Error.prototype under Oden capsec lockdown (SES override mistake).
+    ObjectDefineProperty(this, "name", {
+      __proto__: null,
+      value: "AssertionError",
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
   }
 }
 

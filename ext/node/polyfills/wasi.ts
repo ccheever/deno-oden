@@ -38,6 +38,7 @@ const {
   ArrayIsArray,
   Error,
   NumberIsInteger,
+  ObjectDefineProperty,
   ObjectEntries,
   ObjectPrototypeIsPrototypeOf,
   ObjectPrototypeToString,
@@ -53,7 +54,16 @@ class UVWASIError extends Error {
   constructor(code: string, message: string) {
     super(message);
     this.code = code;
-    this.name = "Error";
+    // Define, not assign: `name` is non-writable once Oden capsec lockdown
+    // freezes Error.prototype, so a shadowing assignment would throw (the
+    // SES "override mistake"). Same semantics as the assignment (ENG-23781).
+    ObjectDefineProperty(this, "name", {
+      __proto__: null,
+      value: "Error",
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
   }
 }
 

@@ -597,7 +597,15 @@
   class BadResource extends Error {
     constructor(msg, options) {
       super(msg, options);
-      this.name = "BadResource";
+      // Define, not assign: `name` is non-writable via the frozen
+      // Error.prototype under Oden capsec lockdown (SES override mistake).
+      ObjectDefineProperty(this, "name", {
+        __proto__: null,
+        value: "BadResource",
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
   }
   const BadResourcePrototype = BadResource.prototype;
@@ -605,7 +613,15 @@
   class Interrupted extends Error {
     constructor(msg, options) {
       super(msg, options);
-      this.name = "Interrupted";
+      // Define, not assign: `name` is non-writable via the frozen
+      // Error.prototype under Oden capsec lockdown (SES override mistake).
+      ObjectDefineProperty(this, "name", {
+        __proto__: null,
+        value: "Interrupted",
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
   }
   const InterruptedPrototype = Interrupted.prototype;
@@ -613,7 +629,15 @@
   class NotCapable extends Error {
     constructor(msg, options) {
       super(msg, options);
-      this.name = "NotCapable";
+      // Define, not assign: `name` is non-writable via the frozen
+      // Error.prototype under Oden capsec lockdown (SES override mistake).
+      ObjectDefineProperty(this, "name", {
+        __proto__: null,
+        value: "NotCapable",
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
   }
   const NotCapablePrototype = NotCapable.prototype;

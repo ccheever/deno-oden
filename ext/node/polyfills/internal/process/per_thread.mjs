@@ -6,6 +6,7 @@ const {
   ArrayPrototypeForEach,
   ArrayPrototypeIncludes,
   ArrayPrototypeMap,
+  ObjectDefineProperty,
   ObjectFreeze,
   ReflectApply,
   RegExpPrototypeTest,
@@ -283,10 +284,27 @@ function buildAllowedFlags() {
       return SetPrototypeValues(this[kInternal].set);
     }
   }
-  NodeEnvironmentFlagsSet.prototype.keys =
-    NodeEnvironmentFlagsSet
-      .prototype[SymbolIterator] =
-      NodeEnvironmentFlagsSet.prototype.values;
+  // Define (not assign) these: `keys` and `Symbol.iterator` exist as
+  // non-writable inherited properties once `Set.prototype` is frozen under
+  // Oden capsec lockdown, so a shadowing ASSIGNMENT throws (the SES "override
+  // mistake"). ObjectDefineProperty creates the own properties directly and
+  // is also what upstream Node does for exactly this kind of shadowing.
+  // @ref llp/0001-adding-capability-security-to-deno.plan.md (Compartments and lockdown)
+  const flagsSetValues = NodeEnvironmentFlagsSet.prototype.values;
+  ObjectDefineProperty(NodeEnvironmentFlagsSet.prototype, "keys", {
+    __proto__: null,
+    value: flagsSetValues,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  ObjectDefineProperty(NodeEnvironmentFlagsSet.prototype, SymbolIterator, {
+    __proto__: null,
+    value: flagsSetValues,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
 
   ObjectFreeze(NodeEnvironmentFlagsSet.prototype.constructor);
   ObjectFreeze(NodeEnvironmentFlagsSet.prototype);
