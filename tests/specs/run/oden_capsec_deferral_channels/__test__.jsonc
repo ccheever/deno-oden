@@ -10,8 +10,7 @@
     "all_deferral_channels_carry_principal": {
       "args": "run --allow-env app.js",
       "envs": {
-        "ODEN_CAPSEC_SPIKE": "1",
-        "ODEN_CAPSEC_MODE": "audit",
+        "ODEN_CAPSEC_POLICY": "capsec_audit.json",
         "SECRET": "s3cret",
         "STAMP": "x"
       },

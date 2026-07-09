@@ -8,7 +8,7 @@
   "tests": {
     "cross_principal_watcher_poll_denied": {
       "args": "run --allow-read --allow-env app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "POLLER_MARK": "1" },
+      "envs": { "POLLER_MARK": "1" },
       "output": "owner.out",
       "exitCode": 0
     }

@@ -13,7 +13,6 @@
     "armed_deputy_class_denies_laundering": {
       "args": "run --allow-env app.js",
       "envs": {
-        "ODEN_CAPSEC_SPIKE": "1",
         "ODEN_CAPSEC_DEPUTY_CLASSES": "env:read",
         "SECRET": "s3cret"
       },
@@ -24,7 +23,6 @@
     "unarmed_default_allows_via_row1": {
       "args": "run --allow-env app.js",
       "envs": {
-        "ODEN_CAPSEC_SPIKE": "1",
         "SECRET": "s3cret"
       },
       "output": "unarmed.out",

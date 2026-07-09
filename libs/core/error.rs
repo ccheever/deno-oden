@@ -670,19 +670,34 @@ pub fn capture_op_stack_frames(
 // an ordinary Symbol that object spread copies — so a user `AsyncLocalStorage`
 // scope preserves it (the seal PoC's foreign-key-preserving condition). At op
 // dispatch, a live user frame stamps the slot; a detached callback with no user
-// frame reads it back (precedence row 2). Inert unless `ODEN_CAPSEC_SPIKE`.
+// frame reads it back (precedence row 2). Inert unless capsec is armed.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md
 fn oden_capsec_armed() -> bool {
   static ARMED: LazyLock<bool> = LazyLock::new(oden_capsec_armed_uncached);
   *ARMED
 }
 
+// Structural arming: the policy artifact's presence arms — an explicit
+// `ODEN_CAPSEC_POLICY` handoff or `<root>/.oden/policy.json` (root =
+// `ODEN_CAPSEC_ROOT` else cwd). Kept in sync with
+// `deno_permissions::oden_capsec_armed`, which deno_core sits below and cannot
+// call; both cache once per process, so the two probes cannot diverge mid-run.
 #[allow(
   clippy::disallowed_methods,
-  reason = "Phase-0 capsec is armed through an env var by design; read once and cached."
+  reason = "structural arming probes the policy artifact; read once and cached."
 )]
 fn oden_capsec_armed_uncached() -> bool {
-  std::env::var_os("ODEN_CAPSEC_SPIKE").is_some()
+  if std::env::var_os("ODEN_CAPSEC_POLICY").is_some_and(|v| !v.is_empty()) {
+    return true;
+  }
+  let root = match std::env::var_os("ODEN_CAPSEC_ROOT") {
+    Some(r) if !r.is_empty() => std::path::PathBuf::from(r),
+    _ => match std::env::current_dir() {
+      Ok(cwd) => cwd,
+      Err(_) => return false,
+    },
+  };
+  root.join(".oden").join("policy.json").exists()
 }
 
 // Opaque-token registry for the CPED slot (LLP 0001 token invariants). The slot
@@ -721,7 +736,12 @@ fn oden_cped_intern(locator: &str) -> u64 {
 }
 
 fn oden_cped_resolve(token: u64) -> Option<String> {
-  ODEN_CPED_REGISTRY.lock().unwrap().to_locator.get(&token).cloned()
+  ODEN_CPED_REGISTRY
+    .lock()
+    .unwrap()
+    .to_locator
+    .get(&token)
+    .cloned()
 }
 
 // Red-team hook: when ODEN_CAPSEC_FORGE_CPED is set, a stamp writes a token that

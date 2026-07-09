@@ -10,8 +10,8 @@
 // principal exactly the authority it was observed to need. So "run code nobody
 // read, then accept the grants it actually used" becomes one reviewable step:
 //
-//   ODEN_CAPSEC_SPIKE=1 ODEN_CAPSEC_MODE=audit ODEN_CAPSEC_AUDIT=run.ndjson \
-//     deno run --allow-all app.js
+//   echo '{ "mode": "audit" }' > .oden/policy.json   # the artifact arms capsec
+//   ODEN_CAPSEC_AUDIT=run.ndjson deno run --allow-all app.js
 //   deno run -A tools/oden/audit_synth.ts run.ndjson --out .oden/policy.json
 //
 // The synthesized policy is a *proposal*, not an auto-accept: it prints a

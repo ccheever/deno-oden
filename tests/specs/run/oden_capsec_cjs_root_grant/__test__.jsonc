@@ -8,7 +8,7 @@
   "tests": {
     "cjs_root_grants_cjs_dep_via_overlay": {
       "args": "run --allow-env --allow-read app.cjs",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ALLOWED": "ok", "SECRET": "xyz" },
+      "envs": { "ALLOWED": "ok", "SECRET": "xyz" },
       "output": "cjs.out",
       "exitCode": 0
     }

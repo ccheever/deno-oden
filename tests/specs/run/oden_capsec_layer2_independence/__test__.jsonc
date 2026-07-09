@@ -9,8 +9,7 @@
     "armed_enforce_denies_require_read": {
       "args": "run --allow-read --allow-env app.js",
       "envs": {
-        "ODEN_CAPSEC_SPIKE": "1",
-        "ODEN_CAPSEC_ENFORCE": "1"
+        "ODEN_CAPSEC_POLICY": "capsec_enforce.json"
       },
       "output": "armed.out",
       "exitCode": 0

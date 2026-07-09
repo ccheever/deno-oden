@@ -8,7 +8,7 @@
   "tests": {
     "lockdown_freezes_intrinsics": {
       "args": "run --allow-all app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_LOCKDOWN": "1" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_audit.json", "ODEN_CAPSEC_LOCKDOWN": "1" },
       "output": "locked.out",
       "exitCode": 0
     },
@@ -19,7 +19,7 @@
     },
     "enforce_without_lockdown_is_opt_in": {
       "args": "run --allow-all app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce", "ODEN_CAPSEC_ALLOW_ADVISORY": "1" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json", "ODEN_CAPSEC_ALLOW_ADVISORY": "1" },
       "output": "unlocked.out",
       "exitCode": 0
     }

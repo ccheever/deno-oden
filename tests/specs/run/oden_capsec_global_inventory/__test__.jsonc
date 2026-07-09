@@ -7,7 +7,7 @@
   "tests": {
     "armed_seals_powerful_surface": {
       "args": "run probe.mjs",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_audit.json" },
       "output": "armed.out",
       "exitCode": 0
     },

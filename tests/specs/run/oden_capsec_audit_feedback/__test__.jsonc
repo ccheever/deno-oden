@@ -8,7 +8,7 @@
   "tests": {
     "denial_suggests_grant": {
       "args": "run --allow-env app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce", "SECRET": "xyz" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json", "SECRET": "xyz" },
       "output": "deny.out",
       "exitCode": 0
     },
@@ -16,7 +16,7 @@
       "steps": [
         {
           "args": "run --allow-env app.js",
-          "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "audit", "ODEN_CAPSEC_AUDIT": "audit.ndjson", "SECRET": "xyz" },
+          "envs": { "ODEN_CAPSEC_POLICY": "capsec_audit.json", "ODEN_CAPSEC_AUDIT": "audit.ndjson", "SECRET": "xyz" },
           "output": "[WILDCARD]"
         },
         {

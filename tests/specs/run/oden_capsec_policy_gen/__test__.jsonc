@@ -5,6 +5,9 @@
   // regenerates and passes when the committed artifact is up to date. "Only
   // your code grants": a dependency self-grant would be ignored (covered by the
   // tool's own run against node_modules; here the graph is clean).
+  // The committed .oden/policy.json (the check target) also arms capsec in this
+  // cwd under structural arming, so the tool's own first-party reads emit
+  // audit(record) lines — benign, matched by the [WILDCARD] prefix in check.out.
   "tests": {
     "generated_policy_is_stable": {
       "args": "run -A ../../../../tools/oden/policy_gen.ts main.js --check",
