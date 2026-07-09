@@ -110,10 +110,18 @@ fn oden_capsec_decide(
   }
   let policy = oden_capsec_policy_from_env();
   let principal = oden_capsec_principal();
+  // Normalize fs targets to an absolute, lexically-folded path so a relative
+  // op (`./data/x`) matches an fs grant scope (also resolved absolute) and a
+  // `..` escape resolves out of its granted scope. Non-fs targets pass through.
+  let normalized_target = if matches!(family, OdenFamily::Fs) {
+    oden_normalize_fs_target(target)
+  } else {
+    target.to_string()
+  };
   let req = OdenRequest {
     family,
     action: action.to_string(),
-    target: target.to_string(),
+    target: normalized_target,
   };
   let decision = policy.decide(&principal, &req);
   let principal_label = principal.label();
@@ -155,10 +163,133 @@ fn oden_capsec_active() -> bool {
 
 #[allow(
   clippy::disallowed_methods,
-  reason = "Phase-0 capsec grants are supplied through an env var; a real policy source replaces this."
+  reason = "Phase-0/1 capsec resolves the project root from an env var, falling back to cwd."
+)]
+fn oden_capsec_project_root() -> String {
+  std::env::var("ODEN_CAPSEC_ROOT").unwrap_or_else(|_| {
+    std::env::current_dir()
+      .map(|p| p.to_string_lossy().into_owned())
+      .unwrap_or_default()
+  })
+}
+
+#[derive(serde::Deserialize, Default)]
+struct OdenPolicyFile {
+  #[serde(default)]
+  mode: Option<String>,
+  #[serde(default)]
+  grants: std::collections::HashMap<String, String>,
+}
+
+// The real policy source: `.oden/policy.json` in the project root — the same
+// file the userland layer (LLP 0012) writes, so a grant authored there enforces
+// unforgeably in the engine without a rewrite. Shape:
+// `{ "mode": "enforce", "grants": { "<pkg>": "fs:read:./x,network:fetch:host" } }`.
+// Env vars (ODEN_CAPSEC_GRANT / _MODE / _ENFORCE) still layer on top.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md ; llp/0012-userland-capability-layer.plan.md
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-1 capsec reads its policy file from the project root; a resolver replaces the raw fs read later."
+)]
+fn oden_capsec_policy_file() -> Option<OdenPolicyFile> {
+  let root = oden_capsec_project_root();
+  if root.is_empty() {
+    return None;
+  }
+  let path = std::path::Path::new(&root).join(".oden").join("policy.json");
+  let text = std::fs::read_to_string(path).ok()?;
+  serde_json::from_str::<OdenPolicyFile>(&text).ok()
+}
+
+// Resolve fs grant scopes against $HOME/root, mirroring the userland policy
+// loader so a `fs:read:./data` grant authored in `.oden/policy.json` matches the
+// absolute path the op actually requests.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "resolves fs grant scopes against $HOME to match the userland policy format"
+)]
+fn oden_resolve_grant_scopes(grant_str: &str, root: &str) -> String {
+  grant_str
+    .split(',')
+    .map(|g| {
+      let g = g.trim();
+      if let Some(rest) = g.strip_prefix("fs:")
+        && let Some((action, scope)) = rest.split_once(':')
+      {
+        let resolved = if let Some(r) = scope.strip_prefix("~/") {
+          match std::env::var("HOME") {
+            Ok(home) => format!("{home}/{r}"),
+            Err(_) => scope.to_string(),
+          }
+        } else if scope.starts_with('/') {
+          scope.to_string()
+        } else {
+          format!("{root}/{}", scope.strip_prefix("./").unwrap_or(scope))
+        };
+        return format!("fs:{action}:{resolved}");
+      }
+      g.to_string()
+    })
+    .collect::<Vec<_>>()
+    .join(",")
+}
+
+// Resolve an fs op target to an absolute, lexically-normalized path (join cwd
+// for relative paths; fold `.` and `..`), so scope matching is done on canonical
+// paths and a `..` escape lands outside its granted scope. Purely lexical (does
+// not touch the filesystem); symlink/TOCTOU hardening is separate.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "resolves a relative fs op target against the process cwd for scope matching"
+)]
+fn oden_normalize_fs_target(target: &str) -> String {
+  use std::path::Component;
+  let p = std::path::Path::new(target);
+  let abs = if p.is_absolute() {
+    p.to_path_buf()
+  } else {
+    match std::env::current_dir() {
+      Ok(cwd) => cwd.join(p),
+      Err(_) => return target.to_string(),
+    }
+  };
+  let mut out: Vec<Component> = Vec::new();
+  for comp in abs.components() {
+    match comp {
+      Component::CurDir => {}
+      Component::ParentDir => {
+        if matches!(out.last(), Some(Component::Normal(_))) {
+          out.pop();
+        }
+      }
+      other => out.push(other),
+    }
+  }
+  let mut pb = std::path::PathBuf::new();
+  for c in out {
+    pb.push(c.as_os_str());
+  }
+  pb.to_string_lossy().into_owned()
+}
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-0/1 capsec grants may be supplied through an env var layered on the policy file."
 )]
 fn oden_capsec_policy_from_env() -> OdenPolicy {
-  let mut policy = OdenPolicy::new(oden_capsec_mode());
+  let file = oden_capsec_policy_file();
+  let root = oden_capsec_project_root();
+  let mut policy = OdenPolicy::new(oden_capsec_mode(file.as_ref()));
+  // Policy-file grants (the userland `.oden/policy.json` format).
+  if let Some(file) = &file {
+    for (selector, grant_str) in &file.grants {
+      let selector = selector.trim();
+      if !selector.is_empty() {
+        policy.grant(selector, &oden_resolve_grant_scopes(grant_str, &root));
+      }
+    }
+  }
+  // Env grants layer on top (tests / ad-hoc runs).
   if let Ok(grants) = std::env::var("ODEN_CAPSEC_GRANT") {
     let entries = if grants.contains(';') {
       grants.split(';').collect::<Vec<_>>()
@@ -185,36 +316,38 @@ fn oden_capsec_policy_from_env() -> OdenPolicy {
   policy
 }
 
+// Mode precedence: env override (ODEN_CAPSEC_MODE / _ENFORCE) > policy-file mode
+// > default (audit). A typo in an env or file mode is ignored rather than
+// silently downgrading enforcement.
 #[allow(
   clippy::disallowed_methods,
-  reason = "Phase-0 capsec mode is selected through env vars; the spike's control surface."
+  reason = "Phase-0/1 capsec mode may be overridden through env vars; the spike's control surface."
 )]
-fn oden_capsec_mode() -> OdenMode {
-  if let Ok(mode) = std::env::var("ODEN_CAPSEC_MODE") {
-    match mode.as_str() {
-      "off" | "permissive" => return OdenMode::Permissive,
-      "audit" => return OdenMode::Audit,
-      "enforce" => return OdenMode::Enforce,
-      _ => {}
+fn oden_capsec_mode(file: Option<&OdenPolicyFile>) -> OdenMode {
+  fn parse_mode(s: &str) -> Option<OdenMode> {
+    match s {
+      "off" | "permissive" => Some(OdenMode::Permissive),
+      "audit" => Some(OdenMode::Audit),
+      "enforce" => Some(OdenMode::Enforce),
+      _ => None,
     }
   }
-  if std::env::var_os("ODEN_CAPSEC_ENFORCE").is_some() {
-    OdenMode::Enforce
-  } else {
-    OdenMode::Audit
+  if let Ok(mode) = std::env::var("ODEN_CAPSEC_MODE")
+    && let Some(m) = parse_mode(&mode)
+  {
+    return m;
   }
+  if std::env::var_os("ODEN_CAPSEC_ENFORCE").is_some() {
+    return OdenMode::Enforce;
+  }
+  if let Some(m) = file.and_then(|f| f.mode.as_deref()).and_then(parse_mode) {
+    return m;
+  }
+  OdenMode::Audit
 }
 
-#[allow(
-  clippy::disallowed_methods,
-  reason = "Phase-0 capsec reads the project root from an env var, falling back to cwd; a real config source replaces this."
-)]
 fn oden_capsec_principal() -> OdenPrincipal {
-  let project_root = std::env::var("ODEN_CAPSEC_ROOT").unwrap_or_else(|_| {
-    std::env::current_dir()
-      .map(|p| p.to_string_lossy().into_owned())
-      .unwrap_or_else(|_| String::new())
-  });
+  let project_root = oden_capsec_project_root();
   let frames = MAYBE_CURRENT_ODEN_STACKTRACE
     .lock()
     .as_ref()

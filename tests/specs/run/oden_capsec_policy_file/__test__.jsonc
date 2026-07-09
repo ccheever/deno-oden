@@ -1,0 +1,14 @@
+{
+  // decide() reads the userland .oden/policy.json format (mode + per-package
+  // grants) as its policy source — no grant/mode env. mode=enforce from the
+  // file; dep-a granted env:read:SECRET + fs:read:./data (resolved absolute); a
+  // ../ escape and an ungranted var are denied. Proves grants carry forward.
+  "tests": {
+    "policy_file_drives_enforce": {
+      "args": "run --allow-env --allow-read app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "SECRET": "s3cret", "OTHER": "nope" },
+      "output": "policy.out",
+      "exitCode": 0
+    }
+  }
+}

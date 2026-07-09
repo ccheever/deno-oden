@@ -1,0 +1,1 @@
+{ "mode": "enforce", "grants": { "dep-a": "env:read:SECRET,fs:read:./data" } }
