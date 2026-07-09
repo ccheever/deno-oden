@@ -518,6 +518,19 @@ pub fn op_compile_function<'s, 'i>(
     }
   };
 
+  // Oden: register this compiled script's id to its specifier so op-boundary
+  // attribution can key on CJS/dynamic scripts, not only ESM modules. The key is
+  // the V8 script id (unforgeable); a forged `//# sourceURL` changes only the
+  // display name, never the id, so it cannot inject a trusted locator.
+  // @ref llp/0001-adding-capability-security-to-deno.plan.md
+  let oden_script_id = function.script_id();
+  if oden_script_id >= 0 {
+    crate::error::oden_register_script_locator_global(
+      oden_script_id as usize,
+      specifier.as_str(),
+    );
+  }
+
   if let Some(code_cache_hash) = maybe_code_cache_hash
     && let Some(cb) = state.eval_context_code_cache_ready_cb.borrow().as_ref()
   {
