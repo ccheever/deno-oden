@@ -22,6 +22,7 @@ deno_core::extension!(
     op_bootstrap_unstable_args,
     op_bootstrap_is_from_unconfigured_runtime,
     op_oden_capsec_flags,
+    op_oden_capsec_seal_report,
     op_proto_set_attempted,
     op_proto_get_attempted,
     op_snapshot_options,
@@ -202,6 +203,15 @@ pub fn op_oden_capsec_flags() -> u32 {
     flags |= 4;
   }
   flags
+}
+
+// Always-on seal conformance (LLP 0001 ENG-23775): the bootstrap runs the four
+// seal conditions on every armed startup and reports the result here. The flag
+// lives in `deno_permissions` (where readiness reads it), so a broken seal makes
+// enforce fail closed rather than silently trusting an unsound attribution slot.
+#[op2(fast)]
+pub fn op_oden_capsec_seal_report(ok: bool) {
+  deno_permissions::oden_capsec_report_seal(ok);
 }
 
 // Called (at most once) from the disabled `Object.prototype.__proto__` setter

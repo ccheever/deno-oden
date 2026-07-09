@@ -18,6 +18,7 @@ import {
   op_main_module,
   op_node_has_child_ipc_pipe,
   op_oden_capsec_flags,
+  op_oden_capsec_seal_report,
   op_ppid,
   op_proto_get_attempted,
   op_proto_set_attempted,
@@ -785,7 +786,7 @@ function odenSealAsyncContext() {
 // attacker-built async variable. Conditions 1 (sealed) and 2 (ALS coexists) are
 // proven in user space against the sealed binary. Gated by
 // ODEN_CAPSEC_SEAL_SELFTEST.
-function odenSealSelfTest() {
+function odenSealSelfTest(verbose) {
   const rawGet = internals.core.getAsyncContext;
   const rawSet = internals.core.setAsyncContext;
   const AsyncVariable = internals.core.AsyncVariable;
@@ -845,15 +846,20 @@ function odenSealSelfTest() {
     if (!r.ok) {
       allOk = false;
     }
+    if (verbose) {
+      internals.core.print(
+        `[oden-seal-selftest] ${r.ok ? "PASS" : "FAIL"} ${r.name}\n`,
+        true,
+      );
+    }
+  }
+  if (verbose) {
     internals.core.print(
-      `[oden-seal-selftest] ${r.ok ? "PASS" : "FAIL"} ${r.name}\n`,
+      `[oden-seal-selftest] ${allOk ? "ALL PASS" : "FAILURES PRESENT"}\n`,
       true,
     );
   }
-  internals.core.print(
-    `[oden-seal-selftest] ${allOk ? "ALL PASS" : "FAILURES PRESENT"}\n`,
-    true,
-  );
+  return allOk;
 }
 
 // --- Oden capsec Phase-2: minimal lockdown (LLP 0001 lockdown) --------------
@@ -932,9 +938,13 @@ function odenMaybeSealAsyncContext() {
   if ((flags & 1) === 0) {
     return;
   }
-  if ((flags & 2) !== 0) {
-    odenSealSelfTest();
-  }
+  // Always-on seal conformance (LLP 0001 ENG-23775): the four seal conditions
+  // run on every armed startup, not just under the env-gated self-test. Verbose
+  // (prints PASS/FAIL) only when the self-test bit is set; otherwise silent. The
+  // result is reported to the engine so a broken seal makes enforce fail closed
+  // (readiness `seal_applied` reflects the real conformance, not an assumption).
+  const ok = odenSealSelfTest((flags & 2) !== 0);
+  op_oden_capsec_seal_report(ok);
   odenSealAsyncContext();
 }
 

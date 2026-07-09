@@ -183,6 +183,26 @@ fn oden_capsec_active() -> bool {
   std::env::var_os("ODEN_CAPSEC_SPIKE").is_some()
 }
 
+// Always-on seal conformance (LLP 0001 ENG-23775). The bootstrap runs the four
+// seal conditions on every armed startup and reports the result here; a broken
+// seal flips this to false so readiness reports `seal_applied = false` and
+// enforce fails closed. Starts true (assume sound until a run reports otherwise).
+static ODEN_SEAL_CONFORMANCE_OK: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(true);
+
+/// Called by the bootstrap op once per armed startup with the seal self-test's
+/// verdict. A single failure latches the flag closed for the process.
+pub fn oden_capsec_report_seal(ok: bool) {
+  if !ok {
+    ODEN_SEAL_CONFORMANCE_OK
+      .store(false, std::sync::atomic::Ordering::Relaxed);
+  }
+}
+
+fn oden_capsec_seal_conformance_ok() -> bool {
+  ODEN_SEAL_CONFORMANCE_OK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // The acting principal's label for out-of-process consumers (the permission
 // broker), so a brokered decision can key on the package, not just the process.
 // None when capsec is inactive — the broker wire format is then unchanged.
@@ -327,8 +347,12 @@ fn oden_capsec_readiness() -> OdenReadiness {
     // forced-degradation hook lets the honesty machinery be exercised.
     attribution_armed: oden_capsec_active()
       && !oden_capsec_env_flag("ODEN_CAPSEC_FORCE_UNARMED"),
+    // The seal is applied when armed, not force-disabled, AND the always-on
+    // conformance the bootstrap ran actually passed (a real broken seal, not
+    // just the forced hook, flips this).
     seal_applied: oden_capsec_active()
-      && !oden_capsec_env_flag("ODEN_CAPSEC_FORCE_UNSEALED"),
+      && !oden_capsec_env_flag("ODEN_CAPSEC_FORCE_UNSEALED")
+      && oden_capsec_seal_conformance_ok(),
     lockdown_on: oden_capsec_active() && oden_capsec_lockdown_on(),
     policy_source,
     project_root: root,
