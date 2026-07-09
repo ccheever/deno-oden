@@ -263,6 +263,29 @@ pub fn op_drain_pending_rejections<'s>(
   arr.into()
 }
 
+/// Oden (ENG-23881): whether capsec is armed, for the timer wrapper's fast
+/// path. When disarmed the wrapper skips `op_oden_schedule_context` entirely, so
+/// scheduling stays byte-identical to upstream.
+#[op2(fast)]
+pub fn op_oden_capsec_armed() -> bool {
+  crate::error::oden_is_capsec_armed()
+}
+
+/// Oden (ENG-23881): the async-context object a genuine async schedule
+/// (`setTimeout`/`setInterval`) should capture for its callback — the current
+/// continuation-preserved data plus the snapshot-scoped scheduling-boundary
+/// stamp (the scheduling package's principal). Returns the current context
+/// unchanged when disarmed or when no package principal is scheduling. The
+/// timer wrapper captures the returned object for the callback only; the live
+/// continuation is never mutated.
+/// @ref llp/0001-adding-capability-security-to-deno.plan.md (Async attribution row 3)
+#[op2(reentrant)]
+pub fn op_oden_schedule_context<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Value> {
+  crate::error::oden_build_schedule_context(scope)
+}
+
 pub struct EvalContextError<'s> {
   thrown: v8::Local<'s, v8::Value>,
   is_native_error: bool,

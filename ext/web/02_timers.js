@@ -10,7 +10,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { op_defer } = core.ops;
+const { op_defer, op_oden_capsec_armed, op_oden_schedule_context } = core.ops;
 const {
   createTimer,
   cancelTimer,
@@ -19,6 +19,20 @@ const {
   getAsyncContext,
   setAsyncContext,
 } = core;
+
+// Oden (ENG-23881): the async context a timer callback should capture. When
+// capsec is armed, this is the current continuation data plus a snapshot-scoped
+// scheduling-boundary stamp (the scheduling package's principal), built in Rust
+// as a FRESH object so the scheduler's own continuation is never mutated. When
+// disarmed, op_oden_schedule_context returns the current continuation data
+// unchanged — byte-identical to getAsyncContext() — so the op can be called
+// unconditionally. (An earlier `let odenCapsecArmed` JS cache was unsound: the
+// bootstrap runs setTimeout during the snapshot build, before any policy env
+// exists, caching `false` INTO the snapshot so the armed check never re-ran at
+// runtime. Deferring the arm decision to the Rust op each call avoids that.)
+function odenScheduleAsyncContext() {
+  return core.ops.op_oden_schedule_context();
+}
 const {
   MapPrototypeDelete,
   MapPrototypeGet,
@@ -55,7 +69,7 @@ function setTimeout(callback, timeout = 0, ...args) {
     callback = () => indirectEval(unboundCallback);
   }
   const unboundCallback = callback;
-  const asyncContext = getAsyncContext();
+  const asyncContext = odenScheduleAsyncContext();
   const depth = timerDepth;
   let id = 0;
   const wrappedCallback = function () {
@@ -88,7 +102,7 @@ function setInterval(callback, timeout = 0, ...args) {
     callback = () => indirectEval(unboundCallback);
   }
   const unboundCallback = callback;
-  const asyncContext = getAsyncContext();
+  const asyncContext = odenScheduleAsyncContext();
   const depth = timerDepth;
   const wrappedCallback = function () {
     const oldContext = getAsyncContext();

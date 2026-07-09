@@ -1332,6 +1332,7 @@ pub fn create_permissions_stack_trace_callback()
   Box::new(
     |stack: Vec<deno_core::error::JsStackFrame>,
      cped_locator: Option<String>,
+     schedule_locator: Option<String>,
      display_frames: Option<Vec<deno_core::error::JsStackFrame>>| {
       let oden_stack = stack
         .iter()
@@ -1353,6 +1354,13 @@ pub fn create_permissions_stack_trace_callback()
       // Precedence row 2: the CPED scheduling-principal locator, carried when no
       // live user frame was present at dispatch.
       deno_permissions::prompter::set_current_oden_cped_locator(cped_locator);
+      // Row 3 (ENG-23881): the snapshot-scoped scheduling-boundary principal —
+      // who scheduled this callback — fed to the stack-intersection. Only a
+      // genuine async schedule populates it, so it is empty for synchronous ops
+      // and cannot falsely deny an unrelated later package's own op.
+      deno_permissions::prompter::set_current_oden_cped_stack(
+        schedule_locator.map(|s| vec![s]),
+      );
       deno_permissions::prompter::set_current_oden_stacktrace(Box::new(
         move || oden_stack.clone(),
       ));

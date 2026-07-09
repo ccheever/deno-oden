@@ -262,6 +262,9 @@ pub(crate) fn with_stack_trace(
       // @ref llp/0001-adding-capability-security-to-deno.plan.md
       let frames = deno_core::error::capture_op_stack_frames(&mut #scope, #opctx.isolate);
       let oden_cped = deno_core::error::oden_capture_stamp_and_read(&mut #scope, &frames);
+      // ENG-23881: the snapshot-scoped scheduling principal (who scheduled this
+      // callback), read for the row-3 intersection. Empty for synchronous ops.
+      let oden_sched = deno_core::error::oden_read_schedule_slot(&mut #scope);
       let display_frames = if deno_core::error::oden_trace_display_enabled() {
         let stack_trace_msg = deno_core::v8::String::empty(&mut #scope);
         let stack_trace_error = deno_core::v8::Exception::error(&mut #scope, stack_trace_msg.into());
@@ -270,7 +273,7 @@ pub(crate) fn with_stack_trace(
         None
       };
       let mut op_state = ::std::cell::RefCell::borrow_mut(&#opstate);
-      op_state.op_stack_trace_callback.as_ref().unwrap()(frames, oden_cped, display_frames)
+      op_state.op_stack_trace_callback.as_ref().unwrap()(frames, oden_cped, oden_sched, display_frames)
     })
   )
 }
