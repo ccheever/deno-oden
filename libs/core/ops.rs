@@ -234,8 +234,16 @@ impl ExternalOpsTracker {
 
 // The second argument carries the Oden CPED scheduling-principal locator when
 // no live user frame is present at dispatch (precedence row 2); `None`
-// otherwise. @ref llp/0001-adding-capability-security-to-deno.plan.md
-pub type OpStackTraceCallback = Box<dyn Fn(Vec<JsStackFrame>, Option<String>)>;
+// otherwise. The third argument carries rich display frames (the upstream
+// JsError-style capture: receiver type names + exact call positions) and is
+// `Some` only when `DENO_TRACE_PERMISSIONS` is set — the raw frames are the
+// attribution source (unforgeable script IDs) but v8::StackFrame lacks
+// type/method names and reports approximate positions for outer frames, so
+// the human-facing permission-prompt trace keeps upstream's capture, paid
+// only when tracing is explicitly on.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+pub type OpStackTraceCallback =
+  Box<dyn Fn(Vec<JsStackFrame>, Option<String>, Option<Vec<JsStackFrame>>)>;
 
 /// Maintains the resources and ops inside a JS runtime.
 pub struct OpState {

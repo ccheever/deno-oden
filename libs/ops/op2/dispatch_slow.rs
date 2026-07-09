@@ -254,12 +254,23 @@ pub(crate) fn with_stack_trace(
     (if #opctx.enable_stack_trace {
       // Oden captures raw V8 frames here so the permission layer can key on
       // script IDs instead of forgeable display names, and stamps/reads the
-      // CPED scheduling-principal slot for async attribution.
+      // CPED scheduling-principal slot for async attribution. When
+      // DENO_TRACE_PERMISSIONS is set, the upstream JsError-style capture
+      // rides along for the human-facing prompt trace (receiver type names +
+      // exact call positions, which v8::StackFrame does not provide) —
+      // attribution still keys on the raw frames.
       // @ref llp/0001-adding-capability-security-to-deno.plan.md
       let frames = deno_core::error::capture_op_stack_frames(&mut #scope, #opctx.isolate);
       let oden_cped = deno_core::error::oden_capture_stamp_and_read(&mut #scope, &frames);
+      let display_frames = if deno_core::error::oden_trace_display_enabled() {
+        let stack_trace_msg = deno_core::v8::String::empty(&mut #scope);
+        let stack_trace_error = deno_core::v8::Exception::error(&mut #scope, stack_trace_msg.into());
+        Some(deno_core::error::JsError::from_v8_exception(&mut #scope, stack_trace_error).frames)
+      } else {
+        None
+      };
       let mut op_state = ::std::cell::RefCell::borrow_mut(&#opstate);
-      op_state.op_stack_trace_callback.as_ref().unwrap()(frames, oden_cped)
+      op_state.op_stack_trace_callback.as_ref().unwrap()(frames, oden_cped, display_frames)
     })
   )
 }

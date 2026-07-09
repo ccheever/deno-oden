@@ -643,6 +643,16 @@ pub fn oden_script_locator(
     .cloned()
 }
 
+/// Whether the human-facing permission-prompt trace should carry the rich
+/// (JsError-style) frames alongside the cheap raw attribution frames. Cached
+/// once per process like the arming probes.
+pub fn oden_trace_display_enabled() -> bool {
+  static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var_os("DENO_TRACE_PERMISSIONS").is_some_and(|v| !v.is_empty())
+  });
+  *ENABLED
+}
+
 pub fn capture_op_stack_frames(
   scope: &mut v8::PinScope,
   isolate: v8::UnsafeRawIsolatePtr,

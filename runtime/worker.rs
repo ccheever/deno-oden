@@ -1331,7 +1331,8 @@ pub fn create_permissions_stack_trace_callback()
 -> deno_core::OpStackTraceCallback {
   Box::new(
     |stack: Vec<deno_core::error::JsStackFrame>,
-     cped_locator: Option<String>| {
+     cped_locator: Option<String>,
+     display_frames: Option<Vec<deno_core::error::JsStackFrame>>| {
       let oden_stack = stack
         .iter()
         .map(|frame| {
@@ -1355,8 +1356,13 @@ pub fn create_permissions_stack_trace_callback()
       deno_permissions::prompter::set_current_oden_stacktrace(Box::new(
         move || oden_stack.clone(),
       ));
+      // The human-facing formatted stack: rich JsError-style frames when
+      // DENO_TRACE_PERMISSIONS is on (receiver type names + exact call
+      // positions, byte-identical to upstream's prompt trace); the raw
+      // attribution frames otherwise (only machine consumers see those).
+      let formatted_source = display_frames.unwrap_or(stack);
       deno_permissions::prompter::set_current_stacktrace(Box::new(move || {
-        stack
+        formatted_source
           .iter()
           .map(|frame| {
             deno_core::error::format_frame::<deno_core::error::NoAnsiColors>(
