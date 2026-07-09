@@ -252,7 +252,7 @@ const CHECKLIST: HoleClass[] = [
       "async detached-deputy / schedule-before-first-op: scheduler present only in the CPED",
     status: "residual",
     residual: {
-      ticket: "ENG-23785",
+      ticket: "ENG-23881",
       why:
         "the synchronous confused deputy is closed by stack-intersection (oden_capsec_deputy_intersection); the async case — scheduler carried only in the CPED with a granted deputy frame live, or a callback scheduled before its first op — needs a snapshot-scoped scheduling-boundary stamp to feed the intersection. Reading the op-dispatch slot for it was measured to be unsound (it pollutes later synchronous ops of unrelated packages with a false denial), so it stays a documented residual: sound today (fails closed to no-user, never launders)",
     },
