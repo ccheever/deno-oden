@@ -776,6 +776,16 @@ pub(crate) fn boot_phase(label: &str) {
 
 pub fn main() {
   boot_phase("main start");
+  // Keep the lower-level emitter independent of `deno_runtime`: the CLI owns
+  // the one-way registration from loader locator to the policy-derived
+  // endowment fingerprint. With compartment globals off, the provider returns
+  // None and all emit/cache behavior remains upstream-identical.
+  // @ref LLP 0014#at-which-loader-stage [implements]
+  deno_resolver::emit::set_oden_compartment_fingerprint_provider(|specifier| {
+    deno_runtime::deno_permissions::oden_capsec_compartment_globals_fingerprint(
+      specifier.as_str(),
+    )
+  });
   #[cfg(feature = "dhat-heap")]
   let profiler = dhat::Profiler::new_heap();
 

@@ -1,0 +1,27 @@
+[WILDCARD]# Oden compartment-globals compatibility report (generated)
+
+Ran 4 entries / 10 installed package selectors in two arms. 4 entries cleared the shared enforce+lockdown control and are in the compartment denominator.
+
+| classification | entries | rate among control-pass entries |
+| --- | ---: | ---: |
+| compatible | 3 | 75.0% |
+| derivation-gap | 0 | 0.0% |
+| transform-bug | 0 | 0.0% |
+| legitimate-tradeoff | 1 | 25.0% |
+| baseline-failure (excluded) | 0 | — |
+
+## Per-entry result
+
+| entry | classification | control / experiment | detail |
+| --- | --- | --- | --- |
+| compute | compatible | 0 / 0 | same output |
+| fetch | compatible | 0 / 0 | same output |
+| process | legitimate-tradeoff | 0 / 1 | process is intentionally never-endowed |
+| local | compatible | 0 / 0 | same output |
+
+## Posture
+
+**OPT-IN ONLY.** This run found no transform blocker above the stated threshold, but it does not certify the external lockdown prerequisite or a tooling-inclusive default-on corpus.
+
+A `legitimate-tradeoff` is priced reachability enforcement, not a transform defect. A `baseline-failure` is excluded because the shared enforce/lockdown control already failed; it cannot be credited as compartment compatibility.
+[WILDCARD]

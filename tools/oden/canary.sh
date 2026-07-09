@@ -48,6 +48,11 @@ if ! "$DENO" run --allow-read tools/oden/script_creation_manifest.ts --check; th
   fail=1
 fi
 
+echo "== exhaustive ambient-global inventory =="
+if ! "$DENO" run --allow-read tools/oden/global_inventory.ts --check; then
+  fail=1
+fi
+
 echo "== resource-family classification =="
 if ! "$DENO" run --allow-read tools/oden/resource_families.ts --check; then
   fail=1

@@ -2,6 +2,7 @@
 
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::sync::OnceLock;
 
 use anyhow::Error as AnyError;
 use deno_ast::EmittedSourceText;
@@ -15,6 +16,8 @@ use deno_ast::TranspileModuleOptions;
 use deno_ast::TranspileResult;
 use deno_ast::swc::ast::Decorator;
 use deno_ast::swc::ecma_visit::Visit;
+use deno_ast::swc::ecma_visit::VisitMut;
+use deno_ast::swc::ecma_visit::VisitMutWith;
 use deno_ast::swc::ecma_visit::VisitWith;
 use deno_ast::swc::ecma_visit::noop_visit_type;
 use deno_error::JsErrorBox;
@@ -36,6 +39,27 @@ use crate::cjs::CjsTrackerRc;
 use crate::deno_json::CompilerOptionsParseError;
 use crate::deno_json::CompilerOptionsResolverRc;
 use crate::deno_json::TranspileAndEmitOptions;
+
+/// The CLI registers the fork policy's locator -> endowment fingerprint
+/// provider at startup. Keeping the callback at this lower-level seam avoids an
+/// outward dependency from `deno_resolver` into `deno_runtime`; without a
+/// registered provider the fork is byte-identical to upstream.
+type OdenCompartmentFingerprintProvider = fn(&Url) -> Option<u64>;
+static ODEN_COMPARTMENT_FINGERPRINT_PROVIDER: OnceLock<
+  OdenCompartmentFingerprintProvider,
+> = OnceLock::new();
+
+pub fn set_oden_compartment_fingerprint_provider(
+  provider: OdenCompartmentFingerprintProvider,
+) {
+  let _ = ODEN_COMPARTMENT_FINGERPRINT_PROVIDER.set(provider);
+}
+
+fn oden_compartment_fingerprint(specifier: &Url) -> Option<u64> {
+  ODEN_COMPARTMENT_FINGERPRINT_PROVIDER
+    .get()
+    .and_then(|provider| provider(specifier))
+}
 
 #[allow(
   clippy::disallowed_types,
@@ -124,8 +148,12 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       .compiler_options_resolver
       .for_specifier(specifier)
       .transpile_options()?;
-    let source_hash =
-      self.get_source_hash(module_kind, transpile_and_emit_options, source);
+    let source_hash = self.get_source_hash(
+      specifier,
+      module_kind,
+      transpile_and_emit_options,
+      source,
+    );
     Ok(self.emit_cache.get_emit_code(specifier, source_hash))
   }
 
@@ -388,6 +416,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
   /// determine if the cached emit is valid or not.
   fn get_source_hash(
     &self,
+    specifier: &Url,
     module_kind: ModuleKind,
     transpile_and_emit: &TranspileAndEmitOptions,
     source_text: &str,
@@ -396,6 +425,11 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
     source_text.hash(&mut hasher);
     transpile_and_emit.pre_computed_hash.hash(&mut hasher);
     module_kind.hash(&mut hasher);
+    // The rewritten output is principal-relative. A policy/endowment change
+    // must never reuse the prior compartment's emit, even when source and
+    // compiler options are byte-identical.
+    // @ref LLP 0014#at-which-loader-stage [implements]
+    oden_compartment_fingerprint(specifier).hash(&mut hasher);
     hasher.finish()
   }
 }
@@ -478,6 +512,9 @@ pub enum EmitParsedSourceHelperError {
   Transpile(#[from] deno_ast::TranspileError),
   #[class(inherit)]
   #[error(transparent)]
+  Emit(#[from] deno_ast::EmitError),
+  #[class(inherit)]
+  #[error(transparent)]
   Other(#[from] JsErrorBox),
 }
 
@@ -498,10 +535,12 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
     transpile_and_emit_options: &TranspileAndEmitOptions,
     source: &ArcStr,
   ) -> PreEmitResult {
-    let source_hash =
-      self
-        .0
-        .get_source_hash(module_kind, transpile_and_emit_options, source);
+    let source_hash = self.0.get_source_hash(
+      specifier,
+      module_kind,
+      transpile_and_emit_options,
+      source,
+    );
 
     if let Some(emit_code) =
       self.0.emit_cache.get_emit_code(specifier, source_hash)
@@ -526,6 +565,310 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
   }
 }
 
+const ODEN_COMPARTMENT_HELPER: &str = "__oden_compartment_globals__";
+const ODEN_REWRITTEN_GLOBALS: &[&str] = &[
+  "BroadcastChannel",
+  "Deno",
+  "EventSource",
+  "WebSocket",
+  "Worker",
+  "alert",
+  "caches",
+  "confirm",
+  "eval",
+  "fetch",
+  "global",
+  "globalThis",
+  "localStorage",
+  "navigator",
+  "process",
+  "prompt",
+  "self",
+  "sessionStorage",
+];
+
+fn oden_is_rewritten_global(name: &str) -> bool {
+  ODEN_REWRITTEN_GLOBALS.contains(&name)
+}
+
+struct OdenCompartmentGlobalTransform {
+  unresolved: deno_ast::swc::common::SyntaxContext,
+  record_name: String,
+  helper_shadowed: bool,
+  rewritten_count: usize,
+}
+
+impl OdenCompartmentGlobalTransform {
+  fn is_unresolved_global(&self, ident: &deno_ast::swc::ast::Ident) -> bool {
+    ident.ctxt == self.unresolved && oden_is_rewritten_global(&ident.sym)
+  }
+
+  fn record_member(
+    &self,
+    name: deno_ast::swc::atoms::Atom,
+    span: deno_ast::swc::common::Span,
+  ) -> deno_ast::swc::ast::MemberExpr {
+    use deno_ast::swc::ast::Expr;
+    use deno_ast::swc::ast::Ident;
+    use deno_ast::swc::ast::IdentName;
+    use deno_ast::swc::ast::MemberExpr;
+    use deno_ast::swc::ast::MemberProp;
+    use deno_ast::swc::common::SyntaxContext;
+    MemberExpr {
+      span,
+      obj: Box::new(Expr::Ident(Ident::new(
+        self.record_name.clone().into(),
+        span,
+        SyntaxContext::empty(),
+      ))),
+      prop: MemberProp::Ident(IdentName::new(name, span)),
+    }
+  }
+}
+
+impl VisitMut for OdenCompartmentGlobalTransform {
+  fn visit_mut_ident(&mut self, ident: &mut deno_ast::swc::ast::Ident) {
+    if ident.sym == ODEN_COMPARTMENT_HELPER && ident.ctxt != self.unresolved {
+      self.helper_shadowed = true;
+    }
+  }
+
+  fn visit_mut_expr(&mut self, expr: &mut deno_ast::swc::ast::Expr) {
+    expr.visit_mut_children_with(self);
+    if let deno_ast::swc::ast::Expr::Ident(ident) = expr
+      && self.is_unresolved_global(ident)
+    {
+      self.rewritten_count += 1;
+      *expr = deno_ast::swc::ast::Expr::Member(
+        self.record_member(ident.sym.clone(), ident.span),
+      );
+    }
+  }
+
+  fn visit_mut_prop(&mut self, prop: &mut deno_ast::swc::ast::Prop) {
+    use deno_ast::swc::ast::Expr;
+    use deno_ast::swc::ast::IdentName;
+    use deno_ast::swc::ast::KeyValueProp;
+    use deno_ast::swc::ast::Prop;
+    use deno_ast::swc::ast::PropName;
+    if let Prop::Shorthand(ident) = prop
+      && self.is_unresolved_global(ident)
+    {
+      self.rewritten_count += 1;
+      *prop = Prop::KeyValue(KeyValueProp {
+        key: PropName::Ident(IdentName::new(ident.sym.clone(), ident.span)),
+        value: Box::new(Expr::Member(
+          self.record_member(ident.sym.clone(), ident.span),
+        )),
+      });
+    } else {
+      prop.visit_mut_children_with(self);
+    }
+  }
+
+  fn visit_mut_assign_expr(
+    &mut self,
+    assign: &mut deno_ast::swc::ast::AssignExpr,
+  ) {
+    use deno_ast::swc::ast::AssignTarget;
+    use deno_ast::swc::ast::SimpleAssignTarget;
+    assign.visit_mut_children_with(self);
+    if let AssignTarget::Simple(SimpleAssignTarget::Ident(ident)) = &assign.left
+      && self.is_unresolved_global(&ident.id)
+    {
+      self.rewritten_count += 1;
+      assign.left = AssignTarget::Simple(SimpleAssignTarget::Member(
+        self.record_member(ident.id.sym.clone(), ident.id.span),
+      ));
+    }
+  }
+}
+
+fn oden_record_decl(record_name: &str) -> deno_ast::swc::ast::Stmt {
+  use deno_ast::swc::ast::*;
+  use deno_ast::swc::common::DUMMY_SP;
+  use deno_ast::swc::common::SyntaxContext;
+  Stmt::Decl(Decl::Var(Box::new(VarDecl {
+    span: DUMMY_SP,
+    ctxt: SyntaxContext::empty(),
+    kind: VarDeclKind::Const,
+    declare: false,
+    decls: vec![VarDeclarator {
+      span: DUMMY_SP,
+      name: Pat::Ident(BindingIdent {
+        id: Ident::new(record_name.into(), DUMMY_SP, SyntaxContext::empty()),
+        type_ann: None,
+      }),
+      init: Some(Box::new(Expr::Call(CallExpr {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        callee: Callee::Expr(Box::new(Expr::Ident(Ident::new(
+          ODEN_COMPARTMENT_HELPER.into(),
+          DUMMY_SP,
+          SyntaxContext::empty(),
+        )))),
+        args: Vec::new(),
+        type_args: None,
+      }))),
+      definite: false,
+    }],
+  })))
+}
+
+fn oden_use_strict_stmt() -> deno_ast::swc::ast::Stmt {
+  use deno_ast::swc::ast::*;
+  use deno_ast::swc::common::DUMMY_SP;
+  Stmt::Expr(ExprStmt {
+    span: DUMMY_SP,
+    expr: Box::new(Expr::Lit(Lit::Str(Str {
+      span: DUMMY_SP,
+      value: "use strict".into(),
+      raw: None,
+    }))),
+  })
+}
+
+fn oden_existing_record_name(
+  program: &deno_ast::swc::ast::Program,
+  unresolved: deno_ast::swc::common::SyntaxContext,
+) -> Option<String> {
+  use deno_ast::swc::ast::*;
+  fn from_stmt(
+    stmt: &Stmt,
+    unresolved: deno_ast::swc::common::SyntaxContext,
+  ) -> Option<String> {
+    let Stmt::Decl(Decl::Var(var)) = stmt else {
+      return None;
+    };
+    for decl in &var.decls {
+      let Pat::Ident(binding) = &decl.name else {
+        continue;
+      };
+      let Some(init) = &decl.init else {
+        continue;
+      };
+      let Expr::Call(call) = &**init else {
+        continue;
+      };
+      let Callee::Expr(callee) = &call.callee else {
+        continue;
+      };
+      let Expr::Ident(helper) = &**callee else {
+        continue;
+      };
+      if helper.sym == ODEN_COMPARTMENT_HELPER
+        && helper.ctxt == unresolved
+        && binding.id.sym.starts_with("__oden_endow_")
+      {
+        return Some(binding.id.sym.to_string());
+      }
+    }
+    None
+  }
+  match program {
+    Program::Module(module) => module.body.iter().find_map(|item| match item {
+      ModuleItem::Stmt(stmt) => from_stmt(stmt, unresolved),
+      ModuleItem::ModuleDecl(_) => None,
+    }),
+    Program::Script(script) => script
+      .body
+      .iter()
+      .find_map(|stmt| from_stmt(stmt, unresolved)),
+  }
+}
+
+fn oden_rewrite_compartment_globals(
+  specifier: &Url,
+  module_kind: ModuleKind,
+  source: &str,
+  fingerprint: u64,
+) -> Result<String, EmitParsedSourceHelperError> {
+  let parsed = deno_ast::parse_program(deno_ast::ParseParams {
+    specifier: specifier.clone(),
+    text: source.into(),
+    media_type: match module_kind {
+      ModuleKind::Esm => MediaType::JavaScript,
+      ModuleKind::Cjs => MediaType::Cjs,
+    },
+    capture_tokens: false,
+    scope_analysis: true,
+    maybe_syntax: None,
+  })?;
+  let unresolved = parsed.unresolved_context();
+  let mut program = (*parsed.program()).clone();
+  let existing_record = oden_existing_record_name(&program, unresolved);
+  let mut record_name = existing_record
+    .clone()
+    .unwrap_or_else(|| format!("__oden_endow_{fingerprint:016x}"));
+  if existing_record.is_none() {
+    let mut suffix = 0usize;
+    while source.contains(&record_name) {
+      suffix += 1;
+      record_name = format!("__oden_endow_{fingerprint:016x}_{suffix}");
+    }
+  }
+  let mut transform = OdenCompartmentGlobalTransform {
+    unresolved,
+    record_name: record_name.clone(),
+    helper_shadowed: false,
+    rewritten_count: 0,
+  };
+  program.visit_mut_with(&mut transform);
+  if transform.helper_shadowed {
+    return Err(JsErrorBox::type_error(format!(
+      "module {specifier} shadows Oden's reserved compartment binding {ODEN_COMPARTMENT_HELPER}"
+    ))
+    .into());
+  }
+  if existing_record.is_some() && transform.rewritten_count == 0 {
+    return Ok(source.to_string());
+  }
+
+  if existing_record.is_none() {
+    match &mut program {
+      deno_ast::swc::ast::Program::Module(module) => {
+        module.body.insert(
+          0,
+          deno_ast::swc::ast::ModuleItem::Stmt(oden_record_decl(&record_name)),
+        );
+      }
+      deno_ast::swc::ast::Program::Script(script) => {
+        script.body.insert(0, oden_record_decl(&record_name));
+        script.body.insert(0, oden_use_strict_stmt());
+      }
+    }
+  }
+
+  let source_map =
+    deno_ast::SourceMap::single(specifier.clone(), source.to_string());
+  let emitted = deno_ast::emit(
+    (&program).into(),
+    &parsed.comments().as_single_threaded(),
+    &source_map,
+    &deno_ast::EmitOptions {
+      source_map: SourceMapOption::Inline,
+      ..Default::default()
+    },
+  )?;
+  Ok(emitted.text)
+}
+
+/// Rewrite unresolved authority-bearing globals through a caller-derived
+/// endowment record when the registered provider says the layer is active.
+/// Snapshot/extension scripts never traverse this CLI emitter seam.
+// @ref LLP 0014#mechanism-the-load-time-free-global-rewrite [implements]
+pub fn maybe_rewrite_oden_compartment_globals(
+  specifier: &Url,
+  module_kind: ModuleKind,
+  source: &str,
+) -> Result<Option<String>, EmitParsedSourceHelperError> {
+  let Some(fingerprint) = oden_compartment_fingerprint(specifier) else {
+    return Ok(None);
+  };
+  oden_rewrite_compartment_globals(specifier, module_kind, source, fingerprint)
+    .map(Some)
+}
+
 #[allow(
   clippy::result_large_err,
   reason = "EmitParsedSourceHelperError is intentionally large"
@@ -536,6 +879,7 @@ fn transpile(
   transpile_options: &deno_ast::TranspileOptions,
   emit_options: &deno_ast::EmitOptions,
 ) -> Result<EmittedSourceText, EmitParsedSourceHelperError> {
+  let specifier = parsed_source.specifier().clone();
   ensure_no_import_assertion(&parsed_source)?;
   if let Some(diagnostics) = invalid_syntax_parse_diagnostics(&parsed_source) {
     return Err(deno_ast::TranspileError::ParseErrors(diagnostics).into());
@@ -575,6 +919,14 @@ fn transpile(
     }
   };
   patch_public_decorator_access_has(&mut transpiled_source.text);
+  if let Some(rewritten) = maybe_rewrite_oden_compartment_globals(
+    &specifier,
+    module_kind,
+    &transpiled_source.text,
+  )? {
+    transpiled_source.text = rewritten;
+    transpiled_source.source_map = None;
+  }
   Ok(transpiled_source)
 }
 
@@ -734,4 +1086,69 @@ fn ensure_no_import_assertion(
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod oden_compartment_tests {
+  use super::*;
+
+  fn rewrite(kind: ModuleKind, source: &str, fingerprint: u64) -> String {
+    oden_rewrite_compartment_globals(
+      &Url::parse("file:///proj/node_modules/dep/mod.js").unwrap(),
+      kind,
+      source,
+      fingerprint,
+    )
+    .unwrap()
+  }
+
+  #[test]
+  fn rewrites_only_unresolved_globals() {
+    let source = concat!(
+      "const local = (fetch) => fetch('local');\n",
+      "const shorthand = { fetch };\n",
+      "export const run = () => fetch('remote');\n",
+      "export const reflected = globalThis['fet' + 'ch'];\n",
+    );
+    let output = rewrite(ModuleKind::Esm, source, 0xabc);
+    assert!(output.contains("const local = (fetch)=>fetch('local')"));
+    assert!(output.contains("fetch: __oden_endow_0000000000000abc.fetch"));
+    assert!(output.contains("__oden_endow_0000000000000abc.fetch('remote')"));
+    assert!(
+      output.contains("__oden_endow_0000000000000abc.globalThis['fet' + 'ch']")
+    );
+  }
+
+  #[test]
+  fn cjs_is_strict_and_keeps_wrapper_this_explicit() {
+    let output = rewrite(
+      ModuleKind::Cjs,
+      "module.exports = { top: this === module.exports, fetch };",
+      7,
+    );
+    assert!(output.starts_with("\"use strict\";"));
+    assert!(output.contains("this === module.exports"));
+    assert!(output.contains("fetch: __oden_endow_0000000000000007.fetch"));
+  }
+
+  #[test]
+  fn fingerprint_changes_the_emitted_binding() {
+    let one = rewrite(ModuleKind::Esm, "export const f = fetch;", 1);
+    let two = rewrite(ModuleKind::Esm, "export const f = fetch;", 2);
+    assert_ne!(one, two);
+    assert!(one.contains("__oden_endow_0000000000000001"));
+    assert!(two.contains("__oden_endow_0000000000000002"));
+  }
+
+  #[test]
+  fn reserved_helper_cannot_be_shadowed() {
+    let err = oden_rewrite_compartment_globals(
+      &Url::parse("file:///proj/evil.js").unwrap(),
+      ModuleKind::Esm,
+      "const __oden_compartment_globals__ = () => ({ fetch }); fetch();",
+      1,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("reserved compartment binding"));
+  }
 }

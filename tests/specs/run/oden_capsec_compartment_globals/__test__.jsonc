@@ -1,0 +1,38 @@
+{
+  // LLP 0014 slices 2-5: the explicit enforce+lockdown compartment layer
+  // rewrites ESM and CJS free globals through policy-derived records. The ten
+  // red-team channels cover direct, mediated-global, eval, Function/prototype,
+  // strict-this, node backdoor, reflection, leaked-reference, and async paths.
+  // Function-family reach remains a labeled ENG-23783 residual: the reference
+  // can be recovered, but its eventual op is still denied using the recipient.
+  "tests": {
+    "esm_cjs_and_redteam_matrix": {
+      "args": "run --allow-all app.js",
+      "envs": {
+        "ODEN_CAPSEC_COMPARTMENT_GLOBALS": "1"
+      },
+      "output": "compartments.out",
+      "exitCode": 0
+    },
+    "off_by_default_is_inert": {
+      "args": "run --allow-all posture.js",
+      "output": "off.out",
+      "exitCode": 0
+    },
+    "audit_request_is_gated_off": {
+      "args": "run --allow-all posture.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_audit.json",
+        "ODEN_CAPSEC_COMPARTMENT_GLOBALS": "1"
+      },
+      "output": "off.out",
+      "exitCode": 0
+    },
+    "compat_harness_classifies_two_arms": {
+      "args": "run -A ../../../../tools/oden/compartment_compat.ts compat_corpus.json",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_audit.json" },
+      "output": "compat.out",
+      "exitCode": 0
+    }
+  }
+}

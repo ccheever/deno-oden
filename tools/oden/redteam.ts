@@ -24,6 +24,7 @@
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const SPEC_DIR = ROOT + "tests/specs/run/";
+const MANIFEST = ROOT + "tools/oden/redteam.manifest.md";
 
 type Status = "closed" | "residual";
 
@@ -233,6 +234,109 @@ const CHECKLIST: HoleClass[] = [
     note:
       "the freeze walk + Error taming make the primordials non-writable; enforce defaults lockdown ON (ODEN_CAPSEC_LOCKDOWN=0 is the named override), audit/permissive stay opt-in per the compat-corpus NO-GO (ENG-23880); the ext/node lazy-write repairs and prepareStackTrace shim landed with ENG-23781",
   },
+  // --- Compartment-global reachability (LLP 0014 fixtures 1-10) -------------
+  {
+    category: "compartment-globals",
+    attack: "1. direct free identifier reaches unendowed fetch",
+    status: "closed",
+    tests: ["oden_capsec_compartment_globals"],
+    note:
+      "the ESM/CJS scope-aware rewrite redirects the unresolved identifier to a throwing per-principal record; local parameters named fetch remain untouched",
+  },
+  {
+    category: "compartment-globals",
+    attack: "2. globalThis/global/self computed member reaches unendowed fetch",
+    status: "closed",
+    tests: ["oden_capsec_compartment_globals"],
+    note:
+      "global aliases resolve to the filtered per-principal Proxy, including computed property access",
+  },
+  {
+    category: "compartment-globals",
+    attack: "3. direct or indirect eval reaches an unendowed global",
+    status: "residual",
+    tests: ["oden_capsec_compartment_globals"],
+    residual: {
+      ticket: "ENG-23783",
+      why:
+        "package eval is never-endowed and the fixture proves fail-closed ReferenceError; caller-bound evaluator semantics remain blocked on the code-generation hook",
+    },
+    note:
+      "sound over-deny only; this slice does not relabel eval-to-caller as complete",
+  },
+  {
+    category: "compartment-globals",
+    attack: "4. Function constructor recovers unendowed fetch",
+    status: "residual",
+    tests: ["oden_capsec_compartment_globals", "oden_capsec_eval_quarantine"],
+    residual: {
+      ticket: "ENG-23783",
+      why:
+        "the fixture intentionally observes that the reference is reachable, then proves its eventual operation is attributed to and denied for the ungranted package",
+    },
+    note:
+      "quarantine/op denial is preserved; complete reachability closure belongs to evaluator taming",
+  },
+  {
+    category: "compartment-globals",
+    attack: "5. prototype-chain Function constructor recovers unendowed fetch",
+    status: "residual",
+    tests: ["oden_capsec_compartment_globals", "oden_capsec_eval_quarantine"],
+    residual: {
+      ticket: "ENG-23783",
+      why:
+        "frozen prototypes prevent mutation but the constructor family still creates quarantine code; the op-denial fixture keeps the current sound boundary explicit",
+    },
+    note: "not claimed closed by the lexical rewrite",
+  },
+  {
+    category: "compartment-globals",
+    attack: "6. sloppy this recovers the real global",
+    status: "closed",
+    tests: ["oden_capsec_compartment_globals"],
+    note:
+      "ESM is strict and rewritten CJS injects use strict while the standard wrapper still supplies top-level module.exports explicitly",
+  },
+  {
+    category: "compartment-globals",
+    attack: "7. ext/node backdoor recovers the real global",
+    status: "residual",
+    tests: [
+      "oden_capsec_compartment_globals",
+      "oden_capsec_compilefn_forgery",
+    ],
+    residual: {
+      ticket: "ENG-23783 / ENG-23779",
+      why:
+        "process is never-endowed and a fresh node:vm context has no fetch, but runInThisContext is a generated-code route and remains quarantine/op-denied pending evaluator and hatch closure",
+    },
+    note:
+      "the fixture distinguishes a closed namespace path from the honestly labeled generated-code residual",
+  },
+  {
+    category: "compartment-globals",
+    attack: "8. reflection/enumeration discovers unendowed fetch",
+    status: "closed",
+    tests: ["oden_capsec_compartment_globals"],
+    note:
+      "Reflect.get throws and ownKeys/has omit the unendowed key on the mediated global view",
+  },
+  {
+    category: "compartment-globals",
+    attack: "9. leaked endowed fetch launders the grantor's authority",
+    status: "closed",
+    tests: ["oden_capsec_compartment_globals"],
+    note:
+      "the receiver may hold the opaque function reference, but the eventual fetch op attributes recipient-dep and denies NotCapable",
+  },
+  {
+    category: "compartment-globals",
+    attack: "10. detached async callback reaches unendowed fetch",
+    status: "closed",
+    tests: ["oden_capsec_compartment_globals"],
+    note:
+      "the rewritten lexical reference remains a throwing record access inside the scheduled callback",
+  },
   // --- Async call-boundary (stack-intersection + opt-in deputyClasses) -------
   {
     category: "attribution-laundering",
@@ -309,19 +413,19 @@ function dirExists(name: string): boolean {
 function validate(): string[] {
   const errors: string[] = [];
   for (const h of CHECKLIST) {
+    for (const t of h.tests ?? []) {
+      if (!dirExists(t)) {
+        errors.push(
+          `MISSING FIXTURE: "${h.attack}" names ${t}, which is not on disk (red-team regression)`,
+        );
+      }
+    }
     if (h.status === "closed") {
       if (!h.tests || h.tests.length === 0) {
         errors.push(
           `OPEN HOLE: "${h.attack}" is marked closed but names no guarding spec test`,
         );
         continue;
-      }
-      for (const t of h.tests) {
-        if (!dirExists(t)) {
-          errors.push(
-            `MISSING FIXTURE: "${h.attack}" is guarded by ${t}, which is not on disk (red-team regression)`,
-          );
-        }
       }
     } else {
       if (!h.residual) {
@@ -389,6 +493,13 @@ function render(): string {
 function main() {
   const errors = validate();
   if (Deno.args.includes("--check")) {
+    try {
+      if (Deno.readTextFileSync(MANIFEST) !== render()) {
+        errors.push("red-team manifest is stale");
+      }
+    } catch {
+      errors.push("red-team manifest is missing");
+    }
     if (errors.length) {
       console.error("red-team gate NO-GO:");
       for (const e of errors) console.error("  - " + e);
@@ -404,7 +515,7 @@ function main() {
     );
     return;
   }
-  console.log(render());
+  Deno.stdout.writeSync(new TextEncoder().encode(render()));
 }
 
 main();

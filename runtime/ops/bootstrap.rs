@@ -204,6 +204,13 @@ pub fn op_oden_capsec_flags() -> u32 {
   if deno_permissions::oden_capsec_lockdown_on() {
     flags |= 4;
   }
+  // Bit 3 (value 8) = the LLP 0014 compartment-globals reachability layer.
+  // It is deliberately explicit opt-in, enforce-only, and lockdown-gated;
+  // current corpus evidence does not authorize a default-on posture.
+  // @ref LLP 0014#kill-criteria [constrained-by]
+  if deno_permissions::oden_capsec_compartment_globals_on() {
+    flags |= 8;
+  }
   flags
 }
 

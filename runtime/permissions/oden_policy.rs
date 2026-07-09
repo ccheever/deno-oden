@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 // Fork-local mirror of the parent workspace's crates/oden_policy model. The
@@ -49,6 +50,120 @@ pub struct Request {
   pub family: Family,
   pub action: String,
   pub target: String,
+}
+
+// Keep in parity with the parent workspace's `oden_policy` and userland
+// `policy.ts`. The fork remains standalone, so this is intentionally mirrored
+// rather than imported through an outward path dependency.
+// @ref LLP 0014#the-endowment-derivation-table [implements]
+pub const ALWAYS_ENDOWED_GLOBALS: &[&str] = &[
+  "AggregateError",
+  "Array",
+  "ArrayBuffer",
+  "Atomics",
+  "BigInt",
+  "BigInt64Array",
+  "BigUint64Array",
+  "Blob",
+  "Boolean",
+  "DataView",
+  "Date",
+  "Error",
+  "EvalError",
+  "FinalizationRegistry",
+  "Float16Array",
+  "Float32Array",
+  "Float64Array",
+  "Function",
+  "Headers",
+  "Infinity",
+  "Int16Array",
+  "Int32Array",
+  "Int8Array",
+  "Intl",
+  "Iterator",
+  "JSON",
+  "Map",
+  "Math",
+  "NaN",
+  "Number",
+  "Object",
+  "Promise",
+  "Proxy",
+  "RangeError",
+  "ReferenceError",
+  "Reflect",
+  "RegExp",
+  "Request",
+  "Response",
+  "Set",
+  "SharedArrayBuffer",
+  "String",
+  "SubtleCrypto",
+  "SuppressedError",
+  "Symbol",
+  "SyntaxError",
+  "Temporal",
+  "TextDecoder",
+  "TextEncoder",
+  "TypeError",
+  "URIError",
+  "URL",
+  "URLPattern",
+  "URLSearchParams",
+  "Uint16Array",
+  "Uint32Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "WeakMap",
+  "WeakRef",
+  "WeakSet",
+  "WebAssembly",
+  "atob",
+  "btoa",
+  "crypto",
+  "decodeURI",
+  "decodeURIComponent",
+  "encodeURI",
+  "encodeURIComponent",
+  "escape",
+  "isFinite",
+  "isNaN",
+  "parseFloat",
+  "parseInt",
+  "performance",
+  "queueMicrotask",
+  "structuredClone",
+  "undefined",
+  "unescape",
+];
+
+pub const GRANT_DERIVED_GLOBALS: &[&str] =
+  &["EventSource", "WebSocket", "fetch"];
+
+pub fn endow(grants: &[Grant]) -> BTreeSet<String> {
+  let mut names = ALWAYS_ENDOWED_GLOBALS
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect::<BTreeSet<_>>();
+  for grant in grants {
+    if grant.family != Family::Network {
+      continue;
+    }
+    match grant.action.as_str() {
+      "fetch" => {
+        names.insert("EventSource".into());
+        names.insert("fetch".into());
+      }
+      "connect" => {
+        names.insert("WebSocket".into());
+      }
+      "*" => names
+        .extend(GRANT_DERIVED_GLOBALS.iter().map(|name| (*name).to_string())),
+      _ => {}
+    }
+  }
+  names
 }
 
 impl Grant {
@@ -356,6 +471,28 @@ impl Policy {
       .unwrap_or(false)
   }
 
+  /// Pure `endow(principal, policy)` derivation used by the bootstrap-captured
+  /// compartment record. Ambient root/runtime receive every mapped name;
+  /// quarantine/no-user receive the authority-free set only.
+  // @ref LLP 0014#the-endowment-derivation-table [implements]
+  pub fn endowments(&self, principal: &Principal) -> BTreeSet<String> {
+    let mut names = if principal.is_ambient() {
+      endow(&[])
+    } else {
+      let grants = principal
+        .selector()
+        .and_then(|selector| self.packages.get(&selector))
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+      endow(grants)
+    };
+    if principal.is_ambient() {
+      names
+        .extend(GRANT_DERIVED_GLOBALS.iter().map(|name| (*name).to_string()));
+    }
+    names
+  }
+
   pub fn decide(&self, principal: &Principal, req: &Request) -> Decision {
     if self.mode == Mode::Permissive {
       return Decision::Allow;
@@ -386,7 +523,11 @@ impl Policy {
   /// single-principal path — no false denials. An all-ambient (or empty) set is
   /// unconstrained; the caller supplies the row-4 sentinel when nothing is
   /// implicated.
-  pub fn decide_set(&self, principals: &[Principal], req: &Request) -> Decision {
+  pub fn decide_set(
+    &self,
+    principals: &[Principal],
+    req: &Request,
+  ) -> Decision {
     if self.mode == Mode::Permissive {
       return Decision::Allow;
     }
@@ -472,6 +613,29 @@ mod tests {
       ),
       Decision::Deny,
     );
+  }
+
+  #[test]
+  fn endowment_derivation_is_action_sensitive_and_fs_empty() {
+    let mut policy = Policy::new(Mode::Enforce);
+    policy.grant("fetcher", "network:fetch:api.example");
+    policy.grant("socket", "network:connect:socket.example");
+    policy.grant("reader", "fs:read:/tmp");
+
+    let fetcher = policy.endowments(&pkg("fetcher"));
+    assert!(fetcher.contains("fetch"));
+    assert!(fetcher.contains("EventSource"));
+    assert!(!fetcher.contains("WebSocket"));
+
+    let socket = policy.endowments(&pkg("socket"));
+    assert!(socket.contains("WebSocket"));
+    assert!(!socket.contains("fetch"));
+
+    assert_eq!(
+      policy.endowments(&pkg("reader")).len(),
+      ALWAYS_ENDOWED_GLOBALS.len()
+    );
+    assert!(policy.endowments(&Principal::Root).contains("fetch"));
   }
 
   // --- Stack-intersection / deputyClasses (precedence row 3) ----------------

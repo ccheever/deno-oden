@@ -1,0 +1,8 @@
+{
+  "mode": "enforce",
+  "grants": {
+    "granted-esm": "network:fetch:*",
+    "granted-cjs": "network:fetch:*",
+    "grantor-dep": "network:fetch:127.0.0.1:54321"
+  }
+}

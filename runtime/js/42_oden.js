@@ -32,12 +32,225 @@ const {
   op_oden_handle_enter,
   op_oden_handle_exit,
   op_oden_handle_revoke,
+  op_oden_compartment_endowments,
 } = core.ops;
 const {
+  ArrayPrototypeFilter,
+  ArrayPrototypeIncludes,
+  ArrayPrototypePush,
+  ObjectCreate,
   ObjectFreeze,
   ObjectDefineProperty,
+  ObjectGetOwnPropertyDescriptor,
+  ObjectHasOwn,
+  Proxy,
+  ReferenceError,
+  ReflectDeleteProperty,
+  ReflectGet,
+  ReflectOwnKeys,
+  StringPrototypeSplit,
   TypeError,
 } = primordials;
+
+// The real global is captured by trusted bootstrap before user code runs. A
+// rewritten module receives a caller-checked Proxy over this captured object;
+// it never reads authority-bearing values from a mutable user global.
+// @ref LLP 0014#closing-the-dynamic-channels [implements]
+const realGlobal = globalThis;
+const realGlobalKeys = ReflectOwnKeys(realGlobal);
+const records = ObjectCreate(null);
+
+const helperName = "__oden_compartment_globals__";
+const aliases = ObjectCreate(null);
+aliases.globalThis = true;
+aliases.global = true;
+aliases.self = true;
+
+// Authority-bearing names. A non-ambient principal sees one only when the
+// Rust policy's endowment descriptor contains it. The families that are not
+// yet in the shared v1 policy vocabulary remain fail-closed (never endowed).
+const gated = ObjectCreate(null);
+for (const name of [
+  "BroadcastChannel",
+  "EventSource",
+  "WebSocket",
+  "caches",
+  "fetch",
+  "localStorage",
+  "sessionStorage",
+]) gated[name] = true;
+
+// Namespace/escape-hatch globals never endowed to a package. `eval` and the
+// Function-constructor family remain governed by ENG-23783's quarantine path;
+// this list does not weaken or relabel that residual.
+const never = ObjectCreate(null);
+for (const name of [
+  "Deno",
+  "Worker",
+  "alert",
+  "confirm",
+  "eval",
+  "process",
+  "prompt",
+]) never[name] = true;
+
+function deniedGlobal(name) {
+  return new ReferenceError(
+    `Oden compartment: global "${name}" is not endowed for this principal`,
+  );
+}
+
+function descriptorValue(object, key) {
+  const descriptor = ObjectGetOwnPropertyDescriptor(object, key);
+  if (!descriptor) return undefined;
+  return {
+    __proto__: null,
+    value: ReflectGet(object, key, object),
+    writable: true,
+    enumerable: descriptor.enumerable,
+    configurable: true,
+  };
+}
+
+function makeNavigatorProxy(isAmbient, endowed) {
+  const realNavigator = realGlobal.navigator;
+  if (!realNavigator) return undefined;
+  return new Proxy(ObjectCreate(null), {
+    get(_target, key) {
+      if (key === "gpu" && !isAmbient && !endowed["navigator.gpu"]) {
+        throw deniedGlobal("navigator.gpu");
+      }
+      return ReflectGet(realNavigator, key, realNavigator);
+    },
+    has(_target, key) {
+      return key !== "gpu" || isAmbient || endowed["navigator.gpu"] === true;
+    },
+    ownKeys() {
+      const keys = ReflectOwnKeys(realNavigator);
+      if (isAmbient || endowed["navigator.gpu"]) return keys;
+      return ArrayPrototypeFilter(keys, (key) => key !== "gpu");
+    },
+    getOwnPropertyDescriptor(_target, key) {
+      if (key === "gpu" && !isAmbient && !endowed["navigator.gpu"]) {
+        return undefined;
+      }
+      return descriptorValue(realNavigator, key);
+    },
+  });
+}
+
+function makeCompartmentRecord(descriptor) {
+  const parts = StringPrototypeSplit(descriptor, "\0");
+  const principal = parts[0];
+  const isAmbient = principal === "root" || principal === "runtime";
+  const endowed = ObjectCreate(null);
+  const names = StringPrototypeSplit(parts[1] || "", ",");
+  for (let i = 0; i < names.length; i++) endowed[names[i]] = true;
+  const local = ObjectCreate(null);
+  let proxy;
+  const navigatorProxy = makeNavigatorProxy(isAmbient, endowed);
+
+  function visible(key) {
+    if (typeof key !== "string") return false;
+    if (key === helperName) return false;
+    if (aliases[key]) return true;
+    if (isAmbient) return true;
+    if (never[key]) return false;
+    if (gated[key]) return endowed[key] === true;
+    return true;
+  }
+
+  proxy = new Proxy(local, {
+    get(target, key) {
+      if (ObjectHasOwn(target, key)) return ReflectGet(target, key, target);
+      if (aliases[key]) return proxy;
+      if (key === "navigator") return navigatorProxy;
+      if (visible(key)) return ReflectGet(realGlobal, key, realGlobal);
+      if (typeof key === "string" && (gated[key] || never[key])) {
+        throw deniedGlobal(key);
+      }
+      return undefined;
+    },
+    has(target, key) {
+      return ObjectHasOwn(target, key) || visible(key);
+    },
+    ownKeys(target) {
+      const out = [];
+      for (let i = 0; i < realGlobalKeys.length; i++) {
+        const key = realGlobalKeys[i];
+        if (visible(key)) ArrayPrototypePush(out, key);
+      }
+      const localKeys = ReflectOwnKeys(target);
+      for (let i = 0; i < localKeys.length; i++) {
+        const key = localKeys[i];
+        if (!ArrayPrototypeIncludes(out, key)) ArrayPrototypePush(out, key);
+      }
+      return out;
+    },
+    getOwnPropertyDescriptor(target, key) {
+      if (ObjectHasOwn(target, key)) {
+        return ObjectGetOwnPropertyDescriptor(target, key);
+      }
+      if (aliases[key]) {
+        return {
+          __proto__: null,
+          value: proxy,
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        };
+      }
+      if (key === "navigator") {
+        return {
+          __proto__: null,
+          value: navigatorProxy,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        };
+      }
+      return visible(key) ? descriptorValue(realGlobal, key) : undefined;
+    },
+    set(target, key, value) {
+      ObjectDefineProperty(target, key, {
+        __proto__: null,
+        value,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+      return true;
+    },
+    defineProperty(target, key, descriptor) {
+      ObjectDefineProperty(target, key, descriptor);
+      return true;
+    },
+    deleteProperty(target, key) {
+      return ReflectDeleteProperty(target, key);
+    },
+    getPrototypeOf() {
+      return null;
+    },
+    setPrototypeOf() {
+      return false;
+    },
+  });
+  return proxy;
+}
+
+function compartmentGlobals() {
+  const descriptor = op_oden_compartment_endowments();
+  if (!ObjectHasOwn(records, descriptor)) {
+    ObjectDefineProperty(records, descriptor, {
+      __proto__: null,
+      value: makeCompartmentRecord(descriptor),
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+  }
+  return records[descriptor];
+}
 
 // Build a frozen carrier object for a handle id. The id lives only in these
 // closures; the carrier exposes behavior, never the id.
@@ -95,5 +308,5 @@ ObjectFreeze(oden);
 
 // Returned to 99_main.js (via loadExtScript) for conditional install onto the
 // Deno namespace when capsec is armed.
-return { oden };
+return { oden, compartmentGlobals };
 })();

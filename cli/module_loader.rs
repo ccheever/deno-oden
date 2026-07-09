@@ -670,6 +670,36 @@ fn patch_react_cves_source(
   }
 }
 
+/// Apply the LLP 0014 free-global rewrite to a JavaScript module, preserving
+/// the original zero-allocation representation when the layer is inactive.
+fn rewrite_oden_compartment_globals_source(
+  specifier: &ModuleSpecifier,
+  module_kind: ModuleKind,
+  code: ModuleSourceCode,
+) -> Result<ModuleSourceCode, JsErrorBox> {
+  let rewritten = {
+    let source = match &code {
+      ModuleSourceCode::String(source) => source.as_str(),
+      ModuleSourceCode::Bytes(source) => std::str::from_utf8(source.as_bytes())
+        .map_err(|_| {
+          JsErrorBox::type_error(format!(
+            "JavaScript module {specifier} is not valid UTF-8"
+          ))
+        })?,
+    };
+    deno_resolver::emit::maybe_rewrite_oden_compartment_globals(
+      specifier,
+      module_kind,
+      source,
+    )
+    .map_err(JsErrorBox::from_err)?
+  };
+  Ok(match rewritten {
+    Some(source) => ModuleSourceCode::String(source.into()),
+    None => code,
+  })
+}
+
 impl<TGraphContainer: ModuleGraphContainer>
   CliModuleLoaderInner<TGraphContainer>
 {
@@ -783,6 +813,17 @@ impl<TGraphContainer: ModuleGraphContainer>
       && deno_resolver::is_react_cve_patch_enabled(&self.shared.sys)
     {
       patch_react_cves_source(specifier, code)
+    } else {
+      code
+    };
+
+    // This final loader seam covers plain JS ESM and npm-translated CJS, which
+    // do not otherwise enter the TypeScript emitter. The transform itself is
+    // inert unless its registered fingerprint provider says the explicit,
+    // enforce+lockdown-gated compartment mode is active.
+    // @ref LLP 0014#mechanism-the-load-time-free-global-rewrite [implements]
+    let code = if code_source.module_type == ModuleType::JavaScript {
+      rewrite_oden_compartment_globals_source(specifier, ModuleKind::Esm, code)?
     } else {
       code
     };
@@ -2066,11 +2107,30 @@ impl<TGraphContainer: ModuleGraphContainer> NodeRequireLoader
           &text.into(),
         )
         .map_err(JsErrorBox::from_err)?;
+      let text = deno_resolver::emit::maybe_rewrite_oden_compartment_globals(
+        &specifier,
+        ModuleKind::Cjs,
+        &text,
+      )
+      .map_err(JsErrorBox::from_err)?
+      .unwrap_or_else(|| text.to_string());
       Ok(text.into())
     } else {
-      Ok(match text {
-        Cow::Borrowed(s) => FastString::from_static(s),
-        Cow::Owned(s) => s.into(),
+      let specifier = deno_path_util::url_from_file_path(path)
+        .map_err(JsErrorBox::from_err)?;
+      let rewritten =
+        deno_resolver::emit::maybe_rewrite_oden_compartment_globals(
+          &specifier,
+          ModuleKind::Cjs,
+          text.as_ref(),
+        )
+        .map_err(JsErrorBox::from_err)?;
+      Ok(match rewritten {
+        Some(source) => source.into(),
+        None => match text {
+          Cow::Borrowed(s) => FastString::from_static(s),
+          Cow::Owned(s) => s.into(),
+        },
       })
     }
   }

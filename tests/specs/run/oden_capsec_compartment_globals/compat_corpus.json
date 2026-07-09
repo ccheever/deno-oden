@@ -1,0 +1,9 @@
+{
+  "root": ".",
+  "entries": [
+    { "name": "compute", "entry": "compat_entries/compute.mjs" },
+    { "name": "fetch", "entry": "compat_entries/fetch.mjs" },
+    { "name": "process", "entry": "compat_entries/process.mjs" },
+    { "name": "local", "entry": "compat_entries/local.mjs" }
+  ]
+}

@@ -26,8 +26,20 @@ deno_core::extension!(
     op_oden_handle_enter,
     op_oden_handle_exit,
     op_oden_handle_revoke,
+    op_oden_compartment_endowments,
   ],
 );
+
+/// Return the caller-derived endowment descriptor used by trusted bootstrap JS
+/// to construct a filtered global record. The live frame is load-bearing: user
+/// code may call the installed helper, but it can only obtain its own record.
+// @ref LLP 0014#endowment-record-derivation-from-grants [implements]
+#[op2(stack_trace)]
+#[string]
+pub fn op_oden_compartment_endowments() -> Result<String, PermissionCheckError>
+{
+  deno_permissions::oden_capsec_compartment_endowments()
+}
 
 /// Mint an attenuated handle from a capability the acting principal holds
 /// (frame-checked). Returns the unguessable handle id as hex. `stack_trace`:

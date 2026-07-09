@@ -1051,9 +1051,23 @@ function odenMaybeInstallHandles(denoNs) {
   if ((flags & 1) === 0) {
     return;
   }
-  const { oden } = core.loadExtScript("ext:runtime/42_oden.js");
+  const { oden, compartmentGlobals } = core.loadExtScript(
+    "ext:runtime/42_oden.js",
+  );
   if (oden) {
     ObjectDefineProperty(denoNs, "oden", core.propReadOnly(oden));
+  }
+  // The loader injects this binding only while bit 3 is active. It is
+  // non-writable/non-configurable, but reachability does not depend on secrecy:
+  // the backing op derives the record from the live caller frame, so directly
+  // naming the helper can only retrieve the caller's own endowments.
+  // @ref LLP 0014#closing-the-dynamic-channels [implements]
+  if ((flags & 8) !== 0 && compartmentGlobals) {
+    ObjectDefineProperty(
+      globalThis,
+      "__oden_compartment_globals__",
+      core.propReadOnly(compartmentGlobals),
+    );
   }
 }
 

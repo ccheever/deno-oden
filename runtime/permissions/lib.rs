@@ -6,6 +6,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::hash::Hasher;
 use std::io::Write;
 use std::net::IpAddr;
 use std::net::Ipv6Addr;
@@ -382,6 +383,8 @@ struct OdenReadiness {
   seal_applied: bool,
   lockdown_on: bool,
   lockdown_posture: OdenLockdownPosture,
+  compartment_globals_requested: bool,
+  compartment_globals_on: bool,
   integrity: &'static oden_principal_index::LockState,
   policy_source: Option<String>,
   project_root: String,
@@ -413,6 +416,17 @@ impl OdenReadiness {
       degraded.push(
         "enforce without lockdown (explicit override) — intrinsics unfrozen (integrity gap)",
       );
+    }
+    if self.compartment_globals_requested && !self.compartment_globals_on {
+      if self.mode != OdenMode::Enforce {
+        degraded.push(
+          "compartment globals requested outside enforce — disabled (enforce-gated)",
+        );
+      } else if !self.lockdown_on {
+        degraded.push(
+          "compartment globals requested without lockdown — disabled (dynamic channels remain porous)",
+        );
+      }
     }
     if oden_policy_unreadable() {
       degraded.push(
@@ -482,6 +496,19 @@ impl OdenReadiness {
         }
       }
     ));
+    // Compartment globals remains explicitly opt-in and enforce+lockdown gated.
+    // The existing 32-package corpus does not authorize a default-on claim:
+    // lockdown still breaks 4/32 after the runtime repairs, and the full
+    // tooling-inclusive compartment corpus has not cleared the LLP 0014 bar.
+    // @ref LLP 0014#kill-criteria [constrained-by]
+    out.push_str(&format!(
+      "  compartment-globals: {}\n",
+      if self.compartment_globals_on {
+        "on (explicit opt-in; enforce + lockdown gated)"
+      } else {
+        "off (opt-in only; default-on blocked by the compat-corpus gate)"
+      }
+    ));
     out.push_str(&format!(
       "  integrity: {}\n",
       self.integrity.readiness_label()
@@ -541,6 +568,8 @@ fn oden_capsec_readiness() -> OdenReadiness {
       && oden_capsec_seal_conformance_ok(),
     lockdown_on: oden_capsec_lockdown_on(),
     lockdown_posture: oden_capsec_lockdown_posture(),
+    compartment_globals_requested: oden_capsec_compartment_globals_requested(),
+    compartment_globals_on: oden_capsec_compartment_globals_on(),
     integrity: oden_principal_index::lock_state(),
     policy_source,
     project_root: root.to_string(),
@@ -636,6 +665,91 @@ fn oden_capsec_lockdown_posture() -> OdenLockdownPosture {
 /// capsec is armed (lockdown stays inert without the policy artifact).
 pub fn oden_capsec_lockdown_on() -> bool {
   oden_capsec_armed() && oden_capsec_lockdown_posture().is_on()
+}
+
+/// Whether the operator explicitly requested the Phase-3 reachability layer.
+/// `0|false|off` are explicit off spellings; an empty value is unset.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "compartment globals is an explicit non-authority posture toggle, analogous to lockdown"
+)]
+fn oden_capsec_compartment_globals_requested() -> bool {
+  static REQUESTED: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| {
+      match std::env::var_os("ODEN_CAPSEC_COMPARTMENT_GLOBALS") {
+        Some(v) if !v.is_empty() => !matches!(
+          v.to_string_lossy().to_ascii_lowercase().as_str(),
+          "0" | "false" | "off"
+        ),
+        _ => false,
+      }
+    });
+  *REQUESTED
+}
+
+/// The shipped posture is deliberately narrower than the LLP 0014 aspiration:
+/// explicit opt-in, enforce only, and only while lockdown is active. This keeps
+/// the documented kill signal intact; current corpus evidence does not permit
+/// a default-on claim.
+// @ref LLP 0014#kill-criteria [constrained-by]
+pub fn oden_capsec_compartment_globals_on() -> bool {
+  oden_capsec_armed()
+    && oden_capsec_compartment_globals_requested()
+    && oden_capsec_mode(oden_capsec_policy_file()) == OdenMode::Enforce
+    && oden_capsec_lockdown_on()
+}
+
+/// Stable endowment fingerprint for the loader's emit/V8 cache keys. The
+/// locator resolves through the same integrity-bound principal index used by
+/// op attribution; there is no second compartment identity system.
+// @ref LLP 0014#at-which-loader-stage [implements]
+pub fn oden_capsec_compartment_globals_fingerprint(
+  locator: &str,
+) -> Option<u64> {
+  if !oden_capsec_compartment_globals_on()
+    || locator.starts_with("ext:")
+    || locator.starts_with("node:")
+    || locator.starts_with("deno:")
+  {
+    return None;
+  }
+  let principal = oden_principal_index::resolve_locator(locator);
+  let names = oden_capsec_policy().endowments(&principal);
+  let mut hasher = std::collections::hash_map::DefaultHasher::new();
+  principal.label().hash(&mut hasher);
+  for name in names {
+    name.hash(&mut hasher);
+  }
+  Some(hasher.finish())
+}
+
+/// Snapshot descriptor consumed by trusted bootstrap JS to create/cache the
+/// caller's filtered global record. The op resolving this function carries the
+/// live module frame, so a package cannot request another principal's record.
+// @ref LLP 0014#endowment-record-derivation-from-grants [implements]
+pub fn oden_capsec_compartment_endowments()
+-> Result<String, PermissionCheckError> {
+  if !oden_capsec_compartment_globals_on() {
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: "compartment globals".to_string(),
+        name: "capsec",
+        custom_message: Some(
+          "oden capsec: compartment globals is not active (requires explicit opt-in under enforce with lockdown)"
+            .to_string(),
+        ),
+        state: PermissionState::Denied,
+      },
+    ));
+  }
+  oden_capsec_readiness_gate()?;
+  let principal = oden_capsec_principal();
+  let names = oden_capsec_policy()
+    .endowments(&principal)
+    .into_iter()
+    .collect::<Vec<_>>()
+    .join(",");
+  Ok(format!("{}\0{names}", principal.label()))
 }
 
 // Emit the readiness report once, and enforce fail-closed honesty. Returns Err
