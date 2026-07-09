@@ -1,0 +1,25 @@
+{
+  // Layer-2-independence (LLP 0001 Phase 0): a read routed through an op-body
+  // pre-check skip (require.rs / worker_threads.rs query_read_all) fires a
+  // per-package decision, not only check_* method paths. The SAME dependency
+  // require is DENIED when armed (the skip is disabled, the read is mediated and
+  // attributed to the ungranted package) and ALLOWED at baseline (the fast-path
+  // skip is active) -- both under Deno --allow-read fully open.
+  "tests": {
+    "armed_enforce_denies_require_read": {
+      "args": "run --allow-read --allow-env app.js",
+      "envs": {
+        "DENO_TRACE_PERMISSIONS": "1",
+        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_ENFORCE": "1"
+      },
+      "output": "armed.out",
+      "exitCode": 0
+    },
+    "baseline_allows_via_fast_path_skip": {
+      "args": "run --allow-read --allow-env app.js",
+      "output": "baseline.out",
+      "exitCode": 0
+    }
+  }
+}
