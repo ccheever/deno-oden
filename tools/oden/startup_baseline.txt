@@ -1,0 +1,11 @@
+# Oden startup baseline — deno 2.9.1 (stable, debug, aarch64-apple-darwin)
+# script: Deno.env.get("PATH"); Deno.exit(0)
+inert (capsec off)           mean=   8ms min=   8ms  (N=25)
+armed audit (no enforce)     mean=   8ms min=   7ms  (N=25)
+armed enforce                mean=   8ms min=   8ms  (N=25)
+#
+# Caveat: debug build (unoptimized) — absolute numbers are slow; the RELATIVE
+# inert-vs-armed delta is the signal, and startup shows ~no overhead (a startup
+# does few gated ops). Per-op throughput under load, and a fork-vs-upstream
+# comparison, are the follow-on measurements (need a release build + upstream
+# deno). Re-run: DENO=./target/debug/deno ./tools/oden/bench_startup.sh
