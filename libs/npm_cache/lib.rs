@@ -34,6 +34,7 @@ use sys_traits::ThreadSleep;
 use url::Url;
 
 mod fs_util;
+pub mod profile;
 mod registry_info;
 mod remote;
 mod rt;

@@ -85,6 +85,50 @@ struct UnmetPeerDiagnosticsState {
   seen: HashSet<UnmetPeerDepDiagnostic>,
 }
 
+/// Receives concrete package versions as the resolver settles on them —
+/// while the rest of the graph is still resolving — so tarball downloads
+/// can overlap the packument fetch wave instead of waiting behind it.
+/// Implementations must be cheap and non-blocking (fire-and-forget), must
+/// deduplicate, and must treat calls as advisory: a version may later leave
+/// the graph (peer-dependency re-resolution), so a prefetch failure for it
+/// must not fail anything by itself.
+pub trait TarballPrefetcher: std::fmt::Debug + Send + Sync {
+  fn prefetch(
+    &self,
+    nv: &PackageNv,
+    version_info: &deno_npm::registry::NpmPackageVersionInfo,
+  );
+}
+
+/// Composes the display reporter with the tarball prefetcher so prefetching
+/// works even when no display reporter is configured (e.g. `--quiet`).
+#[derive(Debug)]
+struct ResolveReporter<'a> {
+  inner: Option<&'a dyn deno_npm::resolution::Reporter>,
+  prefetcher: Option<Arc<dyn TarballPrefetcher>>,
+}
+
+impl deno_npm::resolution::Reporter for ResolveReporter<'_> {
+  fn on_resolved(&self, package_req: &PackageReq, nv: &PackageNv) {
+    if let Some(inner) = self.inner {
+      inner.on_resolved(package_req, nv);
+    }
+  }
+
+  fn on_version_resolved(
+    &self,
+    nv: &PackageNv,
+    version_info: &deno_npm::registry::NpmPackageVersionInfo,
+  ) {
+    if let Some(inner) = self.inner {
+      inner.on_version_resolved(nv, version_info);
+    }
+    if let Some(prefetcher) = &self.prefetcher {
+      prefetcher.prefetch(nv, version_info);
+    }
+  }
+}
+
 /// Updates the npm resolution with the provided package requirements.
 #[derive(Debug)]
 pub struct NpmResolutionInstaller<
@@ -99,6 +143,10 @@ pub struct NpmResolutionInstaller<
   maybe_lockfile: Option<Arc<LockfileLock<TSys>>>,
   update_queue: TaskQueue,
   unmet_peer_diagnostics: Mutex<UnmetPeerDiagnosticsState>,
+  /// Set (and cleared) by `NpmInstaller` around resolutions that will be
+  /// followed by caching; `None` for resolution-only callers like the LSP,
+  /// which must not trigger tarball downloads.
+  tarball_prefetcher: Mutex<Option<Arc<dyn TarballPrefetcher>>>,
 }
 
 impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmResolutionInstallerSys>
@@ -123,7 +171,17 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmResolutionInstallerSys>
       maybe_lockfile,
       update_queue: Default::default(),
       unmet_peer_diagnostics: Default::default(),
+      tarball_prefetcher: Default::default(),
     }
+  }
+
+  /// Sets (or clears) the tarball prefetcher used for subsequent
+  /// resolutions. See the field docs for who sets this and when.
+  pub fn set_tarball_prefetcher(
+    &self,
+    prefetcher: Option<Arc<dyn TarballPrefetcher>>,
+  ) {
+    *self.tarball_prefetcher.lock() = prefetcher;
   }
 
   /// Drains and returns the unmet peer dependency diagnostics collected since
@@ -220,6 +278,12 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmResolutionInstallerSys>
       "Running npm resolution."
     );
     let should_dedup = !self.has_js_execution_started_flag.is_raised();
+    let resolve_reporter = ResolveReporter {
+      inner: self.reporter.as_deref(),
+      prefetcher: self.tarball_prefetcher.lock().clone(),
+    };
+    let profile_resolution =
+      deno_npm_cache::profile::start("npm_resolution", "resolve");
     let result = snapshot
       .add_pkg_reqs(
         self.registry_info_provider.as_ref(),
@@ -228,9 +292,12 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmResolutionInstallerSys>
           should_dedup,
           version_resolver: &self.npm_version_resolver,
         },
-        self.reporter.as_deref(),
+        Some(&resolve_reporter),
       )
       .await;
+    if let Some(timer) = profile_resolution {
+      timer.finish();
+    }
     let result = match &result.dep_graph_result {
       Err(NpmResolutionError::Resolution(err))
         if self.registry_info_provider.mark_force_reload() =>
@@ -248,7 +315,7 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmResolutionInstallerSys>
               should_dedup,
               version_resolver: &self.npm_version_resolver,
             },
-            self.reporter.as_deref(),
+            Some(&resolve_reporter),
           )
           .await
       }

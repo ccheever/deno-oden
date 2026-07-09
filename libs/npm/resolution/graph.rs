@@ -53,6 +53,27 @@ pub trait Reporter: std::fmt::Debug + Send + Sync {
     reason = "default implementation ignores parameters"
   )]
   fn on_resolved(&self, package_req: &PackageReq, nv: &PackageNv) {}
+
+  /// Fired each time the resolver settles on a concrete version for a
+  /// package, with that version's registry info (dist, cpu/os, …). This
+  /// fires as soon as the version is chosen — while the rest of the graph
+  /// is still resolving — so a consumer can start downloading the tarball
+  /// concurrently with resolution. It may fire more than once for the same
+  /// package, and may fire for versions that later leave the graph (e.g.
+  /// peer-dependency re-resolution) or that target other platforms
+  /// (optional os/cpu-specific dependencies stay in the graph and are
+  /// filtered at install time), so consumers must deduplicate, filter, and
+  /// treat it as advisory.
+  #[allow(
+    unused_variables,
+    reason = "default implementation ignores parameters"
+  )]
+  fn on_version_resolved(
+    &self,
+    nv: &PackageNv,
+    version_info: &NpmPackageVersionInfo,
+  ) {
+  }
 }
 
 // todo(dsherret): for perf we should use an arena/bump allocator for
@@ -1418,6 +1439,7 @@ impl<'a, TNpmRegistryApi: NpmRegistryApi>
     );
 
     if let Some(reporter) = &self.reporter {
+      reporter.on_version_resolved(&pkg_nv, info);
       let package_req = PackageReq {
         name: pkg_req_name.into(),
         version_req: version_req.clone(),

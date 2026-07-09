@@ -588,17 +588,31 @@ impl CliFactory {
           .ok()
           .and_then(|c| c.age.as_ref().and_then(|d| d.into_option()))
           .is_some();
+      let packument_format = if needs_full_packument {
+        NpmPackumentFormat::Full
+      } else {
+        NpmPackumentFormat::Abbreviated
+      };
       Ok(CliNpmInstallerFactory::new(
         resolver_factory.clone(),
         Arc::new(CliNpmCacheHttpClient::new(
           self.http_client_provider().clone(),
           self.text_only_progress_bar().clone(),
-          if needs_full_packument {
-            NpmPackumentFormat::Full
-          } else {
-            NpmPackumentFormat::Abbreviated
-          },
+          packument_format,
         )),
+        // Dedicated connection pool for tarball downloads: prefetched
+        // tarballs overlap packument fetches during resolution, and on a
+        // shared HTTP/2 connection the large tarball bodies consume the
+        // connection flow-control window that packument streams need,
+        // stalling resolution.
+        Some(Arc::new(CliNpmCacheHttpClient::new(
+          Arc::new(HttpClientProvider::new(
+            Some(self.root_cert_store_provider().clone()),
+            self.flags.unsafely_ignore_certificate_errors.clone(),
+          )),
+          self.text_only_progress_bar().clone(),
+          packument_format,
+        ))),
         match resolver_factory.npm_resolver()?.as_managed() {
           Some(managed_npm_resolver) => {
             Arc::new(DenoTaskLifeCycleScriptsExecutor::new(

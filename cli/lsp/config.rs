@@ -1348,6 +1348,9 @@ impl WorkspaceConfigData {
         pb.clone(),
         NpmPackumentFormat::Abbreviated,
       )),
+      // the LSP never prefetches tarballs during resolution, so it has no
+      // packument/tarball connection contention to avoid
+      None,
       Arc::new(NullLifecycleScriptsExecutor),
       pb,
       None,

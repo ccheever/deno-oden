@@ -110,6 +110,14 @@ pub struct NpmInstallerFactory<
   >,
   registry_info_provider:
     Deferred<Arc<RegistryInfoProvider<TNpmCacheHttpClient, TSys>>>,
+  /// Optional dedicated HTTP client for tarball downloads. Tarball fetches
+  /// overlap packument fetches (tarball prefetch during resolution), and on
+  /// a shared HTTP/2 connection large tarball bodies consume the connection
+  /// flow-control window that packument streams need, stalling resolution.
+  /// A separate client means a separate connection pool, so the two streams
+  /// of traffic only compete for actual bandwidth. Falls back to
+  /// `http_client` when `None` (e.g. the LSP).
+  tarball_http_client: Option<Arc<TNpmCacheHttpClient>>,
   tarball_cache: Deferred<Arc<TarballCache<TNpmCacheHttpClient, TSys>>>,
   options: NpmInstallerFactoryOptions,
   install_reporter: Option<Arc<dyn InstallReporter + 'static>>,
@@ -124,6 +132,7 @@ impl<
   pub fn new(
     resolver_factory: Arc<ResolverFactory<TSys>>,
     http_client: Arc<TNpmCacheHttpClient>,
+    tarball_http_client: Option<Arc<TNpmCacheHttpClient>>,
     lifecycle_scripts_executor: Arc<dyn LifecycleScriptsExecutor>,
     reporter: TReporter,
     install_reporter: Option<Arc<dyn InstallReporter + 'static>>,
@@ -133,6 +142,7 @@ impl<
       resolver_factory,
       has_js_execution_started_flag: Default::default(),
       http_client,
+      tarball_http_client,
       lifecycle_scripts_config: Default::default(),
       lifecycle_scripts_executor,
       reporter,
@@ -445,7 +455,10 @@ impl<
       let workspace_factory = self.workspace_factory();
       Ok(Arc::new(TarballCache::new(
         self.npm_cache()?.clone(),
-        self.http_client.clone(),
+        self
+          .tarball_http_client
+          .clone()
+          .unwrap_or_else(|| self.http_client.clone()),
         workspace_factory.sys().clone(),
         workspace_factory.npmrc()?.clone(),
         self

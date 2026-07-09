@@ -232,6 +232,7 @@ impl<
     )
     .await;
 
+    let profile_sync = deno_npm_cache::profile::start("sync_total", "sync");
     let package_partitions =
       snapshot.all_system_packages_partitioned(&self.system_info);
     let pb_clear_guard = self.reporter.clear_guard(); // prevent flickering
@@ -305,6 +306,8 @@ impl<
         self.root_node_modules_path.parent(),
       ));
 
+    let profile_packages =
+      deno_npm_cache::profile::start("packages_phase", "sync");
     for package in &package_partitions.packages {
       if let Some(current_pkg) =
         newest_packages_by_name.get_mut(&package.id.nv.name)
@@ -407,8 +410,18 @@ impl<
               let handle = crate::rt::spawn_blocking({
                 let package_path = package_path.clone();
                 let sys = self.sys.clone();
+                let profile_key = if deno_npm_cache::profile::enabled() {
+                  package.id.nv.to_string()
+                } else {
+                  String::new()
+                };
                 move || {
+                  let profile_clone =
+                    deno_npm_cache::profile::start("clone_dir", &profile_key);
                   clone_dir_recursive(&sys, &cache_folder, &package_path)?;
+                  if let Some(timer) = profile_clone {
+                    timer.finish();
+                  }
                   // write out a file that indicates this folder has been initialized
                   write_initialized_file(&sys, &initialized_file, &tags)?;
 
@@ -646,6 +659,11 @@ impl<
       result?; // surface the first error
     }
     drop(cache_futures);
+    if let Some(timer) = profile_packages {
+      timer.finish();
+    }
+    let profile_symlinks =
+      deno_npm_cache::profile::start("symlink_phase", "sync");
 
     // 5. Symlink all the dependencies into the .deno directory.
     //
@@ -912,6 +930,11 @@ impl<
       }
     }
 
+    if let Some(timer) = profile_symlinks {
+      timer.finish();
+    }
+    let profile_bins = deno_npm_cache::profile::start("bins_phase", "sync");
+
     // 9. Set up `node_modules/.bin` entries for packages that need it.
     {
       let bin_entries = match Rc::try_unwrap(bin_entries) {
@@ -940,6 +963,10 @@ impl<
           }
         },
       )?;
+    }
+
+    if let Some(timer) = profile_bins {
+      timer.finish();
     }
 
     // 10. Create symlinks for the workspace packages
@@ -1177,6 +1204,9 @@ impl<
     setup_cache.save();
     drop(single_process_lock);
     drop(pb_clear_guard);
+    if let Some(timer) = profile_sync {
+      timer.finish();
+    }
 
     Ok(())
   }

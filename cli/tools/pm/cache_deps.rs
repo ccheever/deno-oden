@@ -37,6 +37,13 @@ pub async fn cache_top_level_deps(
     .text_only_progress_bar()
     .deferred_keep_initialize_alive();
   let npm_installer = factory.npm_installer().await?;
+  if !options.lockfile_only {
+    // This flow caches every resolved package right after resolving, so
+    // tarball downloads can safely overlap the resolution itself. With
+    // --lockfile-only nothing is cached, so prefetching would waste the
+    // downloads.
+    npm_installer.enable_tarball_prefetch();
+  }
   npm_installer
     .ensure_top_level_package_json_install()
     .await?;
