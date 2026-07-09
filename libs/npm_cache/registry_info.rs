@@ -312,6 +312,7 @@ impl<THttpClient: NpmCacheHttpClient, TSys: NpmCacheSys>
             // (see #35761).
             Some(SerializedCachedPackageInfo { etag: None, ..cached_info })
           } else {
+            crate::profile::mark("packument_cache_hit", &name);
             return Ok(FutureResult::SavedFsCache(Arc::new(cached_info.info)));
           }
         } _ => {
@@ -342,6 +343,7 @@ impl<THttpClient: NpmCacheHttpClient, TSys: NpmCacheSys>
         None => (None, None)
       };
 
+      let profile_fetch = crate::profile::start("packument_fetch", &name);
       let response = downloader
         .http_client
         .download_with_retries_on_any_tokio_runtime(
@@ -351,6 +353,12 @@ impl<THttpClient: NpmCacheHttpClient, TSys: NpmCacheSys>
           Some(registry_config),
         )
         .await.map_err(JsErrorBox::from_err)?;
+      if let Some(timer) = profile_fetch {
+        timer.finish_with_bytes(match &response {
+          NpmCacheHttpClientResponse::Bytes(r) => Some(r.bytes.len() as u64),
+          _ => None,
+        });
+      }
       match response {
         NpmCacheHttpClientResponse::NotModified => {
           log::debug!("Respected etag for packument '{0}'", name); // used in the tests

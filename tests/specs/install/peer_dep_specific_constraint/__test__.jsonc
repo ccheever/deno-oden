@@ -1,5 +1,11 @@
 {
   "tempDir": true,
+  // This test asserts peer-dep warning behavior, not download scheduling.
+  // Tarball prefetching interleaves download lines nondeterministically with
+  // the warning block, so disable it.
+  "envs": {
+    "DENO_NPM_PREFETCH_CONCURRENCY": "0"
+  },
   "steps": [{
     "args": "install",
     "output": "install.out"

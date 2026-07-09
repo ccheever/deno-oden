@@ -206,9 +206,17 @@ impl<THttpClient: NpmCacheHttpClient, TSys: NpmCacheSys>
         reporter.download_started(&package_nv);
 
       }
+      let profile_download =
+        crate::profile::start("tarball_download", &package_nv.to_string());
       let result = tarball_cache.http_client
         .download_with_retries_on_any_tokio_runtime(tarball_uri, maybe_auth_header, None, maybe_registry_config.map(|c| c.as_ref()))
         .await;
+      if let Some(timer) = profile_download {
+        timer.finish_with_bytes(match &result {
+          Ok(NpmCacheHttpClientResponse::Bytes(r)) => Some(r.bytes.len() as u64),
+          _ => None,
+        });
+      }
       if let Some(reporter) = &reporter {
         reporter.downloaded(&package_nv);
       }
@@ -252,22 +260,37 @@ impl<THttpClient: NpmCacheHttpClient, TSys: NpmCacheSys>
             TarballExtractionMode::Overwrite
           };
           // Phase 1: verify integrity + decompress (CPU-bound, no concurrency limit)
+          let profile_key = if crate::profile::enabled() {
+            package_nv.to_string()
+          } else {
+            String::new()
+          };
+          let profile_decompress =
+            crate::profile::start("verify_decompress", &profile_key);
           let tar_data = spawn_blocking(move || {
             verify_and_decompress_tarball(&package_nv, &bytes, &dist)
           })
           .await
           .map_err(JsErrorBox::from_err)?
           .map_err(JsErrorBox::from_err)?;
+          if let Some(timer) = profile_decompress {
+            timer.finish_with_bytes(Some(tar_data.len() as u64));
+          }
           // Phase 2: write to disk (I/O-bound, limited concurrency to
           // avoid filesystem contention — especially on macOS APFS)
+          let profile_sem = crate::profile::start("extract_sem_wait", &profile_key);
           #[cfg(not(target_arch = "wasm32"))]
           let _permit = tarball_cache
             .fs_write_semaphore
             .acquire()
             .await
             .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+          if let Some(timer) = profile_sem {
+            timer.finish();
+          }
 
-          spawn_blocking(move || {
+          let profile_extract = crate::profile::start("extract_write", &profile_key);
+          let extract_result = spawn_blocking(move || {
             write_extracted_tarball(
               &sys,
               &tar_data,
@@ -277,7 +300,11 @@ impl<THttpClient: NpmCacheHttpClient, TSys: NpmCacheSys>
           })
           .await
           .map_err(JsErrorBox::from_err)?
-          .map_err(JsErrorBox::from_err)
+          .map_err(JsErrorBox::from_err);
+          if let Some(timer) = profile_extract {
+            timer.finish();
+          }
+          extract_result
         }
         None => {
           // A 404 lands here (mapped to `NotFound`), so the 401 check above is

@@ -175,10 +175,106 @@ pub struct NpmInstaller<
   npm_resolution_installer:
     Arc<NpmResolutionInstaller<TNpmCacheHttpClient, TSys>>,
   maybe_lockfile: Option<Arc<LockfileLock<TSys>>>,
+  npm_cache: Arc<NpmCache<TSys>>,
   npm_resolution: Arc<NpmResolutionCell>,
+  system_info: NpmSystemInfo,
+  tarball_cache: Arc<deno_npm_cache::TarballCache<TNpmCacheHttpClient, TSys>>,
+  /// See [`Self::enable_tarball_prefetch`].
+  tarball_prefetch_flag: AtomicFlag,
   top_level_install_flag: AtomicFlag,
   install_queue: TaskQueue,
   cached_reqs: Mutex<FxHashSet<PackageReq>>,
+}
+
+/// Maximum tarball downloads a prefetcher runs concurrently, or `None` when
+/// prefetching is disabled. Even with the tarball cache on its own
+/// connection pool, an uncapped prefetch flood competes with packument
+/// fetches for bandwidth and stretches resolution — measured on the LLP
+/// 0002 fixture, uncapped prefetching on a shared connection stretched
+/// resolution from ~4.7s to ~12.6s and made the cold install slower than no
+/// prefetching at all. The post-resolution caching pass is intentionally
+/// not capped (nothing else needs the network by then); this cap only
+/// protects the resolution window. `DENO_NPM_PREFETCH_CONCURRENCY`
+/// overrides it for tuning; `0` disables prefetching entirely.
+fn prefetch_downloads_cap() -> Option<usize> {
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "process-global tuning/kill-switch knob, deliberately not per-sys"
+  )]
+  match std::env::var("DENO_NPM_PREFETCH_CONCURRENCY")
+    .ok()
+    .and_then(|v| v.parse::<usize>().ok())
+  {
+    Some(0) => None,
+    Some(n) => Some(n),
+    None => Some(16),
+  }
+}
+
+// @ref llp/0002-the-oden-installer.plan.md#the-recipe
+/// Fire-and-forget tarball prefetcher: spawns `TarballCache::ensure_package`
+/// for each version the resolver settles on, so downloads and extraction
+/// overlap the packument fetch wave instead of starting after resolution
+/// completes. `ensure_package` deduplicates in-flight work internally (the
+/// post-resolution caching pass joins the same in-flight future rather than
+/// re-downloading) and its failures are recorded there too, so errors here
+/// are only logged: packages that stay in the graph surface the same error
+/// through the caching pass, and versions that left the graph don't matter.
+#[derive(Debug)]
+struct SpawningTarballPrefetcher<
+  TNpmCacheHttpClient: NpmCacheHttpClient,
+  TSys: NpmInstallerSys,
+> {
+  seen: Mutex<FxHashSet<PackageNv>>,
+  system_info: NpmSystemInfo,
+  #[cfg(not(target_arch = "wasm32"))]
+  download_permits: Arc<tokio::sync::Semaphore>,
+  tarball_cache: Arc<deno_npm_cache::TarballCache<TNpmCacheHttpClient, TSys>>,
+}
+
+impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
+  resolution::TarballPrefetcher
+  for SpawningTarballPrefetcher<TNpmCacheHttpClient, TSys>
+{
+  fn prefetch(
+    &self,
+    nv: &PackageNv,
+    version_info: &deno_npm::registry::NpmPackageVersionInfo,
+  ) {
+    let Some(dist) = &version_info.dist else {
+      return;
+    };
+    // Optional os/cpu-specific packages for other platforms stay in the
+    // resolution graph and are only filtered out at install time — measured
+    // on the LLP 0002 fixture they are over half the tarball bytes
+    // (platform binaries like @next/swc-* for every platform), so filter
+    // here too rather than downloading them.
+    let system = deno_npm::NpmResolutionPackageSystemInfo {
+      cpu: version_info.cpu.clone(),
+      os: version_info.os.clone(),
+    };
+    if !system.matches_system(&self.system_info) {
+      return;
+    }
+    if !self.seen.lock().insert(nv.clone()) {
+      return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+      let download_permits = self.download_permits.clone();
+      let tarball_cache = self.tarball_cache.clone();
+      let nv = nv.clone();
+      let dist = dist.clone();
+      drop(deno_unsync::spawn(async move {
+        let Ok(_permit) = download_permits.acquire_owned().await else {
+          return; // semaphore closed (never happens; defensive)
+        };
+        if let Err(err) = tarball_cache.ensure_package(&nv, &dist).await {
+          log::debug!("npm tarball prefetch failed for {nv}: {err:#}");
+        }
+      }));
+    }
+  }
 }
 
 impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
@@ -203,6 +299,7 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
     tarball_cache: Arc<deno_npm_cache::TarballCache<TNpmCacheHttpClient, TSys>>,
     options: NpmInstallerOptions<TSys>,
   ) -> Self {
+    let system_info = options.system_info.clone();
     let fs_installer: Arc<dyn NpmPackageFsInstaller> =
       match options.maybe_node_modules_path {
         Some(node_modules_folder) => {
@@ -221,7 +318,7 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
                 (*reporter).clone(),
                 npm_resolution.clone(),
                 sys,
-                tarball_cache,
+                tarball_cache.clone(),
                 LocalNpmPackageInstallerOptions {
                   clean_on_install: options.clean_on_install,
                   lifecycle_scripts: options.lifecycle_scripts,
@@ -241,7 +338,7 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
                 (*reporter).clone(),
                 npm_resolution.clone(),
                 sys,
-                tarball_cache,
+                tarball_cache.clone(),
                 LocalNpmPackageInstallerOptions {
                   clean_on_install: options.clean_on_install,
                   lifecycle_scripts: options.lifecycle_scripts,
@@ -255,8 +352,8 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
           }
         }
         None => Arc::new(GlobalNpmPackageInstaller::new(
-          npm_cache,
-          tarball_cache,
+          npm_cache.clone(),
+          tarball_cache.clone(),
           sys,
           npm_resolution.clone(),
           options.lifecycle_scripts,
@@ -267,14 +364,31 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
     Self {
       fs_installer,
       npm_install_deps_provider,
+      npm_cache,
       npm_resolution,
       npm_resolution_initializer,
       npm_resolution_installer,
       maybe_lockfile: options.maybe_lockfile,
+      system_info,
+      tarball_cache,
+      tarball_prefetch_flag: Default::default(),
       top_level_install_flag: Default::default(),
       install_queue: Default::default(),
       cached_reqs: Default::default(),
     }
+  }
+
+  /// Opts this installer into tarball prefetching: subsequent resolutions
+  /// start downloading a package's tarball the moment its version is
+  /// chosen, overlapping the packument fetch wave (the dominant
+  /// cold-install phase) instead of downloading everything afterwards.
+  /// Only call this from flows that will certainly cache every resolved
+  /// package afterwards (the explicit install flows); resolution-only
+  /// flows (`deno outdated`, `--lockfile-only`) must not, or they would
+  /// download every tarball, and `deno run`-style auto-install stays
+  /// opted out so its download-progress output stays deterministic.
+  pub fn enable_tarball_prefetch(&self) {
+    self.tarball_prefetch_flag.raise();
   }
 
   /// Adds package requirements to the resolver and ensures everything is setup.
@@ -356,10 +470,47 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
     #[cfg(debug_assertions)]
     self.npm_resolution_initializer.debug_assert_initialized();
 
+    // Overlap tarball downloads with resolution: while the resolver is still
+    // fetching packuments, versions it has already settled on can start
+    // downloading and extracting into the global cache. Only armed for
+    // flows that opted in via `enable_tarball_prefetch` (the explicit
+    // install flows, which cache every resolved package right after) and
+    // when downloading is allowed at all. Deliberately not armed for
+    // `deno run`-style auto-install even though it caches too: prefetch
+    // interleaves download progress lines nondeterministically, and the
+    // run flow's output is asserted byte-for-byte by a large spec corpus —
+    // if it opts in later, its download reporting needs to be made
+    // order-insensitive first.
+    let prefetch_cap = if self.tarball_prefetch_flag.is_raised()
+      && !matches!(
+        self.npm_cache.cache_setting(),
+        deno_npm_cache::NpmCacheSetting::Only
+      ) {
+      prefetch_downloads_cap()
+    } else {
+      None
+    };
+    let prefetch = prefetch_cap.is_some();
+    if let Some(cap) = prefetch_cap {
+      #[cfg(target_arch = "wasm32")]
+      let _ = cap;
+      self.npm_resolution_installer.set_tarball_prefetcher(Some(
+        Arc::new(SpawningTarballPrefetcher {
+          seen: Default::default(),
+          system_info: self.system_info.clone(),
+          #[cfg(not(target_arch = "wasm32"))]
+          download_permits: Arc::new(tokio::sync::Semaphore::new(cap)),
+          tarball_cache: self.tarball_cache.clone(),
+        }),
+      ));
+    }
     let mut result = self
       .npm_resolution_installer
       .add_package_reqs(packages)
       .await;
+    if prefetch {
+      self.npm_resolution_installer.set_tarball_prefetcher(None);
+    }
 
     if result.dependencies_result.is_ok()
       && let Some(lockfile) = self.maybe_lockfile.as_ref()
