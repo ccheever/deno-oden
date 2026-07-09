@@ -473,6 +473,128 @@ fn oden_capsec_audit_record(
   }
 }
 
+// --- Resource ownership (LLP 0001 Native resource ownership, ENG-23776) ------
+// A rid is a small guessable integer; owner metadata makes guessing worthless.
+// A package that opens an owner-checked resource is recorded as its owner; a
+// different package using that rid denies under enforce (audits under audit).
+// The minimal transfer primitive re-owns a rid for a sanctioned cross-package
+// handoff, audited. Family classification lives in
+// `tools/oden/resource_families.ts`; this is the mechanism the checked families
+// call. @ref llp/0001-adding-capability-security-to-deno.plan.md
+static ODEN_RESOURCE_OWNERS: Lazy<
+  Mutex<std::collections::HashMap<u32, String>>,
+> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+
+// Pure decision core, unit-testable without the op-dispatch stack: given the
+// acting principal's label, the rid's recorded owner (if any), and the mode,
+// decide whether a resource use is allowed. An untracked rid (opened by
+// root/ambient, or a family whose owner-check isn't wired) is a named residual:
+// allowed, recorded. Ownership match: allowed. Cross-principal: denied under
+// enforce, recorded under audit.
+fn oden_resource_use_decision(
+  caller: &str,
+  owner: Option<&str>,
+  mode: OdenMode,
+) -> OdenDecision {
+  match owner {
+    None => OdenDecision::AllowRecord, // untracked residual
+    Some(o) if o == caller => OdenDecision::Allow,
+    Some(_) => match mode {
+      OdenMode::Enforce => OdenDecision::Deny,
+      OdenMode::Audit => OdenDecision::AllowRecord,
+      OdenMode::Permissive => OdenDecision::Allow,
+    },
+  }
+}
+
+/// Stamp the acting package as the owner of a freshly-opened owner-checked
+/// resource. Ambient (root/runtime) resources are not owner-scoped. Inert unless
+/// capsec is armed.
+pub fn oden_capsec_own_resource(rid: u32, family: &str) {
+  if !oden_capsec_active() {
+    return;
+  }
+  let principal = oden_capsec_principal();
+  if principal.is_ambient() || matches!(principal, OdenPrincipal::NoUser) {
+    return;
+  }
+  let label = principal.label();
+  ODEN_RESOURCE_OWNERS.lock().insert(rid, label.clone());
+  oden_capsec_audit_record(&label, family, "own", &rid.to_string(), "allow(owner)", None);
+}
+
+/// Check that the acting principal may use `rid`. A cross-principal use of a
+/// guessed/handed rid denies under enforce (audits otherwise). Root/runtime may
+/// use any resource. Inert unless capsec is armed.
+pub fn oden_capsec_check_resource_owner(
+  rid: u32,
+  family: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_active() {
+    return Ok(());
+  }
+  let principal = oden_capsec_principal();
+  if principal.is_ambient() {
+    return Ok(());
+  }
+  let label = principal.label();
+  let owner = ODEN_RESOURCE_OWNERS.lock().get(&rid).cloned();
+  let mode = oden_capsec_mode(oden_capsec_policy_file().as_ref());
+  let decision = oden_resource_use_decision(&label, owner.as_deref(), mode);
+  if matches!(decision, OdenDecision::Allow) && owner.as_deref() == Some(label.as_str())
+  {
+    return Ok(()); // caller owns it; no audit noise
+  }
+  let owner_label = owner.as_deref().unwrap_or("(untracked)");
+  let verdict = match decision {
+    OdenDecision::Deny => "DENY(cross-principal rid)",
+    _ => "audit(record)",
+  };
+  if !matches!(decision, OdenDecision::Allow) {
+    eprintln!(
+      "[oden-capsec] {family}:use rid={rid} caller={label} owner={owner_label} -> {verdict}"
+    );
+    oden_capsec_audit_record(&label, family, "use", &rid.to_string(), verdict, None);
+  }
+  if matches!(decision, OdenDecision::Deny) {
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("use of {family} resource {rid}"),
+        name: "capsec",
+        custom_message: Some(format!(
+          "oden capsec: principal \"{label}\" may not use {family} resource {rid} \
+           owned by \"{owner_label}\" (cross-principal rid)"
+        )),
+        state: PermissionState::Denied,
+      },
+    ));
+  }
+  Ok(())
+}
+
+/// The minimal transfer primitive: re-own `rid` to `to_selector` for a
+/// sanctioned cross-package handoff, audited. After the transfer the recipient
+/// may use the rid and the prior owner may not.
+pub fn oden_capsec_transfer_resource(rid: u32, to_selector: &str) {
+  if !oden_capsec_active() {
+    return;
+  }
+  let from = ODEN_RESOURCE_OWNERS
+    .lock()
+    .get(&rid)
+    .cloned()
+    .unwrap_or_else(|| "(untracked)".to_string());
+  ODEN_RESOURCE_OWNERS.lock().insert(rid, to_selector.to_string());
+  oden_capsec_audit_record(
+    to_selector,
+    "resource",
+    "transfer",
+    &rid.to_string(),
+    &format!("allow(transfer from {from})"),
+    None,
+  );
+}
+
 // Import gating (LLP 0001 Phase 2), attributed to the **referrer** — the module
 // that issued the import, which the loader knows synchronously. This is the
 // sound attribution point: the op-dispatch stack is empty at the loader
@@ -6370,6 +6492,62 @@ mod tests {
   use sys_traits::EnvCurrentDir;
 
   use super::*;
+
+  #[test]
+  fn resource_use_decision_owner_semantics() {
+    // Untracked rid (opened by root, or a family whose check isn't wired) is a
+    // named residual: recorded, allowed.
+    assert_eq!(
+      oden_resource_use_decision("dep-a", None, OdenMode::Enforce),
+      OdenDecision::AllowRecord
+    );
+    // The owner uses its own rid freely.
+    assert_eq!(
+      oden_resource_use_decision("dep-a", Some("dep-a"), OdenMode::Enforce),
+      OdenDecision::Allow
+    );
+    // A different package using a guessed/handed rid denies under enforce,
+    // records under audit, allows under permissive.
+    assert_eq!(
+      oden_resource_use_decision("dep-b", Some("dep-a"), OdenMode::Enforce),
+      OdenDecision::Deny
+    );
+    assert_eq!(
+      oden_resource_use_decision("dep-b", Some("dep-a"), OdenMode::Audit),
+      OdenDecision::AllowRecord
+    );
+    assert_eq!(
+      oden_resource_use_decision("dep-b", Some("dep-a"), OdenMode::Permissive),
+      OdenDecision::Allow
+    );
+  }
+
+  #[test]
+  fn transfer_primitive_re_owns_the_rid() {
+    // The transfer primitive re-owns a rid for a sanctioned handoff: after it,
+    // the recipient owns the rid (owner decision flips) and the prior owner does
+    // not. Exercised against the registry directly (the op-facing wrappers add
+    // the armed/principal/audit layer).
+    let rid = 4242u32;
+    ODEN_RESOURCE_OWNERS.lock().insert(rid, "dep-a".to_string());
+    let owner = ODEN_RESOURCE_OWNERS.lock().get(&rid).cloned();
+    assert_eq!(
+      oden_resource_use_decision("dep-b", owner.as_deref(), OdenMode::Enforce),
+      OdenDecision::Deny
+    );
+    // Transfer to dep-b.
+    ODEN_RESOURCE_OWNERS.lock().insert(rid, "dep-b".to_string());
+    let owner = ODEN_RESOURCE_OWNERS.lock().get(&rid).cloned();
+    assert_eq!(
+      oden_resource_use_decision("dep-b", owner.as_deref(), OdenMode::Enforce),
+      OdenDecision::Allow
+    );
+    assert_eq!(
+      oden_resource_use_decision("dep-a", owner.as_deref(), OdenMode::Enforce),
+      OdenDecision::Deny
+    );
+    ODEN_RESOURCE_OWNERS.lock().remove(&rid);
+  }
   use crate::prompter::set_prompter;
 
   // Creates vector of strings, Vec<String>
