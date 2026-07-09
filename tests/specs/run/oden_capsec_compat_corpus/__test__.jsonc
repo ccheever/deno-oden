@@ -1,0 +1,14 @@
+{
+  // compat_corpus.ts runs a corpus under audit and aggregates the per-package
+  // would-deny audit stream into enforce-readiness volume and legitimate-hit
+  // rates against a proposed deny-ceiling. probe-dep (a node_modules package)
+  // touches AWS_SECRET_ACCESS_KEY, PATH, and /etc/hostname — 3 would-denies —
+  // and both ceiling candidates are hit, pricing them as too costly to promote.
+  "tests": {
+    "corpus_audit_aggregation": {
+      "args": "run -A ../../../../tools/oden/compat_corpus.ts corpus.json",
+      "output": "report.out",
+      "exitCode": 0
+    }
+  }
+}

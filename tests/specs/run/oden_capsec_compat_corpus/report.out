@@ -1,0 +1,31 @@
+# Oden compat-corpus report (generated)
+
+Ran 1 corpus entries under audit; 3 mediated ops observed across 1 principals.
+
+## Would-deny volume per principal (enforce readiness)
+
+| principal | mediated ops | would-deny under enforce |
+| --- | --- | --- |
+| probe-dep | 3 | 3 |
+
+## Would-deny by capability
+
+| capability | would-deny count |
+| --- | --- |
+| env:read | 2 |
+| fs:read | 1 |
+
+## Legitimate-hit rate vs proposed deny-ceiling defaults
+
+For each ceiling candidate, the fraction of corpus principals that legitimately touch it. A high rate prices the default as too costly to promote (LLP 0008 ceiling ratification).
+
+| ceiling candidate | principals hit | legitimate-hit rate |
+| --- | --- | --- |
+| env:AWS_SECRET_ACCESS_KEY | 1 | 100.0% |
+| fs:read:/etc | 1 | 100.0% |
+
+## Scope caveats (do not mistake a clean run for a full corpus)
+
+- **Corpus size**: this reflects the entries actually run. Pricing the real defaults needs the top-N npm graphs installed and run — a network + install step outside the sandbox.
+- **Lockdown arm not run**: the separate under-lockdown pass needs the freeze walk (Phase-2 minimal lockdown). Until then only the audit arm is measured, and the lockdown-default kill criterion stays unpriced.
+

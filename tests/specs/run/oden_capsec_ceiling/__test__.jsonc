@@ -1,0 +1,25 @@
+{
+  // ceiling_compile.ts compiles a deny ceiling into layer-1 --deny-* flags, and
+  // the ceiling holds even when layer 1 is thrown wide open with --allow-all
+  // (fast-skip-with-denies). Two access shapes are proven denied under
+  // --allow-all + compiled denies: a direct Deno.env op, and a node:fs read
+  // that reaches the file through the require/node path.
+  "tests": {
+    "compiles_to_deny_flags": {
+      "args": "run --allow-read --allow-run ../../../../tools/oden/ceiling_compile.ts ceiling.json",
+      "output": "flags.out",
+      "exitCode": 0
+    },
+    "env_ceiling_denies_under_allow_all": {
+      "args": "run --allow-read --allow-run --allow-env ../../../../tools/oden/ceiling_compile.ts ceiling.json --exec env_app.js",
+      "envs": { "SECRET_KEY": "topsecret" },
+      "output": "denied.out",
+      "exitCode": 0
+    },
+    "node_read_ceiling_denies_under_allow_all": {
+      "args": "run --allow-read --allow-run ../../../../tools/oden/ceiling_compile.ts ceiling.json --exec node_read_app.js",
+      "output": "denied.out",
+      "exitCode": 0
+    }
+  }
+}

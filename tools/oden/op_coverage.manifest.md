@@ -19,6 +19,20 @@ run the generator and commit. Drift fails the rebase canary.
 - run:run	via check_run_all()
 - worker:create	via oden_capsec_check_worker_create()
 
+## Capability taxonomy / descriptor mapping
+
+`--check` fails if this table and the mediated family:action set drift.
+
+| Capability | Deno descriptor / gate | Target shape | Grant / status |
+| --- | --- | --- | --- |
+| env:read | EnvDescriptor / EnvQueryDescriptor | name or * | env:read:<name> |
+| ffi:load | FfiQueryDescriptor | path or * | ffi |
+| fs:read | ReadDescriptor / ReadQueryDescriptor | canonical path or * | fs:read:<path> |
+| fs:write | WriteDescriptor / WriteQueryDescriptor | canonical path or * | fs:write:<path> |
+| network:fetch | NetDescriptor / ImportDescriptor | host, URL, vsock, or unix socket | network:fetch:<host> |
+| run:run | RunQueryDescriptor | command display name or * | run:<command> |
+| worker:create | op_create_worker capsec gate | worker specifier | default-denied for package principals until inheritance is designed |
+
 ## Op-body pre-check skips (query_read_all call sites)
 
 These bypass the permission container when read is fully granted; capsec
@@ -27,4 +41,3 @@ covered by the layer-2-independence proof.
 
 - ext/node/ops/require.rs:45
 - ext/node/ops/worker_threads.rs:38
-

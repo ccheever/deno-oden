@@ -1,0 +1,15 @@
+{
+  // policy_gen.ts walks the module graph (deno info), collects first-party
+  // import-site grants, unions with deno.json's oden.grants, and emits the
+  // byte-reproducible .oden/policy.json the engine decide() consumes. --check
+  // regenerates and passes when the committed artifact is up to date. "Only
+  // your code grants": a dependency self-grant would be ignored (covered by the
+  // tool's own run against node_modules; here the graph is clean).
+  "tests": {
+    "generated_policy_is_stable": {
+      "args": "run -A ../../../../tools/oden/policy_gen.ts main.js --check",
+      "output": "check.out",
+      "exitCode": 0
+    }
+  }
+}
