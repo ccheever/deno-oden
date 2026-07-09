@@ -5,13 +5,13 @@
   "tests": {
     "dep_remote_import_denied_under_enforce": {
       "args": "run --allow-all dep_app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json" },
       "output": "dep_denied.out",
       "exitCode": 0
     },
     "root_remote_import_allowed_under_enforce": {
       "args": "run --allow-all root_app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json" },
       "output": "root_ok.out",
       "exitCode": 0
     },

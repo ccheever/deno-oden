@@ -30,8 +30,16 @@ bench() { # $1=label ; rest=env assignments
   printf "%-28s mean=%4dms min=%4dms  (N=%d)\n" "$label" "$((total / N))" "$min" "$N"
 }
 
+# Structural arming: the policy artifact arms capsec, handed to the child via
+# ODEN_CAPSEC_POLICY (temp files; the tree stays clean).
+POLICY_AUDIT=$(mktemp -t oden_bench_audit.XXXXXX.json)
+POLICY_ENFORCE=$(mktemp -t oden_bench_enforce.XXXXXX.json)
+trap 'rm -f "$POLICY_AUDIT" "$POLICY_ENFORCE"' EXIT
+echo '{ "mode": "audit" }' > "$POLICY_AUDIT"
+echo '{ "mode": "enforce" }' > "$POLICY_ENFORCE"
+
 echo "# Oden startup baseline — $($DENO --version | head -1)"
 echo "# script: $SCRIPT"
 bench "inert (capsec off)"          --allow-env
-bench "armed audit (no enforce)"    --allow-env DENO_TRACE_PERMISSIONS=1 ODEN_CAPSEC_SPIKE=1 ODEN_CAPSEC_MODE=audit
-bench "armed enforce"               --allow-env DENO_TRACE_PERMISSIONS=1 ODEN_CAPSEC_SPIKE=1 ODEN_CAPSEC_ENFORCE=1
+bench "armed audit (no enforce)"    --allow-env ODEN_CAPSEC_POLICY="$POLICY_AUDIT"
+bench "armed enforce"               --allow-env ODEN_CAPSEC_POLICY="$POLICY_ENFORCE"

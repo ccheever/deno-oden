@@ -7,19 +7,19 @@
   "tests": {
     "readiness_report": {
       "args": "run --allow-env app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "audit", "ODEN_CAPSEC_READINESS": "1" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_audit.json", "ODEN_CAPSEC_READINESS": "1" },
       "output": "readiness.out",
       "exitCode": 0
     },
     "enforce_missing_prereq_fails_closed": {
       "args": "run --allow-env app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce", "ODEN_CAPSEC_FORCE_UNSEALED": "1" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json", "ODEN_CAPSEC_FORCE_UNSEALED": "1" },
       "output": "refuse.out",
       "exitCode": 0
     },
     "enforce_advisory_named_degraded": {
       "args": "run --allow-env app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce", "ODEN_CAPSEC_FORCE_UNSEALED": "1", "ODEN_CAPSEC_ALLOW_ADVISORY": "1" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json", "ODEN_CAPSEC_FORCE_UNSEALED": "1", "ODEN_CAPSEC_ALLOW_ADVISORY": "1" },
       "output": "degraded.out",
       "exitCode": 0
     }

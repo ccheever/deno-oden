@@ -167,23 +167,25 @@ pub fn op_bootstrap_is_from_unconfigured_runtime(state: &mut OpState) -> bool {
   state.borrow::<IsFromUnconfiguredRuntime>().0
 }
 
-// Oden capsec Phase-0: report whether the capability layer is armed so trusted
+// Oden capsec: report whether the capability layer is armed so trusted
 // bootstrap JS can seal the continuation-preserved-embedder-data primitives
-// (LLP 0001 §Async attribution) before user code runs. Bit 0 = capsec active
-// (`ODEN_CAPSEC_SPIKE`); bit 1 = run the seal self-test (`ODEN_CAPSEC_SEAL_SELFTEST`).
-// Called once at bootstrap, before `removeImportedOps()`, so it never enters the
-// steady-state op surface. Reading the env here (not from a snapshot-baked value)
-// keeps the seal a per-process runtime decision.
+// (LLP 0001 §Async attribution) before user code runs. Bit 0 = capsec armed —
+// structural arming, the policy artifact's presence (ODEN_CAPSEC_POLICY handoff
+// or `<root>/.oden/policy.json`); bit 1 = run the seal self-test
+// (`ODEN_CAPSEC_SEAL_SELFTEST`). Called once at bootstrap, before
+// `removeImportedOps()`, so it never enters the steady-state op surface.
+// Probing here (not a snapshot-baked value) keeps the seal a per-process
+// runtime decision.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md
 #[op2(fast)]
 #[smi]
 #[allow(
   clippy::disallowed_methods,
-  reason = "Phase-0 capsec is armed through env vars by design; this op is the bootstrap-time read of that control surface."
+  reason = "capsec test hooks (seal self-test, lockdown opt-in) are env-driven; arming itself is the structural probe in deno_permissions."
 )]
 pub fn op_oden_capsec_flags() -> u32 {
   let mut flags = 0u32;
-  if std::env::var_os("ODEN_CAPSEC_SPIKE").is_some() {
+  if deno_permissions::oden_capsec_armed() {
     flags |= 1;
   }
   if std::env::var_os("ODEN_CAPSEC_SEAL_SELFTEST").is_some() {

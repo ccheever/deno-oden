@@ -9,9 +9,8 @@
     "forged_token_falls_to_sentinel_with_audit": {
       "args": "run --allow-env app.js",
       "envs": {
-        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_POLICY": "capsec_audit.json",
         "ODEN_CAPSEC_FORGE_CPED": "1",
-        "ODEN_CAPSEC_MODE": "audit",
         "HOME": "/home/x",
         "ROOT_SECRET": "r00t",
         "SECRET": "s3cret"

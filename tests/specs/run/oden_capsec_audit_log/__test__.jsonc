@@ -8,8 +8,7 @@
     {
       "args": "run --allow-env --allow-read app.js",
       "envs": {
-        "ODEN_CAPSEC_SPIKE": "1",
-        "ODEN_CAPSEC_MODE": "audit",
+        "ODEN_CAPSEC_POLICY": "capsec_audit.json",
         "ODEN_CAPSEC_AUDIT": "audit.ndjson",
         "SECRET": "s",
         "OTHER": "o"

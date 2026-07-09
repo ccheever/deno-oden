@@ -109,7 +109,7 @@ fn oden_capsec_decide(
     return Ok(());
   }
   oden_capsec_readiness_gate()?;
-  let policy = oden_capsec_policy_from_env();
+  let policy = oden_capsec_policy();
   // Normalize fs targets to an absolute, lexically-folded path so a relative
   // op (`./data/x`) matches an fs grant scope (also resolved absolute) and a
   // `..` escape resolves out of its granted scope. Non-fs targets pass through.
@@ -219,12 +219,42 @@ fn oden_capsec_decide(
   Ok(())
 }
 
+/// Structural arming (LLP 0001, ENG-23764/23772): the presence of the policy
+/// artifact arms capsec — either an explicit `ODEN_CAPSEC_POLICY` handoff (the
+/// seam the oden CLI uses to pass a merged policy in a temp file) or a
+/// committed `<root>/.oden/policy.json`. There is no boolean arm/disarm switch:
+/// the artifact is the control surface, so an environment cannot arm
+/// enforcement without a policy nor silently disarm one that is present.
+/// Cached once per process — arming is a process-lifetime decision (the CPED
+/// seal and lockdown are bootstrap-time), so a mid-run policy appearance must
+/// not half-arm a running process. Kept in sync with the copy in
+/// `libs/core/error.rs` (deno_core sits below this crate and cannot call it).
+pub fn oden_capsec_armed() -> bool {
+  static ARMED: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(oden_capsec_armed_uncached);
+  *ARMED
+}
+
 #[allow(
   clippy::disallowed_methods,
-  reason = "Phase-0 capsec is armed and configured through env vars by design; this is the spike's control surface, not steady-state config."
+  reason = "structural arming probes the policy artifact (explicit ODEN_CAPSEC_POLICY handoff or <root>/.oden/policy.json); read once and cached."
 )]
+fn oden_capsec_armed_uncached() -> bool {
+  if std::env::var_os("ODEN_CAPSEC_POLICY").is_some_and(|v| !v.is_empty()) {
+    return true;
+  }
+  let root = oden_capsec_project_root();
+  if root.is_empty() {
+    return false;
+  }
+  std::path::Path::new(&root)
+    .join(".oden")
+    .join("policy.json")
+    .exists()
+}
+
 fn oden_capsec_active() -> bool {
-  std::env::var_os("ODEN_CAPSEC_SPIKE").is_some()
+  oden_capsec_armed()
 }
 
 // Always-on seal conformance (LLP 0001 ENG-23775). The bootstrap runs the four
@@ -238,8 +268,7 @@ static ODEN_SEAL_CONFORMANCE_OK: std::sync::atomic::AtomicBool =
 /// verdict. A single failure latches the flag closed for the process.
 pub fn oden_capsec_report_seal(ok: bool) {
   if !ok {
-    ODEN_SEAL_CONFORMANCE_OK
-      .store(false, std::sync::atomic::Ordering::Relaxed);
+    ODEN_SEAL_CONFORMANCE_OK.store(false, std::sync::atomic::Ordering::Relaxed);
   }
 }
 
@@ -331,6 +360,11 @@ impl OdenReadiness {
       degraded
         .push("enforce without lockdown — intrinsics unfrozen (integrity gap)");
     }
+    if oden_policy_unreadable() {
+      degraded.push(
+        "policy artifact present but unreadable — fail-closed enforce with zero grants",
+      );
+    }
     degraded
   }
 
@@ -345,11 +379,19 @@ impl OdenReadiness {
     out.push_str(&format!("  mode: {mode}\n"));
     out.push_str(&format!(
       "  attribution: {}\n",
-      if self.attribution_armed { "armed" } else { "OFF" }
+      if self.attribution_armed {
+        "armed"
+      } else {
+        "OFF"
+      }
     ));
     out.push_str(&format!(
       "  cped-seal: {}\n",
-      if self.seal_applied { "applied" } else { "NOT applied" }
+      if self.seal_applied {
+        "applied"
+      } else {
+        "NOT applied"
+      }
     ));
     out.push_str(&format!(
       "  lockdown: {}\n",
@@ -357,7 +399,7 @@ impl OdenReadiness {
     ));
     out.push_str(&format!(
       "  policy-source: {}\n",
-      self.policy_source.as_deref().unwrap_or("(none — grants from env only)")
+      self.policy_source.as_deref().unwrap_or("(none)")
     ));
     out.push_str(&format!("  root: {}\n", self.project_root));
     for d in self.degraded_states() {
@@ -374,11 +416,14 @@ impl OdenReadiness {
 fn oden_capsec_readiness() -> OdenReadiness {
   let root = oden_capsec_project_root();
   let file = oden_capsec_policy_file();
-  let policy_source = if let Some(p) = std::env::var_os("ODEN_CAPSEC_POLICY") {
+  let policy_source = if let Some(p) =
+    std::env::var_os("ODEN_CAPSEC_POLICY").filter(|v| !v.is_empty())
+  {
     Some(std::path::PathBuf::from(p).to_string_lossy().into_owned())
   } else {
-    let policy_path =
-      std::path::Path::new(&root).join(".oden").join("policy.json");
+    let policy_path = std::path::Path::new(&root)
+      .join(".oden")
+      .join("policy.json");
     if policy_path.exists() {
       Some(policy_path.to_string_lossy().into_owned())
     } else {
@@ -564,7 +609,14 @@ pub fn oden_capsec_own_resource(rid: u32, family: &str) {
   }
   let label = principal.label();
   ODEN_RESOURCE_OWNERS.lock().insert(rid, label.clone());
-  oden_capsec_audit_record(&label, family, "own", &rid.to_string(), "allow(owner)", None);
+  oden_capsec_audit_record(
+    &label,
+    family,
+    "own",
+    &rid.to_string(),
+    "allow(owner)",
+    None,
+  );
 }
 
 /// Check that the acting principal may use `rid`. A cross-principal use of a
@@ -585,7 +637,8 @@ pub fn oden_capsec_check_resource_owner(
   let owner = ODEN_RESOURCE_OWNERS.lock().get(&rid).cloned();
   let mode = oden_capsec_mode(oden_capsec_policy_file().as_ref());
   let decision = oden_resource_use_decision(&label, owner.as_deref(), mode);
-  if matches!(decision, OdenDecision::Allow) && owner.as_deref() == Some(label.as_str())
+  if matches!(decision, OdenDecision::Allow)
+    && owner.as_deref() == Some(label.as_str())
   {
     return Ok(()); // caller owns it; no audit noise
   }
@@ -598,7 +651,14 @@ pub fn oden_capsec_check_resource_owner(
     eprintln!(
       "[oden-capsec] {family}:use rid={rid} caller={label} owner={owner_label} -> {verdict}"
     );
-    oden_capsec_audit_record(&label, family, "use", &rid.to_string(), verdict, None);
+    oden_capsec_audit_record(
+      &label,
+      family,
+      "use",
+      &rid.to_string(),
+      verdict,
+      None,
+    );
   }
   if matches!(decision, OdenDecision::Deny) {
     return Err(PermissionCheckError::PermissionDenied(
@@ -628,7 +688,9 @@ pub fn oden_capsec_transfer_resource(rid: u32, to_selector: &str) {
     .get(&rid)
     .cloned()
     .unwrap_or_else(|| "(untracked)".to_string());
-  ODEN_RESOURCE_OWNERS.lock().insert(rid, to_selector.to_string());
+  ODEN_RESOURCE_OWNERS
+    .lock()
+    .insert(rid, to_selector.to_string());
   oden_capsec_audit_record(
     to_selector,
     "resource",
@@ -772,11 +834,13 @@ struct OdenPolicyFile {
   deputy_classes: Vec<String>,
 }
 
-// The real policy source: `.oden/policy.json` in the project root — the same
-// file the userland layer (LLP 0012) writes, so a grant authored there enforces
+// The policy source: `.oden/policy.json` in the project root — the same file
+// the userland layer (LLP 0012) writes, so a grant authored there enforces
 // unforgeably in the engine without a rewrite. Shape:
 // `{ "mode": "enforce", "grants": { "<pkg>": "fs:read:./x,network:fetch:host" } }`.
-// Env vars (ODEN_CAPSEC_GRANT / _MODE / _ENFORCE) still layer on top.
+// The artifact is the only mode/grant source: with structural arming there are
+// no env-var grant or mode overrides an environment could use to widen or
+// silently downgrade what the artifact says.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md ; llp/0012-userland-capability-layer.plan.md
 #[allow(
   clippy::disallowed_methods,
@@ -788,17 +852,52 @@ fn oden_capsec_policy_file() -> Option<OdenPolicyFile> {
   // deno.json + import-site grants) from a temp file, without writing into the
   // project tree. Shares the env name with the userland layer (LLP 0012). Falls
   // back to <root>/.oden/policy.json, the committed artifact.
-  let path = if let Some(p) = std::env::var_os("ODEN_CAPSEC_POLICY") {
-    std::path::PathBuf::from(p)
-  } else {
-    let root = oden_capsec_project_root();
-    if root.is_empty() {
-      return None;
+  let path = match std::env::var_os("ODEN_CAPSEC_POLICY") {
+    // Same non-empty rule as the arming probe, so the two cannot disagree.
+    Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+    _ => {
+      let root = oden_capsec_project_root();
+      if root.is_empty() {
+        return None;
+      }
+      std::path::Path::new(&root)
+        .join(".oden")
+        .join("policy.json")
     }
-    std::path::Path::new(&root).join(".oden").join("policy.json")
   };
-  let text = std::fs::read_to_string(path).ok()?;
-  serde_json::from_str::<OdenPolicyFile>(&text).ok()
+  // Fail closed on a present-but-unreadable artifact: the process armed on this
+  // policy's existence, so losing or corrupting it mid-run must not downgrade
+  // to audit-with-zero-grants. The latch forces enforce (packages get denied)
+  // and readiness names the state.
+  match std::fs::read_to_string(&path) {
+    Ok(text) => match serde_json::from_str::<OdenPolicyFile>(&text) {
+      Ok(file) => Some(file),
+      Err(_) => {
+        oden_policy_unreadable_latch();
+        None
+      }
+    },
+    Err(_) => {
+      if oden_capsec_armed() {
+        oden_policy_unreadable_latch();
+      }
+      None
+    }
+  }
+}
+
+// Latched when the policy artifact that armed this process cannot be read or
+// parsed. Forces enforce-with-zero-grants (fail closed) rather than the silent
+// audit downgrade a deleted temp file would otherwise buy an attacker.
+static ODEN_POLICY_UNREADABLE: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+fn oden_policy_unreadable_latch() {
+  ODEN_POLICY_UNREADABLE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn oden_policy_unreadable() -> bool {
+  ODEN_POLICY_UNREADABLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 // Resolve fs grant scopes against $HOME/root, mirroring the userland policy
@@ -872,11 +971,10 @@ fn oden_normalize_fs_target(target: &str) -> String {
   pb.to_string_lossy().into_owned()
 }
 
-#[allow(
-  clippy::disallowed_methods,
-  reason = "Phase-0/1 capsec grants may be supplied through an env var layered on the policy file."
-)]
-fn oden_capsec_policy_from_env() -> OdenPolicy {
+// The decision policy, built from the policy artifact alone (the retired
+// ODEN_CAPSEC_GRANT env layering is gone — grants have exactly one authoring
+// surface, so an environment cannot widen a package's authority).
+fn oden_capsec_policy() -> OdenPolicy {
   let file = oden_capsec_policy_file();
   let root = oden_capsec_project_root();
   let mut policy = OdenPolicy::new(oden_capsec_mode(file.as_ref()));
@@ -889,40 +987,14 @@ fn oden_capsec_policy_from_env() -> OdenPolicy {
       }
     }
   }
-  // Env grants layer on top (tests / ad-hoc runs).
-  if let Ok(grants) = std::env::var("ODEN_CAPSEC_GRANT") {
-    let entries = if grants.contains(';') {
-      grants.split(';').collect::<Vec<_>>()
-    } else {
-      grants.split(',').collect::<Vec<_>>()
-    };
-    for entry in entries {
-      let Some((selector, grant_str)) = entry.split_once('=') else {
-        continue;
-      };
-      let selector = selector.trim();
-      if selector.is_empty() {
-        continue;
-      }
-      let grant_str = grant_str.trim();
-      let grant_str = if grant_str.contains(':') {
-        Cow::Borrowed(grant_str)
-      } else {
-        Cow::Owned(format!("env:read:{grant_str}"))
-      };
-      policy.grant(selector, &grant_str);
-    }
-  }
   policy
 }
 
-// Mode precedence: env override (ODEN_CAPSEC_MODE / _ENFORCE) > policy-file mode
-// > default (audit). A typo in an env or file mode is ignored rather than
-// silently downgrading enforcement.
-#[allow(
-  clippy::disallowed_methods,
-  reason = "Phase-0/1 capsec mode may be overridden through env vars; the spike's control surface."
-)]
+// Mode comes from the policy artifact: file mode > default (audit). A typo in
+// the file mode is ignored rather than silently downgrading enforcement, and a
+// present-but-unreadable artifact forces enforce (fail closed). The retired
+// ODEN_CAPSEC_MODE/_ENFORCE env overrides are gone: with structural arming the
+// mode name is the artifact's guarantee, and no environment may downgrade it.
 fn oden_capsec_mode(file: Option<&OdenPolicyFile>) -> OdenMode {
   fn parse_mode(s: &str) -> Option<OdenMode> {
     match s {
@@ -932,12 +1004,7 @@ fn oden_capsec_mode(file: Option<&OdenPolicyFile>) -> OdenMode {
       _ => None,
     }
   }
-  if let Ok(mode) = std::env::var("ODEN_CAPSEC_MODE")
-    && let Some(m) = parse_mode(&mode)
-  {
-    return m;
-  }
-  if std::env::var_os("ODEN_CAPSEC_ENFORCE").is_some() {
+  if oden_policy_unreadable() {
     return OdenMode::Enforce;
   }
   if let Some(m) = file.and_then(|f| f.mode.as_deref()).and_then(parse_mode) {

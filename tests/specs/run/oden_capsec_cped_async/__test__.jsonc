@@ -7,8 +7,7 @@
     "cped_async_attribution": {
       "args": "run --allow-env app.js",
       "envs": {
-        "ODEN_CAPSEC_SPIKE": "1",
-        "ODEN_CAPSEC_MODE": "audit",
+        "ODEN_CAPSEC_POLICY": "capsec_audit.json",
         "HOME": "/home/x",
         "ROOT_SECRET": "r00t",
         "SECRET": "s3cret"

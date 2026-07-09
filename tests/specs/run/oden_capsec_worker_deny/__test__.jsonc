@@ -6,7 +6,7 @@
   "tests": {
     "armed_enforce_denies_package_worker": {
       "args": "run --allow-env --allow-read app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_ENFORCE": "1" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json" },
       "output": "armed.out",
       "exitCode": 0
     },

@@ -57,13 +57,17 @@ function loadCorpus(path: string): Corpus {
 
 function runEntry(root: string, entry: Entry): AuditRecord[] {
   const auditFile = Deno.makeTempFileSync({ suffix: ".ndjson" });
+  // Structural arming: the policy artifact arms the child, handed off via
+  // ODEN_CAPSEC_POLICY (audit mode, zero grants) without touching the corpus
+  // entry's own tree.
+  const policyFile = Deno.makeTempFileSync({ suffix: ".json" });
+  Deno.writeTextFileSync(policyFile, JSON.stringify({ mode: "audit" }));
   try {
     const cmd = new Deno.Command(Deno.execPath(), {
       args: ["run", "--allow-all", entry.entry, ...(entry.args ?? [])],
       cwd: root,
       env: {
-        ODEN_CAPSEC_SPIKE: "1",
-        ODEN_CAPSEC_MODE: "audit",
+        ODEN_CAPSEC_POLICY: policyFile,
         ODEN_CAPSEC_AUDIT: auditFile,
       },
       stdout: "null",
@@ -84,6 +88,7 @@ function runEntry(root: string, entry: Entry): AuditRecord[] {
   } finally {
     try {
       Deno.removeSync(auditFile);
+      Deno.removeSync(policyFile);
     } catch { /* ignore */ }
   }
 }

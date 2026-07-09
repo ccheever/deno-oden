@@ -1,0 +1,1 @@
+{"mode": "audit", "grants": {"trusted-pkg": "env:read:SECRET"}}

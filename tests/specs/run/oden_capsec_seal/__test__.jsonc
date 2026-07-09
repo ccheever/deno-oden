@@ -5,7 +5,7 @@
     "armed_with_selftest": {
       "args": "run main.mjs",
       "envs": {
-        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_POLICY": "capsec_audit.json",
         "ODEN_CAPSEC_SEAL_SELFTEST": "1"
       },
       "output": "armed.out",
@@ -14,7 +14,7 @@
     // Armed without the self-test flag: the seal still applies.
     "armed_no_selftest": {
       "args": "run main.mjs",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_audit.json" },
       "output": "armed_no_selftest.out",
       "exitCode": 0
     },

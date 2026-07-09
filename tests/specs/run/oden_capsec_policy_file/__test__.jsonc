@@ -6,7 +6,7 @@
   "tests": {
     "policy_file_drives_enforce": {
       "args": "run --allow-env --allow-read app.js",
-      "envs": { "ODEN_CAPSEC_SPIKE": "1", "SECRET": "s3cret", "OTHER": "nope" },
+      "envs": { "SECRET": "s3cret", "OTHER": "nope" },
       "output": "policy.out",
       "exitCode": 0
     }
