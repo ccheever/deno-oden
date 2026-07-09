@@ -1,0 +1,27 @@
+{
+  // Minimal lockdown (ENG-23773): the freeze walk makes the primordial
+  // intrinsics non-writable, so a dependency cannot repair its authority by
+  // patching Array.prototype.push or polluting Object.prototype. Opt-in via
+  // ODEN_CAPSEC_LOCKDOWN: "enforce implies lockdown" is softened to opt-in
+  // (LLP 0001 kill criterion) until the ext/node lazy-write compat repairs land,
+  // so plain enforce leaves intrinsics patchable and names the degraded state.
+  "tests": {
+    "lockdown_freezes_intrinsics": {
+      "args": "run --allow-all app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_LOCKDOWN": "1" },
+      "output": "locked.out",
+      "exitCode": 0
+    },
+    "baseline_intrinsics_patchable": {
+      "args": "run --allow-all app.js",
+      "output": "unlocked.out",
+      "exitCode": 0
+    },
+    "enforce_without_lockdown_is_opt_in": {
+      "args": "run --allow-all app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce", "ODEN_CAPSEC_ALLOW_ADVISORY": "1" },
+      "output": "unlocked.out",
+      "exitCode": 0
+    }
+  }
+}

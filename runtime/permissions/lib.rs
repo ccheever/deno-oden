@@ -329,9 +329,7 @@ fn oden_capsec_readiness() -> OdenReadiness {
       && !oden_capsec_env_flag("ODEN_CAPSEC_FORCE_UNARMED"),
     seal_applied: oden_capsec_active()
       && !oden_capsec_env_flag("ODEN_CAPSEC_FORCE_UNSEALED"),
-    // Minimal lockdown (freeze walk + evaluator taming) is a separate Phase-2
-    // deliverable; until it lands this is honestly off.
-    lockdown_on: false,
+    lockdown_on: oden_capsec_active() && oden_capsec_lockdown_on(),
     policy_source,
     project_root: root,
   }
@@ -343,6 +341,17 @@ fn oden_capsec_readiness() -> OdenReadiness {
 )]
 fn oden_capsec_env_flag(name: &str) -> bool {
   std::env::var_os(name).is_some()
+}
+
+// Whether minimal lockdown (the intrinsic freeze walk) is active — the same
+// decision `op_oden_capsec_flags` compiles for the bootstrap JS. Opt-in via
+// ODEN_CAPSEC_LOCKDOWN: "enforce implies lockdown" is softened to opt-in
+// (LLP 0001 kill criterion) until the ext/node lazy-write compat repairs land,
+// so under enforce without it the readiness report names "enforce without
+// lockdown" as a degraded state. Kept in sync with `runtime/ops/bootstrap.rs`.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+fn oden_capsec_lockdown_on() -> bool {
+  oden_capsec_env_flag("ODEN_CAPSEC_LOCKDOWN")
 }
 
 // Emit the readiness report once, and enforce fail-closed honesty. Returns Err
