@@ -1,0 +1,21 @@
+{
+  // Precedence row 2 (LLP 0001 async attribution): a detached, frame-less
+  // callback is attributed to the package that scheduled it, via the CPED slot.
+  // Audit mode records + allows (exit 0); the bound-native callback cannot be
+  // wrapped without adding a user frame, so enforce would throw unhandled.
+  "tests": {
+    "cped_async_attribution": {
+      "args": "run --allow-env app.js",
+      "envs": {
+        "DENO_TRACE_PERMISSIONS": "1",
+        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_MODE": "audit",
+        "HOME": "/home/x",
+        "ROOT_SECRET": "r00t",
+        "SECRET": "s3cret"
+      },
+      "output": "cped_async.out",
+      "exitCode": 0
+    }
+  }
+}

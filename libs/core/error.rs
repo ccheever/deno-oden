@@ -661,6 +661,114 @@ pub fn capture_op_stack_frames(
     .collect()
 }
 
+// --- Oden CPED async-attribution slot (LLP 0001) ---------------------------
+// The scheduling principal rides V8's continuation-preserved-embedder-data,
+// which the engine already propagates across promises, timers, and event-loop
+// ticks. Oden stores the acting package's locator under a dedicated slot keyed
+// by a `Symbol::for_api` symbol: that registry is unreachable from JS (distinct
+// from `Symbol.for`), so user code cannot forge or address the slot, yet it is
+// an ordinary Symbol that object spread copies — so a user `AsyncLocalStorage`
+// scope preserves it (the seal PoC's foreign-key-preserving condition). At op
+// dispatch, a live user frame stamps the slot; a detached callback with no user
+// frame reads it back (precedence row 2). Inert unless `ODEN_CAPSEC_SPIKE`.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+fn oden_capsec_armed() -> bool {
+  static ARMED: LazyLock<bool> = LazyLock::new(oden_capsec_armed_uncached);
+  *ARMED
+}
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-0 capsec is armed through an env var by design; read once and cached."
+)]
+fn oden_capsec_armed_uncached() -> bool {
+  std::env::var_os("ODEN_CAPSEC_SPIKE").is_some()
+}
+
+fn oden_cped_slot_symbol<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+) -> Option<v8::Local<'s, v8::Symbol>> {
+  let desc = v8::String::new(scope, "oden.principal.slot")?;
+  Some(v8::Symbol::for_api(scope, desc))
+}
+
+fn oden_read_cped_slot(scope: &mut v8::PinScope) -> Option<String> {
+  let cped = scope.get_continuation_preserved_embedder_data();
+  let obj = v8::Local::<v8::Object>::try_from(cped).ok()?;
+  let sym = oden_cped_slot_symbol(scope)?;
+  let val = obj.get(scope, sym.into())?;
+  if val.is_string() {
+    Some(val.to_rust_string_lossy(scope))
+  } else {
+    None
+  }
+}
+
+fn oden_write_cped_slot(scope: &mut v8::PinScope, locator: &str) {
+  let Some(sym) = oden_cped_slot_symbol(scope) else {
+    return;
+  };
+  let Some(value) = v8::String::new(scope, locator) else {
+    return;
+  };
+  let cped = scope.get_continuation_preserved_embedder_data();
+  // A fresh object (never a mutation of the current one) so that a continuation
+  // that already captured the old value keeps seeing its own principal. Copy the
+  // existing own keys forward so a coexisting AsyncLocalStorage keeps its slots.
+  let new_obj = v8::Object::new(scope);
+  if let Ok(old) = v8::Local::<v8::Object>::try_from(cped) {
+    let args = v8::GetPropertyNamesArgsBuilder::new()
+      .mode(v8::KeyCollectionMode::OwnOnly)
+      .property_filter(v8::PropertyFilter::ALL_PROPERTIES)
+      .index_filter(v8::IndexFilter::IncludeIndices)
+      .key_conversion(v8::KeyConversionMode::KeepNumbers)
+      .build();
+    if let Some(names) = old.get_own_property_names(scope, args) {
+      for i in 0..names.length() {
+        if let Some(key) = names.get_index(scope, i)
+          && let Some(val) = old.get(scope, key)
+        {
+          new_obj.set(scope, key, val);
+        }
+      }
+    }
+  }
+  new_obj.set(scope, sym.into(), value.into());
+  scope.set_continuation_preserved_embedder_data(new_obj.into());
+}
+
+/// At op dispatch: if a live user frame is present, stamp its locator into the
+/// CPED slot so continuations it schedules inherit it, and return `None` (the
+/// permission layer resolves the principal from the frame itself, precedence
+/// row 1). If no user frame is present, return the locator carried in the CPED
+/// slot (precedence row 2 — the detached-callback case). `None` in both the
+/// disarmed case and when no scheduling principal is recorded (row 4 fails
+/// closed downstream).
+pub fn oden_capture_stamp_and_read(
+  scope: &mut v8::PinScope,
+  frames: &[JsStackFrame],
+) -> Option<String> {
+  if !oden_capsec_armed() {
+    return None;
+  }
+  let nearest_user =
+    frames
+      .iter()
+      .find_map(|f| match (f.isolate_id, f.script_id) {
+        (Some(iso), Some(sid)) => oden_script_locator(iso, sid),
+        _ => None,
+      });
+  match nearest_user {
+    Some(locator) => {
+      if oden_read_cped_slot(scope).as_deref() != Some(locator.as_str()) {
+        oden_write_cped_slot(scope, &locator);
+      }
+      None
+    }
+    None => oden_read_cped_slot(scope),
+  }
+}
+
 /// Applies source map to the given location
 fn apply_source_map<'a>(
   source_mapper: &mut crate::source_map::SourceMapper,

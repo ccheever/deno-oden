@@ -60,12 +60,27 @@ pub(crate) static MAYBE_CURRENT_ODEN_STACKTRACE: Lazy<
   Mutex<Option<GetOdenStackFn>>,
 > = Lazy::new(|| Mutex::new(None));
 
+// Oden CPED scheduling-principal locator captured at the most recent op
+// dispatch that had no live user frame (precedence row 2). Stored as the
+// already-resolved value, not a closure, since it is computed at dispatch.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+pub(crate) static MAYBE_CURRENT_ODEN_CPED_LOCATOR: Lazy<Mutex<Option<String>>> =
+  Lazy::new(|| Mutex::new(None));
+
 pub fn set_current_stacktrace(get_stack: GetFormattedStackFn) {
   *MAYBE_CURRENT_STACKTRACE.lock() = Some(get_stack);
 }
 
 pub fn set_current_oden_stacktrace(get_stack: GetOdenStackFn) {
   *MAYBE_CURRENT_ODEN_STACKTRACE.lock() = Some(get_stack);
+}
+
+pub fn set_current_oden_cped_locator(locator: Option<String>) {
+  *MAYBE_CURRENT_ODEN_CPED_LOCATOR.lock() = locator;
+}
+
+pub(crate) fn current_oden_cped_locator() -> Option<String> {
+  MAYBE_CURRENT_ODEN_CPED_LOCATOR.lock().clone()
 }
 
 pub fn permission_prompt(
