@@ -48,6 +48,16 @@ if ! "$DENO" run --allow-read tools/oden/script_creation_manifest.ts --check; th
   fail=1
 fi
 
+echo "== resource-family classification =="
+if ! "$DENO" run --allow-read tools/oden/resource_families.ts --check; then
+  fail=1
+fi
+
+echo "== red-team soundness gate (Phase-2 exit gate) =="
+if ! "$DENO" run --allow-read tools/oden/redteam.ts --check; then
+  fail=1
+fi
+
 echo "== PATCHES.md pin =="
 if [ -f ../PATCHES.md ] && grep -q "Pin:" ../PATCHES.md; then
   grep "Pin:" ../PATCHES.md | head -1
