@@ -36,6 +36,16 @@ pub fn has_trace_permissions_enabled(sys: &impl EnvVar) -> bool {
   has_flag_env_var(sys, "DENO_TRACE_PERMISSIONS")
 }
 
+/// Op-dispatch frame capture (the `enable_stack_trace_arg_in_ops` path) is
+/// enabled by the `DENO_TRACE_PERMISSIONS` debug flag OR when Oden capsec is
+/// armed — capsec keys per-package attribution on those frames, so it must arm
+/// the capture itself rather than piggyback on a debug flag.
+/// @ref llp/0001-adding-capability-security-to-deno.plan.md
+pub fn oden_stack_capture_enabled(sys: &impl EnvVar) -> bool {
+  has_trace_permissions_enabled(sys)
+    || sys.env_var_os("ODEN_CAPSEC_SPIKE").is_some()
+}
+
 pub fn has_flag_env_var(sys: &impl EnvVar, name: &str) -> bool {
   match sys.env_var_os(name) {
     Some(value) => value == "1",
