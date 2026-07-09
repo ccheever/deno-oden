@@ -1,0 +1,16 @@
+{
+  // CJS root grant surface (LLP 0001 OQ9): a first-party CJS entry (app.cjs)
+  // cannot write import attributes, so its grants live in the root-level
+  // .oden/policy.json overlay. Here a CJS root requires a CJS dependency under
+  // enforce; the overlay grants cjs-dep env:read:ALLOWED only, so the granted
+  // read passes and the ungranted SECRET read denies — identical to the ESM
+  // enforcement path. Proves grants authored in CJS enforce like ESM.
+  "tests": {
+    "cjs_root_grants_cjs_dep_via_overlay": {
+      "args": "run --allow-env --allow-read app.cjs",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ALLOWED": "ok", "SECRET": "xyz" },
+      "output": "cjs.out",
+      "exitCode": 0
+    }
+  }
+}
