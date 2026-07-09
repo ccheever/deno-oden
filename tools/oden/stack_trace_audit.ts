@@ -35,9 +35,6 @@ const EXEMPT: Record<string, string> = {
   // Permission *introspection* ops: they read permission state (query/request
   // /revoke) rather than exercising a capability; attribution of the caller
   // is not load-bearing for soundness (the userland layer mediates prompts).
-  "op_query_permission": "permission introspection, not a capability exercise",
-  "op_request_permission": "permission introspection, not a capability exercise",
-  "op_revoke_permission": "permission introspection, not a capability exercise",
 };
 
 async function* rsFiles(dir: string): AsyncGenerator<string> {

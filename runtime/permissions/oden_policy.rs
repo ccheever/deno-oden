@@ -2,6 +2,11 @@
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use super::oden_dynamic::EscalationCeiling;
+use super::oden_dynamic::SessionOverlay;
 
 // Fork-local mirror of the parent workspace's crates/oden_policy model. The
 // fork must remain buildable without a path dependency back to the parent repo.
@@ -13,16 +18,18 @@ pub enum Family {
   Env,
   Run,
   Ffi,
+  Sys,
 }
 
 impl Family {
   fn parse(s: &str) -> Option<Family> {
-    match s {
-      "fs" | "read" | "write" => Some(Family::Fs),
+    match s.to_lowercase().as_str() {
+      "fs" | "file" | "read" | "write" => Some(Family::Fs),
       "network" | "net" | "fetch" => Some(Family::Network),
       "env" => Some(Family::Env),
       "run" | "spawn" => Some(Family::Run),
       "ffi" | "napi" => Some(Family::Ffi),
+      "sys" | "os" => Some(Family::Sys),
       _ => None,
     }
   }
@@ -34,11 +41,12 @@ impl Family {
       Family::Env => "env",
       Family::Run => "run",
       Family::Ffi => "ffi",
+      Family::Sys => "sys",
     }
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Grant {
   pub family: Family,
   pub action: String,
@@ -190,6 +198,24 @@ impl Grant {
         })
       }
       Family::Env => {
+        let mid = parts.get(1).copied().unwrap_or("").to_lowercase();
+        let action = if parts.len() >= 3 && (mid == "write" || mid == "*") {
+          mid
+        } else {
+          "read".to_string()
+        };
+        let scope = if parts.len() >= 3 {
+          parts[2..].join(":")
+        } else {
+          parts.get(1).copied().unwrap_or("").to_string()
+        };
+        Some(Grant {
+          family,
+          action,
+          scope,
+        })
+      }
+      Family::Sys => {
         let scope = if parts.len() >= 3 {
           parts[2..].join(":")
         } else {
@@ -220,6 +246,94 @@ impl Grant {
   pub fn parse_many(s: &str) -> Vec<Grant> {
     s.split(',').filter_map(Grant::parse).collect()
   }
+
+  pub fn valid_dynamic_authority(s: &str) -> bool {
+    s.split(',')
+      .map(str::trim)
+      .filter(|token| !token.is_empty())
+      .all(valid_dynamic_authority_token)
+  }
+
+  pub fn to_string_canonical(&self) -> String {
+    match self.family {
+      Family::Ffi => "ffi".into(),
+      Family::Run => {
+        if self.scope.is_empty() {
+          "run".into()
+        } else {
+          format!("run:{}", self.scope)
+        }
+      }
+      Family::Env => format!("env:{}:{}", self.action, self.scope),
+      Family::Sys => format!("sys:read:{}", self.scope),
+      Family::Fs => format!("fs:{}:{}", self.action, self.scope),
+      Family::Network => {
+        format!("network:{}:{}", self.action, self.scope)
+      }
+    }
+  }
+
+  /// Exact session-grant width for dynamic permissions.
+  /// @ref llp/0015-dynamic-permissions-with-ceiling.plan.md (Request state machine)
+  pub fn from_request(req: &Request) -> Grant {
+    Grant {
+      family: req.family,
+      action: req.action.clone(),
+      scope: req.target.clone(),
+    }
+  }
+}
+
+fn valid_dynamic_authority_token(token: &str) -> bool {
+  let parts = token.split(':').collect::<Vec<_>>();
+  let Some(family) = parts.first().and_then(|value| Family::parse(value))
+  else {
+    return false;
+  };
+  match family {
+    Family::Ffi => parts.len() == 1,
+    Family::Run => match parts.as_slice() {
+      [_] => true,
+      [_, scope] => !scope.is_empty(),
+      [_, action, scope @ ..] => {
+        action.eq_ignore_ascii_case("run")
+          && !scope.is_empty()
+          && scope.iter().any(|part| !part.is_empty())
+      }
+      [] => false,
+    },
+    Family::Env => match parts.as_slice() {
+      [_, scope] => !scope.is_empty(),
+      [_, action, scope @ ..] => {
+        matches!(action.to_lowercase().as_str(), "read" | "write" | "*")
+          && !scope.is_empty()
+          && scope.iter().any(|part| !part.is_empty())
+      }
+      _ => false,
+    },
+    Family::Sys => match parts.as_slice() {
+      [_, scope] => !scope.is_empty(),
+      [_, action, scope @ ..] => {
+        action.eq_ignore_ascii_case("read")
+          && !scope.is_empty()
+          && scope.iter().any(|part| !part.is_empty())
+      }
+      _ => false,
+    },
+    Family::Fs => {
+      parts.len() >= 3
+        && matches!(parts[1].to_lowercase().as_str(), "read" | "write" | "*")
+        && parts[2..].iter().any(|part| !part.is_empty())
+    }
+    Family::Network => {
+      parts.len() >= 3
+        && matches!(
+          parts[1].to_lowercase().as_str(),
+          "fetch" | "connect" | "listen" | "*"
+        )
+        && parts[2..].iter().any(|part| !part.is_empty())
+    }
+  }
 }
 
 pub fn covers(grants: &[Grant], req: &Request) -> bool {
@@ -232,17 +346,55 @@ fn covers_one(g: &Grant, req: &Request) -> bool {
   }
   match g.family {
     Family::Fs => {
+      if g.scope.is_empty() {
+        return false;
+      }
       (g.action == req.action || g.action == "*")
         && (g.scope == "*" || path_under(&req.target, &g.scope))
     }
-    Family::Network => host_covered(&g.scope, &host_of(&req.target)),
-    Family::Env => g.scope == "*" || g.scope == req.target,
-    Family::Run => g.scope == req.target || g.scope == basename(&req.target),
+    Family::Network => {
+      (g.action == req.action || g.action == "*")
+        && host_covered(&g.scope, &host_of(&req.target))
+    }
+    Family::Env => {
+      (g.action == req.action || g.action == "*")
+        && (g.scope == "*" || g.scope == req.target)
+    }
+    Family::Run => {
+      g.scope == "*"
+        || g.scope == req.target
+        || g.scope == basename(&req.target)
+    }
     Family::Ffi => true,
+    Family::Sys => g.scope == "*" || g.scope == req.target,
   }
 }
 
+pub fn grants_intersect(a: &Grant, b: &Grant) -> bool {
+  covers_one(
+    a,
+    &Request {
+      family: b.family,
+      action: b.action.clone(),
+      target: b.scope.clone(),
+    },
+  ) || covers_one(
+    b,
+    &Request {
+      family: a.family,
+      action: a.action.clone(),
+      target: a.scope.clone(),
+    },
+  )
+}
+
 pub fn path_under(child: &str, parent: &str) -> bool {
+  if parent.is_empty() {
+    return false;
+  }
+  if parent == "/" {
+    return child.starts_with('/');
+  }
   if child == parent {
     return true;
   }
@@ -255,6 +407,8 @@ pub fn path_under(child: &str, parent: &str) -> bool {
 }
 
 fn host_covered(grant_host: &str, host: &str) -> bool {
+  let grant_host = grant_host.to_lowercase();
+  let host = host.to_lowercase();
   grant_host == "*"
     || host == grant_host
     || host.ends_with(&format!(".{grant_host}"))
@@ -431,6 +585,9 @@ pub enum Mode {
 pub struct Policy {
   pub mode: Mode,
   pub packages: HashMap<String, Vec<Grant>>,
+  pub ceilings: HashMap<String, EscalationCeiling>,
+  pub deny_ceiling: Vec<Grant>,
+  pub(super) session: Arc<Mutex<SessionOverlay>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,6 +602,9 @@ impl Policy {
     Policy {
       mode,
       packages: HashMap::new(),
+      ceilings: HashMap::new(),
+      deny_ceiling: Vec::new(),
+      session: Arc::new(Mutex::new(SessionOverlay::default())),
     }
   }
 
@@ -464,11 +624,19 @@ impl Policy {
     if principal.is_ambient() {
       return true;
     }
-    principal
-      .selector()
-      .and_then(|s| self.packages.get(&s))
+    let Some(selector) = principal.selector() else {
+      return false;
+    };
+    let floor = self
+      .packages
+      .get(&selector)
       .map(|g| covers(g, req))
-      .unwrap_or(false)
+      .unwrap_or(false);
+    self
+      .session
+      .lock()
+      .unwrap()
+      .effective(&selector, req, floor)
   }
 
   /// Pure `endow(principal, policy)` derivation used by the bootstrap-captured
@@ -636,6 +804,16 @@ mod tests {
       ALWAYS_ENDOWED_GLOBALS.len()
     );
     assert!(policy.endowments(&Principal::Root).contains("fetch"));
+  }
+
+  #[test]
+  fn dynamic_authority_vocabulary_is_strict() {
+    assert!(Grant::valid_dynamic_authority(
+      "fs:read:./cache,network:connect:example.com,env:*:TOKEN,run:git,sys:read:hostname,ffi"
+    ));
+    assert!(!Grant::valid_dynamic_authority("telepathy:read:thoughts"));
+    assert!(!Grant::valid_dynamic_authority("env:execute:PATH"));
+    assert!(!Grant::valid_dynamic_authority("network:connect:"));
   }
 
   // --- Stack-intersection / deputyClasses (precedence row 3) ----------------

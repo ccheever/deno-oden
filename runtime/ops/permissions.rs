@@ -66,13 +66,11 @@ pub enum PermissionError {
   RunDescriptorParse(#[from] ::deno_permissions::RunDescriptorParseError),
 }
 
-#[op2]
-pub fn op_query_permission(
-  state: &mut OpState,
-  #[scoped] args: PermissionArgs,
-) -> Result<PermissionStatus, PermissionError> {
-  let permissions = state.borrow::<PermissionsContainer>();
-  let perm = match args.name.as_ref() {
+fn query_permission(
+  permissions: &PermissionsContainer,
+  args: &PermissionArgs,
+) -> Result<PermissionState, PermissionError> {
+  Ok(match args.name.as_ref() {
     "read" => permissions.query_read(args.path.as_deref())?,
     "write" => permissions.query_write(args.path.as_deref())?,
     "net" => permissions.query_net(args.host.as_deref())?,
@@ -81,17 +79,53 @@ pub fn op_query_permission(
     "run" => permissions.query_run(args.command.as_deref())?,
     "ffi" => permissions.query_ffi(args.path.as_deref())?,
     "import" => permissions.query_import(args.host.as_deref())?,
-    _ => return Err(PermissionError::InvalidPermissionName(args.name)),
-  };
+    _ => return Err(PermissionError::InvalidPermissionName(args.name.clone())),
+  })
+}
+
+fn dynamic_descriptor(
+  args: &PermissionArgs,
+) -> ::deno_permissions::OdenDynamicPermissionDescriptor<'_> {
+  ::deno_permissions::OdenDynamicPermissionDescriptor {
+    name: &args.name,
+    path: args.path.as_deref(),
+    host: args.host.as_deref(),
+    variable: args.variable.as_deref(),
+    kind: args.kind.as_deref(),
+    command: args.command.as_deref(),
+  }
+}
+
+#[op2(stack_trace)]
+pub fn op_query_permission(
+  state: &mut OpState,
+  #[scoped] args: PermissionArgs,
+) -> Result<PermissionStatus, PermissionError> {
+  let permissions = state.borrow::<PermissionsContainer>();
+  // Validate through the stock descriptor parser first. Layer 2 then
+  // overrides the status for a package principal without mutating layer 1.
+  let stock = query_permission(permissions, &args)?;
+  let perm = ::deno_permissions::oden_capsec_query_dynamic_permission(
+    &dynamic_descriptor(&args),
+  )
+  .unwrap_or(stock);
   Ok(PermissionStatus::from(perm))
 }
 
-#[op2]
+#[op2(stack_trace)]
 pub fn op_revoke_permission(
   state: &mut OpState,
   #[scoped] args: PermissionArgs,
 ) -> Result<PermissionStatus, PermissionError> {
   let permissions = state.borrow::<PermissionsContainer>();
+  // Validation only; package revoke is a session overlay and must not narrow
+  // the process-global permission object for every other principal.
+  let _ = query_permission(permissions, &args)?;
+  if let Some(perm) = ::deno_permissions::oden_capsec_revoke_dynamic_permission(
+    &dynamic_descriptor(&args),
+  ) {
+    return Ok(PermissionStatus::from(perm));
+  }
   let perm = match args.name.as_ref() {
     "read" => permissions.revoke_read(args.path.as_deref())?,
     "write" => permissions.revoke_write(args.path.as_deref())?,
@@ -112,6 +146,15 @@ pub fn op_request_permission(
   #[scoped] args: PermissionArgs,
 ) -> Result<PermissionStatus, PermissionError> {
   let permissions = state.borrow::<PermissionsContainer>();
+  // Validation only. A package request is decided against its immutable
+  // escalation ceiling and can update only its layer-2 session overlay; it
+  // never reaches stock request()/the process prompt.
+  let _ = query_permission(permissions, &args)?;
+  if let Some(perm) = ::deno_permissions::oden_capsec_request_dynamic_permission(
+    &dynamic_descriptor(&args),
+  ) {
+    return Ok(PermissionStatus::from(perm));
+  }
   let perm = match args.name.as_ref() {
     "read" => permissions.request_read(args.path.as_deref())?,
     "write" => permissions.request_write(args.path.as_deref())?,

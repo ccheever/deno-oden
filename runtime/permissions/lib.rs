@@ -35,6 +35,7 @@ use url::Url;
 
 pub mod broker;
 mod ipc_pipe;
+mod oden_dynamic;
 mod oden_handle;
 mod oden_policy;
 mod oden_principal_index;
@@ -48,6 +49,14 @@ use prompter::PERMISSION_EMOJI;
 use prompter::permission_prompt;
 pub use runtime_descriptor_parser::RuntimePermissionDescriptorParser;
 
+use self::oden_dynamic::DynamicDecider as OdenDynamicDecider;
+use self::oden_dynamic::DynamicPermissionState as OdenDynamicPermissionState;
+use self::oden_dynamic::DynamicQueryState as OdenDynamicQueryState;
+use self::oden_dynamic::DynamicRequestCode as OdenDynamicRequestCode;
+use self::oden_dynamic::DynamicRequestEvaluation as OdenDynamicRequestEvaluation;
+use self::oden_dynamic::DynamicRequestResult as OdenDynamicRequestResult;
+use self::oden_dynamic::OnRequest as OdenOnRequest;
+use self::oden_dynamic::PolicyValidationIssue as OdenPolicyValidationIssue;
 use self::oden_handle::HandleLookup as OdenHandleLookup;
 use self::oden_policy::Decision as OdenDecision;
 use self::oden_policy::Family as OdenFamily;
@@ -66,6 +75,7 @@ pub enum BrokerResponse {
 }
 
 use self::broker::has_broker;
+use self::broker::maybe_check_dynamic_with_broker;
 use self::broker::maybe_check_with_broker;
 
 pub type OtelAuditFn =
@@ -336,6 +346,220 @@ pub(crate) fn oden_capsec_current_principal_label() -> Option<String> {
   Some(oden_capsec_principal().label())
 }
 
+/// The already-validated fields of a `Deno.PermissionDescriptor`. Runtime ops
+/// validate with the stock query parser first, then hand this borrowed view to
+/// layer 2. Package calls never mutate layer-1 state; ambient calls fall
+/// through to stock Deno unchanged.
+/// @ref llp/0015-dynamic-permissions-with-ceiling.plan.md (Deno.permissions.request)
+pub struct OdenDynamicPermissionDescriptor<'a> {
+  pub name: &'a str,
+  pub path: Option<&'a str>,
+  pub host: Option<&'a str>,
+  pub variable: Option<&'a str>,
+  pub kind: Option<&'a str>,
+  pub command: Option<&'a str>,
+}
+
+pub fn oden_capsec_query_dynamic_permission(
+  desc: &OdenDynamicPermissionDescriptor,
+) -> Option<PermissionState> {
+  if !oden_capsec_active() {
+    return None;
+  }
+  let principal = oden_capsec_principal();
+  if principal.is_ambient() {
+    return None;
+  }
+  let req = oden_dynamic_request(desc);
+  let query = if oden_policy_invalid() {
+    OdenDynamicQueryState::Denied
+  } else {
+    oden_capsec_policy().query_dynamic(&principal, req.as_ref())
+  };
+  let state = match query {
+    OdenDynamicQueryState::Ambient => return None,
+    OdenDynamicQueryState::Granted => PermissionState::Granted,
+    OdenDynamicQueryState::Prompt => PermissionState::Prompt,
+    OdenDynamicQueryState::Denied => PermissionState::Denied,
+  };
+  oden_capsec_dynamic_query_audit_record(
+    "query",
+    &principal,
+    req.as_ref(),
+    state,
+  );
+  Some(state)
+}
+
+pub fn oden_capsec_request_dynamic_permission(
+  desc: &OdenDynamicPermissionDescriptor,
+) -> Option<PermissionState> {
+  if !oden_capsec_active() {
+    return None;
+  }
+  let principal = oden_capsec_principal();
+  if principal.is_ambient() {
+    return None;
+  }
+  let req = oden_dynamic_request(desc);
+  let policy = oden_capsec_policy();
+  let result = if oden_policy_invalid() {
+    OdenDynamicRequestResult {
+      state: OdenDynamicPermissionState::Denied,
+      code: OdenDynamicRequestCode::Ambiguous,
+      decider: None,
+      session_grant: None,
+      ceiling: None,
+      memoized: false,
+    }
+  } else {
+    match policy.evaluate_dynamic_request(&principal, req.as_ref()) {
+      OdenDynamicRequestEvaluation::Ambient => return None,
+      OdenDynamicRequestEvaluation::Terminal(result) => result,
+      OdenDynamicRequestEvaluation::NeedsDecision { ceiling } => {
+        let req = req
+          .as_ref()
+          .expect("a decider is requested only for a canonical request");
+        let capability = OdenGrant::from_request(req).to_string_canonical();
+        let ceiling_label = ceiling.to_string_canonical();
+        let principal_label = principal.label();
+        if let Some(response) = maybe_check_dynamic_with_broker(
+          desc.name,
+          &req.target,
+          &principal_label,
+          &capability,
+          &ceiling_label,
+        ) {
+          policy.complete_dynamic_request(
+            &principal,
+            req,
+            ceiling,
+            OdenDynamicDecider::Broker,
+            matches!(response, BrokerResponse::Allow),
+          )
+        } else if prompter::permission_prompt_available() {
+          let message = format!(
+            "package {principal_label} requests {capability} within its declared escalation ceiling {ceiling_label} for this run"
+          );
+          let allowed = matches!(
+            permission_prompt(
+              &message,
+              "capsec",
+              Some("Deno.permissions.request"),
+              false,
+            ),
+            PromptResponse::Allow | PromptResponse::AllowAll
+          );
+          policy.complete_dynamic_request(
+            &principal,
+            req,
+            ceiling,
+            OdenDynamicDecider::Interactive,
+            allowed,
+          )
+        } else {
+          policy.unanswered_dynamic_request(&principal, req, ceiling)
+        }
+      }
+    }
+  };
+  oden_capsec_dynamic_request_audit_record(
+    "request",
+    &principal,
+    req.as_ref(),
+    &result,
+  );
+  Some(match result.state {
+    OdenDynamicPermissionState::Granted => PermissionState::Granted,
+    OdenDynamicPermissionState::Denied => PermissionState::Denied,
+  })
+}
+
+pub fn oden_capsec_revoke_dynamic_permission(
+  desc: &OdenDynamicPermissionDescriptor,
+) -> Option<PermissionState> {
+  if !oden_capsec_active() {
+    return None;
+  }
+  let principal = oden_capsec_principal();
+  if principal.is_ambient() {
+    return None;
+  }
+  let Some(req) = oden_dynamic_request(desc) else {
+    oden_capsec_dynamic_query_audit_record(
+      "revoke",
+      &principal,
+      None,
+      PermissionState::Denied,
+    );
+    return Some(PermissionState::Denied);
+  };
+  let state = match oden_capsec_policy().revoke_dynamic(&principal, &req) {
+    OdenDynamicQueryState::Ambient => return None,
+    OdenDynamicQueryState::Granted => PermissionState::Granted,
+    OdenDynamicQueryState::Prompt => PermissionState::Prompt,
+    OdenDynamicQueryState::Denied => PermissionState::Denied,
+  };
+  oden_capsec_dynamic_query_audit_record(
+    "revoke",
+    &principal,
+    Some(&req),
+    state,
+  );
+  Some(state)
+}
+
+fn oden_dynamic_request(
+  desc: &OdenDynamicPermissionDescriptor,
+) -> Option<OdenRequest> {
+  let (family, action, target) = match desc.name {
+    "read" => (OdenFamily::Fs, "read", oden_dynamic_path_target(desc.path)),
+    "write" => (OdenFamily::Fs, "write", oden_dynamic_path_target(desc.path)),
+    // Deno's net/env descriptors each combine action classes. The wildcard
+    // action makes that breadth explicit in the layer-2 session grant.
+    "net" => (
+      OdenFamily::Network,
+      "*",
+      desc.host.unwrap_or("*").to_string(),
+    ),
+    "env" => (
+      OdenFamily::Env,
+      "*",
+      desc.variable.unwrap_or("*").to_string(),
+    ),
+    "sys" => (
+      OdenFamily::Sys,
+      "read",
+      desc.kind.unwrap_or("*").to_string(),
+    ),
+    "run" => (
+      OdenFamily::Run,
+      "run",
+      desc.command.unwrap_or("*").to_string(),
+    ),
+    "ffi" => (
+      OdenFamily::Ffi,
+      "load",
+      desc.path.unwrap_or("*").to_string(),
+    ),
+    // Import admission is a separate policy axis, not a host capability.
+    "import" => return None,
+    _ => return None,
+  };
+  Some(OdenRequest {
+    family,
+    action: action.to_string(),
+    target,
+  })
+}
+
+fn oden_dynamic_path_target(path: Option<&str>) -> String {
+  match path {
+    Some(path) => oden_normalize_fs_target(path),
+    None => "*".to_string(),
+  }
+}
+
 // The grant token a denied/would-deny principal would need, in the same
 // vocabulary `.oden/policy.json` and `oden_policy::Grant::parse` speak — so a
 // denial suggests its own fix and the audit synthesizer can lift it verbatim.
@@ -357,6 +581,7 @@ fn oden_suggested_grant_token(
     OdenFamily::Network => {
       format!("network:{action}:{}", oden_host_of(target))
     }
+    OdenFamily::Sys => format!("sys:read:{target}"),
   };
   Some(token)
 }
@@ -758,6 +983,19 @@ pub fn oden_capsec_compartment_endowments()
 // the top of every decision so the first mediated op reports posture and a
 // dishonest enforce refuses before it can pretend to be sound.
 fn oden_capsec_readiness_gate() -> Result<(), PermissionCheckError> {
+  if oden_policy_invalid() {
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: "capsec policy".to_string(),
+        name: "capsec",
+        custom_message: Some(
+          "oden capsec: policy authority envelope is invalid (static floor exceeds escalation ceiling)"
+            .to_string(),
+        ),
+        state: PermissionState::Denied,
+      },
+    ));
+  }
   static EMITTED: AtomicFlag = AtomicFlag::lowered();
   let readiness = oden_capsec_readiness();
   let first = EMITTED.raise();
@@ -815,9 +1053,6 @@ fn oden_capsec_audit_record(
   verdict: &str,
   suggestion: Option<&str>,
 ) {
-  let Some(path) = std::env::var_os("ODEN_CAPSEC_AUDIT") else {
-    return;
-  };
   let decision = match verdict {
     v if v.starts_with("allow(ambient") => "allow-ambient",
     v if v.starts_with("allow(granted") => "allow-granted",
@@ -839,6 +1074,13 @@ fn oden_capsec_audit_record(
     "decision": decision,
     "suggestion": suggestion,
   });
+  oden_capsec_write_audit_record(&rec);
+}
+
+fn oden_capsec_write_audit_record(rec: &serde_json::Value) {
+  let Some(path) = std::env::var_os("ODEN_CAPSEC_AUDIT") else {
+    return;
+  };
   if let Ok(line) = serde_json::to_string(&rec) {
     use std::io::Write as _;
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -849,6 +1091,93 @@ fn oden_capsec_audit_record(
       let _ = writeln!(f, "{line}");
     }
   }
+}
+
+// Structured runtime-request evidence. Grant and deny are symmetric inputs to
+// LLP 0008's review loop; every attempt is appended even when the disposition
+// was memoized, while the `memoized` bit lets renderers collapse prompt storms.
+// @ref llp/0015-dynamic-permissions-with-ceiling.plan.md (Audit records)
+fn oden_capsec_dynamic_request_audit_record(
+  operation: &str,
+  principal: &OdenPrincipal,
+  req: Option<&OdenRequest>,
+  result: &OdenDynamicRequestResult,
+) {
+  let principal_label = principal.label();
+  let capability = req
+    .map(OdenGrant::from_request)
+    .map(|g| g.to_string_canonical());
+  let target = req.map(|r| r.target.as_str()).unwrap_or("");
+  let session_grant = result
+    .session_grant
+    .as_ref()
+    .map(OdenGrant::to_string_canonical);
+  let ceiling = result.ceiling.as_ref().map(OdenGrant::to_string_canonical);
+  let decider = result.decider.map(OdenDynamicDecider::as_str);
+  let principal_set = oden_capsec_principal_set()
+    .iter()
+    .map(OdenPrincipal::label)
+    .collect::<Vec<_>>();
+  let suggestion = match result.code {
+    OdenDynamicRequestCode::Granted => session_grant.clone(),
+    OdenDynamicRequestCode::AboveCeiling
+    | OdenDynamicRequestCode::Unanswered
+    | OdenDynamicRequestCode::Refused => capability.clone(),
+    _ => None,
+  };
+  let rec = serde_json::json!({
+    "v": 1,
+    "event": "dynamic_request",
+    "operation": operation,
+    "principal": principal_label,
+    "principalSet": principal_set,
+    "capability": capability,
+    "target": target,
+    "decision": match result.state {
+      OdenDynamicPermissionState::Granted => "granted",
+      OdenDynamicPermissionState::Denied => "denied",
+    },
+    "code": result.code.as_str(),
+    "decider": decider,
+    "sessionGrant": session_grant,
+    "ceiling": ceiling,
+    "memoized": result.memoized,
+    "suggestion": suggestion,
+  });
+  eprintln!(
+    "[oden-capsec] Deno.permissions.{operation} caller={} capability={} -> {}{}",
+    principal.label(),
+    capability.as_deref().unwrap_or("ambiguous"),
+    result.code.as_str(),
+    if result.memoized { " (memoized)" } else { "" },
+  );
+  oden_capsec_write_audit_record(&rec);
+}
+
+fn oden_capsec_dynamic_query_audit_record(
+  operation: &str,
+  principal: &OdenPrincipal,
+  req: Option<&OdenRequest>,
+  state: PermissionState,
+) {
+  let capability = req
+    .map(OdenGrant::from_request)
+    .map(|g| g.to_string_canonical());
+  let rec = serde_json::json!({
+    "v": 1,
+    "event": "dynamic_permission",
+    "operation": operation,
+    "principal": principal.label(),
+    "capability": capability,
+    "target": req.map(|r| r.target.as_str()).unwrap_or(""),
+    "decision": match state {
+      PermissionState::Granted | PermissionState::GrantedPartial => "granted",
+      PermissionState::Prompt => "prompt",
+      PermissionState::Ignored | PermissionState::DeniedPartial | PermissionState::Denied => "denied",
+    },
+    "code": if operation == "revoke" { "OD-CAP-REQ-REVOKED" } else { "OD-CAP-REQ-QUERY" },
+  });
+  oden_capsec_write_audit_record(&rec);
 }
 
 // --- Resource ownership (LLP 0001 Native resource ownership, ENG-23776) ------
@@ -1416,6 +1745,15 @@ struct OdenPolicyFile {
   mode: Option<String>,
   #[serde(default)]
   grants: std::collections::HashMap<String, String>,
+  // Config-only dynamic-permission ceilings (LLP 0015). The string shorthand
+  // defaults to `prompt`; the object form selects prompt/auto/deny.
+  #[serde(default)]
+  ceilings: std::collections::HashMap<String, OdenCeilingFile>,
+  // The parent Oden CLI serializes its process-wide deny ceiling into the
+  // immutable policy handoff so layer 2 can reject dynamic requests before a
+  // prompt. Direct fork users may author the same field explicitly.
+  #[serde(default, rename = "denyCeiling")]
+  deny_ceiling: String,
   // Opt-in stack-intersection arming (LLP 0001 precedence row 3). Names the
   // capability classes (`env`, `env:read`, `fs:write`, or `*`) for which a
   // deputy must not launder a scheduler's authority: for an armed class the
@@ -1424,6 +1762,21 @@ struct OdenPolicyFile {
   // is unaffected.
   #[serde(default, rename = "deputyClasses")]
   deputy_classes: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+#[serde(untagged)]
+enum OdenCeilingFile {
+  Authority(String),
+  Detailed {
+    authority: String,
+    #[serde(default = "oden_default_on_request")]
+    on_request: String,
+  },
+}
+
+fn oden_default_on_request() -> String {
+  "prompt".to_string()
 }
 
 // The policy source: `.oden/policy.json` in the project root — the same file
@@ -1497,12 +1850,19 @@ fn oden_capsec_policy_file_uncached() -> Option<OdenPolicyFile> {
 static ODEN_POLICY_UNREADABLE: std::sync::atomic::AtomicBool =
   std::sync::atomic::AtomicBool::new(false);
 
+static ODEN_POLICY_INVALID: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
 fn oden_policy_unreadable_latch() {
   ODEN_POLICY_UNREADABLE.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn oden_policy_unreadable() -> bool {
   ODEN_POLICY_UNREADABLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn oden_policy_invalid() -> bool {
+  ODEN_POLICY_INVALID.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 // Resolve fs grant scopes against $HOME/root, mirroring the userland policy
@@ -1582,8 +1942,8 @@ fn oden_normalize_fs_target(target: &str) -> String {
 fn oden_capsec_policy() -> &'static OdenPolicy {
   // Built once from the policy-file snapshot: grant-scope resolution does
   // path normalization, which must not run per mediated op.
-  static POLICY: std::sync::LazyLock<OdenPolicy> =
-    std::sync::LazyLock::new(|| {
+  static POLICY: std::sync::LazyLock<OdenPolicy> = std::sync::LazyLock::new(
+    || {
       let file = oden_capsec_policy_file();
       let root = oden_capsec_project_root();
       let mut policy = OdenPolicy::new(oden_capsec_mode(file));
@@ -1596,9 +1956,81 @@ fn oden_capsec_policy() -> &'static OdenPolicy {
               .grant(selector, &oden_resolve_grant_scopes(grant_str, &root));
           }
         }
+        if OdenGrant::valid_dynamic_authority(&file.deny_ceiling) {
+          policy.deny_ceiling(&oden_resolve_grant_scopes(
+            &file.deny_ceiling,
+            &root,
+          ));
+        } else {
+          ODEN_POLICY_INVALID.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        for (selector, ceiling) in &file.ceilings {
+          let (authority, disposition) = match ceiling {
+            OdenCeilingFile::Authority(authority) => {
+              (authority.as_str(), Some(OdenOnRequest::Prompt))
+            }
+            OdenCeilingFile::Detailed {
+              authority,
+              on_request,
+            } => (
+              authority.as_str(),
+              OdenOnRequest::parse(on_request.as_str()),
+            ),
+          };
+          let Some(disposition) = disposition else {
+            ODEN_POLICY_INVALID
+              .store(true, std::sync::atomic::Ordering::Relaxed);
+            continue;
+          };
+          if !OdenGrant::valid_dynamic_authority(authority) {
+            ODEN_POLICY_INVALID
+              .store(true, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+              "[oden-capsec] invalid authority envelope: {selector} contains malformed ceiling vocabulary"
+            );
+            continue;
+          }
+          let selector = selector.trim();
+          if !selector.is_empty() {
+            policy.ceiling(
+              selector,
+              &oden_resolve_grant_scopes(authority, &root),
+              disposition,
+            );
+          }
+        }
+      }
+      for issue in policy.validate_envelopes() {
+        match issue {
+          OdenPolicyValidationIssue::FloorAboveCeiling { selector, grant } => {
+            ODEN_POLICY_INVALID
+              .store(true, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+              "[oden-capsec] invalid authority envelope: {selector} floor {grant} exceeds escalation ceiling"
+            );
+          }
+          OdenPolicyValidationIssue::CeilingConflicted {
+            selector,
+            ceiling,
+            deny,
+          } => {
+            eprintln!(
+              "[oden-capsec] ceiling-conflicted: {selector} {ceiling} intersects deny ceiling {deny}; entry inert"
+            );
+            oden_capsec_audit_record(
+              &selector,
+              "ceiling",
+              "conflict",
+              &ceiling,
+              "deny(ceiling-conflicted)",
+              None,
+            );
+          }
+        }
       }
       policy
-    });
+    },
+  );
   &POLICY
 }
 
@@ -6103,6 +6535,7 @@ impl PermissionsContainer {
     kind: &str,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(OdenFamily::Sys, "read", kind, Some(api_name))?;
     self.inner.lock().sys.check(
       &self.descriptor_parser.parse_sys_descriptor(kind)?,
       Some(api_name),
@@ -6126,6 +6559,7 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn check_sys_all(&self) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(OdenFamily::Sys, "read", "*", None)?;
     self.inner.lock().sys.check_all()?;
     Ok(())
   }

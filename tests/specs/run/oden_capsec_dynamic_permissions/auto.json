@@ -1,0 +1,11 @@
+{
+  "mode": "enforce",
+  "grants": {},
+  "ceilings": {
+    "requester": {
+      "authority": "env:*:DYNAMIC",
+      "on_request": "auto"
+    }
+  },
+  "denyCeiling": "env:*:NEVER"
+}

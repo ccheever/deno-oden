@@ -102,7 +102,10 @@ pub fn set_current_oden_cped_stack(stack: Option<Vec<String>>) {
 }
 
 pub(crate) fn current_oden_cped_stack() -> Vec<String> {
-  MAYBE_CURRENT_ODEN_CPED_STACK.lock().clone().unwrap_or_default()
+  MAYBE_CURRENT_ODEN_CPED_STACK
+    .lock()
+    .clone()
+    .unwrap_or_default()
 }
 
 pub fn permission_prompt(
@@ -122,6 +125,16 @@ pub fn permission_prompt(
     after_callback();
   }
   r
+}
+
+/// Whether the installed prompter can actually hold a principal-aware
+/// interactive conversation. `--no-prompt`, non-TTY children, and the wasm
+/// denied prompter all report false, allowing Oden to emit UNANSWERED rather
+/// than pretending a human refused.
+///
+/// @ref llp/0015-dynamic-permissions-with-ceiling.plan.md (Non-interactive posture)
+pub fn permission_prompt_available() -> bool {
+  PERMISSION_PROMPTER.lock().can_prompt()
 }
 
 pub fn set_prompt_callbacks(
@@ -162,6 +175,10 @@ pub struct OdenStackFrame {
 }
 
 pub trait PermissionPrompter: Send + Sync {
+  fn can_prompt(&self) -> bool {
+    false
+  }
+
   fn prompt(
     &mut self,
     message: &str,
@@ -431,6 +448,13 @@ pub struct TtyPrompter;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PermissionPrompter for TtyPrompter {
+  fn can_prompt(&self) -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+      && std::io::stderr().is_terminal()
+      && !stdin_is_raw_mode()
+  }
+
   fn prompt(
     &mut self,
     message: &str,
@@ -674,6 +698,10 @@ pub mod tests {
   pub struct TestPrompter;
 
   impl PermissionPrompter for TestPrompter {
+    fn can_prompt(&self) -> bool {
+      true
+    }
+
     fn prompt(
       &mut self,
       _message: &str,

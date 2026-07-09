@@ -1,0 +1,10 @@
+{
+  "mode": "enforce",
+  "grants": {},
+  "ceilings": {
+    "prompter-dep": {
+      "authority": "env:*:PROMPT_ME",
+      "on_request": "prompt"
+    }
+  }
+}

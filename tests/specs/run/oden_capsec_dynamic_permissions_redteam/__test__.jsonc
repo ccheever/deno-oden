@@ -1,0 +1,21 @@
+{
+  // LLP 0015 attack-surface ledger: forged frames, deputy laundering, prompt
+  // fatigue and ceiling mapping, overlay tampering, and deny-ceiling conflict.
+  "tempDir": true,
+  "tests": {
+    "dynamic_permission_attack_rows_fail_closed_and_audit": {
+      "args": "run --allow-env --allow-read=. app.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "policy.json",
+        "ODEN_CAPSEC_AUDIT": "redteam-audit.ndjson",
+        "DEPUTY": "deputy-value",
+        "INSIDE": "inside-value",
+        "NEVER": "never-value",
+        "ALLOWED": "allowed-value",
+        "TAMPER": "tamper-value"
+      },
+      "output": "[WILDCARD]frame-forged: denied\ndeputy-request: granted\ndeputy-launder: NotCapable\ndeputy-direct: deputy-value\nmapping: prompt/denied\nfatigue: denied/denied\nconflict: denied\noverlay-legit: allowed-value\noverlay-forged-status: granted\noverlay-tamper-read: NotCapable\ncodes: OD-CAP-REQ-UNATTRIBUTED,OD-CAP-REQ-GRANTED,OD-CAP-REQ-UNANSWERED,OD-CAP-REQ-UNANSWERED,OD-CAP-REQ-DENY-CEILING,OD-CAP-REQ-GRANTED\nfatigue-memoized: false,true\nmapping-audit: 2\n[WILDCARD]",
+      "exitCode": 0
+    }
+  }
+}

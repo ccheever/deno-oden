@@ -1,0 +1,39 @@
+{
+  // LLP 0015 dynamic-permission compatibility surface. Package query/request/
+  // revoke is layer-2 state, never a layer-1 mutation; root remains stock.
+  "tempDir": true,
+  "tests": {
+    "package_auto_request_is_exact_revocable_and_bounded": {
+      "args": "run --allow-env --allow-read=. auto_app.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "auto.json",
+        "ODEN_CAPSEC_AUDIT": "auto-audit.ndjson",
+        "DYNAMIC": "dynamic-value",
+        "OUTSIDE": "outside-value",
+        "NEVER": "never-value"
+      },
+      "output": "[WILDCARD]initial: prompt\nrequest: granted\nafter: granted\nvalue: dynamic-value\nrevoke: denied\nafter-revoke: denied\nread-after-revoke: NotCapable\nabove: denied\nnever: denied\nrequest-codes: OD-CAP-REQ-GRANTED,OD-CAP-REQ-ABOVE-CEILING,OD-CAP-REQ-DENY-CEILING\n[WILDCARD]",
+      "exitCode": 0
+    },
+    "noninteractive_prompt_is_unanswered_and_memoized": {
+      "args": "run --allow-env --allow-read=. prompt_app.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "prompt.json",
+        "ODEN_CAPSEC_AUDIT": "prompt-audit.ndjson",
+        "PROMPT_ME": "value"
+      },
+      "output": "[WILDCARD]first: denied\nsecond: denied\ncodes: OD-CAP-REQ-UNANSWERED,OD-CAP-REQ-UNANSWERED\nmemoized: false,true\n[WILDCARD]",
+      "exitCode": 0
+    },
+    "root_permissions_api_remains_stock": {
+      "args": "run --allow-env --allow-read=. root_app.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "root.json",
+        "ODEN_CAPSEC_AUDIT": "root-audit.ndjson",
+        "ROOT_VALUE": "root-value"
+      },
+      "output": "query: granted\nrequest: granted\ndynamic-events: 0\n",
+      "exitCode": 0
+    }
+  }
+}

@@ -44,6 +44,20 @@ struct PermissionBrokerRequest<'a> {
   // @ref llp/0001-adding-capability-security-to-deno.plan.md (Broker protocol)
   #[serde(skip_serializing_if = "Option::is_none")]
   principal: Option<String>,
+  // Dynamic-request fields are additive and omitted for stock permission
+  // checks, preserving the existing broker wire format byte-for-byte.
+  // @ref llp/0015-dynamic-permissions-with-ceiling.plan.md (Deciders for row 8)
+  #[serde(skip_serializing_if = "Option::is_none")]
+  kind: Option<&'a str>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  ceiling_context: Option<DynamicCeilingContext<'a>>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DynamicCeilingContext<'a> {
+  capability: &'a str,
+  covering_ceiling: &'a str,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -79,6 +93,8 @@ impl PermissionBroker {
     &self,
     permission: &str,
     stringified_value: Option<String>,
+    principal: Option<String>,
+    dynamic: Option<DynamicCeilingContext<'_>>,
   ) -> std::io::Result<BrokerResponse> {
     let mut stream = self.stream.lock();
     let id = self
@@ -92,7 +108,9 @@ impl PermissionBroker {
       datetime: chrono::Utc::now().to_rfc3339(),
       permission,
       value: stringified_value,
-      principal: super::oden_capsec_current_principal_label(),
+      principal,
+      kind: dynamic.as_ref().map(|_| "dynamic_request"),
+      ceiling_context: dynamic,
     };
 
     let msg = format!("{}\n", serde_json::to_string(&request).unwrap());
@@ -138,7 +156,12 @@ pub fn maybe_check_with_broker(
 ) -> Option<BrokerResponse> {
   let broker = PERMISSION_BROKER.get()?;
 
-  let resp = match broker.check(name, stringified_value_fn()) {
+  let resp = match broker.check(
+    name,
+    stringified_value_fn(),
+    super::oden_capsec_current_principal_label(),
+    None,
+  ) {
     Ok(resp) => resp,
     Err(err) => {
       log::error!("{:?}", err);
@@ -146,4 +169,74 @@ pub fn maybe_check_with_broker(
     }
   };
   Some(resp)
+}
+
+/// Ask an attached broker to decide a package's within-ceiling runtime
+/// request. Broker presence outranks the local TTY prompt.
+pub fn maybe_check_dynamic_with_broker(
+  permission: &str,
+  value: &str,
+  principal: &str,
+  capability: &str,
+  covering_ceiling: &str,
+) -> Option<BrokerResponse> {
+  let broker = PERMISSION_BROKER.get()?;
+  let resp = match broker.check(
+    permission,
+    Some(value.to_string()),
+    Some(principal.to_string()),
+    Some(DynamicCeilingContext {
+      capability,
+      covering_ceiling,
+    }),
+  ) {
+    Ok(resp) => resp,
+    Err(err) => {
+      log::error!("{:?}", err);
+      std::process::exit(BROKER_EXIT_CODE);
+    }
+  };
+  Some(resp)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn request<'a>(
+    dynamic: Option<DynamicCeilingContext<'a>>,
+  ) -> PermissionBrokerRequest<'a> {
+    PermissionBrokerRequest {
+      v: 1,
+      pid: 42,
+      id: 7,
+      datetime: "2026-07-09T00:00:00Z".to_string(),
+      permission: "env",
+      value: Some("DYNAMIC".to_string()),
+      principal: Some("requester@1.0.0".to_string()),
+      kind: dynamic.as_ref().map(|_| "dynamic_request"),
+      ceiling_context: dynamic,
+    }
+  }
+
+  #[test]
+  fn stock_request_omits_dynamic_fields() {
+    let value = serde_json::to_value(request(None)).unwrap();
+    assert!(value.get("kind").is_none());
+    assert!(value.get("ceilingContext").is_none());
+    assert_eq!(value["principal"], "requester@1.0.0");
+  }
+
+  #[test]
+  fn dynamic_request_adds_principal_and_ceiling_context() {
+    let value = serde_json::to_value(request(Some(DynamicCeilingContext {
+      capability: "env:*:DYNAMIC",
+      covering_ceiling: "env:*:DYNAMIC",
+    })))
+    .unwrap();
+    assert_eq!(value["kind"], "dynamic_request");
+    assert_eq!(value["principal"], "requester@1.0.0");
+    assert_eq!(value["ceilingContext"]["capability"], "env:*:DYNAMIC");
+    assert_eq!(value["ceilingContext"]["coveringCeiling"], "env:*:DYNAMIC");
+  }
 }
