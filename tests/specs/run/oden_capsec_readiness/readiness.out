@@ -3,6 +3,7 @@
   attribution: armed
   cped-seal: applied
   lockdown: off
+  integrity: unbound (no lockfile)
   policy-source: capsec_audit.json
   root: [WILDLINE]
 [WILDCARD]op ran

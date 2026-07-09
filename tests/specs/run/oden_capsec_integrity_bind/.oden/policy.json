@@ -1,0 +1,8 @@
+{
+  "mode": "enforce",
+  "grants": {
+    "dep-a": "env:read:SECRET",
+    "dep-b": "env:read:SECRET",
+    "dep-c": "env:read:SECRET"
+  }
+}

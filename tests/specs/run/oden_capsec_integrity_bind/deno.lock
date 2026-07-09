@@ -1,0 +1,11 @@
+{
+  "version": "5",
+  "npm": {
+    "dep-a@1.0.0": {
+      "integrity": "sha512-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=="
+    },
+    "dep-b@1.0.0": {
+      "integrity": "sha512-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=="
+    }
+  }
+}

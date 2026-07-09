@@ -35,6 +35,7 @@ use url::Url;
 pub mod broker;
 mod ipc_pipe;
 mod oden_policy;
+mod oden_principal_index;
 pub mod prompter;
 mod runtime_descriptor_parser;
 pub mod which;
@@ -351,6 +352,7 @@ struct OdenReadiness {
   attribution_armed: bool,
   seal_applied: bool,
   lockdown_on: bool,
+  integrity: &'static oden_principal_index::LockState,
   policy_source: Option<String>,
   project_root: String,
 }
@@ -381,6 +383,20 @@ impl OdenReadiness {
     if oden_policy_unreadable() {
       degraded.push(
         "policy artifact present but unreadable — fail-closed enforce with zero grants",
+      );
+    }
+    // Integrity binding of the loader principal index (ENG-23763). No lockfile
+    // means package locators stay path-derived — the forged-version residual is
+    // open for this run, which enforce must name. An unreadable lockfile is
+    // already fail-closed (package principals quarantine), named for honesty.
+    if self.mode == OdenMode::Enforce && self.integrity.is_absent() {
+      degraded.push(
+        "no deno.lock — package locators are path-derived, not integrity-bound",
+      );
+    }
+    if self.integrity.is_unreadable() {
+      degraded.push(
+        "deno.lock present but unreadable — package principals fail closed to quarantine",
       );
     }
     degraded
@@ -416,6 +432,10 @@ impl OdenReadiness {
       if self.lockdown_on { "on" } else { "off" }
     ));
     out.push_str(&format!(
+      "  integrity: {}\n",
+      self.integrity.readiness_label()
+    ));
+    out.push_str(&format!(
       "  policy-source: {}\n",
       self.policy_source.as_deref().unwrap_or("(none)")
     ));
@@ -445,10 +465,9 @@ fn oden_capsec_readiness() -> OdenReadiness {
       {
         Some(std::path::PathBuf::from(p).to_string_lossy().into_owned())
       } else {
-        let policy_path =
-          std::path::Path::new(oden_capsec_project_root())
-            .join(".oden")
-            .join("policy.json");
+        let policy_path = std::path::Path::new(oden_capsec_project_root())
+          .join(".oden")
+          .join("policy.json");
         if policy_path.exists() {
           Some(policy_path.to_string_lossy().into_owned())
         } else {
@@ -470,6 +489,7 @@ fn oden_capsec_readiness() -> OdenReadiness {
       && !oden_capsec_env_flag("ODEN_CAPSEC_FORCE_UNSEALED")
       && oden_capsec_seal_conformance_ok(),
     lockdown_on: oden_capsec_active() && oden_capsec_lockdown_on(),
+    integrity: oden_principal_index::lock_state(),
     policy_source,
     project_root: root.to_string(),
   }
@@ -753,8 +773,7 @@ pub fn oden_capsec_gate_import(
   if !matches!(scheme, "data" | "blob" | "http" | "https") {
     return Ok(());
   }
-  let project_root = oden_capsec_project_root();
-  let principal = oden_policy::classify(referrer.as_str(), &project_root);
+  let principal = oden_principal_index::resolve_locator(referrer.as_str());
   // Ambient referrers (root/runtime) may import freely. A non-ambient referrer
   // — a package, or the quarantine/no-user sentinels — is gated.
   if principal.is_ambient() {
@@ -1038,7 +1057,8 @@ fn oden_capsec_policy() -> &'static OdenPolicy {
         for (selector, grant_str) in &file.grants {
           let selector = selector.trim();
           if !selector.is_empty() {
-            policy.grant(selector, &oden_resolve_grant_scopes(grant_str, &root));
+            policy
+              .grant(selector, &oden_resolve_grant_scopes(grant_str, &root));
           }
         }
       }
@@ -1071,15 +1091,22 @@ fn oden_capsec_mode(file: Option<&OdenPolicyFile>) -> OdenMode {
 }
 
 fn oden_capsec_principal() -> OdenPrincipal {
-  let project_root = oden_capsec_project_root();
   let frames = MAYBE_CURRENT_ODEN_STACKTRACE
     .lock()
     .as_ref()
     .map(|s| s())
     .unwrap_or_default();
   for frame in frames {
+    // Principals come from the loader principal index — integrity-bound
+    // classification (a locator whose lockfile binding fails resolves to
+    // quarantine, never a path-string principal), memoized per script ID for
+    // the op-dispatch hot path (ENG-23763).
     let principal = match frame.locator.as_deref() {
-      Some(locator) => oden_policy::classify(locator, &project_root),
+      Some(locator) => oden_principal_index::resolve_frame(
+        frame.isolate_id,
+        frame.script_id,
+        locator,
+      ),
       None if oden_capsec_runtime_display(frame.display_name.as_deref()) => {
         continue;
       }
@@ -1095,7 +1122,7 @@ fn oden_capsec_principal() -> OdenPrincipal {
   // Precedence row 2: no live user frame, but a scheduling principal survives
   // in the CPED slot (a detached callback) — attribute to the scheduler.
   if let Some(locator) = prompter::current_oden_cped_locator() {
-    let principal = oden_policy::classify(&locator, &project_root);
+    let principal = oden_principal_index::resolve_locator(&locator);
     if principal != OdenPrincipal::Runtime {
       return principal;
     }
@@ -1118,7 +1145,6 @@ fn oden_capsec_principal() -> OdenPrincipal {
 // the intersection denies rather than silently widening.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md (Async attribution row 3)
 fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
-  let project_root = oden_capsec_project_root();
   let mut out: Vec<OdenPrincipal> = Vec::new();
   fn push(out: &mut Vec<OdenPrincipal>, principal: OdenPrincipal) {
     if principal != OdenPrincipal::Runtime && !out.contains(&principal) {
@@ -1134,7 +1160,14 @@ fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
   for frame in frames {
     match frame.locator.as_deref() {
       Some(locator) => {
-        push(&mut out, oden_policy::classify(locator, &project_root));
+        push(
+          &mut out,
+          oden_principal_index::resolve_frame(
+            frame.isolate_id,
+            frame.script_id,
+            locator,
+          ),
+        );
       }
       None if oden_capsec_runtime_display(frame.display_name.as_deref()) => {}
       None if frame.script_id.is_some() => {
@@ -1145,7 +1178,7 @@ fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
   }
   // Row-3 append: the CPED scheduling principal (who scheduled this callback).
   if let Some(locator) = prompter::current_oden_cped_locator() {
-    push(&mut out, oden_policy::classify(&locator, &project_root));
+    push(&mut out, oden_principal_index::resolve_locator(&locator));
   }
   // Seam for call-boundary attribution: the carried scheduling stack set fed by
   // a scheduling-boundary stamp. Empty today (the boundary stamp is the async
@@ -1153,7 +1186,7 @@ fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
   // this is a no-op until that lands; wired here so the intersection picks it up
   // the moment it does, without re-touching the decision path.
   for locator in prompter::current_oden_cped_stack() {
-    push(&mut out, oden_policy::classify(&locator, &project_root));
+    push(&mut out, oden_principal_index::resolve_locator(&locator));
   }
   if out.is_empty() {
     out.push(OdenPrincipal::NoUser);

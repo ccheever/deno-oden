@@ -1,0 +1,17 @@
+{
+  // Loader principal index, integrity-bound (LLP 0001 Phase 1, ENG-23763;
+  // closes Ibex 0016 W7b/R8). The lockfile-managed corpus: dep-a's on-disk
+  // claim (1.0.0) matches the deno.lock pin, so its grant is honored through
+  // the index. dep-b claims 2.0.0 while the lockfile pins dep-b@1.0.0 (a
+  // version/content swap) and dep-c is not pinned at all: both fail
+  // attribution CLOSED — quarantine, never a path-string principal — so their
+  // grants are NOT honored and the reads deny under enforce.
+  "tests": {
+    "lockfile_binds_and_swap_fails_closed": {
+      "args": "run --allow-env --allow-read app.js",
+      "envs": { "SECRET": "s3cret" },
+      "output": "integrity.out",
+      "exitCode": 0
+    }
+  }
+}

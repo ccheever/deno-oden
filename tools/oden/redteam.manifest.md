@@ -1,6 +1,6 @@
 # Oden red-team soundness gate (generated)
 
-Phase-2 exit gate. 18 attack classes CLOSED with a guarding spec test; 5 DOCUMENTED RESIDUALS. Zero undocumented open holes.
+Phase-2 exit gate. 19 attack classes CLOSED with a guarding spec test; 4 DOCUMENTED RESIDUALS. Zero undocumented open holes.
 
 ## Closed (guarded by a spec fixture)
 
@@ -14,6 +14,7 @@ Phase-2 exit gate. 18 attack classes CLOSED with a guarding spec test; 5 DOCUMEN
 | attribution-laundering | CPED token replay / forge / drop | oden_capsec_cped_token | the slot holds an opaque registry token; unknown/stale/forged -> no-user sentinel + audit; dropped -> sentinel |
 | attribution-laundering | seal-bypass of the async-context primitives | oden_capsec_seal | the four seal conditions run as always-on conformance; a broken seal fails enforce closed |
 | classification-confusion | data:/blob: minted code borrows a package's authority | oden_capsec_import_gating | data:/blob:/remote imports by a package are default-denied under enforce; classify() sends them to quarantine |
+| classification-confusion | symlink / vendored-tree / global-cache path aliasing into root | oden_capsec_integrity_bind, oden_capsec_integrity_remote_swap | classify() attributes symlinked/workspace deps to their package (fork commit cb7cf6e); the loader principal index binds package identity to deno.lock (ENG-23763): a version/content swap or an unpinned package fails attribution closed to quarantine (never a path-string principal), global-cache modules are admitted only through a lockfile pin, and a remote byte swap dies in the lockfile check before attribution runs |
 | runtime-escape-hatch | worker / child-runtime creation by a package | oden_capsec_worker_deny | package worker creation is default-denied under enforce (interim stance until inheritance is designed) |
 | runtime-escape-hatch | node:vm fresh-context eval by a package | oden_capsec_compilefn_forgery | node:vm filename is caller-supplied and NOT trusted for attribution; vm code quarantines (userland ENG-23804 also denies it) |
 | path-fs-semantics | relative-path / .. escape out of a granted fs scope | oden_capsec_policy_file | fs op targets and grant scopes are lexically normalized (absolute, .. folded); a .. escape lands outside its scope and denies |
@@ -29,7 +30,6 @@ Phase-2 exit gate. 18 attack classes CLOSED with a guarding spec test; 5 DOCUMEN
 
 | category | attack | owner | why open | note |
 | --- | --- | --- | --- | --- |
-| classification-confusion | symlink / vendored-tree / global-cache path aliasing into root | ENG-23763 | integrity-bound locators (lockfile hashes) inherited from Deno's content-addressed lockfile; end-to-end red-team needs a lockfile-managed corpus | classify() attributes symlinked/workspace deps to their package (fork commit cb7cf6e); content-swap fails closed via Deno's lockfile before attribution |
 | runtime-escape-hatch | node:inspector / self-inspection, WASI | ENG-23779 | default-denied for package principals under enforce; a designed story per hatch is the remaining escape-hatch-closure work | each is a deniable capability; default-deny holds, a per-hatch fixture is owed |
 | runtime-escape-hatch | eval / new Function minting unattributed code bound to caller | ENG-23783 | eval-to-caller binding blocked on a rusty_v8 with SetModifyCodeGenerationFromStringsCallback, which no rusty_v8 release exposes (ENG-23791: needs a vendored fork, not a version bump); until then eval quarantines (fail-closed), now CI-guarded by oden_capsec_eval_quarantine | eval'd code quarantines today (sound, over-denies even first-party eval); the guard asserts the fail-closed DENY so a regression to fail-open (eval inheriting caller authority) breaks CI; attributing it to the caller needs the code-gen hook |
 | resource-ownership | owner-check not yet wired for most families | ENG-23776 | per-family owner-check integration is sequenced; only fs:watch is wired, the rest are named residuals (audited, not silently accepted) | the mechanism + classification are landed; wiring each remaining owner-checked family closes its residual |
@@ -37,5 +37,5 @@ Phase-2 exit gate. 18 attack classes CLOSED with a guarding spec test; 5 DOCUMEN
 
 ## Verdict
 
-**GO** — every attack class in the inherited hole checklist is either closed with a guarding fixture or a documented residual with an owning ticket. No undocumented open holes. The residuals are sound-but-restrictive (schedule-before-first-op fails closed) or deferred by design (lockdown default-on, integrity-bound locators, eval-to-caller, per-family owner-checks).
+**GO** — every attack class in the inherited hole checklist is either closed with a guarding fixture or a documented residual with an owning ticket. No undocumented open holes. The residuals are sound-but-restrictive (schedule-before-first-op fails closed) or deferred by design (lockdown default-on, eval-to-caller, per-family owner-checks).
 

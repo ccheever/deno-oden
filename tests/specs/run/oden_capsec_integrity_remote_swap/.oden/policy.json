@@ -1,0 +1,6 @@
+{
+  "mode": "enforce",
+  "grants": {
+    "http://localhost:4545/welcome.ts": "env:read:SECRET"
+  }
+}

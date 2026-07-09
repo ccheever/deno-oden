@@ -592,9 +592,12 @@ pub struct JsStackFrame {
 static ODEN_SCRIPT_LOCATORS: LazyLock<Mutex<HashMap<(usize, usize), String>>> =
   LazyLock::new(|| Mutex::new(HashMap::new()));
 
-// Oden Phase 0 uses V8 script IDs as the unforgeable stack-frame key. The
-// locator registry is intentionally tiny here; loader ownership hardening builds
-// on the same key in later phases.
+// Oden uses V8 script IDs as the unforgeable stack-frame key. This registry is
+// the raw (script id -> locator) feed captured at script creation; the
+// production loader principal index — integrity-bound classification against
+// the project's content-addressed lockfile, memoized for the op-dispatch hot
+// path — lives above it in `runtime/permissions/oden_principal_index.rs`
+// (deno_core sits below that crate and cannot know about lockfiles).
 // @ref llp/0001-adding-capability-security-to-deno.plan.md
 const _: () = assert!(
   std::mem::size_of::<v8::UnsafeRawIsolatePtr>()

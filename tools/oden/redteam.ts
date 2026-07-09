@@ -111,14 +111,10 @@ const CHECKLIST: HoleClass[] = [
   {
     category: "classification-confusion",
     attack: "symlink / vendored-tree / global-cache path aliasing into root",
-    status: "residual",
-    residual: {
-      ticket: "ENG-23763",
-      why:
-        "integrity-bound locators (lockfile hashes) inherited from Deno's content-addressed lockfile; end-to-end red-team needs a lockfile-managed corpus",
-    },
+    status: "closed",
+    tests: ["oden_capsec_integrity_bind", "oden_capsec_integrity_remote_swap"],
     note:
-      "classify() attributes symlinked/workspace deps to their package (fork commit cb7cf6e); content-swap fails closed via Deno's lockfile before attribution",
+      "classify() attributes symlinked/workspace deps to their package (fork commit cb7cf6e); the loader principal index binds package identity to deno.lock (ENG-23763): a version/content swap or an unpinned package fails attribution closed to quarantine (never a path-string principal), global-cache modules are admitted only through a lockfile pin, and a remote byte swap dies in the lockfile check before attribution runs",
   },
   // --- Runtime escape hatches -------------------------------------------------
   {
@@ -340,7 +336,7 @@ function render(): string {
         "closed with a guarding fixture or a documented residual with an owning " +
         "ticket. No undocumented open holes. The residuals are sound-but-restrictive " +
         "(schedule-before-first-op fails closed) or deferred by design (lockdown " +
-        "default-on, integrity-bound locators, eval-to-caller, per-family owner-checks).",
+        "default-on, eval-to-caller, per-family owner-checks).",
     );
   } else {
     out.push("**NO-GO** — open holes / missing fixtures:");

@@ -1,0 +1,17 @@
+{
+  // The content-swap half of the integrity binding (LLP 0001 Phase 1,
+  // ENG-23763): for remote modules the lockfile is content-addressed per URL,
+  // and Deno's own loader refuses a byte swap BEFORE the module ever executes
+  // — the substrate guarantee the loader principal index leans on. The
+  // lockfile pins a wrong hash for the (unchanged) server file, simulating a
+  // swapped body; the run must die in the integrity check — fail closed —
+  // even though capsec policy names and grants the URL principal. Attribution
+  // never sees the swapped module.
+  "tests": {
+    "remote_content_swap_fails_closed_before_attribution": {
+      "args": "run --allow-import --allow-env main.js",
+      "output": "swap.out",
+      "exitCode": 10
+    }
+  }
+}
