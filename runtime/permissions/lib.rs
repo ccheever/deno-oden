@@ -434,20 +434,29 @@ impl OdenReadiness {
 fn oden_capsec_readiness() -> OdenReadiness {
   let root = oden_capsec_project_root();
   let file = oden_capsec_policy_file();
-  let policy_source = if let Some(p) =
-    std::env::var_os("ODEN_CAPSEC_POLICY").filter(|v| !v.is_empty())
-  {
-    Some(std::path::PathBuf::from(p).to_string_lossy().into_owned())
-  } else {
-    let policy_path = std::path::Path::new(&root)
-      .join(".oden")
-      .join("policy.json");
-    if policy_path.exists() {
-      Some(policy_path.to_string_lossy().into_owned())
-    } else {
-      None
-    }
-  };
+  // Arm-time fact (which artifact armed this process); snapshot to keep the
+  // per-decide readiness gate off the filesystem (an exists() probe per
+  // mediated op otherwise). Live state (seal conformance, forced-unarmed)
+  // stays live below.
+  static POLICY_SOURCE: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| {
+      if let Some(p) =
+        std::env::var_os("ODEN_CAPSEC_POLICY").filter(|v| !v.is_empty())
+      {
+        Some(std::path::PathBuf::from(p).to_string_lossy().into_owned())
+      } else {
+        let policy_path =
+          std::path::Path::new(oden_capsec_project_root())
+            .join(".oden")
+            .join("policy.json");
+        if policy_path.exists() {
+          Some(policy_path.to_string_lossy().into_owned())
+        } else {
+          None
+        }
+      }
+    });
+  let policy_source = POLICY_SOURCE.clone();
   OdenReadiness {
     mode: oden_capsec_mode(file),
     // Attribution is armed whenever capsec is active (they share the arm), but a
@@ -462,7 +471,7 @@ fn oden_capsec_readiness() -> OdenReadiness {
       && oden_capsec_seal_conformance_ok(),
     lockdown_on: oden_capsec_active() && oden_capsec_lockdown_on(),
     policy_source,
-    project_root: root,
+    project_root: root.to_string(),
   }
 }
 
@@ -828,12 +837,23 @@ pub fn oden_capsec_check_worker_create() -> Result<(), PermissionCheckError> {
   clippy::disallowed_methods,
   reason = "Phase-0/1 capsec resolves the project root from an env var, falling back to cwd."
 )]
-fn oden_capsec_project_root() -> String {
-  std::env::var("ODEN_CAPSEC_ROOT").unwrap_or_else(|_| {
-    std::env::current_dir()
-      .map(|p| p.to_string_lossy().into_owned())
-      .unwrap_or_default()
-  })
+/// The project root is the ARM-TIME policy anchor: grants were resolved and
+/// principals classify against the root that armed this process, so a mid-run
+/// `Deno.chdir()` must not re-anchor authority. Snapshot once — this also
+/// removes a per-mediated-op `getcwd()` (macOS walks/opens parent dirs on a
+/// path-cache miss; it and the readiness rebuild dominated the armed hot path
+/// after the policy snapshot, ENG-23764 benchmark). Relative *fs targets*
+/// still resolve against the live cwd in `oden_normalize_fs_target`, matching
+/// what the OS will actually open.
+fn oden_capsec_project_root() -> &'static str {
+  static ROOT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    std::env::var("ODEN_CAPSEC_ROOT").unwrap_or_else(|_| {
+      std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+    })
+  });
+  &ROOT
 }
 
 #[derive(serde::Deserialize, Default)]
