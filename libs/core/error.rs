@@ -685,6 +685,60 @@ fn oden_capsec_armed_uncached() -> bool {
   std::env::var_os("ODEN_CAPSEC_SPIKE").is_some()
 }
 
+// Opaque-token registry for the CPED slot (LLP 0001 token invariants). The slot
+// holds an opaque token (a u64), NOT the locator, so a leaked token names
+// nothing; the token->locator mapping lives here, Rust-side and unreachable from
+// JS. Locators are interned (a package that schedules a thousand callbacks reuses
+// one token), so the registry stays bounded by the number of distinct principals.
+// An unknown/stale token — never registered, or a forged value — resolves to
+// None (the fail-closed sentinel downstream) plus an audit signal.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md (Token invariants)
+struct OdenCpedRegistry {
+  to_token: HashMap<String, u64>,
+  to_locator: HashMap<u64, String>,
+  next: u64,
+}
+
+static ODEN_CPED_REGISTRY: LazyLock<Mutex<OdenCpedRegistry>> =
+  LazyLock::new(|| {
+    Mutex::new(OdenCpedRegistry {
+      to_token: HashMap::new(),
+      to_locator: HashMap::new(),
+      next: 1,
+    })
+  });
+
+fn oden_cped_intern(locator: &str) -> u64 {
+  let mut reg = ODEN_CPED_REGISTRY.lock().unwrap();
+  if let Some(&t) = reg.to_token.get(locator) {
+    return t;
+  }
+  let t = reg.next;
+  reg.next += 1;
+  reg.to_token.insert(locator.to_string(), t);
+  reg.to_locator.insert(t, locator.to_string());
+  t
+}
+
+fn oden_cped_resolve(token: u64) -> Option<String> {
+  ODEN_CPED_REGISTRY.lock().unwrap().to_locator.get(&token).cloned()
+}
+
+// Red-team hook: when ODEN_CAPSEC_FORGE_CPED is set, a stamp writes a token that
+// is NOT in the registry (real token + a large offset), so the detached read
+// exercises the stale/unknown-token invariant. Inert unless set.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "capsec red-team forge hook is an env-gated test control surface."
+)]
+fn oden_cped_forge_offset() -> u64 {
+  if std::env::var_os("ODEN_CAPSEC_FORGE_CPED").is_some() {
+    1_000_000_000
+  } else {
+    0
+  }
+}
+
 fn oden_cped_slot_symbol<'s>(
   scope: &mut v8::PinScope<'s, '_>,
 ) -> Option<v8::Local<'s, v8::Symbol>> {
@@ -692,14 +746,37 @@ fn oden_cped_slot_symbol<'s>(
   Some(v8::Symbol::for_api(scope, desc))
 }
 
+#[allow(
+  clippy::print_stderr,
+  reason = "capsec stale-token invariant emits an audit signal to stderr"
+)]
 fn oden_read_cped_slot(scope: &mut v8::PinScope) -> Option<String> {
   let cped = scope.get_continuation_preserved_embedder_data();
   let obj = v8::Local::<v8::Object>::try_from(cped).ok()?;
   let sym = oden_cped_slot_symbol(scope)?;
   let val = obj.get(scope, sym.into())?;
-  if val.is_string() {
-    Some(val.to_rust_string_lossy(scope))
+  // The slot holds an opaque token (a number). Resolve it through the Rust-side
+  // registry: a known token yields its locator; an unknown/stale/forged token
+  // (or a non-number value planted by a seal bypass) falls to the fail-closed
+  // sentinel (None downstream) plus an audit signal, never a laundered principal.
+  if val.is_number() {
+    let token = val.number_value(scope).unwrap_or(0.0) as u64;
+    match oden_cped_resolve(token) {
+      Some(locator) => Some(locator),
+      None => {
+        eprintln!(
+          "[oden-capsec] stale/unknown CPED token {token} -> no-user sentinel (audit)"
+        );
+        None
+      }
+    }
+  } else if val.is_undefined() || val.is_null() {
+    // Dropped context: the slot was never set on this continuation. Sentinel.
+    None
   } else {
+    eprintln!(
+      "[oden-capsec] non-token value in CPED slot -> no-user sentinel (audit)"
+    );
     None
   }
 }
@@ -708,9 +785,11 @@ fn oden_write_cped_slot(scope: &mut v8::PinScope, locator: &str) {
   let Some(sym) = oden_cped_slot_symbol(scope) else {
     return;
   };
-  let Some(value) = v8::String::new(scope, locator) else {
-    return;
-  };
+  // Store an opaque interned token, not the locator string. The forge offset is
+  // 0 in normal operation; the red-team hook makes it write an unregistered
+  // token to exercise the stale-token invariant.
+  let token = oden_cped_intern(locator) + oden_cped_forge_offset();
+  let value = v8::Number::new(scope, token as f64);
   let cped = scope.get_continuation_preserved_embedder_data();
   // A fresh object (never a mutation of the current one) so that a continuation
   // that already captured the old value keeps seeing its own principal. Copy the

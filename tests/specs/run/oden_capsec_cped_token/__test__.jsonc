@@ -1,0 +1,23 @@
+{
+  // CPED token invariants (ENG-23775): the slot holds an opaque token, not the
+  // locator, resolved through a Rust-side registry. Under the ODEN_CAPSEC_FORGE_CPED
+  // red-team hook a stamp writes an UNREGISTERED token, so the detached row-2
+  // reads resolve a stale/unknown token -> the no-user fail-closed sentinel + a
+  // stale-token audit signal, never the scheduler. Row-1 (live-frame) ops still
+  // attribute correctly. Proves a leaked/forged token names nothing.
+  "tests": {
+    "forged_token_falls_to_sentinel_with_audit": {
+      "args": "run --allow-env app.js",
+      "envs": {
+        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_FORGE_CPED": "1",
+        "ODEN_CAPSEC_MODE": "audit",
+        "HOME": "/home/x",
+        "ROOT_SECRET": "r00t",
+        "SECRET": "s3cret"
+      },
+      "output": "forge.out",
+      "exitCode": 0
+    }
+  }
+}

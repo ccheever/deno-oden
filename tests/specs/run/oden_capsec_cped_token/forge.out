@@ -1,0 +1,7 @@
+[oden-capsec] env:HOME caller=root -> allow(ambient)
+[oden-capsec] stale/unknown CPED token 1000000001 -> no-user sentinel (audit)
+[oden-capsec] env:HOME caller=evil-dep -> audit(record)
+[oden-capsec] stale/unknown CPED token 1000000001 -> no-user sentinel (audit)
+[oden-capsec] env:ROOT_SECRET caller=no-user -> audit(record)
+[oden-capsec] stale/unknown CPED token 1000000002 -> no-user sentinel (audit)
+[oden-capsec] env:SECRET caller=no-user -> audit(record)
