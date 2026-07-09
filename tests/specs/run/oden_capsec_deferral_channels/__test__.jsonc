@@ -1,0 +1,22 @@
+{
+  // Deferral-channel conformance enumerator (LLP 0001). A detached, frame-less
+  // op scheduled through 6 channels (setTimeout, queueMicrotask, promise
+  // reaction, process.nextTick, setImmediate, AsyncResource) must each be
+  // attributed to the scheduling package via the CPED slot. Audit mode records
+  // all (exit 0). Six caller=evil-dep SECRET lines must appear; a channel that
+  // drops the principal yields no-user and the 6th match is missing.
+  "tests": {
+    "all_deferral_channels_carry_principal": {
+      "args": "run --allow-env app.js",
+      "envs": {
+        "DENO_TRACE_PERMISSIONS": "1",
+        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_MODE": "audit",
+        "SECRET": "s3cret",
+        "STAMP": "x"
+      },
+      "output": "deferral.out",
+      "exitCode": 0
+    }
+  }
+}
