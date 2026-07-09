@@ -856,6 +856,77 @@ function odenSealSelfTest() {
   );
 }
 
+// --- Oden capsec Phase-2: minimal lockdown (LLP 0001 lockdown) --------------
+// The security prerequisite of enforce ("enforce implies lockdown"): freeze the
+// primordial intrinsics so a dependency cannot repair its authority by patching
+// a shared primitive a capability check relies on (replacing
+// Array.prototype.push, polluting Object.prototype, repointing
+// Function.prototype.constructor). Runs post-bootstrap / pre-user-code, at the
+// same gate as the CPED seal. A shallow Object.freeze of each intrinsic makes
+// its own methods non-writable and blocks extension -- enough to stop method
+// patching and prototype pollution, the theft vectors. Two deliberate
+// exclusions for compat: the Error CONSTRUCTOR stays unfrozen so
+// node:util.getCallSites can still swap Error.prepareStackTrace (the one known
+// post-bootstrap intrinsic write), and host objects (globalThis, Deno, process)
+// are never frozen -- only the JS primordials. Full SES evaluator taming and the
+// ext/node lazy-write audit are Phase-3 polish.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+function odenHardenIntrinsics() {
+  const freeze = Object.freeze;
+  const getProto = Object.getPrototypeOf;
+  const roots = [];
+  // Prototype-pollution + method-patching surface (the load-bearing freezes).
+  roots.push(
+    Object.prototype,
+    Array.prototype,
+    Function.prototype,
+    String.prototype,
+    Number.prototype,
+    Boolean.prototype,
+    Symbol.prototype,
+    RegExp.prototype,
+    Date.prototype,
+    Promise.prototype,
+    Map.prototype,
+    Set.prototype,
+    WeakMap.prototype,
+    WeakSet.prototype,
+    Error.prototype,
+  );
+  const errs = [TypeError, RangeError, ReferenceError, SyntaxError, EvalError, URIError];
+  for (let i = 0; i < errs.length; i++) roots.push(errs[i].prototype);
+  // Constructors + static namespaces (Object.assign, Array.from, JSON.parse).
+  // Error itself is intentionally omitted (prepareStackTrace/stackTraceLimit).
+  roots.push(
+    Object,
+    Array,
+    Function,
+    String,
+    Number,
+    Boolean,
+    Symbol,
+    RegExp,
+    Promise,
+    Map,
+    Set,
+    WeakMap,
+    WeakSet,
+    Math,
+    JSON,
+    Reflect,
+  );
+  // Iterator prototypes the runtime and check code rely on.
+  try {
+    const arrIter = getProto([][Symbol.iterator]());
+    roots.push(arrIter, getProto(arrIter));
+  } catch { /* best effort */ }
+  for (let i = 0; i < roots.length; i++) {
+    try {
+      if (roots[i]) freeze(roots[i]);
+    } catch { /* best effort -- a frozen or exotic root is fine */ }
+  }
+}
+
 function odenMaybeSealAsyncContext() {
   const flags = op_oden_capsec_flags();
   if ((flags & 1) === 0) {
@@ -865,6 +936,19 @@ function odenMaybeSealAsyncContext() {
     odenSealSelfTest();
   }
   odenSealAsyncContext();
+}
+
+// Lockdown is invoked separately, at the very END of bootstrap, because the
+// freeze must come AFTER the runtime's own late intrinsic setup -- in particular
+// `disableProtoAccessor()` redefines `Object.prototype.__proto__`, which a
+// frozen `Object.prototype` would break. Gated on the same armed flag + the
+// lockdown bit.
+function odenMaybeLockdown() {
+  const flags = op_oden_capsec_flags();
+  if ((flags & 1) === 0 || (flags & 4) === 0) {
+    return;
+  }
+  odenHardenIntrinsics();
 }
 
 // FIXME(bartlomieju): temporarily add whole `Deno.core` to
@@ -1255,6 +1339,10 @@ function bootstrapMainRuntime(runtimeOptions, warmup = false) {
       // the first node:* use), so non-node programs never pay node bootstrap.
       internals.__nodeBootstrapArgs = nodeBootstrapArgs;
     }
+
+    // Oden capsec minimal lockdown: the last bootstrap step, after all runtime
+    // and (eager) node setup and after disableProtoAccessor, before user code.
+    odenMaybeLockdown();
   } else {
     // Warmup
   }
@@ -1418,6 +1506,10 @@ function bootstrapWorkerRuntime(
     } else {
       internals.__nodeBootstrapArgs = nodeBootstrapArgs;
     }
+
+    // Oden capsec minimal lockdown: last bootstrap step (workers get their own
+    // isolate, so their intrinsics are frozen independently), before user code.
+    odenMaybeLockdown();
   } else {
     // Warmup
     return;

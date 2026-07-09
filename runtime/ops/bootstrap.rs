@@ -188,6 +188,19 @@ pub fn op_oden_capsec_flags() -> u32 {
   if std::env::var_os("ODEN_CAPSEC_SEAL_SELFTEST").is_some() {
     flags |= 2;
   }
+  // Bit 2 (value 4) = minimal lockdown (freeze the primordial intrinsics +
+  // evaluator taming). The mechanism is the security prerequisite of enforce,
+  // but the compat corpus shows default-on-under-enforce breaks node compat: the
+  // lazy `node:process` bootstrap (`buildAllowedFlags`) writes `Symbol.iterator`
+  // after a frozen `Set.prototype` would forbid it. Per LLP 0001's kill
+  // criterion, "enforce implies lockdown" is therefore softened to OPT-IN
+  // (`ODEN_CAPSEC_LOCKDOWN`) until the ext/node lazy-write repairs land (Phase 3
+  // / ENG-23781). Under enforce without it, the readiness report names the
+  // "enforce without lockdown" degraded state honestly.
+  // @ref llp/0001-adding-capability-security-to-deno.plan.md
+  if std::env::var_os("ODEN_CAPSEC_LOCKDOWN").is_some() {
+    flags |= 4;
+  }
   flags
 }
 
