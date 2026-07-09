@@ -1,0 +1,19 @@
+{
+  // Interim worker stance (LLP 0001 Phase 2): a package principal's new Worker()
+  // is default-denied under enforce (live-frame attribution = evil-dep), a loud
+  // NotCapable; with capsec off it is created normally. First-party/root workers
+  // are unaffected (ambient).
+  "tests": {
+    "armed_enforce_denies_package_worker": {
+      "args": "run --allow-env --allow-read app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_ENFORCE": "1" },
+      "output": "armed.out",
+      "exitCode": 0
+    },
+    "baseline_allows_worker": {
+      "args": "run --allow-env --allow-read app.js",
+      "output": "baseline.out",
+      "exitCode": 0
+    }
+  }
+}

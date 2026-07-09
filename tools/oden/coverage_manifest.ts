@@ -64,6 +64,10 @@ function collectMediation(): string[] {
       found.add(`${family}:${action}\tvia ${currentFn}()`);
     }
   }
+  // Standalone capsec checks that don't go through oden_capsec_decide.
+  if (src.includes("fn oden_capsec_check_worker_create")) {
+    found.add("worker:create\tvia oden_capsec_check_worker_create()");
+  }
   return [...found].sort();
 }
 

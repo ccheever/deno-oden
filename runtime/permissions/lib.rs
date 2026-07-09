@@ -137,6 +137,13 @@ fn oden_capsec_decide(
   eprintln!(
     "[oden-capsec] {api}:{target} caller={principal_label} -> {verdict}"
   );
+  oden_capsec_audit_record(
+    &principal_label,
+    family.name(),
+    action,
+    &req.target,
+    verdict,
+  );
   if decision == OdenDecision::Deny {
     return Err(PermissionCheckError::PermissionDenied(
       PermissionDeniedError {
@@ -159,6 +166,88 @@ fn oden_capsec_decide(
 )]
 fn oden_capsec_active() -> bool {
   std::env::var_os("ODEN_CAPSEC_SPIKE").is_some()
+}
+
+// Per-package audit log: when ODEN_CAPSEC_AUDIT names a file, append one NDJSON
+// record per mediated op (principal, capability, target, decision) — the
+// structured "see what your dependencies actually touch" data that drives the
+// LLP 0008 grant conversation. @ref llp/0001-adding-capability-security-to-deno.plan.md
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-1 per-package audit log path is supplied through an env var; a resolver replaces it later."
+)]
+fn oden_capsec_audit_record(
+  principal: &str,
+  family: &str,
+  action: &str,
+  target: &str,
+  verdict: &str,
+) {
+  let Some(path) = std::env::var_os("ODEN_CAPSEC_AUDIT") else {
+    return;
+  };
+  let decision = match verdict {
+    v if v.starts_with("allow(ambient") => "allow-ambient",
+    v if v.starts_with("allow(granted") => "allow-granted",
+    v if v.starts_with("audit") => "audit-record",
+    _ => "deny",
+  };
+  let rec = serde_json::json!({
+    "v": 1,
+    "principal": principal,
+    "capability": format!("{family}:{action}"),
+    "target": target,
+    "decision": decision,
+  });
+  if let Ok(line) = serde_json::to_string(&rec) {
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+      .create(true)
+      .append(true)
+      .open(path)
+    {
+      let _ = writeln!(f, "{line}");
+    }
+  }
+}
+
+// Interim worker stance (LLP 0001 Phase 2): worker creation by a package
+// principal is default-denied under enforce until worker principal inheritance
+// is designed. Root/runtime (ambient) are unaffected. Not yet a grantable
+// capability — a loud compat break, never a silent gap.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+pub fn oden_capsec_check_worker_create() -> Result<(), PermissionCheckError> {
+  if !oden_capsec_active() {
+    return Ok(());
+  }
+  let principal = oden_capsec_principal();
+  if principal.is_ambient() {
+    return Ok(());
+  }
+  let label = principal.label();
+  let mode = oden_capsec_mode(oden_capsec_policy_file().as_ref());
+  let deny = mode == OdenMode::Enforce;
+  let verdict = if deny {
+    "DENY(worker default-denied under enforce)"
+  } else {
+    "audit(record)"
+  };
+  eprintln!("[oden-capsec] worker:create caller={label} -> {verdict}");
+  oden_capsec_audit_record(&label, "worker", "create", "", verdict);
+  if deny {
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: "worker creation".to_string(),
+        name: "capsec",
+        custom_message: Some(format!(
+          "oden capsec: principal \"{label}\" cannot create a Worker under enforce \
+           (worker principal inheritance is not yet designed; default-denied)"
+        )),
+        state: PermissionState::Denied,
+      },
+    ));
+  }
+  Ok(())
 }
 
 #[allow(

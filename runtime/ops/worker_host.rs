@@ -233,6 +233,9 @@ pub enum CreateWorkerError {
   Permission(deno_permissions::ChildPermissionError),
   #[class(inherit)]
   #[error(transparent)]
+  Capsec(#[from] deno_permissions::PermissionCheckError),
+  #[class(inherit)]
+  #[error(transparent)]
   ModuleResolution(#[from] deno_core::ModuleResolutionError),
   #[class(inherit)]
   #[error(transparent)]
@@ -262,6 +265,11 @@ fn op_create_worker(
   {
     return Err(CreateWorkerError::ClassicWorkers);
   }
+
+  // Oden capsec: a package principal cannot create a Worker under enforce
+  // (interim stance until worker principal inheritance is designed).
+  // @ref llp/0001-adding-capability-security-to-deno.plan.md
+  deno_permissions::oden_capsec_check_worker_create()?;
 
   if args.permissions.is_some() {
     super::check_unstable(
