@@ -1,0 +1,21 @@
+[oden-capsec] handle:mint caller=grantor-dep cap=[WILDLINE] -> allow(mint)
+[oden-capsec] handle:transfer grantor-dep->recipient-dep cap=[WILDLINE] -> allow(transfer)
+[oden-capsec] Deno.readFileSync():[WILDLINE] caller=recipient-dep -> allow(handle)
+pub-via-handle: PUBLIC-OK
+[oden-capsec] Deno.readFileSync():[WILDLINE] caller=recipient-dep -> DENY(no grant)
+secret-via-handle: DENIED
+[oden-capsec] Deno.readFileSync():[WILDLINE] caller=recipient-dep -> DENY(no grant)
+no-handle: DENIED
+[oden-capsec] Deno.readFileSync():[WILDLINE] caller=recipient-dep -> DENY(no grant)
+holding-not-using: DENIED
+[oden-capsec] handle:mint caller=grantor-dep cap=[WILDLINE] -> DENY(mint exceeds holding)
+mint-exceeds-holding: DENIED
+[oden-capsec] handle:scoped caller=recipient-dep cap=[WILDLINE] -> DENY(scoped wider than parent)
+rewiden: DENIED
+[oden-capsec] handle:scoped caller=recipient-dep cap=[WILDLINE] -> allow(scoped)
+[oden-capsec] Deno.readFileSync():[WILDLINE] caller=recipient-dep -> allow(handle)
+deep-via-child: DEEP-OK
+[oden-capsec] handle:revoke caller=grantor-dep cap=[WILDLINE] -> allow(revoke)
+[oden-capsec] handle:revoke caller=grantor-dep cap=[WILDLINE] -> allow(revoke cascade)
+[oden-capsec] handle:use caller=recipient-dep cap=? -> DENY(handle revoked)
+use-after-revoke-cascade: DENIED

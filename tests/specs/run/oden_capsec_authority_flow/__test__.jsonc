@@ -1,0 +1,36 @@
+{
+  // Oden capsec authority-flow: handles and attenuators (LLP 0001 Delegation
+  // and handles, ENG-23784). The general form of the minimal transfer
+  // primitive: a granted package attenuates a capability it holds into an
+  // unforgeable handle and hands the narrower one across a package boundary.
+  //
+  // grantor-dep holds fs:read on ./shared and mints a handle scoped to
+  // ./shared/pub. recipient-dep, which holds NO fs grant of its own, receives
+  // the handle and uses it. The one run exercises every acceptance criterion:
+  //   - attenuated transfer enforced: recipient reads ./shared/pub via the
+  //     handle (allow(handle)) but NOT ./shared/secret (denied), even though the
+  //     grantor itself holds all of ./shared -- bounded by the attenuated scope,
+  //     not the grantor's authority, not the recipient's own grants;
+  //   - possession, not frame: recipient uses the handle with no grantor frame
+  //     on the stack; merely holding it (no use() window) confers nothing;
+  //   - mint cannot exceed holding: grantor minting outside ./shared denies;
+  //   - scoped() only narrows: re-widening a handle denies, narrowing works;
+  //   - revocation cascades: revoking the parent revokes the derived child, so a
+  //     use-after-revoke through the child denies.
+  // The audit stream (mint / transfer / use / deny / revoke) is asserted inline.
+  "tests": {
+    "attenuated_transfer_enforced": {
+      "args": "run --allow-read app.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json" },
+      "output": "authority_flow.out",
+      "exitCode": 0
+    },
+    // Unarmed: with no policy artifact, capsec is inert -- Deno.oden is absent
+    // and the handle ops are unreachable, byte-identical to stock Deno.
+    "unarmed_inert": {
+      "args": "run --allow-read unarmed.js",
+      "output": "unarmed.out",
+      "exitCode": 0
+    }
+  }
+}

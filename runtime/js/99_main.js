@@ -1035,6 +1035,23 @@ function odenMaybeLockdown() {
   odenHardenIntrinsics();
 }
 
+// Oden capsec authority-flow (ENG-23784): install the `Deno.oden` namespace
+// (handles/attenuators) onto the Deno object only when capsec is armed. The
+// surface script (42_oden.js) is a LAZY module -- loaded here, at runtime
+// bootstrap, only on the armed path -- so unarmed runs neither deserialize it
+// nor expose any new namespace, staying byte-identical to stock Deno. Arming
+// therefore stays a per-process decision with nothing baked into the snapshot.
+function odenMaybeInstallHandles(denoNs) {
+  const flags = op_oden_capsec_flags();
+  if ((flags & 1) === 0) {
+    return;
+  }
+  const { oden } = core.loadExtScript("ext:runtime/42_oden.js");
+  if (oden) {
+    ObjectDefineProperty(denoNs, "oden", core.propReadOnly(oden));
+  }
+}
+
 // FIXME(bartlomieju): temporarily add whole `Deno.core` to
 // `Deno[Deno.internal]` namespace. It should be removed and only necessary
 // methods should be left there.
@@ -1383,6 +1400,10 @@ function bootstrapMainRuntime(runtimeOptions, warmup = false) {
       disableProtoAccessor();
     }
 
+    // Oden capsec: install Deno.oden (authority-flow handles) when armed.
+    // @ref llp/0001-adding-capability-security-to-deno.plan.md
+    odenMaybeInstallHandles(finalDenoNs);
+
     // Setup `Deno` global - we're actually overriding already existing global
     // `Deno` with `Deno` namespace from "./deno.ts".
     ObjectDefineProperty(globalThis, "Deno", core.propReadOnly(finalDenoNs));
@@ -1550,6 +1571,10 @@ function bootstrapWorkerRuntime(
     if (!ArrayPrototypeIncludes(unstableFeatures, unstableIds.unsafeProto)) {
       disableProtoAccessor();
     }
+
+    // Oden capsec: install Deno.oden (authority-flow handles) when armed.
+    // @ref llp/0001-adding-capability-security-to-deno.plan.md
+    odenMaybeInstallHandles(finalDenoNs);
 
     // Setup `Deno` global - we're actually overriding already existing global
     // `Deno` with `Deno` namespace from "./deno.ts".

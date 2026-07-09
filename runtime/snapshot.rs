@@ -92,6 +92,7 @@ pub fn create_runtime_snapshot(
     ops::worker_host::deno_worker_host::lazy_init(),
     ops::fs_events::deno_fs_events::lazy_init(),
     ops::permissions::deno_permissions::lazy_init(),
+    ops::oden::deno_oden::lazy_init(),
     ops::tty::deno_tty::lazy_init(),
     ops::http::deno_http_runtime::lazy_init(),
     deno_bundle_runtime::deno_bundle_runtime::lazy_init(),

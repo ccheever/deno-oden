@@ -61,6 +61,7 @@ pub fn get_extensions_in_snapshot() -> Vec<Extension> {
     ),
     ops::fs_events::deno_fs_events::init(),
     ops::permissions::deno_permissions::init(),
+    ops::oden::deno_oden::init(),
     ops::tty::deno_tty::init(),
     ops::http::deno_http_runtime::init(),
     deno_bundle_runtime::deno_bundle_runtime::init(None),

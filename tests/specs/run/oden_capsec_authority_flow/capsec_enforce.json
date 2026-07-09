@@ -1,0 +1,1 @@
+{ "mode": "enforce", "grants": { "grantor-dep": "fs:read:./shared" } }

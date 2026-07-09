@@ -1,0 +1,24 @@
+{
+  // Oden capsec authority-flow red-team (ENG-23784). An ungranted, malicious
+  // package tries every angle to obtain authority it was not delegated; each
+  // fails closed:
+  //   - cross-package theft: no handle + no grant -> the direct read denies;
+  //   - forged handle: a fabricated handle-shaped object has no host-side id, so
+  //     its fake use() opens no window and the read denies (ids are unguessable
+  //     and never exposed on the carrier -- carrier-keys shows no id);
+  //   - deputy confusion via the transfer path: evil cannot mint the grantor's
+  //     authority (mint is frame-checked against evil's own holdings);
+  //   - serialization: a handle cannot be structuredClone'd (DataCloneError), so
+  //     it never leaks across a serialization/postMessage boundary;
+  //   - re-widening a legitimately-held handle via scoped() denies.
+  // The use-after-revoke and revocation-cascade red-team shapes are covered by
+  // the oden_capsec_authority_flow fixture.
+  "tests": {
+    "handle_attacks_fail_closed": {
+      "args": "run --allow-read app.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json" },
+      "output": "redteam.out",
+      "exitCode": 0
+    }
+  }
+}

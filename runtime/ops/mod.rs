@@ -4,6 +4,7 @@ pub mod bootstrap;
 pub mod desktop;
 pub mod fs_events;
 pub mod http;
+pub mod oden;
 pub mod permissions;
 pub mod runtime;
 pub mod tty;

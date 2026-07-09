@@ -256,6 +256,50 @@ const CHECKLIST: HoleClass[] = [
     note:
       "NOT an open laundering hole — module-eval stamping was measured to launder and was rejected; the residual is the async-detached over-denial, whose sound closure is the call-boundary boundary stamp",
   },
+  // --- Authority-flow handles / attenuators (ENG-23784) ----------------------
+  {
+    category: "authority-flow",
+    attack:
+      "cross-package handle theft: an ungranted package obtains a resource it was not delegated",
+    status: "closed",
+    tests: ["oden_capsec_handle_redteam", "oden_capsec_authority_flow"],
+    note:
+      "possession is the authority and it is scoped to an active use() window: an ungranted package holding no handle denies, a fabricated handle-shaped object opens no host-side window (ids are unguessable and never on the carrier), and merely holding a real carrier without a use() window confers nothing",
+  },
+  {
+    category: "authority-flow",
+    attack: "forged / guessed handle id names authority",
+    status: "closed",
+    tests: ["oden_capsec_handle_redteam"],
+    note:
+      "the host table is keyed by a 128-bit CSPRNG id kept only in the carrier's method closures (no id property, not even symbol-keyed); an unknown id fails closed (unit-tested oden_handle::unknown_id_is_fail_closed), and structuredClone/postMessage of a carrier throw (functions are uncloneable) so a handle never leaks across a serialization boundary",
+  },
+  {
+    category: "authority-flow",
+    attack: "re-widening: scope a handle wider than what was received",
+    status: "closed",
+    tests: ["oden_capsec_authority_flow", "oden_capsec_handle_redteam"],
+    note:
+      "scoped() only narrows — a child capability must be covered by the parent's; a mint cannot exceed the minter's own holdings (frame-checked); both over-broad shapes deny",
+  },
+  {
+    category: "authority-flow",
+    attack:
+      "use-after-revoke through a derived handle (revocation cascade bypass)",
+    status: "closed",
+    tests: ["oden_capsec_authority_flow"],
+    note:
+      "revoking a handle cascades to every handle transitively derived from it; a use of the revoked handle or any descendant fails closed (lookup returns Revoked)",
+  },
+  {
+    category: "authority-flow",
+    attack:
+      "deputy confusion via the transfer path: an ungranted package mints on a grantor's authority",
+    status: "closed",
+    tests: ["oden_capsec_handle_redteam"],
+    note:
+      "mint is frame-checked against the CALLER's own holdings, so an ungranted package minting the grantor's capability denies (mint exceeds holding); it cannot conjure authority it does not hold even where a legitimate grantor could",
+  },
 ];
 
 function dirExists(name: string): boolean {

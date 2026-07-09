@@ -42,6 +42,7 @@ extension!(runtime,
     "40_fs_events.js",
     "40_tty.js",
     "41_prompt.js",
+    "42_oden.js",
   ],
   customizer = |ext: &mut Extension| {
     #[cfg(not(feature = "exclude_runtime_main_js"))]

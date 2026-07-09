@@ -1246,6 +1246,9 @@ fn common_extensions<
     ops::worker_host::deno_worker_host::lazy_init(),
     ops::fs_events::deno_fs_events::init(),
     ops::permissions::deno_permissions::init(),
+    // Oden capsec authority-flow handles/attenuators (ENG-23784). Additive ops
+    // backing the `Deno.oden` namespace; inert unless capsec is armed.
+    ops::oden::deno_oden::init(),
     ops::tty::deno_tty::init(),
     ops::http::deno_http_runtime::init(),
     deno_bundle_runtime::deno_bundle_runtime::lazy_init(),

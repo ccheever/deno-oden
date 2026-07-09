@@ -34,6 +34,7 @@ use url::Url;
 
 pub mod broker;
 mod ipc_pipe;
+mod oden_handle;
 mod oden_policy;
 mod oden_principal_index;
 pub mod prompter;
@@ -46,8 +47,10 @@ use prompter::PERMISSION_EMOJI;
 use prompter::permission_prompt;
 pub use runtime_descriptor_parser::RuntimePermissionDescriptorParser;
 
+use self::oden_handle::HandleLookup as OdenHandleLookup;
 use self::oden_policy::Decision as OdenDecision;
 use self::oden_policy::Family as OdenFamily;
+use self::oden_policy::Grant as OdenGrant;
 use self::oden_policy::Mode as OdenMode;
 use self::oden_policy::Policy as OdenPolicy;
 use self::oden_policy::Principal as OdenPrincipal;
@@ -181,6 +184,32 @@ fn oden_capsec_decide(
         (decision, principal.label(), is_ambient_allow, suggestion)
       }
     };
+
+  // Possession rescue (ENG-23784, authority-flow handles): if the op would be
+  // denied by the possessor's OWN grants but the possessor is *actively using*
+  // a handle whose attenuated capability covers it, the handle authorizes the
+  // op. This is possession-checked, never frame-checked — holding the handle
+  // (the open use window) is the authority, so no stack walk decides it. The
+  // active window is empty on every path where no handle is in use, so this is
+  // byte-identical to the pre-handle behavior when handles are not exercised.
+  // The rescue does not widen: `active_covers` matches the attenuated scope, so
+  // a use outside the handle's scope still denies through the normal path.
+  if decision == OdenDecision::Deny && oden_handle::active_covers(&req) {
+    let api = api_name.unwrap_or_else(|| family.name());
+    eprintln!(
+      "[oden-capsec] {api}:{} caller={principal_label} -> allow(handle)",
+      req.target
+    );
+    oden_capsec_audit_record(
+      &principal_label,
+      family.name(),
+      action,
+      &req.target,
+      "allow(handle)",
+      None,
+    );
+    return Ok(());
+  }
 
   let verdict = match (&decision, is_ambient_allow) {
     (OdenDecision::Allow, true) => "allow(ambient)",
@@ -678,6 +707,10 @@ fn oden_capsec_audit_record(
   let decision = match verdict {
     v if v.starts_with("allow(ambient") => "allow-ambient",
     v if v.starts_with("allow(granted") => "allow-granted",
+    // Generic allow verdicts (handle mint/scoped/transfer/use/revoke,
+    // resource transfer) map to a plain allow so a handle audit record is not
+    // misclassified as a deny by the prefix table above.
+    v if v.starts_with("allow") => "allow",
     v if v.starts_with("audit") => "audit-record",
     _ => "deny",
   };
@@ -841,6 +874,299 @@ pub fn oden_capsec_transfer_resource(rid: u32, to_selector: &str) {
     &format!("allow(transfer from {from})"),
     None,
   );
+}
+
+// --- Authority-flow handles / attenuators (LLP 0001 §Delegation and handles,
+// ENG-23784) ------------------------------------------------------------------
+// The general form of the minimal transfer primitive above: a package
+// attenuates a capability it HOLDS into an unforgeable handle and hands the
+// narrower one across a package boundary. Mint is frame-checked (the minter
+// must hold the authority now); use is possession-checked (holding the handle
+// is the authority — no stack walk); `scoped()` only narrows; revocation
+// cascades; ids are unguessable. The host-side table + use window live in
+// `oden_handle`; this is the glue that resolves the acting principal, consults
+// the policy for the frame-check, and writes the mint/transfer/use/deny/revoke
+// audit records. All inert unless capsec is armed.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+
+// Encode/decode the unguessable 128-bit id as fixed-width hex for the JS
+// carrier. The carrier holds this string under a bootstrap-private Symbol, so
+// user code cannot read or forge it; a guessed/forged string decodes to an id
+// the table does not know (fail closed).
+fn oden_handle_id_hex(id: u128) -> String {
+  format!("{id:032x}")
+}
+
+fn oden_handle_parse_id(hex: &str) -> Option<u128> {
+  u128::from_str_radix(hex.trim(), 16).ok()
+}
+
+// Parse a capability string (`fs:read:./x`, `env:read:SECRET`,
+// `network:fetch:example.com`, `ffi`) into the policy Grant it names, the
+// Request form used for coverage checks, and a canonical string for audit. Fs
+// scopes are resolved to absolute (root/$HOME relative) exactly as policy-file
+// grants are, so a handle scope matches the absolute path an op requests.
+fn oden_handle_parse_capability(
+  cap_str: &str,
+) -> Option<(OdenGrant, OdenRequest, String)> {
+  let root = oden_capsec_project_root();
+  let resolved = oden_resolve_grant_scopes(cap_str.trim(), root);
+  let grant = OdenGrant::parse(&resolved)?;
+  let req = OdenRequest {
+    family: grant.family,
+    action: grant.action.clone(),
+    target: grant.scope.clone(),
+  };
+  let canonical =
+    format!("{}:{}:{}", grant.family.name(), grant.action, grant.scope);
+  Some((grant, req, canonical))
+}
+
+fn oden_handle_denied(
+  label: &str,
+  action: &str,
+  cap: &str,
+  reason: &str,
+) -> PermissionCheckError {
+  eprintln!(
+    "[oden-capsec] handle:{action} caller={label} cap={cap} -> DENY({reason})"
+  );
+  oden_capsec_audit_record(
+    label,
+    "handle",
+    action,
+    cap,
+    &format!("DENY({reason})"),
+    None,
+  );
+  PermissionCheckError::PermissionDenied(PermissionDeniedError {
+    access: format!("handle {action} for {cap:?}"),
+    name: "capsec",
+    custom_message: Some(format!(
+      "oden capsec: principal \"{label}\" cannot {action} handle {cap} ({reason})"
+    )),
+    state: PermissionState::Denied,
+  })
+}
+
+/// Mint an attenuated handle from a capability the acting principal HOLDS.
+/// Frame-checked: the minter's own policy authority must cover the requested
+/// capability (root/permissive hold everything; a package holds only its
+/// grants), so a mint cannot exceed what the minter holds. Returns the
+/// unguessable handle id (hex) on success.
+pub fn oden_capsec_handle_mint(
+  cap_str: &str,
+) -> Result<String, PermissionCheckError> {
+  if !oden_capsec_active() {
+    return Err(oden_handle_inactive());
+  }
+  let principal = oden_capsec_principal();
+  let label = principal.label();
+  let Some((grant, req, canonical)) = oden_handle_parse_capability(cap_str)
+  else {
+    return Err(oden_handle_denied(
+      &label,
+      "mint",
+      cap_str,
+      "unparseable capability",
+    ));
+  };
+  // Frame-check: the minter must actually hold the authority at mint time.
+  let policy = oden_capsec_policy();
+  let mode = oden_capsec_mode(oden_capsec_policy_file());
+  let holds = principal.is_ambient()
+    || mode == OdenMode::Permissive
+    || policy.grants(&principal, &req);
+  if !holds {
+    return Err(oden_handle_denied(
+      &label,
+      "mint",
+      &canonical,
+      "mint exceeds holding",
+    ));
+  }
+  let id =
+    oden_handle::insert_handle(label.clone(), grant, canonical.clone(), None);
+  eprintln!(
+    "[oden-capsec] handle:mint caller={label} cap={canonical} -> allow(mint)"
+  );
+  oden_capsec_audit_record(
+    &label,
+    "handle",
+    "mint",
+    &canonical,
+    "allow(mint)",
+    None,
+  );
+  Ok(oden_handle_id_hex(id))
+}
+
+/// Re-attenuate: derive a narrower child handle from a parent the caller
+/// possesses. Only narrows — the child capability must be covered by the
+/// parent's, so over-broad re-widening is denied. Not frame-checked against the
+/// caller's grants: possession of the parent handle is the authority to
+/// attenuate it (the parent was itself frame-checked at mint).
+pub fn oden_capsec_handle_scoped(
+  parent_hex: &str,
+  cap_str: &str,
+) -> Result<String, PermissionCheckError> {
+  if !oden_capsec_active() {
+    return Err(oden_handle_inactive());
+  }
+  let principal = oden_capsec_principal();
+  let label = principal.label();
+  let Some((grant, req, canonical)) = oden_handle_parse_capability(cap_str)
+  else {
+    return Err(oden_handle_denied(
+      &label,
+      "scoped",
+      cap_str,
+      "unparseable capability",
+    ));
+  };
+  let Some(parent_id) = oden_handle_parse_id(parent_hex) else {
+    return Err(oden_handle_denied(
+      &label,
+      "scoped",
+      &canonical,
+      "unknown parent handle",
+    ));
+  };
+  // The parent must be live (exists, not revoked, no revoked ancestor).
+  let Some(parent_grant) =
+    oden_handle::with_table(|t| t.parent_grant_if_live(parent_id))
+  else {
+    return Err(oden_handle_denied(
+      &label,
+      "scoped",
+      &canonical,
+      "parent handle revoked or unknown",
+    ));
+  };
+  // Narrowing check: the child capability must be covered by the parent's.
+  if !oden_policy::covers(std::slice::from_ref(&parent_grant), &req) {
+    return Err(oden_handle_denied(
+      &label,
+      "scoped",
+      &canonical,
+      "scoped wider than parent",
+    ));
+  }
+  let id = oden_handle::insert_handle(
+    label.clone(),
+    grant,
+    canonical.clone(),
+    Some(parent_id),
+  );
+  eprintln!(
+    "[oden-capsec] handle:scoped caller={label} cap={canonical} -> allow(scoped)"
+  );
+  oden_capsec_audit_record(
+    &label,
+    "handle",
+    "scoped",
+    &canonical,
+    "allow(scoped)",
+    None,
+  );
+  Ok(oden_handle_id_hex(id))
+}
+
+/// Open a synchronous possession window on a handle: push its attenuated
+/// capability onto the active-use stack so the enforcement funnel authorizes
+/// covered ops for the duration of the possessor's callback. Possession-checked
+/// — any principal holding the handle may use it; there is no frame walk. Emits
+/// the boundary-crossing `transfer` record the first time a possessor other
+/// than the minter uses it. A revoked/forged/unknown handle denies (the
+/// use-after-revoke and forged-id red-team cases). Balanced by
+/// `oden_capsec_handle_exit`.
+pub fn oden_capsec_handle_enter(hex: &str) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_active() {
+    return Err(oden_handle_inactive());
+  }
+  let principal = oden_capsec_principal();
+  let label = principal.label();
+  let Some(id) = oden_handle_parse_id(hex) else {
+    return Err(oden_handle_denied(&label, "use", "?", "forged handle id"));
+  };
+  let lookup = oden_handle::with_table(|t| t.lookup(id));
+  match lookup {
+    OdenHandleLookup::Unknown => {
+      Err(oden_handle_denied(&label, "use", "?", "forged handle id"))
+    }
+    OdenHandleLookup::Revoked => {
+      Err(oden_handle_denied(&label, "use", "?", "handle revoked"))
+    }
+    OdenHandleLookup::Live {
+      grant,
+      cap_str,
+      minter,
+    } => {
+      // Boundary-crossing audit: fire once per new cross-package possessor.
+      let crossed = oden_handle::with_table(|t| t.note_possessor(id, &label));
+      if crossed {
+        eprintln!(
+          "[oden-capsec] handle:transfer {minter}->{label} cap={cap_str} -> allow(transfer)"
+        );
+        oden_capsec_audit_record(
+          &label,
+          "handle",
+          "transfer",
+          &cap_str,
+          &format!("allow(transfer {minter}->{label})"),
+          None,
+        );
+      }
+      oden_handle::push_active(grant);
+      Ok(())
+    }
+  }
+}
+
+/// Close the most recent possession window opened by `oden_capsec_handle_enter`.
+pub fn oden_capsec_handle_exit() {
+  if !oden_capsec_active() {
+    return;
+  }
+  oden_handle::pop_active();
+}
+
+/// Revoke a handle and every handle transitively derived from it. Idempotent:
+/// an unknown or already-revoked handle is a no-op. Emits one `revoke` record
+/// per handle actually revoked so the cascade is auditable.
+pub fn oden_capsec_handle_revoke(hex: &str) {
+  if !oden_capsec_active() {
+    return;
+  }
+  let Some(id) = oden_handle_parse_id(hex) else {
+    return;
+  };
+  let label = oden_capsec_principal().label();
+  let revoked = oden_handle::with_table(|t| t.revoke_cascade(id));
+  for (rid, cap) in revoked {
+    let kind = if rid == id {
+      "allow(revoke)"
+    } else {
+      "allow(revoke cascade)"
+    };
+    eprintln!("[oden-capsec] handle:revoke caller={label} cap={cap} -> {kind}");
+    oden_capsec_audit_record(&label, "handle", "revoke", &cap, kind, None);
+  }
+}
+
+// A handle op reached while capsec is inactive: the `Deno.oden` surface is only
+// installed when armed, so this is defense in depth (a stray call denies rather
+// than silently succeeding).
+fn oden_handle_inactive() -> PermissionCheckError {
+  PermissionCheckError::PermissionDenied(PermissionDeniedError {
+    access: "oden handle operation".to_string(),
+    name: "capsec",
+    custom_message: Some(
+      "oden capsec: authority-flow handles require an armed capsec policy"
+        .to_string(),
+    ),
+    state: PermissionState::Denied,
+  })
 }
 
 // Import gating (LLP 0001 Phase 2), attributed to the **referrer** — the module
