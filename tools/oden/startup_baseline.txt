@@ -1,11 +1,20 @@
-# Oden startup baseline — deno 2.9.1 (stable, debug, aarch64-apple-darwin)
+# Oden startup baseline (ENG-23762)
 # script: Deno.env.get("PATH"); Deno.exit(0)
-inert (capsec off)           mean=   8ms min=   8ms  (N=25)
-armed audit (no enforce)     mean=   8ms min=   7ms  (N=25)
-armed enforce                mean=   8ms min=   8ms  (N=25)
 #
-# Caveat: debug build (unoptimized) — absolute numbers are slow; the RELATIVE
-# inert-vs-armed delta is the signal, and startup shows ~no overhead (a startup
-# does few gated ops). Per-op throughput under load, and a fork-vs-upstream
-# comparison, are the follow-on measurements (need a release build + upstream
-# deno). Re-run: DENO=./target/debug/deno ./tools/oden/bench_startup.sh
+# Release builds, fork-vs-upstream, interleaved cells (K=15, medians),
+# quiet machine, 2026-07-09T14:13Z — the recorded baseline:
+#   fork inert       median= 29.5ms
+#   fork enforce     median= 29.0ms   (arming is free at startup)
+#   variant-B inert  median= 29.5ms
+#   upstream v2.9.1  median= 28.9ms   (pin 115114f9, same machine/toolchain)
+# Fork-vs-upstream delta is within run noise; armed-vs-inert is ~0 (a startup
+# does few gated ops). Per-op cost under load lives in
+# tools/oden/throughput_baseline.txt.
+#
+# Phase-0 debug-build measurement (2026-07-09, kept for the relative-delta
+# record): inert 8ms / armed-audit 8ms / armed-enforce 8ms (mean, N=25) —
+# same ~no-overhead shape.
+#
+# Re-run: DENO=./target-release/release/deno N=25 ./tools/oden/bench_startup.sh
+# (single-binary armed-vs-inert); for the fork-vs-upstream interleaved form
+# see the bench_session script in the perf program's artifacts.

@@ -1,0 +1,86 @@
+# Oden per-op throughput baseline — 2026-07-09T14:13Z (ENG-23762 / ENG-23764)
+#
+# deno 2.9.1 release builds, aarch64-apple-darwin (M-series, 18 cores, quiet
+# machine), fork at 36-commit patch set (through the root/readiness snapshot).
+# Harness: tools/oden/bench_throughput.sh — K=5 reps/cell, cells INTERLEAVED
+# per the LLP 0013 measurement protocol (rep k of every cell before rep k+1 of
+# any), medians, same-window ratios only. State: valid for the cells below
+# (variance shown in the reps); vb:audit gated-op cells carry a named confound
+# (see below).
+#
+# Cells: fork (this tree) inert/audit/enforce; vb = variant-B build
+# (unconditional capture: stack-trace emission in EVERY op's dispatch, the
+# rejected option-2 upper bound); up = pristine upstream v2.9.1 (pin 115114f9);
+# trace = DENO_TRACE_PERMISSIONS=1.
+#
+# workload     cell             median ns/op
+# env_get      fork:inert            271.0     gated op, fast path
+# env_get      fork:audit           2475.1
+# env_get      fork:enforce         2427.0
+# env_get      vb:inert              254.1
+# env_get      vb:audit            19260.5     (confound: see note 3)
+# env_get      up:inert              262.8
+# env_get      up:trace            17997.7
+# lstat        fork:inert           2815.0     gated op, slow path
+# lstat        fork:audit           5822.5
+# lstat        fork:enforce         5848.4
+# lstat        vb:inert             2833.1
+# lstat        vb:audit            22263.8     (confound: see note 3)
+# lstat        up:inert             2818.3
+# lstat        up:trace            21494.0
+# read_small   fork:inert          16765.4     gated op (64B file)
+# read_small   fork:audit          21260.1
+# read_small   fork:enforce        21216.5
+# read_small   vb:inert            17448.7
+# read_small   vb:audit            35430.8     (confound: see note 3)
+# read_small   up:inert            16677.6
+# read_small   up:trace            44522.5
+# read_async   fork:inert          27641.7     gated op, async dispatch
+# read_async   fork:audit          30645.8
+# read_async   fork:enforce        31725.1
+# read_async   vb:inert            27846.2
+# read_async   vb:audit            57860.7     (confound: see note 3)
+# read_async   up:inert            29462.9
+# read_async   up:trace            54651.2
+# url_parse    fork:inert            259.5     NON-gated control
+# url_parse    fork:audit            264.1
+# url_parse    fork:enforce          260.6
+# url_parse    vb:inert              268.9
+# url_parse    vb:audit             1729.4     the option-2 rejection number
+# url_parse    up:inert              257.2
+# url_parse    up:trace              261.2
+# now          all cells            ~24.4      non-op fast path, all parity
+#
+# Findings (the ENG-23764 capture-point decision data):
+# 1. Fork inert == upstream inert on every cell (deltas within rep noise):
+#    the mediation machinery is free when capsec is disarmed. LLP 0001's
+#    "≈0% in permissive mode" bar is met.
+# 2. Armed (audit/enforce) taxes ONLY gated ops: +2.2µs (env_get), +3.0µs
+#    (lstat), +4.5µs (read_small), +3.0-4.1µs (read_async) per op — the raw
+#    frame walk + CPED stamp/read + decide(). Non-gated ops are untouched
+#    (url_parse 264 vs 260 ns). Getting here required three hot-path fixes,
+#    each found by this benchmark: policy-file re-read per op (~275µs/op),
+#    per-event ALLOW stderr feedback (~111µs/op), and per-op getcwd/stat in
+#    the readiness gate and principal deriver (~17µs/op).
+# 3. Variant B (unconditional emission) prices option 2: inert it is ~parity
+#    (+0-4%), but ARMED it taxes every op — url_parse 264 -> 1729 ns (6.6x),
+#    the walk+CPED on a non-gated op. Its GATED-op audit cells also carry a
+#    build confound (vb lacks the root/readiness snapshot commit, so those
+#    absolute values overstate option 2 by ~15µs/op); the url_parse number is
+#    unconfounded (no decide() on that path) and is by itself decisive.
+# 4. Context: upstream's own DENO_TRACE_PERMISSIONS pays 18-21.5µs per gated
+#    op (JsError-style capture). The fork's armed capture is 4-8x cheaper.
+#
+# Decision (LLP 0001 open question 1): annotation-keyed capture (option 1),
+# with the stack_trace_audit.ts canary gate closing the annotation-drift
+# soundness objection (844 ops scanned, 0 violations, green on v2.9.1 and the
+# v2.9.2 rebase). Fast-path demotion NOT taken: annotated ops keep fast calls
+# and inert parity shows the emission is free disarmed. Named follow-up: the
+# remaining ~2-4µs armed tax is dominated by the 32-frame walk's per-frame
+# file_name extraction; lazy extraction (only on locator miss) is the next
+# candidate if a workload-level regression ever demands it.
+#
+# Re-run: quiet machine, then
+#   CELLS="fork:./target-release/release/deno:inert fork:./target-release/release/deno:audit \
+#          fork:./target-release/release/deno:enforce up:<upstream-bin>:inert" \
+#     K=5 ./tools/oden/bench_throughput.sh

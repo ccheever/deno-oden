@@ -1,0 +1,21 @@
+# Oden Node-compat baseline (ENG-23762) — 2026-07-09
+#
+# The CI-configured Node-compat suite (cargo test -p node_compat_tests --test
+# node_compat, tests/node_compat/runner/suite at its recorded pin) on the fork
+# at the 36-commit patch set, capsec inert (default):
+#
+#   72 of 74 pass.
+#
+# The 2 failures — sequential/test-gc-http-client.js and
+# sequential/test-gc-http-client-onerror.js (20s timeouts) — are NOT fork
+# regressions: pristine upstream v2.9.1 (pin 115114f9), built with the same
+# toolchain on the same machine, fails exactly the same two tests (A/B run
+# 2026-07-09; likely a GC-vs-network timing sensitivity of this Darwin/hardware
+# combination — upstream's own macOS CI is green on its runner image).
+#
+# Fork-vs-upstream node-compat delta: ZERO tests.
+#
+# The wider unit_node suite (cargo test -p unit_node_tests --test unit_node)
+# passes clean on the fork; capsec is inert by default so Node-compat behavior
+# is inherited from upstream unchanged (url_parse/env parity cells in
+# tools/oden/throughput_baseline.txt quantify "unchanged" at the op level).
