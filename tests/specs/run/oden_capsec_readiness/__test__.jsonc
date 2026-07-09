@@ -1,0 +1,27 @@
+{
+  // Readiness report + fail-closed honesty (mode name is the guarantee).
+  // 1) ODEN_CAPSEC_READINESS prints the exact posture, degraded states named.
+  // 2) enforce with a forced-missing prerequisite (FORCE_UNSEALED) and no
+  //    advisory REFUSES to run — fail-closed. 3) the same with the advisory
+  //    flag runs, loudly labeled as a named degraded state.
+  "tests": {
+    "readiness_report": {
+      "args": "run --allow-env app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "audit", "ODEN_CAPSEC_READINESS": "1" },
+      "output": "readiness.out",
+      "exitCode": 0
+    },
+    "enforce_missing_prereq_fails_closed": {
+      "args": "run --allow-env app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce", "ODEN_CAPSEC_FORCE_UNSEALED": "1" },
+      "output": "refuse.out",
+      "exitCode": 0
+    },
+    "enforce_advisory_named_degraded": {
+      "args": "run --allow-env app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce", "ODEN_CAPSEC_FORCE_UNSEALED": "1", "ODEN_CAPSEC_ALLOW_ADVISORY": "1" },
+      "output": "degraded.out",
+      "exitCode": 0
+    }
+  }
+}

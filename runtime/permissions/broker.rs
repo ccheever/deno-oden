@@ -37,6 +37,13 @@ struct PermissionBrokerRequest<'a> {
   datetime: String,
   permission: &'a str,
   value: Option<String>,
+  // The acting package principal (Oden capsec). Omitted when capsec is
+  // inactive so the wire format is unchanged for stock Deno; present when a
+  // package is on the stack, so a broker can key its decision on caller
+  // identity, not just the process. Upstreaming candidate (shrinks the diff).
+  // @ref llp/0001-adding-capability-security-to-deno.plan.md (Broker protocol)
+  #[serde(skip_serializing_if = "Option::is_none")]
+  principal: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -85,6 +92,7 @@ impl PermissionBroker {
       datetime: chrono::Utc::now().to_rfc3339(),
       permission,
       value: stringified_value,
+      principal: super::oden_capsec_current_principal_label(),
     };
 
     let msg = format!("{}\n", serde_json::to_string(&request).unwrap());

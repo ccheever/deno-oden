@@ -1,0 +1,8 @@
+[oden-capsec] readiness report
+  mode: audit
+  attribution: armed
+  cped-seal: applied
+  lockdown: off
+  policy-source: (none — grants from env only)
+  root: [WILDLINE]
+[WILDCARD]op ran

@@ -1,0 +1,1 @@
+[WILDCARD]denied: oden capsec: principal "needy-dep" is not granted env:read:SECRET — to allow: grant "needy-dep" `env:read:SECRET`

@@ -1,0 +1,30 @@
+{
+  // Audit-as-conversation: a denial suggests its own grant, and a real run's
+  // audit stream synthesizes a starting policy.
+  // 1) Under enforce the dep's ungranted env read is denied with the exact
+  //    grant that would allow it appended to the message.
+  // 2) An audit run writes ODEN_CAPSEC_AUDIT NDJSON carrying that suggestion;
+  //    audit_synth.ts lifts it into a starting .oden/policy.json.
+  "tests": {
+    "denial_suggests_grant": {
+      "args": "run --allow-env app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce", "SECRET": "xyz" },
+      "output": "deny.out",
+      "exitCode": 0
+    },
+    "audit_synthesizes_policy": {
+      "steps": [
+        {
+          "args": "run --allow-env app.js",
+          "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "audit", "ODEN_CAPSEC_AUDIT": "audit.ndjson", "SECRET": "xyz" },
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": "run -A ../../../../tools/oden/audit_synth.ts audit.ndjson",
+          "output": "synth.out",
+          "exitCode": 0
+        }
+      ]
+    }
+  }
+}
