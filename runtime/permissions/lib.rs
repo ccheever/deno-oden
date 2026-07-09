@@ -188,9 +188,27 @@ fn oden_capsec_decide(
     (OdenDecision::Deny, _) => "DENY(no grant)",
   };
   let api = api_name.unwrap_or_else(|| family.name());
-  eprintln!(
-    "[oden-capsec] {api}:{target} caller={principal_label} -> {verdict}"
-  );
+  // Audit-as-conversation feedback. ALLOW verdicts are deduped to one stderr
+  // line per distinct (principal, api, target, verdict) per process: emitting
+  // them per event priced an unbuffered stderr write into every mediated op
+  // (~100x on a gated-op hot loop, ENG-23764 benchmark) and buried the signal
+  // in repeats. audit(record) and DENY stay per-event — they are the
+  // conversation (the deferral-channel conformance spec counts one record per
+  // channel), and a denied op throws, so a deny loop cannot spam. The NDJSON
+  // sink (ODEN_CAPSEC_AUDIT) stays per-event for machine consumption.
+  let emit = if matches!(decision, OdenDecision::Allow) {
+    static SEEN_ALLOWS: Lazy<Mutex<std::collections::HashSet<String>>> =
+      Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
+    let key = format!("{principal_label}\u{1}{api}\u{1}{target}\u{1}{verdict}");
+    SEEN_ALLOWS.lock().insert(key)
+  } else {
+    true
+  };
+  if emit {
+    eprintln!(
+      "[oden-capsec] {api}:{target} caller={principal_label} -> {verdict}"
+    );
+  }
   oden_capsec_audit_record(
     &principal_label,
     family.name(),
