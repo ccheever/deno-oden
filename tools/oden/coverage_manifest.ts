@@ -71,6 +71,12 @@ const CAPABILITY_TAXONOMY: Record<string, TaxonomyEntry> = {
     grant:
       "default-denied for package principals until inheritance is designed",
   },
+  "import:graph": {
+    deno: "ModuleLoader inner_resolve capsec gate (referrer-attributed)",
+    target: "resolved import specifier (data:/blob:/http(s):)",
+    grant:
+      "remote/data imports default-denied for package principals under enforce",
+  },
 };
 
 function* walk(dir: string): Generator<string> {
@@ -114,6 +120,11 @@ function collectMediation(): string[] {
   // Standalone capsec checks that don't go through oden_capsec_decide.
   if (src.includes("fn oden_capsec_check_worker_create")) {
     found.add("worker:create\tvia oden_capsec_check_worker_create()");
+  }
+  if (src.includes("fn oden_capsec_gate_import")) {
+    found.add(
+      "import:graph\tvia oden_capsec_gate_import() [loader-attributed]",
+    );
   }
   return [...found].sort();
 }

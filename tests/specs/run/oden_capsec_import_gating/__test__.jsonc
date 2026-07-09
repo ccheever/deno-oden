@@ -1,0 +1,24 @@
+{
+  // Import gating (ENG-23774), attributed to the referrer at the module loader.
+  // A dependency (sneaky-dep) dynamically importing data: code is denied under
+  // enforce; root doing the same is ambient-allowed; with capsec off both work.
+  "tests": {
+    "dep_remote_import_denied_under_enforce": {
+      "args": "run --allow-all dep_app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce" },
+      "output": "dep_denied.out",
+      "exitCode": 0
+    },
+    "root_remote_import_allowed_under_enforce": {
+      "args": "run --allow-all root_app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "ODEN_CAPSEC_MODE": "enforce" },
+      "output": "root_ok.out",
+      "exitCode": 0
+    },
+    "baseline_capsec_off_allows": {
+      "args": "run --allow-all dep_app.js",
+      "output": "baseline.out",
+      "exitCode": 0
+    }
+  }
+}
