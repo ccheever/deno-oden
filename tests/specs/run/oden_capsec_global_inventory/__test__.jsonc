@@ -1,0 +1,20 @@
+{
+  // Closed global inventory (LLP 0001 Phase 1): the powerful ambient surface is
+  // removed/sealed while armed. __bootstrap and Deno.core are gone, the extras
+  // binding op is stripped, and no powerful async/script-creation primitive is
+  // reachable. Baseline documents the inert (ordinary-Deno) surface. A rebase
+  // that re-exposes any of these fails the armed case.
+  "tests": {
+    "armed_seals_powerful_surface": {
+      "args": "run probe.mjs",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1" },
+      "output": "armed.out",
+      "exitCode": 0
+    },
+    "baseline_surface": {
+      "args": "run probe.mjs",
+      "output": "baseline.out",
+      "exitCode": 0
+    }
+  }
+}
