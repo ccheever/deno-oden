@@ -1,0 +1,1 @@
+--deny-read=secret.txt --deny-env=SECRET_KEY

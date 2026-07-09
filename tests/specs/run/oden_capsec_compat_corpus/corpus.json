@@ -1,0 +1,10 @@
+{
+  "root": ".",
+  "entries": [
+    { "name": "probe-demo", "entry": "demo/app.js" }
+  ],
+  "ceiling": {
+    "env": ["AWS_SECRET_ACCESS_KEY"],
+    "fs:read": ["/etc"]
+  }
+}

@@ -3,12 +3,14 @@
 //
 // Oden op-coverage completeness manifest (LLP 0001 Phase 0).
 //
-// Enumerates two things that together define the capsec mediation surface:
+// Enumerates three things that together define the capsec mediation surface:
 //   1. the capsec-mediated permission checks — every `oden_capsec_decide(...)`
 //      call site, by (family, action) and enclosing fn, in the permission layer;
 //   2. the op-body pre-check *skips* — every `query_read_all()` call site (the
 //      fast paths that bypass the permission container when read is fully
-//      granted), which capsec forces closed while armed.
+//      granted), which capsec forces closed while armed;
+//   3. the capability taxonomy / descriptor mapping for every mediated
+//      family:action pair.
 //
 // The manifest is committed. `--check` regenerates it and diffs against the
 // committed copy, exiting non-zero on drift — so a new upstream op that touches a
@@ -25,6 +27,51 @@ const MANIFEST = ROOT + "tools/oden/op_coverage.manifest.md";
 // Directories scanned for op-body skips. Kept explicit so the scan is stable.
 const SKIP_SCAN_DIRS = ["ext", "runtime", "libs"];
 const MEDIATION_FILE = "runtime/permissions/lib.rs";
+
+type TaxonomyEntry = {
+  deno: string;
+  target: string;
+  grant: string;
+};
+
+const CAPABILITY_TAXONOMY: Record<string, TaxonomyEntry> = {
+  "env:read": {
+    deno: "EnvDescriptor / EnvQueryDescriptor",
+    target: "name or *",
+    grant: "env:read:<name>",
+  },
+  "ffi:load": {
+    deno: "FfiQueryDescriptor",
+    target: "path or *",
+    grant: "ffi",
+  },
+  "fs:read": {
+    deno: "ReadDescriptor / ReadQueryDescriptor",
+    target: "canonical path or *",
+    grant: "fs:read:<path>",
+  },
+  "fs:write": {
+    deno: "WriteDescriptor / WriteQueryDescriptor",
+    target: "canonical path or *",
+    grant: "fs:write:<path>",
+  },
+  "network:fetch": {
+    deno: "NetDescriptor / ImportDescriptor",
+    target: "host, URL, vsock, or unix socket",
+    grant: "network:fetch:<host>",
+  },
+  "run:run": {
+    deno: "RunQueryDescriptor",
+    target: "command display name or *",
+    grant: "run:<command>",
+  },
+  "worker:create": {
+    deno: "op_create_worker capsec gate",
+    target: "worker specifier",
+    grant:
+      "default-denied for package principals until inheritance is designed",
+  },
+};
 
 function* walk(dir: string): Generator<string> {
   let entries: Deno.DirEntry[];
@@ -93,9 +140,60 @@ function collectSkips(): string[] {
   return skips.sort();
 }
 
+function capabilityOf(mediationLine: string): string {
+  return mediationLine.split("\t", 1)[0];
+}
+
+function validateTaxonomy(mediation: string[]): void {
+  const mediated = new Set(mediation.map(capabilityOf));
+  const mapped = new Set(Object.keys(CAPABILITY_TAXONOMY));
+  const errors: string[] = [];
+
+  for (const capability of mediated) {
+    if (!mapped.has(capability)) {
+      errors.push(`missing taxonomy mapping for mediated ${capability}`);
+    }
+  }
+  for (const capability of mapped) {
+    if (!mediated.has(capability)) {
+      errors.push(`taxonomy mapping has no mediated check for ${capability}`);
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(
+      "capability taxonomy is not total against the op-coverage manifest:\n" +
+        errors.map((e) => `  - ${e}`).join("\n"),
+    );
+  }
+}
+
+function renderTaxonomy(): string[] {
+  const out: string[] = [];
+  out.push("## Capability taxonomy / descriptor mapping");
+  out.push("");
+  out.push(
+    "`--check` fails if this table and the mediated family:action set drift.",
+  );
+  out.push("");
+  out.push(
+    "| Capability | Deno descriptor / gate | Target shape | Grant / status |",
+  );
+  out.push("| --- | --- | --- | --- |");
+  for (const capability of Object.keys(CAPABILITY_TAXONOMY).sort()) {
+    const row = CAPABILITY_TAXONOMY[capability];
+    out.push(
+      `| ${capability} | ${row.deno} | ${row.target} | ${row.grant} |`,
+    );
+  }
+  out.push("");
+  return out;
+}
+
 function render(): string {
   const mediation = collectMediation();
   const skips = collectSkips();
+  validateTaxonomy(mediation);
   const out: string[] = [];
   out.push("# Oden op-coverage manifest (generated)");
   out.push("");
@@ -108,12 +206,15 @@ function render(): string {
   out.push("");
   for (const m of mediation) out.push(`- ${m}`);
   out.push("");
+  out.push(...renderTaxonomy());
   out.push("## Op-body pre-check skips (query_read_all call sites)");
   out.push("");
   out.push(
     "These bypass the permission container when read is fully granted; capsec",
   );
-  out.push("forces `query_read_all()` false while armed. Each site must remain");
+  out.push(
+    "forces `query_read_all()` false while armed. Each site must remain",
+  );
   out.push("covered by the layer-2-independence proof.");
   out.push("");
   for (const s of skips) out.push(`- ${s}`);

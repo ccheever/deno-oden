@@ -1,0 +1,7 @@
+{
+  "mode": "audit",
+  "grants": {
+    "left-pad": "env:read:TZ,fs:read:./data,network:fetch:api.example.com",
+    "runner": "run:git"
+  }
+}
