@@ -870,12 +870,16 @@ function odenSealSelfTest(verbose) {
 // Function.prototype.constructor). Runs post-bootstrap / pre-user-code, at the
 // same gate as the CPED seal. A shallow Object.freeze of each intrinsic makes
 // its own methods non-writable and blocks extension -- enough to stop method
-// patching and prototype pollution, the theft vectors. Two deliberate
-// exclusions for compat: the Error CONSTRUCTOR stays unfrozen so
-// node:util.getCallSites can still swap Error.prepareStackTrace (the one known
-// post-bootstrap intrinsic write), and host objects (globalThis, Deno, process)
-// are never frozen -- only the JS primordials. Full SES evaluator taming and the
-// ext/node lazy-write audit are Phase-3 polish.
+// patching and prototype pollution, the theft vectors. One deliberate
+// exclusion for compat: host objects (globalThis, Deno, process) are never
+// frozen -- only the JS primordials. The Error CONSTRUCTOR is TAMED rather
+// than frozen (see odenTameAndFreezeError below): `prepareStackTrace` and
+// `stackTraceLimit` are mutable-by-convention V8 hooks that
+// node:util.getCallSites and userland packages (source-map-support and
+// friends) reassign at will, so those two stay writable data slots while the
+// rest of the constructor's surface is pinned and the object is made
+// non-extensible. The ext/node lazy-write audit landed with ENG-23781
+// (buildAllowedFlags, error-constructor `.name`/`.toString` shadowing).
 // @ref llp/0001-adding-capability-security-to-deno.plan.md
 function odenHardenIntrinsics() {
   const freeze = Object.freeze;
@@ -899,10 +903,18 @@ function odenHardenIntrinsics() {
     WeakSet.prototype,
     Error.prototype,
   );
-  const errs = [TypeError, RangeError, ReferenceError, SyntaxError, EvalError, URIError];
+  const errs = [
+    TypeError,
+    RangeError,
+    ReferenceError,
+    SyntaxError,
+    EvalError,
+    URIError,
+  ];
   for (let i = 0; i < errs.length; i++) roots.push(errs[i].prototype);
   // Constructors + static namespaces (Object.assign, Array.from, JSON.parse).
-  // Error itself is intentionally omitted (prepareStackTrace/stackTraceLimit).
+  // Error itself is handled by odenTameAndFreezeError() below: frozen except
+  // the writable prepareStackTrace/stackTraceLimit data slots.
   roots.push(
     Object,
     Array,
@@ -931,6 +943,68 @@ function odenHardenIntrinsics() {
       if (roots[i]) freeze(roots[i]);
     } catch { /* best effort -- a frozen or exotic root is fine */ }
   }
+  odenTameAndFreezeError();
+}
+
+// The Error.prepareStackTrace / getCallSites shim (LLP 0001 lockdown,
+// ENG-23781): freeze the Error constructor's surface EXCEPT the two
+// mutable-by-convention V8 hooks, so `node:util.getCallSites` and packages
+// that install `Error.prepareStackTrace` (source-map-support style) keep
+// working under lockdown while the constructor can no longer be extended or
+// have `captureStackTrace` and friends swapped out from under a victim.
+//
+// Shape constraint, verified empirically: V8 reads `stackTraceLimit` with
+// GetDataProperty -- converting it to an accessor makes V8 see NO limit and
+// disables stack capture entirely (error.stack becomes undefined). So the
+// blessed slots stay writable DATA properties, pinned non-configurable (they
+// cannot be turned into accessors or deleted -- assignment, including
+// `Error.prepareStackTrace = undefined` to restore the default, keeps
+// working), and everything else is pinned non-writable/non-configurable
+// before the constructor is made non-extensible. This does NOT tame the
+// op-dispatch attribution capture: that walks raw V8 frames in Rust and
+// never consults Error.prepareStackTrace.
+function odenTameAndFreezeError() {
+  const defineProperty = Object.defineProperty;
+  const getOwnPropertyNames = Object.getOwnPropertyNames;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const preventExtensions = Object.preventExtensions;
+  const blessed = ["prepareStackTrace", "stackTraceLimit"];
+  for (let i = 0; i < blessed.length; i++) {
+    const key = blessed[i];
+    const desc = getOwnPropertyDescriptor(Error, key);
+    defineProperty(Error, key, {
+      __proto__: null,
+      value: desc ? desc.value : undefined,
+      writable: true,
+      enumerable: desc ? desc.enumerable : false,
+      configurable: false,
+    });
+  }
+  const names = getOwnPropertyNames(Error);
+  for (let i = 0; i < names.length; i++) {
+    const key = names[i];
+    if (key === "prepareStackTrace" || key === "stackTraceLimit") continue;
+    const desc = getOwnPropertyDescriptor(Error, key);
+    if (!desc || !desc.configurable) continue;
+    if ("value" in desc) {
+      defineProperty(Error, key, {
+        __proto__: null,
+        value: desc.value,
+        writable: false,
+        enumerable: desc.enumerable,
+        configurable: false,
+      });
+    } else {
+      defineProperty(Error, key, {
+        __proto__: null,
+        get: desc.get,
+        set: desc.set,
+        enumerable: desc.enumerable,
+        configurable: false,
+      });
+    }
+  }
+  preventExtensions(Error);
 }
 
 function odenMaybeSealAsyncContext() {
