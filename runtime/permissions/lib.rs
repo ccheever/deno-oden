@@ -435,6 +435,71 @@ fn oden_capsec_audit_record(
   }
 }
 
+// Import gating (LLP 0001 Phase 2), attributed to the **referrer** — the module
+// that issued the import, which the loader knows synchronously. This is the
+// sound attribution point: the op-dispatch stack is empty at the loader
+// boundary, so a package importing remote code cannot be seen there; the
+// referrer can. A package pulling least-attested code — a remote (`http(s):`)
+// or dynamically-minted (`data:`/`blob:`) specifier — is the runtime
+// supply-chain vector the import graph gates, so such imports by a package
+// principal are default-denied under enforce. Root/runtime (ambient) and
+// graph-internal schemes (file/npm/jsr/node) are unaffected — the fs and require
+// layers gate those. Both static and dynamic imports are gated: the referrer
+// makes attribution sound either way, and a dependency's *static* remote import
+// is as much a supply-chain reach as a dynamic one.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md (Import gating; Principals; Loader principal index)
+pub fn oden_capsec_gate_import(
+  specifier: &Url,
+  referrer: &Url,
+  is_dynamic: bool,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_active() {
+    return Ok(());
+  }
+  let scheme = specifier.scheme();
+  if !matches!(scheme, "data" | "blob" | "http" | "https") {
+    return Ok(());
+  }
+  let project_root = oden_capsec_project_root();
+  let principal = oden_policy::classify(referrer.as_str(), &project_root);
+  // Ambient referrers (root/runtime) may import freely. A non-ambient referrer
+  // — a package, or the quarantine/no-user sentinels — is gated.
+  if principal.is_ambient() {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  let mode = oden_capsec_mode(oden_capsec_policy_file().as_ref());
+  let label = principal.label();
+  let target = specifier.as_str();
+  let deny = mode == OdenMode::Enforce;
+  let kindstr = if is_dynamic { "dynamic" } else { "static" };
+  let verdict = if deny {
+    "DENY(remote/data import default-denied under enforce)"
+  } else if mode == OdenMode::Audit {
+    "audit(record)"
+  } else {
+    "allow(permissive)"
+  };
+  eprintln!(
+    "[oden-capsec] import({kindstr}):{target} caller={label} -> {verdict}"
+  );
+  oden_capsec_audit_record(&label, "import", scheme, target, verdict, None);
+  if deny {
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("import of {target:?}"),
+        name: "capsec",
+        custom_message: Some(format!(
+          "oden capsec: principal \"{label}\" may not import {scheme}: code \
+           (remote/data imports are default-denied for packages under enforce)"
+        )),
+        state: PermissionState::Denied,
+      },
+    ));
+  }
+  Ok(())
+}
+
 // Interim worker stance (LLP 0001 Phase 2): worker creation by a package
 // principal is default-denied under enforce until worker principal inheritance
 // is designed. Root/runtime (ambient) are unaffected. Not yet a grantable

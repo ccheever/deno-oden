@@ -13,6 +13,7 @@ run the generator and commit. Drift fails the rebase canary.
 - fs:read	via check_read_all()
 - fs:write	via check_open_with_requested()
 - fs:write	via check_write_all()
+- import:graph	via oden_capsec_gate_import() [loader-attributed]
 - network:fetch	via check_net_unix_socket()
 - network:fetch	via check_net_url()
 - network:fetch	via check_net_vsock()
@@ -29,6 +30,7 @@ run the generator and commit. Drift fails the rebase canary.
 | ffi:load | FfiQueryDescriptor | path or * | ffi |
 | fs:read | ReadDescriptor / ReadQueryDescriptor | canonical path or * | fs:read:<path> |
 | fs:write | WriteDescriptor / WriteQueryDescriptor | canonical path or * | fs:write:<path> |
+| import:graph | ModuleLoader inner_resolve capsec gate (referrer-attributed) | resolved import specifier (data:/blob:/http(s):) | remote/data imports default-denied for package principals under enforce |
 | network:fetch | NetDescriptor / ImportDescriptor | host, URL, vsock, or unix socket | network:fetch:<host> |
 | run:run | RunQueryDescriptor | command display name or * | run:<command> |
 | worker:create | op_create_worker capsec gate | worker specifier | default-denied for package principals until inheritance is designed |
@@ -41,3 +43,4 @@ covered by the layer-2-independence proof.
 
 - ext/node/ops/require.rs:45
 - ext/node/ops/worker_threads.rs:38
+

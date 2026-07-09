@@ -1225,6 +1225,17 @@ impl<TGraphContainer: ModuleGraphContainer>
     // only verify this for an import and not import.meta.resolve
     if !is_import_meta {
       ensure_not_jsr_non_jsr_remote_import(&specifier, &referrer)?;
+      // Oden capsec import gate: attribute the import to the referrer (the
+      // module issuing it) — sound because the loader knows the referrer
+      // synchronously, unlike the op-dispatch stack. A package pulling remote /
+      // data: code is default-denied under enforce. Inert unless capsec armed.
+      // @ref llp/0001-adding-capability-security-to-deno.plan.md (Import gating)
+      deno_runtime::deno_permissions::oden_capsec_gate_import(
+        &specifier,
+        &referrer,
+        matches!(kind, deno_core::ResolutionKind::DynamicImport),
+      )
+      .map_err(JsErrorBox::from_err)?;
     }
 
     Ok(specifier)
