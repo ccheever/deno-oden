@@ -1,0 +1,7 @@
+[WILDCARD]{
+  "mode": "enforce",
+  "grants": {
+    "needy-dep": "env:read:SECRET"
+  }
+}
+

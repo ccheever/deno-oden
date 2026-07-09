@@ -108,6 +108,7 @@ fn oden_capsec_decide(
   if !oden_capsec_active() {
     return Ok(());
   }
+  oden_capsec_readiness_gate()?;
   let policy = oden_capsec_policy_from_env();
   let principal = oden_capsec_principal();
   // Normalize fs targets to an absolute, lexically-folded path so a relative
@@ -134,6 +135,15 @@ fn oden_capsec_decide(
     (_, OdenDecision::Deny) => "DENY(no grant)",
   };
   let api = api_name.unwrap_or_else(|| family.name());
+  // Suggest the grant that would allow a would-deny/deny (audit-as-conversation).
+  let suggestion = if matches!(decision, OdenDecision::Deny)
+    || (matches!(decision, OdenDecision::AllowRecord)
+      && !principal.is_ambient())
+  {
+    oden_suggested_grant_token(&principal, family, action, &req.target)
+  } else {
+    None
+  };
   eprintln!(
     "[oden-capsec] {api}:{target} caller={principal_label} -> {verdict}"
   );
@@ -143,14 +153,19 @@ fn oden_capsec_decide(
     action,
     &req.target,
     verdict,
+    suggestion.as_deref(),
   );
   if decision == OdenDecision::Deny {
+    let fix = suggestion
+      .as_deref()
+      .map(|t| format!(" — to allow: grant \"{principal_label}\" `{t}`"))
+      .unwrap_or_default();
     return Err(PermissionCheckError::PermissionDenied(
       PermissionDeniedError {
         access: format!("{api} access to {target:?}"),
         name: "capsec",
         custom_message: Some(format!(
-          "oden capsec: principal \"{principal_label}\" is not granted {}:{action}:{target}",
+          "oden capsec: principal \"{principal_label}\" is not granted {}:{action}:{target}{fix}",
           family.name()
         )),
         state: PermissionState::Denied,
@@ -168,6 +183,210 @@ fn oden_capsec_active() -> bool {
   std::env::var_os("ODEN_CAPSEC_SPIKE").is_some()
 }
 
+// The acting principal's label for out-of-process consumers (the permission
+// broker), so a brokered decision can key on the package, not just the process.
+// None when capsec is inactive — the broker wire format is then unchanged.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md (Broker protocol)
+pub(crate) fn oden_capsec_current_principal_label() -> Option<String> {
+  if !oden_capsec_active() {
+    return None;
+  }
+  Some(oden_capsec_principal().label())
+}
+
+// The grant token a denied/would-deny principal would need, in the same
+// vocabulary `.oden/policy.json` and `oden_policy::Grant::parse` speak — so a
+// denial suggests its own fix and the audit synthesizer can lift it verbatim.
+// Ambient/no-user principals get no suggestion (nothing to grant).
+fn oden_suggested_grant_token(
+  principal: &OdenPrincipal,
+  family: OdenFamily,
+  action: &str,
+  target: &str,
+) -> Option<String> {
+  if principal.is_ambient() || matches!(principal, OdenPrincipal::NoUser) {
+    return None;
+  }
+  let token = match family {
+    OdenFamily::Ffi => "ffi".to_string(),
+    OdenFamily::Run => format!("run:{target}"),
+    OdenFamily::Env => format!("env:read:{target}"),
+    OdenFamily::Fs => format!("fs:{action}:{target}"),
+    OdenFamily::Network => {
+      format!("network:{action}:{}", oden_host_of(target))
+    }
+  };
+  Some(token)
+}
+
+// Host of a net target for a suggestion scope (strip scheme, path, and port).
+fn oden_host_of(target: &str) -> String {
+  let t = target
+    .strip_prefix("https://")
+    .or_else(|| target.strip_prefix("http://"))
+    .unwrap_or(target);
+  let t = t.split('/').next().unwrap_or(t);
+  t.split(':').next().unwrap_or(t).to_string()
+}
+
+// --- Readiness report + fail-closed honesty (LLP 0001 Phase 2) --------------
+// "The mode name is the guarantee." Under audit/enforce the runtime reports its
+// exact posture, every degraded configuration is named, and enforce fails
+// closed when a load-bearing prerequisite is missing unless the operator
+// explicitly accepts the degraded state with ODEN_CAPSEC_ALLOW_ADVISORY.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md (Mode honesty and readiness)
+struct OdenReadiness {
+  mode: OdenMode,
+  attribution_armed: bool,
+  seal_applied: bool,
+  lockdown_on: bool,
+  policy_source: Option<String>,
+  project_root: String,
+}
+
+impl OdenReadiness {
+  // A prerequisite that is load-bearing for a *sound* enforce decision. Lockdown
+  // is reported and named-as-degraded but not in this set: it is genuinely not
+  // implemented yet, so requiring it would make every enforce run refuse — the
+  // dishonest direction. Attribution + the CPED seal are what make the decision
+  // itself trustworthy, so those are required under enforce.
+  fn missing_required(&self) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if !self.attribution_armed {
+      missing.push("attribution capture (op-dispatch frame capture)");
+    }
+    if !self.seal_applied {
+      missing.push("Deno.core / CPED seal");
+    }
+    missing
+  }
+
+  fn degraded_states(&self) -> Vec<&'static str> {
+    let mut degraded = Vec::new();
+    if self.mode == OdenMode::Enforce && !self.lockdown_on {
+      degraded
+        .push("enforce without lockdown — intrinsics unfrozen (integrity gap)");
+    }
+    degraded
+  }
+
+  fn render(&self) -> String {
+    let mode = match self.mode {
+      OdenMode::Permissive => "permissive",
+      OdenMode::Audit => "audit",
+      OdenMode::Enforce => "enforce",
+    };
+    let mut out = String::new();
+    out.push_str("[oden-capsec] readiness report\n");
+    out.push_str(&format!("  mode: {mode}\n"));
+    out.push_str(&format!(
+      "  attribution: {}\n",
+      if self.attribution_armed { "armed" } else { "OFF" }
+    ));
+    out.push_str(&format!(
+      "  cped-seal: {}\n",
+      if self.seal_applied { "applied" } else { "NOT applied" }
+    ));
+    out.push_str(&format!(
+      "  lockdown: {}\n",
+      if self.lockdown_on { "on" } else { "off" }
+    ));
+    out.push_str(&format!(
+      "  policy-source: {}\n",
+      self.policy_source.as_deref().unwrap_or("(none — grants from env only)")
+    ));
+    out.push_str(&format!("  root: {}\n", self.project_root));
+    for d in self.degraded_states() {
+      out.push_str(&format!("  DEGRADED: {d}\n"));
+    }
+    out
+  }
+}
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "Phase-2 readiness probes whether the policy file exists on disk; a resolver replaces the raw fs read later."
+)]
+fn oden_capsec_readiness() -> OdenReadiness {
+  let root = oden_capsec_project_root();
+  let file = oden_capsec_policy_file();
+  let policy_path = std::path::Path::new(&root).join(".oden").join("policy.json");
+  let policy_source = if policy_path.exists() {
+    Some(policy_path.to_string_lossy().into_owned())
+  } else {
+    None
+  };
+  OdenReadiness {
+    mode: oden_capsec_mode(file.as_ref()),
+    // Attribution is armed whenever capsec is active (they share the arm), but a
+    // forced-degradation hook lets the honesty machinery be exercised.
+    attribution_armed: oden_capsec_active()
+      && !oden_capsec_env_flag("ODEN_CAPSEC_FORCE_UNARMED"),
+    seal_applied: oden_capsec_active()
+      && !oden_capsec_env_flag("ODEN_CAPSEC_FORCE_UNSEALED"),
+    // Minimal lockdown (freeze walk + evaluator taming) is a separate Phase-2
+    // deliverable; until it lands this is honestly off.
+    lockdown_on: false,
+    policy_source,
+    project_root: root,
+  }
+}
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "capsec readiness hooks are env-driven; the spike's control surface."
+)]
+fn oden_capsec_env_flag(name: &str) -> bool {
+  std::env::var_os(name).is_some()
+}
+
+// Emit the readiness report once, and enforce fail-closed honesty. Returns Err
+// if enforce is requested with a missing required prerequisite and the operator
+// has not accepted the degraded state via ODEN_CAPSEC_ALLOW_ADVISORY. Called at
+// the top of every decision so the first mediated op reports posture and a
+// dishonest enforce refuses before it can pretend to be sound.
+fn oden_capsec_readiness_gate() -> Result<(), PermissionCheckError> {
+  static EMITTED: AtomicFlag = AtomicFlag::lowered();
+  let readiness = oden_capsec_readiness();
+  let first = EMITTED.raise();
+  // Emitting the full report is gated on ODEN_CAPSEC_READINESS while capsec is
+  // itself env-gated (auto-emit at startup under audit/enforce wires on with the
+  // structural, non-env arming). The fail-closed refusal below is unconditional.
+  if first && oden_capsec_env_flag("ODEN_CAPSEC_READINESS") {
+    eprint!("{}", readiness.render());
+  }
+  let missing = readiness.missing_required();
+  if readiness.mode == OdenMode::Enforce && !missing.is_empty() {
+    let advisory = oden_capsec_env_flag("ODEN_CAPSEC_ALLOW_ADVISORY");
+    if first {
+      eprintln!(
+        "[oden-capsec] enforce is missing prerequisites: {}",
+        missing.join(", ")
+      );
+    }
+    if !advisory {
+      return Err(PermissionCheckError::PermissionDenied(
+        PermissionDeniedError {
+          access: "capsec enforce".to_string(),
+          name: "capsec",
+          custom_message: Some(format!(
+            "oden capsec: enforce refuses to run — missing {}. \
+             Pass ODEN_CAPSEC_ALLOW_ADVISORY to accept the named degraded state.",
+            missing.join(", ")
+          )),
+          state: PermissionState::Denied,
+        },
+      ));
+    }
+    if first {
+      eprintln!(
+        "[oden-capsec] running enforce in a NAMED DEGRADED STATE (advisory accepted)"
+      );
+    }
+  }
+  Ok(())
+}
+
 // Per-package audit log: when ODEN_CAPSEC_AUDIT names a file, append one NDJSON
 // record per mediated op (principal, capability, target, decision) — the
 // structured "see what your dependencies actually touch" data that drives the
@@ -182,6 +401,7 @@ fn oden_capsec_audit_record(
   action: &str,
   target: &str,
   verdict: &str,
+  suggestion: Option<&str>,
 ) {
   let Some(path) = std::env::var_os("ODEN_CAPSEC_AUDIT") else {
     return;
@@ -192,12 +412,16 @@ fn oden_capsec_audit_record(
     v if v.starts_with("audit") => "audit-record",
     _ => "deny",
   };
+  // The grant suggestion makes the log the input to audit-as-conversation: a
+  // would-deny/deny row carries the exact `{selector: grant}` that would allow
+  // it, so `audit_synth.ts` can synthesize a starting policy from a real run.
   let rec = serde_json::json!({
     "v": 1,
     "principal": principal,
     "capability": format!("{family}:{action}"),
     "target": target,
     "decision": decision,
+    "suggestion": suggestion,
   });
   if let Ok(line) = serde_json::to_string(&rec) {
     use std::io::Write as _;
@@ -220,6 +444,7 @@ pub fn oden_capsec_check_worker_create() -> Result<(), PermissionCheckError> {
   if !oden_capsec_active() {
     return Ok(());
   }
+  oden_capsec_readiness_gate()?;
   let principal = oden_capsec_principal();
   if principal.is_ambient() {
     return Ok(());
@@ -233,7 +458,7 @@ pub fn oden_capsec_check_worker_create() -> Result<(), PermissionCheckError> {
     "audit(record)"
   };
   eprintln!("[oden-capsec] worker:create caller={label} -> {verdict}");
-  oden_capsec_audit_record(&label, "worker", "create", "", verdict);
+  oden_capsec_audit_record(&label, "worker", "create", "", verdict, None);
   if deny {
     return Err(PermissionCheckError::PermissionDenied(
       PermissionDeniedError {
