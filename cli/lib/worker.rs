@@ -56,7 +56,7 @@ use node_resolver::UrlOrPath;
 use node_resolver::errors::ResolvePkgJsonBinExportError;
 use url::Url;
 
-use crate::args::has_trace_permissions_enabled;
+use crate::args::oden_stack_capture_enabled;
 use crate::sys::DenoLibSys;
 use crate::util::checksum;
 
@@ -522,9 +522,7 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
         maybe_coverage_dir: shared.maybe_coverage_dir.clone(),
         maybe_cpu_prof_config: shared.maybe_cpu_prof_config.clone(),
         enable_raw_imports: shared.options.enable_raw_imports,
-        enable_stack_trace_arg_in_ops: has_trace_permissions_enabled(
-          &shared.sys,
-        ),
+        enable_stack_trace_arg_in_ops: oden_stack_capture_enabled(&shared.sys),
         wait_for_debugger_on_start: args.wait_for_debugger_on_start,
         wait_for_page_wait_for_debugger: args.wait_for_page_wait_for_debugger,
       };
@@ -767,7 +765,7 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
       stdio,
       skip_op_registration: shared.options.skip_op_registration,
       enable_raw_imports: shared.options.enable_raw_imports,
-      enable_stack_trace_arg_in_ops: has_trace_permissions_enabled(&shared.sys),
+      enable_stack_trace_arg_in_ops: oden_stack_capture_enabled(&shared.sys),
       unconfigured_runtime,
     };
 

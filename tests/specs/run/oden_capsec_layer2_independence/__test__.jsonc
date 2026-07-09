@@ -9,7 +9,6 @@
     "armed_enforce_denies_require_read": {
       "args": "run --allow-read --allow-env app.js",
       "envs": {
-        "DENO_TRACE_PERMISSIONS": "1",
         "ODEN_CAPSEC_SPIKE": "1",
         "ODEN_CAPSEC_ENFORCE": "1"
       },

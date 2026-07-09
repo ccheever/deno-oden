@@ -7,7 +7,6 @@
     "cjs_attribution_and_sourceurl_redteam": {
       "args": "run --allow-env --allow-read app.js",
       "envs": {
-        "DENO_TRACE_PERMISSIONS": "1",
         "ODEN_CAPSEC_SPIKE": "1",
         "ODEN_CAPSEC_MODE": "audit",
         "HOME": "/home/x",

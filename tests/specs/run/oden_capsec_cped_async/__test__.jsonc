@@ -7,7 +7,6 @@
     "cped_async_attribution": {
       "args": "run --allow-env app.js",
       "envs": {
-        "DENO_TRACE_PERMISSIONS": "1",
         "ODEN_CAPSEC_SPIKE": "1",
         "ODEN_CAPSEC_MODE": "audit",
         "HOME": "/home/x",
