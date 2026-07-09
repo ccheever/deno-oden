@@ -743,6 +743,14 @@ function removeImportedOps() {
 // polyfills both destructure these into their own bindings at module
 // evaluation, so stripping them from the *only* user-reachable core view
 // (`Deno[Deno.internal].core`, assigned above) leaves those closures intact.
+//
+// The same treatment closes a script-creation forgery: `compileFunction` /
+// `evalContext` register the compiled script's id to the specifier the caller
+// passes, and the CJS loader passes a loader-resolved path. If user code could
+// reach these wrappers it could register malicious code under any package's
+// locator and borrow its grants. The backing ops are already stripped by
+// `removeImportedOps`; sealing the wrappers off the user-reachable view (the
+// loader uses the captured core, not this one) removes the last route.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md
 const ODEN_SEALED_CORE_KEYS = [
   "getAsyncContext",
@@ -750,6 +758,8 @@ const ODEN_SEALED_CORE_KEYS = [
   "scopeAsyncContext",
   "AsyncVariable",
   "kNoAsyncContextRestore",
+  "compileFunction",
+  "evalContext",
 ];
 
 function odenSealAsyncContext() {
