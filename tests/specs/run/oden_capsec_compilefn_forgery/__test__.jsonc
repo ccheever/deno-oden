@@ -1,0 +1,18 @@
+{
+  // Regression guard (LLP 0001): CJS attribution registers the specifier passed
+  // to core.compileFunction, so the wrapper must be sealed off user code when
+  // capsec is armed -- otherwise a dependency could register malicious code
+  // under a trusted package's locator and borrow its grants.
+  "tests": {
+    "compilefn_forgery_sealed": {
+      "args": "run --allow-env --allow-read app.js",
+      "envs": {
+        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_GRANT": "trusted-pkg=env:read:SECRET",
+        "SECRET": "s3cret"
+      },
+      "output": "forgery.out",
+      "exitCode": 0
+    }
+  }
+}

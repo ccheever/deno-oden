@@ -10,6 +10,9 @@ const names = [
   "scopeAsyncContext",
   "AsyncVariable",
   "kNoAsyncContextRestore",
+  // Script-creation forgery surface: registering under a forged specifier.
+  "compileFunction",
+  "evalContext",
 ];
 let sealed = true;
 for (const n of names) {
