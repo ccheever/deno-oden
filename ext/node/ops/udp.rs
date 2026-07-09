@@ -63,7 +63,7 @@ impl Resource for NodeUdpSocketResource {
   }
 }
 
-#[op2]
+#[op2(stack_trace)]
 #[serde]
 pub fn op_node_udp_bind(
   state: &mut OpState,
@@ -560,7 +560,7 @@ pub fn op_node_udp_leave_source_specific(
   )
 }
 
-#[op2]
+#[op2(stack_trace)]
 #[smi]
 pub async fn op_node_udp_send(
   state: Rc<RefCell<OpState>>,

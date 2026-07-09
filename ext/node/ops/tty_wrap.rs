@@ -54,7 +54,7 @@ use crate::ops::stream_wrap::LibUvStreamWrap;
 
 /// Check that non-stdio file descriptors (fd > 2) have --allow-all permission.
 /// Stdio fds 0, 1, 2 are always allowed.
-#[op2(fast)]
+#[op2(fast, stack_trace)]
 pub fn op_tty_check_fd_permission(
   state: &mut OpState,
   fd: i32,

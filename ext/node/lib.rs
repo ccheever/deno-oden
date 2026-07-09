@@ -136,7 +136,7 @@ enum DotEnvLoadErr {
   ),
 }
 
-#[op2(fast)]
+#[op2(fast, stack_trace)]
 #[undefined]
 fn op_node_load_env_file(
   state: &mut OpState,

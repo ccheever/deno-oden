@@ -291,7 +291,7 @@ extern "C" fn near_heap_limit_snapshot_callback(
   new_limit
 }
 
-#[op2(nofast)]
+#[op2(nofast, stack_trace)]
 pub fn op_v8_set_heap_snapshot_near_heap_limit(
   state: &mut OpState,
   scope: &mut v8::PinScope<'_, '_>,

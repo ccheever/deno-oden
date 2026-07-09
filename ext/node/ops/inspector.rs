@@ -120,7 +120,7 @@ pub fn op_inspector_close(state: &mut OpState) {
   state.try_take::<InspectorServerUrl>();
 }
 
-#[op2]
+#[op2(stack_trace)]
 #[string]
 pub fn op_inspector_url(
   state: &mut OpState,

@@ -37,11 +37,19 @@ pub async fn cache_top_level_deps(
     .text_only_progress_bar()
     .deferred_keep_initialize_alive();
   let npm_installer = factory.npm_installer().await?;
-  if !options.lockfile_only {
+  let frozen_lockfile = factory
+    .maybe_lockfile()
+    .await?
+    .as_ref()
+    .is_some_and(|l| l.frozen());
+  if !options.lockfile_only && !frozen_lockfile {
     // This flow caches every resolved package right after resolving, so
     // tarball downloads can safely overlap the resolution itself. With
     // --lockfile-only nothing is cached, so prefetching would waste the
-    // downloads.
+    // downloads. With --frozen the install errors out on any lockfile
+    // change, so eager downloads would be both wasted work and an output
+    // difference from upstream (a `Download ...` line before the frozen
+    // error).
     npm_installer.enable_tarball_prefetch();
   }
   npm_installer

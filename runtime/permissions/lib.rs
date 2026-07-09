@@ -431,7 +431,7 @@ fn oden_capsec_readiness() -> OdenReadiness {
     }
   };
   OdenReadiness {
-    mode: oden_capsec_mode(file.as_ref()),
+    mode: oden_capsec_mode(file),
     // Attribution is armed whenever capsec is active (they share the arm), but a
     // forced-degradation hook lets the honesty machinery be exercised.
     attribution_armed: oden_capsec_active()
@@ -635,7 +635,7 @@ pub fn oden_capsec_check_resource_owner(
   }
   let label = principal.label();
   let owner = ODEN_RESOURCE_OWNERS.lock().get(&rid).cloned();
-  let mode = oden_capsec_mode(oden_capsec_policy_file().as_ref());
+  let mode = oden_capsec_mode(oden_capsec_policy_file());
   let decision = oden_resource_use_decision(&label, owner.as_deref(), mode);
   if matches!(decision, OdenDecision::Allow)
     && owner.as_deref() == Some(label.as_str())
@@ -734,7 +734,7 @@ pub fn oden_capsec_gate_import(
     return Ok(());
   }
   oden_capsec_readiness_gate()?;
-  let mode = oden_capsec_mode(oden_capsec_policy_file().as_ref());
+  let mode = oden_capsec_mode(oden_capsec_policy_file());
   let label = principal.label();
   let target = specifier.as_str();
   let deny = mode == OdenMode::Enforce;
@@ -781,7 +781,7 @@ pub fn oden_capsec_check_worker_create() -> Result<(), PermissionCheckError> {
     return Ok(());
   }
   let label = principal.label();
-  let mode = oden_capsec_mode(oden_capsec_policy_file().as_ref());
+  let mode = oden_capsec_mode(oden_capsec_policy_file());
   let deny = mode == OdenMode::Enforce;
   let verdict = if deny {
     "DENY(worker default-denied under enforce)"
@@ -846,7 +846,20 @@ struct OdenPolicyFile {
   clippy::disallowed_methods,
   reason = "Phase-1 capsec reads its policy file from the project root; a resolver replaces the raw fs read later."
 )]
-fn oden_capsec_policy_file() -> Option<OdenPolicyFile> {
+/// Process-lifetime snapshot of the policy artifact. Same doctrine as the
+/// ARMED probe: arming and policy content are bootstrap-time facts, and a
+/// policy artifact that changes or vanishes mid-run must not re-shape a
+/// running process's authority. Re-reading per decision also priced a file
+/// read + JSON parse into every mediated op (~230x on a gated-op hot loop,
+/// ENG-23764 throughput benchmark). The first-read fail-closed latch
+/// (present-but-unreadable → enforce) fires inside this one read.
+fn oden_capsec_policy_file() -> Option<&'static OdenPolicyFile> {
+  static FILE: std::sync::LazyLock<Option<OdenPolicyFile>> =
+    std::sync::LazyLock::new(oden_capsec_policy_file_uncached);
+  FILE.as_ref()
+}
+
+fn oden_capsec_policy_file_uncached() -> Option<OdenPolicyFile> {
   // Explicit policy-file path override (ODEN_CAPSEC_POLICY) — the seam the oden
   // CLI uses to hand the engine a merged policy (`.oden/policy.json` unioned with
   // deno.json + import-site grants) from a temp file, without writing into the
@@ -974,20 +987,26 @@ fn oden_normalize_fs_target(target: &str) -> String {
 // The decision policy, built from the policy artifact alone (the retired
 // ODEN_CAPSEC_GRANT env layering is gone — grants have exactly one authoring
 // surface, so an environment cannot widen a package's authority).
-fn oden_capsec_policy() -> OdenPolicy {
-  let file = oden_capsec_policy_file();
-  let root = oden_capsec_project_root();
-  let mut policy = OdenPolicy::new(oden_capsec_mode(file.as_ref()));
-  // Policy-file grants (the userland `.oden/policy.json` format).
-  if let Some(file) = &file {
-    for (selector, grant_str) in &file.grants {
-      let selector = selector.trim();
-      if !selector.is_empty() {
-        policy.grant(selector, &oden_resolve_grant_scopes(grant_str, &root));
+fn oden_capsec_policy() -> &'static OdenPolicy {
+  // Built once from the policy-file snapshot: grant-scope resolution does
+  // path normalization, which must not run per mediated op.
+  static POLICY: std::sync::LazyLock<OdenPolicy> =
+    std::sync::LazyLock::new(|| {
+      let file = oden_capsec_policy_file();
+      let root = oden_capsec_project_root();
+      let mut policy = OdenPolicy::new(oden_capsec_mode(file));
+      // Policy-file grants (the userland `.oden/policy.json` format).
+      if let Some(file) = file {
+        for (selector, grant_str) in &file.grants {
+          let selector = selector.trim();
+          if !selector.is_empty() {
+            policy.grant(selector, &oden_resolve_grant_scopes(grant_str, &root));
+          }
+        }
       }
-    }
-  }
-  policy
+      policy
+    });
+  &POLICY
 }
 
 // Mode comes from the policy artifact: file mode > default (audit). A typo in
@@ -1115,7 +1134,7 @@ fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
 )]
 fn oden_capsec_deputy_classes() -> Vec<String> {
   let mut classes: Vec<String> = oden_capsec_policy_file()
-    .map(|f| f.deputy_classes)
+    .map(|f| f.deputy_classes.clone())
     .unwrap_or_default();
   if let Ok(env) = std::env::var("ODEN_CAPSEC_DEPUTY_CLASSES") {
     for c in env.split(',') {
