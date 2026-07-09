@@ -352,6 +352,7 @@ struct OdenReadiness {
   attribution_armed: bool,
   seal_applied: bool,
   lockdown_on: bool,
+  lockdown_posture: OdenLockdownPosture,
   integrity: &'static oden_principal_index::LockState,
   policy_source: Option<String>,
   project_root: String,
@@ -377,8 +378,12 @@ impl OdenReadiness {
   fn degraded_states(&self) -> Vec<&'static str> {
     let mut degraded = Vec::new();
     if self.mode == OdenMode::Enforce && !self.lockdown_on {
-      degraded
-        .push("enforce without lockdown — intrinsics unfrozen (integrity gap)");
+      // Under the Phase-3 posture enforce defaults lockdown on, so this state
+      // is only reachable through the explicit ODEN_CAPSEC_LOCKDOWN=0
+      // override — named honestly rather than refused (LLP 0001 Phase 3).
+      degraded.push(
+        "enforce without lockdown (explicit override) — intrinsics unfrozen (integrity gap)",
+      );
     }
     if oden_policy_unreadable() {
       degraded.push(
@@ -427,9 +432,26 @@ impl OdenReadiness {
         "NOT applied"
       }
     ));
+    // State the lockdown posture AND its provenance: "the mode name is the
+    // guarantee" means saying which default (or override) produced the bit.
+    // Audit/permissive default-off is the measured compat-corpus NO-GO
+    // decision (ENG-23880); enforce default-on is the Phase-2 security
+    // prerequisite restored by the ENG-23781 compat repairs.
+    // @ref llp/0001-adding-capability-security-to-deno.plan.md (Mode honesty and readiness)
     out.push_str(&format!(
       "  lockdown: {}\n",
-      if self.lockdown_on { "on" } else { "off" }
+      match (self.lockdown_on, self.lockdown_posture) {
+        (true, OdenLockdownPosture::DefaultOnEnforce) => {
+          "on (default under enforce)"
+        }
+        (true, _) => "on (explicit opt-in)",
+        (false, OdenLockdownPosture::ExplicitOff) => {
+          "off (explicit override)"
+        }
+        (false, _) => {
+          "off (opt-in outside enforce; default-on measured NO-GO by the compat corpus)"
+        }
+      }
     ));
     out.push_str(&format!(
       "  integrity: {}\n",
@@ -488,7 +510,8 @@ fn oden_capsec_readiness() -> OdenReadiness {
     seal_applied: oden_capsec_active()
       && !oden_capsec_env_flag("ODEN_CAPSEC_FORCE_UNSEALED")
       && oden_capsec_seal_conformance_ok(),
-    lockdown_on: oden_capsec_active() && oden_capsec_lockdown_on(),
+    lockdown_on: oden_capsec_lockdown_on(),
+    lockdown_posture: oden_capsec_lockdown_posture(),
     integrity: oden_principal_index::lock_state(),
     policy_source,
     project_root: root.to_string(),
@@ -503,15 +526,87 @@ fn oden_capsec_env_flag(name: &str) -> bool {
   std::env::var_os(name).is_some()
 }
 
-// Whether minimal lockdown (the intrinsic freeze walk) is active — the same
-// decision `op_oden_capsec_flags` compiles for the bootstrap JS. Opt-in via
-// ODEN_CAPSEC_LOCKDOWN: "enforce implies lockdown" is softened to opt-in
-// (LLP 0001 kill criterion) until the ext/node lazy-write compat repairs land,
-// so under enforce without it the readiness report names "enforce without
-// lockdown" as a degraded state. Kept in sync with `runtime/ops/bootstrap.rs`.
-// @ref llp/0001-adding-capability-security-to-deno.plan.md
-fn oden_capsec_lockdown_on() -> bool {
-  oden_capsec_env_flag("ODEN_CAPSEC_LOCKDOWN")
+/// The lockdown posture (LLP 0001 Phase 3, ENG-23781): where the minimal
+/// lockdown decision (freeze walk + Error taming, `odenHardenIntrinsics` in
+/// `runtime/js/99_main.js`) came from, so the readiness report can state the
+/// posture and its provenance, not just the bit.
+///
+/// Per-mode defaults, and why:
+/// - **Enforce defaults lockdown ON** ("enforce implies lockdown"): enforce is
+///   itself opt-in, so its compat price is paid knowingly, and enforcement
+///   over unfrozen intrinsics has a known integrity gap (a patched shared
+///   prototype runs attacker code under a victim's frames). The Phase-2 kill
+///   criterion that had softened this to opt-in (`buildAllowedFlags` writing
+///   `Symbol.iterator` over a frozen `Set.prototype`) is repaired by the
+///   ENG-23781 ext/node lazy-write audit, so the design default is restored.
+///   `ODEN_CAPSEC_LOCKDOWN=0` is the honestly-labeled override: readiness
+///   names the degraded state.
+/// - **Audit/permissive default lockdown OFF (opt-in)**: the Phase-1 compat
+///   corpus run (ENG-23880, `fork/phase1-compat-corpus-report.md`) measured
+///   default-on as a NO-GO — 100% breakage pre-repair, and a ~19% post-repair
+///   floor (express/axios/dayjs/form-data) from the SES "override mistake"
+///   (shadowing assignments over frozen Object/Function/Error prototypes),
+///   which the ENG-23781 shims deliberately do NOT paper over. Default-on in
+///   these modes stays gated on an override-mistake policy decision plus a
+///   re-run corpus measuring ~0% breakage.
+///
+/// @ref llp/0001-adding-capability-security-to-deno.plan.md (Compartments and lockdown)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OdenLockdownPosture {
+  /// Enforce mode, no override: on by default.
+  DefaultOnEnforce,
+  /// Explicitly enabled via ODEN_CAPSEC_LOCKDOWN (audit/permissive opt-in).
+  ExplicitOn,
+  /// Audit/permissive, no opt-in: off by default (compat corpus NO-GO).
+  DefaultOffOptIn,
+  /// Explicitly disabled via ODEN_CAPSEC_LOCKDOWN=0|false|off — under
+  /// enforce this is the named "enforce without lockdown" degraded state.
+  ExplicitOff,
+}
+
+impl OdenLockdownPosture {
+  fn is_on(self) -> bool {
+    matches!(self, Self::DefaultOnEnforce | Self::ExplicitOn)
+  }
+}
+
+// The posture is a process-lifetime, bootstrap-time decision (the freeze walk
+// runs once at the end of bootstrap), so it snapshots like the arming probe.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "the lockdown override is env-driven by design (the non-authority control surface); the default is the policy artifact's mode."
+)]
+fn oden_capsec_lockdown_posture() -> OdenLockdownPosture {
+  static POSTURE: std::sync::LazyLock<OdenLockdownPosture> =
+    std::sync::LazyLock::new(|| {
+      match std::env::var_os("ODEN_CAPSEC_LOCKDOWN") {
+        // Same non-empty rule as the arming probe: an empty value is unset.
+        Some(v) if !v.is_empty() => {
+          let v = v.to_string_lossy().to_ascii_lowercase();
+          if v == "0" || v == "false" || v == "off" {
+            OdenLockdownPosture::ExplicitOff
+          } else {
+            OdenLockdownPosture::ExplicitOn
+          }
+        }
+        _ => {
+          if oden_capsec_mode(oden_capsec_policy_file()) == OdenMode::Enforce {
+            OdenLockdownPosture::DefaultOnEnforce
+          } else {
+            OdenLockdownPosture::DefaultOffOptIn
+          }
+        }
+      }
+    });
+  *POSTURE
+}
+
+/// Whether minimal lockdown (the intrinsic freeze walk + Error-constructor
+/// taming) is active — the same decision `op_oden_capsec_flags` compiles for
+/// the bootstrap JS in `runtime/ops/bootstrap.rs`. Only meaningful while
+/// capsec is armed (lockdown stays inert without the policy artifact).
+pub fn oden_capsec_lockdown_on() -> bool {
+  oden_capsec_armed() && oden_capsec_lockdown_posture().is_on()
 }
 
 // Emit the readiness report once, and enforce fail-closed honesty. Returns Err

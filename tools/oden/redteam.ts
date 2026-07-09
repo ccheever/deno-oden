@@ -231,7 +231,7 @@ const CHECKLIST: HoleClass[] = [
     status: "closed",
     tests: ["oden_capsec_lockdown"],
     note:
-      "the freeze walk makes the primordials non-writable under ODEN_CAPSEC_LOCKDOWN; default-on-under-enforce is deferred (ENG-23781) pending ext/node lazy-write repairs",
+      "the freeze walk + Error taming make the primordials non-writable; enforce defaults lockdown ON (ODEN_CAPSEC_LOCKDOWN=0 is the named override), audit/permissive stay opt-in per the compat-corpus NO-GO (ENG-23880); the ext/node lazy-write repairs and prepareStackTrace shim landed with ENG-23781",
   },
   // --- Async call-boundary (stack-intersection + opt-in deputyClasses) -------
   {
@@ -336,7 +336,7 @@ function render(): string {
         "closed with a guarding fixture or a documented residual with an owning " +
         "ticket. No undocumented open holes. The residuals are sound-but-restrictive " +
         "(schedule-before-first-op fails closed) or deferred by design (lockdown " +
-        "default-on, eval-to-caller, per-family owner-checks).",
+        "default-on in audit/permissive, eval-to-caller, per-family owner-checks).",
     );
   } else {
     out.push("**NO-GO** — open holes / missing fixtures:");

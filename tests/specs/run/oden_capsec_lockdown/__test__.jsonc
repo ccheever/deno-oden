@@ -1,14 +1,27 @@
 {
-  // Minimal lockdown (ENG-23773): the freeze walk makes the primordial
-  // intrinsics non-writable, so a dependency cannot repair its authority by
-  // patching Array.prototype.push or polluting Object.prototype. Opt-in via
-  // ODEN_CAPSEC_LOCKDOWN: "enforce implies lockdown" is softened to opt-in
-  // (LLP 0001 kill criterion) until the ext/node lazy-write compat repairs land,
-  // so plain enforce leaves intrinsics patchable and names the degraded state.
+  // Minimal lockdown (ENG-23773) + the Phase-3 posture and compat tail
+  // (ENG-23781): the freeze walk makes the primordial intrinsics non-writable,
+  // so a dependency cannot repair its authority by patching
+  // Array.prototype.push or polluting Object.prototype.
+  //
+  // Posture: ENFORCE defaults lockdown ON ("enforce implies lockdown";
+  // ODEN_CAPSEC_LOCKDOWN=0 is the honestly-labeled override and readiness
+  // names the degraded state). AUDIT/PERMISSIVE keep lockdown OPT-IN: the
+  // compat corpus (ENG-23880) measured default-on there as a NO-GO, and the
+  // decision stays gated on an override-mistake policy plus a re-run corpus.
+  //
+  // The shim tests cover the ENG-23781 compat tail: the ext/node lazy-write
+  // audit (buildAllowedFlags, error-constructor `.name`/`.toString`
+  // shadowing over frozen prototypes) and the Error-constructor taming that
+  // keeps Error.prepareStackTrace / node:util.getCallSites /
+  // Error.stackTraceLimit working while the rest of Error is frozen.
   "tests": {
     "lockdown_freezes_intrinsics": {
       "args": "run --allow-all app.js",
-      "envs": { "ODEN_CAPSEC_POLICY": "capsec_audit.json", "ODEN_CAPSEC_LOCKDOWN": "1" },
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_audit.json",
+        "ODEN_CAPSEC_LOCKDOWN": "1"
+      },
       "output": "locked.out",
       "exitCode": 0
     },
@@ -17,10 +30,38 @@
       "output": "unlocked.out",
       "exitCode": 0
     },
-    "enforce_without_lockdown_is_opt_in": {
+    "audit_defaults_lockdown_off": {
       "args": "run --allow-all app.js",
-      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json", "ODEN_CAPSEC_ALLOW_ADVISORY": "1" },
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_audit.json" },
       "output": "unlocked.out",
+      "exitCode": 0
+    },
+    "enforce_defaults_lockdown_on": {
+      "args": "run --allow-all app.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_enforce.json",
+        "ODEN_CAPSEC_ALLOW_ADVISORY": "1"
+      },
+      "output": "locked.out",
+      "exitCode": 0
+    },
+    "enforce_lockdown_explicit_override_off": {
+      "args": "run --allow-all app.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_enforce.json",
+        "ODEN_CAPSEC_LOCKDOWN": "0",
+        "ODEN_CAPSEC_ALLOW_ADVISORY": "1"
+      },
+      "output": "unlocked.out",
+      "exitCode": 0
+    },
+    "compat_shims_under_lockdown": {
+      "args": "run --allow-all shims.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_audit.json",
+        "ODEN_CAPSEC_LOCKDOWN": "1"
+      },
+      "output": "shims.out",
       "exitCode": 0
     }
   }
