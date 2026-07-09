@@ -1,0 +1,20 @@
+{
+  // eval-quarantine invariant (LLP 0001; ENG-23783 fail-closed guard). Code
+  // minted through eval()/new Function() gets a fresh V8 script id the loader
+  // index never registered; the frame walk attributes it to quarantine (no
+  // grants), so under enforce a privileged read DENIES. Locks in the sound
+  // over-deny until eval-taming (attribute-to-caller) is unblocked by a
+  // rusty_v8 code-generation hook (ENG-23791). A regression to fail-open
+  // (eval'd code inheriting its caller's authority) breaks this test.
+  "tests": {
+    "eval_and_new_function_quarantine_deny_under_enforce": {
+      "args": "run --allow-env app.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_enforce.json",
+        "SECRET": "s3cret"
+      },
+      "output": "quarantine.out",
+      "exitCode": 0
+    }
+  }
+}

@@ -153,13 +153,14 @@ const CHECKLIST: HoleClass[] = [
     category: "runtime-escape-hatch",
     attack: "eval / new Function minting unattributed code bound to caller",
     status: "residual",
+    tests: ["oden_capsec_eval_quarantine"],
     residual: {
       ticket: "ENG-23783",
       why:
-        "eval-to-caller binding blocked on a rusty_v8 with SetModifyCodeGenerationFromStringsCallback (ENG-23791); until then eval quarantines (fail-closed)",
+        "eval-to-caller binding blocked on a rusty_v8 with SetModifyCodeGenerationFromStringsCallback, which no rusty_v8 release exposes (ENG-23791: needs a vendored fork, not a version bump); until then eval quarantines (fail-closed), now CI-guarded by oden_capsec_eval_quarantine",
     },
     note:
-      "eval'd code quarantines today (sound); attributing it to the caller needs the code-gen hook",
+      "eval'd code quarantines today (sound, over-denies even first-party eval); the guard asserts the fail-closed DENY so a regression to fail-open (eval inheriting caller authority) breaks CI; attributing it to the caller needs the code-gen hook",
   },
   // --- Path / fs semantics ----------------------------------------------------
   {
