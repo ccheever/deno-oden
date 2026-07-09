@@ -498,11 +498,13 @@ pub(crate) fn generate_dispatch_fast(
     gs_quote!(generator_state(opctx, scope, opstate) =>
     (if #opctx.enable_stack_trace {
       // Oden captures raw V8 frames here so the permission layer can key on
-      // script IDs instead of forgeable display names.
+      // script IDs instead of forgeable display names, and stamps/reads the
+      // CPED scheduling-principal slot for async attribution.
       // @ref llp/0001-adding-capability-security-to-deno.plan.md
       let frames = deno_core::error::capture_op_stack_frames(&mut #scope, #opctx.isolate);
+      let oden_cped = deno_core::error::oden_capture_stamp_and_read(&mut #scope, &frames);
       let mut op_state = ::std::cell::RefCell::borrow_mut(&#opstate);
-      op_state.op_stack_trace_callback.as_ref().unwrap()(frames)
+      op_state.op_stack_trace_callback.as_ref().unwrap()(frames, oden_cped)
     })
     )
   } else {

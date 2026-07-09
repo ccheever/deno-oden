@@ -232,7 +232,10 @@ impl ExternalOpsTracker {
   }
 }
 
-pub type OpStackTraceCallback = Box<dyn Fn(Vec<JsStackFrame>)>;
+// The second argument carries the Oden CPED scheduling-principal locator when
+// no live user frame is present at dispatch (precedence row 2); `None`
+// otherwise. @ref llp/0001-adding-capability-security-to-deno.plan.md
+pub type OpStackTraceCallback = Box<dyn Fn(Vec<JsStackFrame>, Option<String>)>;
 
 /// Maintains the resources and ops inside a JS runtime.
 pub struct OpState {

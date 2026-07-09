@@ -232,8 +232,19 @@ fn oden_capsec_principal() -> OdenPrincipal {
     if principal == OdenPrincipal::Runtime {
       continue;
     }
+    // Precedence row 1: the nearest live user frame wins.
     return principal;
   }
+  // Precedence row 2: no live user frame, but a scheduling principal survives
+  // in the CPED slot (a detached callback) — attribute to the scheduler.
+  if let Some(locator) = prompter::current_oden_cped_locator() {
+    let principal = oden_policy::classify(&locator, &project_root);
+    if principal != OdenPrincipal::Runtime {
+      return principal;
+    }
+  }
+  // Precedence row 4: no live user frame and no scheduling principal — the
+  // fail-closed sentinel, never root.
   OdenPrincipal::NoUser
 }
 
