@@ -108,7 +108,7 @@ pub(crate) type CachedClientVerifier = (
   Arc<std::sync::Mutex<Option<String>>>,
 );
 
-#[op2]
+#[op2(stack_trace)]
 pub fn op_get_root_certificates(
   state: &mut OpState,
 ) -> Result<Vec<String>, PermissionCheckError> {
@@ -169,7 +169,7 @@ pub enum CaCertificatesError {
   Other(String),
 }
 
-#[op2]
+#[op2(stack_trace)]
 #[serde]
 pub fn op_node_get_ca_certificates<TSys: ExtNodeSys + 'static>(
   state: &mut OpState,

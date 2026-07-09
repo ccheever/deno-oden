@@ -58,6 +58,11 @@ if ! "$DENO" run --allow-read tools/oden/redteam.ts --check; then
   fail=1
 fi
 
+echo "== stack-trace annotation audit (capture-point completeness) =="
+if ! "$DENO" run --allow-read tools/oden/stack_trace_audit.ts --check; then
+  fail=1
+fi
+
 echo "== PATCHES.md pin =="
 if [ -f ../PATCHES.md ] && grep -q "Pin:" ../PATCHES.md; then
   grep "Pin:" ../PATCHES.md | head -1

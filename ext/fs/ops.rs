@@ -1763,7 +1763,7 @@ pub async fn op_fs_file_sync_async(
   Ok(())
 }
 
-#[op2(fast)]
+#[op2(fast, stack_trace)]
 pub fn op_fs_file_stat_sync(
   state: &mut OpState,
   #[smi] rid: ResourceId,
@@ -1786,7 +1786,7 @@ pub fn op_fs_file_stat_sync(
   Ok(())
 }
 
-#[op2]
+#[op2(stack_trace)]
 pub async fn op_fs_file_stat_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -1899,7 +1899,7 @@ pub async fn op_fs_file_truncate_async(
   Ok(())
 }
 
-#[op2(fast)]
+#[op2(fast, stack_trace)]
 pub fn op_fs_futime_sync(
   state: &mut OpState,
   #[smi] rid: ResourceId,
@@ -1923,7 +1923,7 @@ pub fn op_fs_futime_sync(
   Ok(())
 }
 
-#[op2]
+#[op2(stack_trace)]
 pub async fn op_fs_futime_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,

@@ -260,6 +260,10 @@ impl<TSys: LockfileSys> LockfileLock<TSys> {
     self.lockfile.lock().overwrite
   }
 
+  pub fn frozen(&self) -> bool {
+    self.frozen
+  }
+
   pub fn write_if_changed(&self) -> Result<(), LockfileWriteError> {
     if self.skip_write {
       return Ok(());

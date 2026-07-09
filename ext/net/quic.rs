@@ -244,7 +244,7 @@ unsafe impl GarbageCollected for EndpointResource {
   }
 }
 
-#[op2]
+#[op2(stack_trace)]
 #[cppgc]
 pub(crate) fn op_quic_endpoint_create(
   state: Rc<RefCell<OpState>>,
@@ -553,7 +553,7 @@ struct CertificateHash {
   value: JsBuffer,
 }
 
-#[op2]
+#[op2(stack_trace)]
 #[cppgc]
 pub(crate) fn op_quic_endpoint_connect(
   state: Rc<RefCell<OpState>>,
