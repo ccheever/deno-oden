@@ -310,11 +310,16 @@ impl OdenReadiness {
 fn oden_capsec_readiness() -> OdenReadiness {
   let root = oden_capsec_project_root();
   let file = oden_capsec_policy_file();
-  let policy_path = std::path::Path::new(&root).join(".oden").join("policy.json");
-  let policy_source = if policy_path.exists() {
-    Some(policy_path.to_string_lossy().into_owned())
+  let policy_source = if let Some(p) = std::env::var_os("ODEN_CAPSEC_POLICY") {
+    Some(std::path::PathBuf::from(p).to_string_lossy().into_owned())
   } else {
-    None
+    let policy_path =
+      std::path::Path::new(&root).join(".oden").join("policy.json");
+    if policy_path.exists() {
+      Some(policy_path.to_string_lossy().into_owned())
+    } else {
+      None
+    }
   };
   OdenReadiness {
     mode: oden_capsec_mode(file.as_ref()),
@@ -571,11 +576,20 @@ struct OdenPolicyFile {
   reason = "Phase-1 capsec reads its policy file from the project root; a resolver replaces the raw fs read later."
 )]
 fn oden_capsec_policy_file() -> Option<OdenPolicyFile> {
-  let root = oden_capsec_project_root();
-  if root.is_empty() {
-    return None;
-  }
-  let path = std::path::Path::new(&root).join(".oden").join("policy.json");
+  // Explicit policy-file path override (ODEN_CAPSEC_POLICY) — the seam the oden
+  // CLI uses to hand the engine a merged policy (`.oden/policy.json` unioned with
+  // deno.json + import-site grants) from a temp file, without writing into the
+  // project tree. Shares the env name with the userland layer (LLP 0012). Falls
+  // back to <root>/.oden/policy.json, the committed artifact.
+  let path = if let Some(p) = std::env::var_os("ODEN_CAPSEC_POLICY") {
+    std::path::PathBuf::from(p)
+  } else {
+    let root = oden_capsec_project_root();
+    if root.is_empty() {
+      return None;
+    }
+    std::path::Path::new(&root).join(".oden").join("policy.json")
+  };
   let text = std::fs::read_to_string(path).ok()?;
   serde_json::from_str::<OdenPolicyFile>(&text).ok()
 }
