@@ -579,6 +579,9 @@ fn op_fs_events_open(
     overflowed,
   };
   let rid = state.resource_table.add(resource);
+  // Oden capsec: stamp the acting package as the watcher's owner so a guessed
+  // rid from another package cannot poll it (Native resource ownership).
+  deno_permissions::oden_capsec_own_resource(rid, "fs:watch");
   Ok(rid)
 }
 
@@ -612,6 +615,9 @@ async fn op_fs_events_poll(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
 ) -> Result<Option<FsEvent>, FsEventsError> {
+  // Oden capsec: a different package polling this watcher's rid (guessed or
+  // handed) denies under enforce; the owner polls freely.
+  deno_permissions::oden_capsec_check_resource_owner(rid, "fs:watch")?;
   let resource = state.borrow().resource_table.get::<FsEventsResource>(rid)?;
   let mut receiver = RcRef::map(&resource, |r| &r.receiver).borrow_mut().await;
 

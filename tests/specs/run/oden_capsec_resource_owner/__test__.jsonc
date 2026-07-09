@@ -1,0 +1,16 @@
+{
+  // Native resource ownership (ENG-23776): a resource is owner-stamped to the
+  // package that opened it, and a different package using that rid is denied.
+  // watcher-dep opens a Deno.watchFs watcher (owns the rid); the FsWatcher object
+  // is passed to poller-dep, which stamps its own async context then polls -- the
+  // poll op attributes to poller-dep, whose principal != the watcher's owner, so
+  // the cross-principal rid use is denied under enforce. rid-guessing is worthless.
+  "tests": {
+    "cross_principal_watcher_poll_denied": {
+      "args": "run --allow-read --allow-env app.js",
+      "envs": { "ODEN_CAPSEC_SPIKE": "1", "POLLER_MARK": "1" },
+      "output": "owner.out",
+      "exitCode": 0
+    }
+  }
+}

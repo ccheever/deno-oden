@@ -1,0 +1,2 @@
+[WILDCARD]fs:watch:use rid=[WILDLINE] caller=poller-dep owner=watcher-dep -> DENY(cross-principal rid)
+[WILDCARD]denied:NotCapable
