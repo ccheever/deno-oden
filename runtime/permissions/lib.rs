@@ -925,7 +925,10 @@ fn oden_capsec_principal() -> OdenPrincipal {
     }
   }
   // Precedence row 4: no live user frame and no scheduling principal — the
-  // fail-closed sentinel, never root.
+  // fail-closed sentinel, never root. The schedule-before-first-op case lands
+  // here today; its sound closure is call-boundary attribution, which replaces
+  // the body of `oden_detached_scheduling_principal` in libs/core/error.rs
+  // (the single seam), not this fallthrough (ENG-23785).
   OdenPrincipal::NoUser
 }
 

@@ -816,6 +816,40 @@ fn oden_write_cped_slot(scope: &mut v8::PinScope, locator: &str) {
   scope.set_continuation_preserved_embedder_data(new_obj.into());
 }
 
+/// The locator of the principal executing right now, derived from the frames
+/// captured at op dispatch: the nearest frame with a registered script locator.
+/// This is the stamp source for the CPED slot — the "who is scheduling"
+/// answer. Call-boundary attribution (ENG-23785) may extend this derivation
+/// with a boundary-maintained current-principal register; it must never fall
+/// back to a caller's principal across a package boundary (module-eval
+/// stamping was measured to launder exactly that way).
+fn oden_live_principal_locator(frames: &[JsStackFrame]) -> Option<String> {
+  frames
+    .iter()
+    .find_map(|f| match (f.isolate_id, f.script_id) {
+      (Some(iso), Some(sid)) => oden_script_locator(iso, sid),
+      _ => None,
+    })
+}
+
+/// THE schedule-time seam (ENG-23785). Derive the scheduling principal for a
+/// detached continuation — an op dispatched with no live user frame on the
+/// stack. Today the only source is the CPED slot, which a package stamps at
+/// its first gated op; code that schedules a callback *before* any op leaves
+/// the slot empty, so this returns `None` and the permission layer falls to
+/// the fail-closed `no-user` sentinel (precedence row 4) — a false deny,
+/// never a false allow. Sound closure is call-boundary attribution
+/// (stack-intersection, LLP 0001 Phase 4): re-establish the principal when
+/// execution crosses into a different package's function/module so a callee
+/// cannot inherit its caller's authority, then consult that register here
+/// when the slot is empty. That replacement happens in the body of this
+/// function and nowhere else; `None` must keep meaning "fail closed".
+fn oden_detached_scheduling_principal(
+  scope: &mut v8::PinScope,
+) -> Option<String> {
+  oden_read_cped_slot(scope)
+}
+
 /// At op dispatch: if a live user frame is present, stamp its locator into the
 /// CPED slot so continuations it schedules inherit it, and return `None` (the
 /// permission layer resolves the principal from the frame itself, precedence
@@ -830,21 +864,14 @@ pub fn oden_capture_stamp_and_read(
   if !oden_capsec_armed() {
     return None;
   }
-  let nearest_user =
-    frames
-      .iter()
-      .find_map(|f| match (f.isolate_id, f.script_id) {
-        (Some(iso), Some(sid)) => oden_script_locator(iso, sid),
-        _ => None,
-      });
-  match nearest_user {
+  match oden_live_principal_locator(frames) {
     Some(locator) => {
       if oden_read_cped_slot(scope).as_deref() != Some(locator.as_str()) {
         oden_write_cped_slot(scope, &locator);
       }
       None
     }
-    None => oden_read_cped_slot(scope),
+    None => oden_detached_scheduling_principal(scope),
   }
 }
 

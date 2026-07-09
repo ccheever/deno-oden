@@ -4,3 +4,4 @@
 [WILDCARD][oden-capsec] env:SECRET caller=evil-dep -> audit(record)
 [WILDCARD][oden-capsec] env:SECRET caller=evil-dep -> audit(record)
 [WILDCARD][oden-capsec] env:SECRET caller=evil-dep -> audit(record)
+[WILDCARD][oden-capsec] env:SECRET caller=evil-dep -> audit(record)
