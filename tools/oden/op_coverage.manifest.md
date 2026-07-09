@@ -17,6 +17,7 @@ run the generator and commit. Drift fails the rebase canary.
 - network:fetch	via check_net_url()
 - network:fetch	via check_net_vsock()
 - run:run	via check_run_all()
+- worker:create	via oden_capsec_check_worker_create()
 
 ## Op-body pre-check skips (query_read_all call sites)
 

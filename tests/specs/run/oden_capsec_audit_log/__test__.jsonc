@@ -1,0 +1,26 @@
+{
+  // Per-package audit log (LLP 0001 Phase 1): ODEN_CAPSEC_AUDIT names a file that
+  // receives one NDJSON record per mediated op (principal, capability, target,
+  // decision). tempDir isolates the append-file so it starts fresh. Step 1 runs
+  // under audit; step 2 reads the log and prints the two dep-x env records.
+  "tempDir": true,
+  "steps": [
+    {
+      "args": "run --allow-env --allow-read app.js",
+      "envs": {
+        "ODEN_CAPSEC_SPIKE": "1",
+        "ODEN_CAPSEC_MODE": "audit",
+        "ODEN_CAPSEC_AUDIT": "audit.ndjson",
+        "SECRET": "s",
+        "OTHER": "o"
+      },
+      "output": "[WILDCARD]done[WILDCARD]",
+      "exitCode": 0
+    },
+    {
+      "args": "run --allow-read=. reader.mjs",
+      "output": "audit.out",
+      "exitCode": 0
+    }
+  ]
+}
