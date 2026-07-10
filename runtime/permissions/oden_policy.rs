@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 use super::oden_dynamic::EscalationCeiling;
 use super::oden_dynamic::SessionOverlay;
@@ -700,7 +700,7 @@ pub struct Policy {
   pub packages: HashMap<String, Vec<Grant>>,
   pub ceilings: HashMap<String, EscalationCeiling>,
   pub deny_ceiling: Vec<Grant>,
-  pub(super) session: Arc<Mutex<SessionOverlay>>,
+  pub(super) session: Arc<RwLock<SessionOverlay>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -717,7 +717,7 @@ impl Policy {
       packages: HashMap::new(),
       ceilings: HashMap::new(),
       deny_ceiling: Vec::new(),
-      session: Arc::new(Mutex::new(SessionOverlay::default())),
+      session: Arc::new(RwLock::new(SessionOverlay::default())),
     }
   }
 
@@ -763,7 +763,7 @@ impl Policy {
       .unwrap_or(false);
     self
       .session
-      .lock()
+      .read()
       .unwrap()
       .effective(&selector, req, floor)
   }
