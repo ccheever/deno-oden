@@ -1,6 +1,6 @@
 # Oden red-team soundness gate (generated)
 
-Phase-2 exit gate. 32 attack classes CLOSED with a guarding spec test; 6 DOCUMENTED RESIDUALS. Zero undocumented open holes.
+Phase-2 exit gate. 38 attack classes CLOSED with a guarding spec test; 6 DOCUMENTED RESIDUALS. Zero undocumented open holes.
 
 ## Closed (guarded by a spec fixture)
 
@@ -38,6 +38,12 @@ Phase-2 exit gate. 32 attack classes CLOSED with a guarding spec test; 6 DOCUMEN
 | authority-flow | re-widening: scope a handle wider than what was received | oden_capsec_authority_flow, oden_capsec_handle_redteam | scoped() only narrows — a child capability must be covered by the parent's; a mint cannot exceed the minter's own holdings (frame-checked); both over-broad shapes deny |
 | authority-flow | use-after-revoke through a derived handle (revocation cascade bypass) | oden_capsec_authority_flow | revoking a handle cascades to every handle transitively derived from it; a use of the revoked handle or any descendant fails closed (lookup returns Revoked) |
 | authority-flow | deputy confusion via the transfer path: an ungranted package mints on a grantor's authority | oden_capsec_handle_redteam | mint is frame-checked against the CALLER's own holdings, so an ungranted package minting the grantor's capability denies (mint exceeds holding); it cannot conjure authority it does not hold even where a legitimate grantor could |
+| dynamic-permissions | frame-forged request claims a first-party sourceURL | oden_capsec_dynamic_permissions_redteam | permission ops capture the unforgeable script id; eval/new Function frames resolve to quarantine and request returns OD-CAP-REQ-UNATTRIBUTED |
+| dynamic-permissions | deputy-laundered session escalation | oden_capsec_dynamic_permissions_redteam | the request grant belongs only to the nearest requesting deputy; stack-intersection still requires every implicated principal on use, so an ungranted caller denies |
+| dynamic-permissions | prompt fatigue / repeated social-engineering requests | oden_capsec_dynamic_permissions, oden_capsec_dynamic_permissions_redteam | non-interactive prompt requests return UNANSWERED without touching the layer-1 prompt; the signature is memoized and every repeated attempt remains audited |
+| dynamic-permissions | ceiling mapping through query/request probes | oden_capsec_dynamic_permissions_redteam | query deliberately exposes the authored tri-state, but each inside/outside probe is a structured dynamic_permission audit event |
+| dynamic-permissions | in-realm overlay tampering / forged granted status | oden_capsec_dynamic_permissions_redteam | session entries live in the Rust policy overlay; forged JS properties and status-shaped objects do not authorize the next host operation |
+| dynamic-permissions | conflicted escalation ceiling launders through the deny ceiling | oden_capsec_dynamic_permissions_redteam | a ceiling entry intersecting the deny ceiling is diagnosed and inert, and request state-machine row 5 returns OD-CAP-REQ-DENY-CEILING before auto/prompt |
 
 ## Documented residuals (sound-but-open or deferred, with owner)
 

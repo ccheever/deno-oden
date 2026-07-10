@@ -17,6 +17,7 @@
 // accounted for and each closed one still has its fixture on disk.
 //
 //   deno run --allow-read tools/oden/redteam.ts            # render the ledger
+//   deno run --allow-read --allow-write=tools/oden/redteam.manifest.md tools/oden/redteam.ts --write
 //   deno run --allow-read tools/oden/redteam.ts --check    # gate (exit non-zero on a hole)
 //
 // @ref llp/0001-adding-capability-security-to-deno.plan.md (The inherited hole
@@ -402,6 +403,58 @@ const CHECKLIST: HoleClass[] = [
     note:
       "mint is frame-checked against the CALLER's own holdings, so an ungranted package minting the grantor's capability denies (mint exceeds holding); it cannot conjure authority it does not hold even where a legitimate grantor could",
   },
+  // --- Ceiling-bounded dynamic permissions (ENG-23786 / LLP 0015) ----------
+  {
+    category: "dynamic-permissions",
+    attack: "frame-forged request claims a first-party sourceURL",
+    status: "closed",
+    tests: ["oden_capsec_dynamic_permissions_redteam"],
+    note:
+      "permission ops capture the unforgeable script id; eval/new Function frames resolve to quarantine and request returns OD-CAP-REQ-UNATTRIBUTED",
+  },
+  {
+    category: "dynamic-permissions",
+    attack: "deputy-laundered session escalation",
+    status: "closed",
+    tests: ["oden_capsec_dynamic_permissions_redteam"],
+    note:
+      "the request grant belongs only to the nearest requesting deputy; stack-intersection still requires every implicated principal on use, so an ungranted caller denies",
+  },
+  {
+    category: "dynamic-permissions",
+    attack: "prompt fatigue / repeated social-engineering requests",
+    status: "closed",
+    tests: [
+      "oden_capsec_dynamic_permissions",
+      "oden_capsec_dynamic_permissions_redteam",
+    ],
+    note:
+      "non-interactive prompt requests return UNANSWERED without touching the layer-1 prompt; the signature is memoized and every repeated attempt remains audited",
+  },
+  {
+    category: "dynamic-permissions",
+    attack: "ceiling mapping through query/request probes",
+    status: "closed",
+    tests: ["oden_capsec_dynamic_permissions_redteam"],
+    note:
+      "query deliberately exposes the authored tri-state, but each inside/outside probe is a structured dynamic_permission audit event",
+  },
+  {
+    category: "dynamic-permissions",
+    attack: "in-realm overlay tampering / forged granted status",
+    status: "closed",
+    tests: ["oden_capsec_dynamic_permissions_redteam"],
+    note:
+      "session entries live in the Rust policy overlay; forged JS properties and status-shaped objects do not authorize the next host operation",
+  },
+  {
+    category: "dynamic-permissions",
+    attack: "conflicted escalation ceiling launders through the deny ceiling",
+    status: "closed",
+    tests: ["oden_capsec_dynamic_permissions_redteam"],
+    note:
+      "a ceiling entry intersecting the deny ceiling is diagnosed and inert, and request state-machine row 5 returns OD-CAP-REQ-DENY-CEILING before auto/prompt",
+  },
 ];
 
 function dirExists(name: string): boolean {
@@ -494,6 +547,11 @@ function render(): string {
 
 function main() {
   const errors = validate();
+  if (Deno.args.includes("--write")) {
+    Deno.writeTextFileSync(MANIFEST, render());
+    console.log(`updated ${MANIFEST}`);
+    return;
+  }
   if (Deno.args.includes("--check")) {
     try {
       if (Deno.readTextFileSync(MANIFEST) !== render()) {
