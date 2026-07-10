@@ -19,6 +19,7 @@ import {
   op_node_has_child_ipc_pipe,
   op_oden_capsec_flags,
   op_oden_capsec_seal_report,
+  op_oden_enable_dynamic_endowments,
   op_ppid,
   op_proto_get_attempted,
   op_proto_set_attempted,
@@ -1069,6 +1070,7 @@ function odenMaybeInstallHandles(denoNs) {
       "__oden_compartment_globals__",
       core.propReadOnly(compartmentGlobals),
     );
+    op_oden_enable_dynamic_endowments();
   }
 }
 

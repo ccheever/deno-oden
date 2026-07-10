@@ -1,6 +1,6 @@
 # Oden red-team soundness gate (generated)
 
-Phase-2 exit gate. 39 attack classes CLOSED with a guarding spec test; 6 DOCUMENTED RESIDUALS. Zero undocumented open holes.
+Phase-2 exit gate. 43 attack classes CLOSED with a guarding spec test; 2 DOCUMENTED RESIDUALS. Zero undocumented open holes.
 
 ## Closed (guarded by a spec fixture)
 
@@ -28,7 +28,11 @@ Phase-2 exit gate. 39 attack classes CLOSED with a guarding spec test; 6 DOCUMEN
 | lockdown | a dependency patches a shared intrinsic a check relies on | oden_capsec_lockdown | the freeze walk + Error taming make the primordials non-writable; enforce defaults lockdown ON (ODEN_CAPSEC_LOCKDOWN=0 is the named override), audit/permissive stay opt-in per the compat-corpus NO-GO (ENG-23880); the ext/node lazy-write repairs and prepareStackTrace shim landed with ENG-23781 |
 | compartment-globals | 1. direct free identifier reaches unendowed fetch | oden_capsec_compartment_globals | the ESM/CJS scope-aware rewrite redirects the unresolved identifier to a throwing per-principal record; local parameters named fetch remain untouched |
 | compartment-globals | 2. globalThis/global/self computed member reaches unendowed fetch | oden_capsec_compartment_globals | global aliases resolve to the filtered per-principal Proxy, including computed property access |
+| compartment-globals | 3. direct or indirect eval reaches an unendowed global | oden_capsec_compartment_globals | the V8 code-generation callback parses direct and indirect eval source and redirects unresolved authority globals through the exact caller's filtered record |
+| compartment-globals | 4. Function constructor recovers unendowed fetch | oden_capsec_compartment_globals, oden_capsec_eval_quarantine | Function and new Function bodies resolve authority globals through the caller record while preserving the engine's parameter-prefix boundary |
+| compartment-globals | 5. prototype-chain Function constructor recovers unendowed fetch | oden_capsec_compartment_globals, oden_capsec_eval_quarantine | the isolate callback covers ordinary, async, generator, and async-generator constructors reached directly or through prototype and Reflect walks |
 | compartment-globals | 6. sloppy this recovers the real global | oden_capsec_compartment_globals | ESM is strict and rewritten CJS injects use strict while the standard wrapper still supplies top-level module.exports explicitly |
+| compartment-globals | 7. ext/node backdoor recovers the real global | oden_capsec_compartment_globals, oden_capsec_compilefn_forgery | process is never-endowed and package node:vm script, compileFunction, and SourceTextModule creation are denied before they can create a fresh-context evaluator bypass |
 | compartment-globals | 8. reflection/enumeration discovers unendowed fetch | oden_capsec_compartment_globals | Reflect.get throws and ownKeys/has omit the unendowed key on the mediated global view |
 | compartment-globals | 9. leaked endowed fetch launders the grantor's authority | oden_capsec_compartment_globals | the receiver may hold the opaque function reference, but the eventual fetch op attributes recipient-dep and denies NotCapable |
 | compartment-globals | 10. detached async callback reaches unendowed fetch | oden_capsec_compartment_globals | the rewritten lexical reference remains a throwing record access inside the scheduled callback |
@@ -52,11 +56,7 @@ Phase-2 exit gate. 39 attack classes CLOSED with a guarding spec test; 6 DOCUMEN
 | --- | --- | --- | --- | --- |
 | runtime-escape-hatch | node:inspector / self-inspection, WASI | ENG-23779 | default-denied for package principals under enforce; a designed story per hatch is the remaining escape-hatch-closure work | each is a deniable capability; default-deny holds, a per-hatch fixture is owed |
 | resource-ownership | owner-check not yet wired for most families | ENG-23776 | per-family owner-check integration is sequenced; only fs:watch is wired, the rest are named residuals (audited, not silently accepted) | the mechanism + classification are landed; wiring each remaining owner-checked family closes its residual |
-| compartment-globals | 3. direct or indirect eval reaches an unendowed global | ENG-23968 | caller identity/op attribution is now closed, but package eval remains never-endowed; exposing exactly the caller's filtered global record is the separate LLP 0014 Slice-4 reachability task | sound over-deny only; this slice does not relabel eval-to-caller as complete |
-| compartment-globals | 4. Function constructor recovers unendowed fetch | ENG-23968 | the raw constructor can still recover the reference; ENG-23783 now proves its eventual operation is attributed to and denied for the true caller, while endowment reachability remains open | caller-attributed op denial is preserved; complete reachability closure belongs to evaluator endowment taming |
-| compartment-globals | 5. prototype-chain Function constructor recovers unendowed fetch | ENG-23968 | frozen prototypes prevent mutation and dynamic code is caller-attributed, but the constructor family can still recover an unendowed reference | not claimed closed by the lexical rewrite |
-| compartment-globals | 7. ext/node backdoor recovers the real global | ENG-23968 / ENG-23779 | process is never-endowed and node:vm sourceURL/nonces remain quarantine, but generated-code global reachability still awaits evaluator endowment taming and hatch closure | the fixture distinguishes a closed namespace path from the honestly labeled generated-code residual |
 
 ## Verdict
 
-**GO** — every attack class in the inherited hole checklist is either closed with a guarding fixture or a documented residual with an owning ticket. No undocumented open holes. The remaining residuals are the default-denied inspector/WASI story, evaluator endowment reachability, and per-family resource owner-check wiring.
+**GO** — every attack class in the inherited hole checklist is either closed with a guarding fixture or a documented residual with an owning ticket. No undocumented open holes. The remaining residuals are the default-denied inspector/WASI story and per-family resource owner-check wiring.

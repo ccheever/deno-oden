@@ -2,6 +2,7 @@
 
 use deno_core::OpState;
 use deno_core::op2;
+use deno_core::v8;
 use deno_terminal::colors::ColorLevel;
 
 use crate::BootstrapOptions;
@@ -22,6 +23,7 @@ deno_core::extension!(
     op_bootstrap_unstable_args,
     op_bootstrap_is_from_unconfigured_runtime,
     op_oden_capsec_flags,
+    op_oden_enable_dynamic_endowments,
     op_oden_capsec_seal_report,
     op_proto_set_attempted,
     op_proto_get_attempted,
@@ -212,6 +214,16 @@ pub fn op_oden_capsec_flags() -> u32 {
     flags |= 8;
   }
   flags
+}
+
+/// Arm dynamic-source endowment rewriting only after trusted bootstrap has
+/// installed the non-configurable helper in this exact context. A marker in an
+/// embedder slot, rather than the public property name, distinguishes the
+/// bootstrap helper from a user-created lookalike when the layer is off.
+// @ref LLP 0014#closing-the-dynamic-channels [implements]
+#[op2(fast)]
+pub fn op_oden_enable_dynamic_endowments(scope: &mut v8::PinScope<'_, '_>) {
+  deno_core::oden_enable_dynamic_endowments(scope);
 }
 
 // Always-on seal conformance (LLP 0001 ENG-23775): the bootstrap runs the four
