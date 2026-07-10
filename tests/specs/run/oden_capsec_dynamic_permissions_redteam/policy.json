@@ -3,7 +3,6 @@
   "grants": {},
   "ceilings": {
     "deputy-dep": { "authority": "env:*:DEPUTY", "on_request": "auto" },
-    "forger-dep": { "authority": "env:*:FORGED", "on_request": "auto" },
     "mapper-dep": { "authority": "env:*:INSIDE", "on_request": "prompt" },
     "conflicted-dep": { "authority": "env:*:NEVER", "on_request": "auto" },
     "tamper-dep": { "authority": "env:*:ALLOWED", "on_request": "auto" }

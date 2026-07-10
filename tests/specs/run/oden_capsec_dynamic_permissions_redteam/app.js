@@ -2,7 +2,10 @@ import { forgeRootLookingRequest } from "./node_modules/forger-dep/index.js";
 import { attackViaDeputy } from "./node_modules/evil-dep/index.js";
 import { directRead } from "./node_modules/deputy-dep/index.js";
 import { mapAndFlood } from "./node_modules/mapper-dep/index.js";
-import { requestConflict } from "./node_modules/conflicted-dep/index.js";
+import {
+  requestBroadConflict,
+  requestConflict,
+} from "./node_modules/conflicted-dep/index.js";
 import { attemptOverlayTamper } from "./node_modules/tamper-dep/index.js";
 
 console.log(`frame-forged: ${forgeRootLookingRequest()}`);
@@ -14,6 +17,7 @@ const mapping = mapAndFlood();
 console.log(`mapping: ${mapping.inside}/${mapping.outside}`);
 console.log(`fatigue: ${mapping.first}/${mapping.second}`);
 console.log(`conflict: ${requestConflict()}`);
+console.log(`conflict-broad: ${requestBroadConflict()}`);
 const tamper = attemptOverlayTamper();
 console.log(`overlay-legit: ${tamper.legit}`);
 console.log(`overlay-forged-status: ${tamper.forgedStatus}`);

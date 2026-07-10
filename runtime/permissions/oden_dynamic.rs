@@ -282,6 +282,14 @@ impl Policy {
       .find(|entry| covers(std::slice::from_ref(entry), req))
   }
 
+  fn deny_ceiling_intersects(&self, req: &Request) -> bool {
+    let requested = Grant::from_request(req);
+    self
+      .deny_ceiling
+      .iter()
+      .any(|deny| grants_intersect(&requested, deny))
+  }
+
   pub fn query_dynamic(
     &self,
     principal: &Principal,
@@ -302,7 +310,7 @@ impl Policy {
     if self.grants(principal, req) {
       return DynamicQueryState::Granted;
     }
-    if covers(&self.deny_ceiling, req) {
+    if self.deny_ceiling_intersects(req) {
       return DynamicQueryState::Denied;
     }
     let Some(ceiling) = self.ceilings.get(&selector) else {
@@ -354,7 +362,7 @@ impl Policy {
         None,
       ));
     }
-    if covers(&self.deny_ceiling, req) {
+    if self.deny_ceiling_intersects(req) {
       return DynamicRequestEvaluation::Terminal(self.memoized_denial(
         &selector,
         req,
@@ -595,6 +603,27 @@ mod tests {
       DynamicRequestEvaluation::Terminal(DynamicRequestResult {
         code: DynamicRequestCode::Unanswered,
         memoized: true,
+        ..
+      })
+    ));
+
+    let mut broad = Policy::new(Mode::Enforce);
+    broad.ceiling("dep", "env:*:*", OnRequest::Auto);
+    broad.deny_ceiling("env:read:NEVER");
+    let all_env = Request {
+      family: Family::Env,
+      action: "*".into(),
+      target: "*".into(),
+    };
+    assert_eq!(
+      broad.query_dynamic(&dep("dep"), Some(&all_env)),
+      DynamicQueryState::Denied,
+      "a broad descriptor intersects a narrow deny-ceiling entry"
+    );
+    assert!(matches!(
+      broad.evaluate_dynamic_request(&dep("dep"), Some(&all_env)),
+      DynamicRequestEvaluation::Terminal(DynamicRequestResult {
+        code: DynamicRequestCode::DenyCeiling,
         ..
       })
     ));

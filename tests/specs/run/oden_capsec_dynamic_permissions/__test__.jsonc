@@ -34,6 +34,11 @@
       },
       "output": "root.out",
       "exitCode": 0
+    },
+    "unarmed_grants_attribute_remains_unsupported": {
+      "args": "run attribute_unarmed.js",
+      "output": "attribute_unarmed.out",
+      "exitCode": 1
     }
   }
 }

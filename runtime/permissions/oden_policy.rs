@@ -371,21 +371,50 @@ fn covers_one(g: &Grant, req: &Request) -> bool {
 }
 
 pub fn grants_intersect(a: &Grant, b: &Grant) -> bool {
-  covers_one(
-    a,
-    &Request {
-      family: b.family,
-      action: b.action.clone(),
-      target: b.scope.clone(),
-    },
-  ) || covers_one(
-    b,
-    &Request {
-      family: a.family,
-      action: a.action.clone(),
-      target: a.scope.clone(),
-    },
-  )
+  if a.family != b.family {
+    return false;
+  }
+  let actions_overlap =
+    a.action == "*" || b.action == "*" || a.action == b.action;
+  match a.family {
+    Family::Ffi => true,
+    Family::Fs => {
+      actions_overlap
+        && !a.scope.is_empty()
+        && !b.scope.is_empty()
+        && (a.scope == "*"
+          || b.scope == "*"
+          || path_under(&a.scope, &b.scope)
+          || path_under(&b.scope, &a.scope))
+    }
+    Family::Network => {
+      actions_overlap
+        && (host_covered(&a.scope, &b.scope)
+          || host_covered(&b.scope, &a.scope))
+    }
+    Family::Env => {
+      actions_overlap
+        && (a.scope == "*" || b.scope == "*" || a.scope == b.scope)
+    }
+    Family::Sys => a.scope == "*" || b.scope == "*" || a.scope == b.scope,
+    Family::Run => {
+      covers_one(
+        a,
+        &Request {
+          family: b.family,
+          action: b.action.clone(),
+          target: b.scope.clone(),
+        },
+      ) || covers_one(
+        b,
+        &Request {
+          family: a.family,
+          action: a.action.clone(),
+          target: a.scope.clone(),
+        },
+      )
+    }
+  }
 }
 
 pub fn path_under(child: &str, parent: &str) -> bool {
@@ -814,6 +843,21 @@ mod tests {
     assert!(!Grant::valid_dynamic_authority("telepathy:read:thoughts"));
     assert!(!Grant::valid_dynamic_authority("env:execute:PATH"));
     assert!(!Grant::valid_dynamic_authority("network:connect:"));
+  }
+
+  #[test]
+  fn intersection_compares_action_and_scope_breadth_independently() {
+    let narrow_all = Grant::parse("fs:*:/proj/.oden/cache").unwrap();
+    let broad_read = Grant::parse("fs:read:/proj/.oden").unwrap();
+    assert!(grants_intersect(&narrow_all, &broad_read));
+
+    let all_env = Grant::parse("env:*:*").unwrap();
+    let one_env_read = Grant::parse("env:read:NPM_TOKEN").unwrap();
+    assert!(grants_intersect(&all_env, &one_env_read));
+    assert!(!grants_intersect(
+      &Grant::parse("env:write:SAFE").unwrap(),
+      &one_env_read
+    ));
   }
 
   // --- Stack-intersection / deputyClasses (precedence row 3) ----------------

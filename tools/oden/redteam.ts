@@ -410,7 +410,7 @@ const CHECKLIST: HoleClass[] = [
     status: "closed",
     tests: ["oden_capsec_dynamic_permissions_redteam"],
     note:
-      "permission ops capture the unforgeable script id; eval/new Function frames resolve to quarantine and request returns OD-CAP-REQ-UNATTRIBUTED",
+      "permission ops capture the unforgeable script id; eval/new Function is bound to its real package caller, so a forged first-party sourceURL cannot borrow root and the request is denied against that package's ceiling",
   },
   {
     category: "dynamic-permissions",

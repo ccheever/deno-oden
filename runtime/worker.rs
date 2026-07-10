@@ -123,7 +123,18 @@ pub fn create_validate_import_attributes_callback(
             && matches!(kind, "bytes" | "css"))
       };
       for (key, value) in attributes {
-        let msg = if key != "type" {
+        // Oden's parent CLI extracts first-party `with { grants: "..." }`
+        // declarations into the armed policy before launch. The fork must keep
+        // the original module URL for unforgeable attribution, so accept and
+        // otherwise ignore that already-consumed attribute only while capsec is
+        // structurally armed. A declaration in dependency code still grants
+        // nothing because it was never added to the policy artifact.
+        //
+        // @ref LLP 0012#open-questions (import-site grants)
+        // @ref LLP 0015#the-authority-envelope (the resolved floor)
+        let msg = if key == "grants" && deno_permissions::oden_capsec_armed() {
+          None
+        } else if key != "type" {
           Some(format!("\"{key}\" attribute is not supported."))
         } else if !valid_attribute(value.as_str()) {
           Some(format!("\"{value}\" is not a valid module type."))
