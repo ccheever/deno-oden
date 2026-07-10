@@ -28,6 +28,13 @@
 // code grants"; drift severity is class-sensitive)
 
 const GRANT_KEYS = ["grants", "endow", "builtins", "also"];
+const SAFE_LOADER_ENV = {
+  LD_LIBRARY_PATH: "",
+  LD_PRELOAD: "",
+  DYLD_FALLBACK_LIBRARY_PATH: "",
+  DYLD_LIBRARY_PATH: "",
+  DYLD_INSERT_LIBRARIES: "",
+};
 
 // Capability families whose expansion is high-severity in drift review
 // (LLP 0016 R5 / LLP 0001 "Drift severity is class-sensitive").
@@ -56,6 +63,7 @@ type Graph = { roots: string[]; modules: GraphModule[] };
 function runDenoInfo(entry: string): Graph {
   const cmd = new Deno.Command(Deno.execPath(), {
     args: ["info", "--json", entry],
+    env: SAFE_LOADER_ENV,
     stdout: "piped",
     stderr: "piped",
   });

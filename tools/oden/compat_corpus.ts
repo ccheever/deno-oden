@@ -47,6 +47,14 @@ type AuditRecord = {
   decision: "allow-ambient" | "allow-granted" | "audit-record" | "deny";
 };
 
+const SAFE_LOADER_ENV = {
+  LD_LIBRARY_PATH: "",
+  LD_PRELOAD: "",
+  DYLD_FALLBACK_LIBRARY_PATH: "",
+  DYLD_LIBRARY_PATH: "",
+  DYLD_INSERT_LIBRARIES: "",
+};
+
 function loadCorpus(path: string): Corpus {
   const corpus = JSON.parse(Deno.readTextFileSync(path)) as Corpus;
   if (!Array.isArray(corpus.entries)) {
@@ -67,6 +75,7 @@ function runEntry(root: string, entry: Entry): AuditRecord[] {
       args: ["run", "--allow-all", entry.entry, ...(entry.args ?? [])],
       cwd: root,
       env: {
+        ...SAFE_LOADER_ENV,
         ODEN_CAPSEC_POLICY: policyFile,
         ODEN_CAPSEC_AUDIT: auditFile,
       },
@@ -111,7 +120,22 @@ function hitsCeiling(
   for (const [key, scopes] of Object.entries(ceiling)) {
     if (key !== family && key !== r.capability) continue;
     for (const s of scopes) {
-      if (s === "*" || r.target === s || r.target.startsWith(s)) return true;
+      if (s === "*") return true;
+      const scope = family === "fs"
+        ? (() => {
+          try {
+            return Deno.realPathSync(s);
+          } catch {
+            return s;
+          }
+        })()
+        : s;
+      if (
+        r.target === scope ||
+        (family === "fs"
+          ? r.target.startsWith(scope.endsWith("/") ? scope : `${scope}/`)
+          : r.target.startsWith(scope))
+      ) return true;
     }
   }
   return false;

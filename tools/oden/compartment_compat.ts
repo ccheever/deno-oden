@@ -27,6 +27,13 @@ type Result = {
 };
 
 const decoder = new TextDecoder();
+const SAFE_LOADER_ENV = {
+  LD_LIBRARY_PATH: "",
+  LD_PRELOAD: "",
+  DYLD_FALLBACK_LIBRARY_PATH: "",
+  DYLD_LIBRARY_PATH: "",
+  DYLD_INSERT_LIBRARIES: "",
+};
 const BROAD_GRANTS = "fs:*:*,network:*:*,env:*,run:*,ffi";
 const DERIVED = new Set(["fetch", "EventSource", "WebSocket"]);
 const INTENTIONAL = new Set([
@@ -102,6 +109,7 @@ function run(
     cwd: root,
     args: ["run", "--allow-all", entry.entry, ...(entry.args ?? [])],
     env: {
+      ...SAFE_LOADER_ENV,
       DENO_NO_UPDATE_CHECK: "1",
       NO_COLOR: "1",
       ODEN_CAPSEC_ALLOW_ADVISORY: "1",
