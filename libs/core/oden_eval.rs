@@ -13,18 +13,18 @@
 //! @ref llp/0001-adding-capability-security-to-deno.plan.md#attribution-of-evalnew-function-code [implements] — bind dynamic code at compile time without making unknown scripts transparent
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::pin::pin;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
+use indexmap::IndexMap;
 use rand::RngCore;
 
 use crate::error::JsStackFrame;
 use crate::oden_v8_abi::ModifyCodeGenerationFromStringsResult;
 
 const EVAL_SOURCE_URL_PREFIX: &str = "oden-eval://";
-const MAX_PENDING_EVALS: usize = 4096;
+const MAX_PENDING_EVALS_PER_ISOLATE: usize = 4096;
 // Context embedder slots 1/2 belong to ContextState/ModuleMap, while node:vm
 // uses 1/2/3 plus its own tag in slot 4. Slot 5 is Oden's unforgeable realm
 // tag. At the
@@ -35,39 +35,42 @@ const ODEN_EVAL_CONTEXT_SLOT: i32 = 5;
 
 #[derive(Debug)]
 struct PendingEval {
-  isolate_id: usize,
   context_id: String,
   caller_locator: String,
 }
 
 #[derive(Default)]
 struct PendingEvalRegistry {
-  by_source_url: HashMap<String, PendingEval>,
-  insertion_order: VecDeque<String>,
+  by_isolate: HashMap<usize, IndexMap<String, PendingEval>>,
 }
 
 impl PendingEvalRegistry {
-  fn insert(&mut self, source_url: String, pending: PendingEval) {
-    // Remove consumed entries from the FIFO head so a process that repeatedly
-    // compiles and immediately executes eval does not grow the order queue.
-    while self
-      .insertion_order
-      .front()
-      .is_some_and(|url| !self.by_source_url.contains_key(url))
-    {
-      self.insertion_order.pop_front();
-    }
+  fn insert(
+    &mut self,
+    isolate_id: usize,
+    source_url: String,
+    pending: PendingEval,
+  ) {
+    let entries = self.by_isolate.entry(isolate_id).or_default();
     // Syntax errors and never-called returned functions can leave an identity
-    // pending. Bound the fail-closed table; eviction only causes quarantine.
-    while self.by_source_url.len() >= MAX_PENDING_EVALS {
-      let Some(oldest) = self.insertion_order.pop_front() else {
-        self.by_source_url.clear();
-        break;
-      };
-      self.by_source_url.remove(&oldest);
+    // pending. IndexMap is the single authoritative bounded structure: both
+    // lookup and ordering metadata disappear together on every removal.
+    // swap-removal keeps consumption and eviction bounded O(1); eviction is
+    // deliberately fail-closed because the forgotten script quarantines.
+    if entries.contains_key(&source_url) {
+      entries.swap_remove(&source_url);
     }
-    self.insertion_order.push_back(source_url.clone());
-    self.by_source_url.insert(source_url, pending);
+    while entries.len() >= MAX_PENDING_EVALS_PER_ISOLATE {
+      entries.swap_remove_index(0);
+    }
+    entries.insert(source_url, pending);
+  }
+
+  fn contains(&self, source_url: &str, isolate_id: usize) -> bool {
+    self
+      .by_isolate
+      .get(&isolate_id)
+      .is_some_and(|entries| entries.contains_key(source_url))
   }
 
   fn remove_for_isolate(
@@ -75,15 +78,15 @@ impl PendingEvalRegistry {
     source_url: &str,
     isolate_id: usize,
   ) -> Option<PendingEval> {
-    if self
-      .by_source_url
-      .get(source_url)
-      .is_some_and(|pending| pending.isolate_id == isolate_id)
-    {
-      self.by_source_url.remove(source_url)
-    } else {
-      None
+    let (removed, empty) = {
+      let entries = self.by_isolate.get_mut(&isolate_id)?;
+      let removed = entries.swap_remove(source_url);
+      (removed, entries.is_empty())
+    };
+    if empty {
+      self.by_isolate.remove(&isolate_id);
     }
+    removed
   }
 
   fn remove_for_context(
@@ -92,13 +95,28 @@ impl PendingEvalRegistry {
     isolate_id: usize,
     context_id: &str,
   ) -> Option<PendingEval> {
-    if self.by_source_url.get(source_url).is_some_and(|pending| {
-      pending.isolate_id == isolate_id && pending.context_id == context_id
-    }) {
-      self.by_source_url.remove(source_url)
-    } else {
-      None
+    let (removed, empty) = {
+      let entries = self.by_isolate.get_mut(&isolate_id)?;
+      let removed = entries
+        .get(source_url)
+        .is_some_and(|pending| pending.context_id == context_id)
+        .then(|| entries.swap_remove(source_url))
+        .flatten();
+      (removed, entries.is_empty())
+    };
+    if empty {
+      self.by_isolate.remove(&isolate_id);
     }
+    removed
+  }
+
+  fn clear_isolate(&mut self, isolate_id: usize) {
+    self.by_isolate.remove(&isolate_id);
+  }
+
+  #[cfg(test)]
+  fn len_for_isolate(&self, isolate_id: usize) -> usize {
+    self.by_isolate.get(&isolate_id).map_or(0, IndexMap::len)
   }
 }
 
@@ -178,13 +196,13 @@ fn remember_pending_eval(
   for _ in 0..4 {
     let source_url = random_hex_identity(EVAL_SOURCE_URL_PREFIX)?;
     let mut pending = registry();
-    if pending.by_source_url.contains_key(&source_url) {
+    if pending.contains(&source_url, isolate_id) {
       continue;
     }
     pending.insert(
+      isolate_id,
       source_url.clone(),
       PendingEval {
-        isolate_id,
         context_id,
         caller_locator,
       },
@@ -198,6 +216,23 @@ fn forget_pending_eval(source_url: &str, isolate_id: usize) {
   registry().remove_for_isolate(source_url, isolate_id);
 }
 
+pub(crate) fn clear_isolate(isolate_id: usize) {
+  registry().clear_isolate(isolate_id);
+}
+
+fn frame_has_pending_identity(
+  pending: &PendingEvalRegistry,
+  frame: &JsStackFrame,
+  isolate_id: usize,
+) -> bool {
+  frame.is_eval
+    && frame.isolate_id == Some(isolate_id)
+    && frame.file_name.as_deref().is_some_and(|source_url| {
+      source_url.starts_with(EVAL_SOURCE_URL_PREFIX)
+        && pending.contains(source_url, isolate_id)
+    })
+}
+
 /// Consume callback-owned identities and register their first observed script
 /// IDs. A displayed sourceURL alone never grants identity: it must match an
 /// unconsumed CSPRNG entry for the same isolate.
@@ -205,18 +240,32 @@ pub(crate) fn bind_pending_frames(
   scope: &mut v8::PinScope,
   frames: &[JsStackFrame],
 ) {
-  // Avoid V8's experimental per-function stack walk and a Vec allocation on
-  // the ordinary hot path. A pending identity exists only between dynamic
-  // compilation and that script's first observed operation.
-  if registry().by_source_url.is_empty() {
-    return;
-  }
-  if !frames.iter().any(|frame| frame.isolate_id.is_some()) {
+  // A never-called Function must not arm a process-wide tax. Inspect the
+  // already-captured cheap frames first and do not even acquire the registry
+  // mutex unless this isolate is executing an eval frame with Oden's nonce.
+  if !frames.iter().any(|frame| {
+    frame.is_eval
+      && frame.file_name.as_deref().is_some_and(|source_url| {
+        source_url.starts_with(EVAL_SOURCE_URL_PREFIX)
+      })
+  }) {
     return;
   }
   // SAFETY: `scope` is active for the stack walk below; the pointer is passed
   // back to V8 immediately and is not retained as a dereferenceable handle.
   let isolate = unsafe { scope.as_raw_isolate_ptr() };
+  let isolate_id = crate::error::oden_isolate_key(isolate);
+  {
+    let pending = registry();
+    if !frames
+      .iter()
+      .any(|frame| frame_has_pending_identity(&pending, frame, isolate_id))
+    {
+      return;
+    }
+  }
+  // V8's experimental per-function context walk and its allocation happen
+  // only after an exact pending nonce match in this isolate.
   let script_contexts =
     crate::oden_v8_abi::current_script_data(scope, isolate, frames.len())
       .into_iter()
@@ -263,7 +312,7 @@ pub(crate) fn bind_pending_frames(
     }
   }
   for (isolate_id, script_id, locator) in bindings {
-    crate::error::oden_register_script_locator_by_key(
+    crate::error::oden_register_dynamic_script_locator_by_key(
       isolate_id, script_id, &locator,
     );
   }
@@ -375,6 +424,35 @@ pub(crate) fn maybe_enable_for_context(
 mod tests {
   use super::*;
 
+  fn pending_eval(context_id: &str) -> PendingEval {
+    PendingEval {
+      context_id: context_id.to_string(),
+      caller_locator: "file:///root/app.js".to_string(),
+    }
+  }
+
+  fn frame(isolate_id: usize, file_name: &str, is_eval: bool) -> JsStackFrame {
+    JsStackFrame {
+      isolate_id: Some(isolate_id),
+      script_id: Some(1),
+      type_name: None,
+      function_name: None,
+      method_name: None,
+      file_name: Some(file_name.to_string()),
+      line_number: Some(1),
+      column_number: Some(1),
+      eval_origin: None,
+      is_top_level: Some(true),
+      is_eval,
+      is_native: false,
+      is_constructor: false,
+      is_async: false,
+      is_promise_all: false,
+      is_wasm: false,
+      promise_index: None,
+    }
+  }
+
   #[test]
   fn pending_identity_is_one_shot_and_isolate_scoped() {
     let url = remember_pending_eval(
@@ -400,22 +478,110 @@ mod tests {
   #[test]
   fn pending_registry_evicts_fail_closed() {
     let mut pending = PendingEvalRegistry::default();
-    for i in 0..=MAX_PENDING_EVALS {
+    for i in 0..=MAX_PENDING_EVALS_PER_ISOLATE {
       pending.insert(
+        1,
         format!("{EVAL_SOURCE_URL_PREFIX}{i:032x}"),
-        PendingEval {
-          isolate_id: 1,
-          context_id: "context-1".to_string(),
-          caller_locator: "file:///root/app.js".to_string(),
-        },
+        pending_eval("context-1"),
       );
     }
-    assert_eq!(pending.by_source_url.len(), MAX_PENDING_EVALS);
+    assert_eq!(pending.len_for_isolate(1), MAX_PENDING_EVALS_PER_ISOLATE);
     assert!(
-      !pending
-        .by_source_url
-        .contains_key(&format!("{EVAL_SOURCE_URL_PREFIX}{:032x}", 0))
+      !pending.contains(&format!("{EVAL_SOURCE_URL_PREFIX}{:032x}", 0), 1)
     );
+  }
+
+  #[test]
+  fn out_of_order_consumption_does_not_retain_ordering_metadata() {
+    let mut registry = PendingEvalRegistry::default();
+    let oldest = format!("{EVAL_SOURCE_URL_PREFIX}{:032x}", 0);
+    registry.insert(1, oldest.clone(), pending_eval("context-1"));
+
+    for i in 1..(MAX_PENDING_EVALS_PER_ISOLATE * 4) {
+      let source_url = format!("{EVAL_SOURCE_URL_PREFIX}{i:032x}");
+      registry.insert(1, source_url.clone(), pending_eval("context-1"));
+      assert!(
+        registry
+          .remove_for_context(&source_url, 1, "context-1")
+          .is_some()
+      );
+    }
+
+    assert_eq!(registry.len_for_isolate(1), 1);
+    assert!(registry.contains(&oldest, 1));
+  }
+
+  #[test]
+  fn abandoned_eval_does_not_arm_sibling_or_root_slow_path() {
+    let mut registry = PendingEvalRegistry::default();
+    let nonce = format!("{EVAL_SOURCE_URL_PREFIX}{:032x}", 7);
+    registry.insert(11, nonce.clone(), pending_eval("context-1"));
+
+    let root_op = frame(11, "file:///root/main.ts", false);
+    assert!(!frame_has_pending_identity(&registry, &root_op, 11));
+
+    let sibling_replay = frame(22, &nonce, true);
+    assert!(!frame_has_pending_identity(&registry, &sibling_replay, 22));
+
+    let matching_eval = frame(11, &nonce, true);
+    assert!(frame_has_pending_identity(&registry, &matching_eval, 11));
+  }
+
+  #[test]
+  fn isolate_cleanup_reclaims_pending_and_dynamic_locators() {
+    let isolate_id = usize::MAX - 101;
+    let mut pending = PendingEvalRegistry::default();
+    pending.insert(
+      isolate_id,
+      format!("{EVAL_SOURCE_URL_PREFIX}{:032x}", 1),
+      pending_eval("context-1"),
+    );
+    assert_eq!(pending.len_for_isolate(isolate_id), 1);
+    pending.clear_isolate(isolate_id);
+    assert_eq!(pending.len_for_isolate(isolate_id), 0);
+
+    crate::error::oden_register_dynamic_script_locator_by_key(
+      isolate_id,
+      1,
+      "file:///root/app.js",
+    );
+    assert_eq!(
+      crate::error::oden_dynamic_script_locator_count(isolate_id),
+      1
+    );
+    crate::error::oden_clear_script_locators(isolate_id);
+    assert!(crate::error::oden_script_locator(isolate_id, 1).is_none());
+  }
+
+  #[test]
+  fn dynamic_script_locators_are_bounded_without_evicting_static_modules() {
+    let isolate_id = usize::MAX - 202;
+    let static_script_id = usize::MAX - 2_048;
+    crate::error::oden_register_script_locator_by_key(
+      isolate_id,
+      static_script_id,
+      "file:///root/static.js",
+    );
+    for script_id in
+      0..(crate::error::MAX_DYNAMIC_SCRIPT_LOCATORS_PER_ISOLATE * 4)
+    {
+      crate::error::oden_register_dynamic_script_locator_by_key(
+        isolate_id,
+        script_id,
+        "file:///root/eval.js",
+      );
+    }
+
+    assert_eq!(
+      crate::error::oden_dynamic_script_locator_count(isolate_id),
+      crate::error::MAX_DYNAMIC_SCRIPT_LOCATORS_PER_ISOLATE
+    );
+    assert_eq!(
+      crate::error::oden_script_locator(isolate_id, static_script_id)
+        .as_deref(),
+      Some("file:///root/static.js")
+    );
+    crate::error::oden_clear_script_locators(isolate_id);
   }
 
   #[test]
@@ -446,5 +612,8 @@ mod tests {
       "file:///legacy-global.js",
     );
     assert!(crate::error::oden_script_locator(303, script_id - 1).is_none());
+    crate::error::oden_clear_script_locators(101);
+    crate::error::oden_clear_script_locators(202);
+    crate::error::oden_clear_script_locators(0);
   }
 }

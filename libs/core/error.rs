@@ -18,6 +18,7 @@ use deno_error::JsError;
 use deno_error::JsErrorClass;
 use deno_error::PropertyValue;
 use deno_error::builtin_classes::*;
+use indexmap::IndexMap;
 use thiserror::Error;
 
 pub use super::modules::ModuleConcreteError;
@@ -589,8 +590,28 @@ pub struct JsStackFrame {
   pub promise_index: Option<i64>,
 }
 
-static ODEN_SCRIPT_LOCATORS: LazyLock<Mutex<HashMap<(usize, usize), String>>> =
-  LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(crate) const MAX_DYNAMIC_SCRIPT_LOCATORS_PER_ISOLATE: usize = 4096;
+
+#[derive(Default)]
+struct OdenScriptLocatorRegistry {
+  // Keep the overwhelmingly common loader-owned lookup at the original
+  // single-hash shape. Dynamic scripts need a separate per-isolate order only
+  // so their adversarially generated population can be capped independently.
+  static_by_key: HashMap<(usize, usize), String>,
+  dynamic_by_isolate: HashMap<usize, IndexMap<usize, String>>,
+}
+
+static ODEN_SCRIPT_LOCATORS: LazyLock<Mutex<OdenScriptLocatorRegistry>> =
+  LazyLock::new(|| Mutex::new(OdenScriptLocatorRegistry::default()));
+
+fn oden_script_locators()
+-> std::sync::MutexGuard<'static, OdenScriptLocatorRegistry> {
+  // Poisoning cannot justify stale or cross-isolate authority. Recover the
+  // owned registry and preserve the same exact-key lookup rules.
+  ODEN_SCRIPT_LOCATORS
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 // Oden uses V8 script IDs as the unforgeable stack-frame key. This registry is
 // the raw (script id -> locator) feed captured at script creation; the
@@ -631,23 +652,78 @@ pub(crate) fn oden_register_script_locator_by_key(
   if script_id == usize::MAX {
     return;
   }
-  ODEN_SCRIPT_LOCATORS
-    .lock()
-    .unwrap()
+  let mut registry = oden_script_locators();
+  if let Some(dynamic) = registry.dynamic_by_isolate.get_mut(&isolate_id) {
+    dynamic.swap_remove(&script_id);
+  }
+  registry
+    .static_by_key
     .insert((isolate_id, script_id), locator.to_string());
+}
+
+/// Register a dynamically generated script without allowing an eval flood to
+/// evict loader-owned module identities. Eviction quarantines only the
+/// forgotten dynamic script and therefore remains fail-closed.
+pub(crate) fn oden_register_dynamic_script_locator_by_key(
+  isolate_id: usize,
+  script_id: usize,
+  locator: &str,
+) {
+  if script_id == usize::MAX {
+    return;
+  }
+  let mut registry = oden_script_locators();
+  registry.static_by_key.remove(&(isolate_id, script_id));
+  let dynamic = registry.dynamic_by_isolate.entry(isolate_id).or_default();
+  if dynamic.contains_key(&script_id) {
+    dynamic.swap_remove(&script_id);
+  }
+  while dynamic.len() >= MAX_DYNAMIC_SCRIPT_LOCATORS_PER_ISOLATE {
+    dynamic.swap_remove_index(0);
+  }
+  dynamic.insert(script_id, locator.to_string());
 }
 
 pub fn oden_script_locator(
   isolate_id: usize,
   script_id: usize,
 ) -> Option<String> {
-  let locators = ODEN_SCRIPT_LOCATORS.lock().unwrap();
-  locators.get(&(isolate_id, script_id)).cloned()
+  let registry = oden_script_locators();
+  registry
+    .static_by_key
+    .get(&(isolate_id, script_id))
+    .or_else(|| {
+      registry
+        .dynamic_by_isolate
+        .get(&isolate_id)
+        .and_then(|dynamic| dynamic.get(&script_id))
+    })
+    .cloned()
+}
+
+pub(crate) fn oden_clear_script_locators(isolate_id: usize) {
+  let mut registry = oden_script_locators();
+  registry
+    .static_by_key
+    .retain(|(entry_isolate_id, _), _| *entry_isolate_id != isolate_id);
+  registry.dynamic_by_isolate.remove(&isolate_id);
+}
+
+#[cfg(test)]
+pub(crate) fn oden_dynamic_script_locator_count(isolate_id: usize) -> usize {
+  oden_script_locators()
+    .dynamic_by_isolate
+    .get(&isolate_id)
+    .map_or(0, IndexMap::len)
 }
 
 /// Whether the human-facing permission-prompt trace should carry the rich
 /// (JsError-style) frames alongside the cheap raw attribution frames. Cached
 /// once per process like the arming probes.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "diagnostic environment probe is read once and cached"
+)]
 pub fn oden_trace_display_enabled() -> bool {
   static ENABLED: LazyLock<bool> = LazyLock::new(|| {
     std::env::var_os("DENO_TRACE_PERMISSIONS").is_some_and(|v| !v.is_empty())
