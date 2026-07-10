@@ -1498,13 +1498,15 @@ fn handle_repl_flags(flags: &mut Flags, repl_flags: ReplFlags) {
 pub fn clap_root() -> Command {
   debug_assert_eq!(DENO_VERSION_INFO.typescript, deno_snapshots::TS_VERSION);
   let long_version = format!(
-    "{} ({}, {}, {})\nv8 {}\ntypescript {}",
+    "{} ({}, {}, {})\nv8 {}\ntypescript {}\noden-fork {}",
     DENO_VERSION_INFO.deno,
     DENO_VERSION_INFO.release_channel.name(),
     env!("PROFILE"),
     env!("TARGET"),
     deno_core::v8::VERSION_STRING,
-    DENO_VERSION_INFO.typescript
+    DENO_VERSION_INFO.typescript,
+    // @ref https://github.com/ccheever/oden/blob/main/llp/0016-the-v1-release-contract.spec.md#engine-provenance-contract [implements] — Release packaging verifies the commit embedded in the engine bytes.
+    DENO_VERSION_INFO.git_hash
   );
 
   run_args(Command::new("deno"), true)
@@ -9080,9 +9082,12 @@ mod tests {
   #[test]
   fn version() {
     let r = flags_from_vec(svec!["deno", "--version"]);
-    assert_eq!(
-      r.unwrap_err().kind(),
-      clap::error::ErrorKind::DisplayVersion
+    let error = r.unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert!(
+      error
+        .to_string()
+        .contains(&format!("oden-fork {}", DENO_VERSION_INFO.git_hash))
     );
     let r = flags_from_vec(svec!["deno", "-V"]);
     assert_eq!(
