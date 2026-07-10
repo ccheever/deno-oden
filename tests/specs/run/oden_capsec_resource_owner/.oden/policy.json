@@ -1,1 +1,9 @@
-{ "mode": "enforce", "grants": { "watcher-dep": "fs:read:./watchdir", "poller-dep": "env:read:POLLER_MARK" } }
+{
+  "mode": "enforce",
+  "grants": {
+    "watcher-dep": "fs:read:./watchdir",
+    "poller-dep": "env:read:POLLER_MARK",
+    "worker-a": "fs:read:./watchdir,env:read:WORKER_MARK",
+    "worker-b": "fs:read:./watchdir,env:read:WORKER_MARK"
+  }
+}

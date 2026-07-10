@@ -5,12 +5,31 @@
   // is passed to poller-dep, which stamps its own async context then polls -- the
   // poll op attributes to poller-dep, whose principal != the watcher's owner, so
   // the cross-principal rid use is denied under enforce. rid-guessing is worthless.
+  "tempDir": true,
   "tests": {
     "cross_principal_watcher_poll_denied": {
       "args": "run --allow-read --allow-env app.js",
       "envs": { "POLLER_MARK": "1" },
       "output": "owner.out",
       "exitCode": 0
+    },
+    "worker_local_same_rid_owners_do_not_collide": {
+      "steps": [
+        {
+          "args": "run -A worker_collision.js",
+          "envs": {
+            "WORKER_MARK": "1",
+            "ODEN_CAPSEC_AUDIT": "worker-collision-audit.ndjson"
+          },
+          "output": "worker_collision.out",
+          "exitCode": 0
+        },
+        {
+          "args": "run --allow-read=. worker_collision_audit.js",
+          "output": "worker_collision_audit.out",
+          "exitCode": 0
+        }
+      ]
     }
   }
 }

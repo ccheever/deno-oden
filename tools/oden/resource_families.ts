@@ -3,8 +3,10 @@
 //
 // Oden resource-family classification (LLP 0001 Phase 2, Native resource
 // ownership). Every resource in deno_core's resource table is classified into
-// one of four ownership classes, so a rid — a small guessable integer — cannot
-// be used across a package boundary it was never handed to. The classes:
+// one of four ownership classes. A rid is a small guessable, table-local
+// integer, so owner metadata must live on the concrete resource rather than in
+// a process-global rid map; it cannot be used across a package boundary it was
+// never handed to. The classes:
 //
 //   * ambient            — any principal may use it (no owner check); the
 //                          resource carries no cross-package authority.
@@ -12,7 +14,8 @@
 //                          guessed rid from another package denies. Owner
 //                          metadata makes rid-guessing worthless.
 //   * possession-delegable — owner-checked, but may be handed to another package
-//                          via the minimal transfer primitive (re-owns the rid).
+//                          via the minimal transfer primitive (re-owns that
+//                          concrete resource's owner token).
 //   * terminal           — compartment-terminating; holding it is full trust for
 //                          that package (FFI / native addons), gated at load.
 //
