@@ -1,0 +1,10 @@
+[WILDCARD]initial: prompt
+[WILDCARD]request: granted
+[WILDCARD]after: granted
+[WILDCARD]value: dynamic-value
+[WILDCARD]revoke: denied
+[WILDCARD]after-revoke: prompt
+[WILDCARD]read-after-revoke: NotCapable
+[WILDCARD]above: denied
+[WILDCARD]never: denied
+[WILDCARD]request-codes: OD-CAP-REQ-GRANTED,OD-CAP-REQ-ABOVE-CEILING,OD-CAP-REQ-DENY-CEILING

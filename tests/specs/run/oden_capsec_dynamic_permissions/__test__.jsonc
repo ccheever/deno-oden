@@ -12,7 +12,7 @@
         "OUTSIDE": "outside-value",
         "NEVER": "never-value"
       },
-      "output": "[WILDCARD]initial: prompt\nrequest: granted\nafter: granted\nvalue: dynamic-value\nrevoke: denied\nafter-revoke: denied\nread-after-revoke: NotCapable\nabove: denied\nnever: denied\nrequest-codes: OD-CAP-REQ-GRANTED,OD-CAP-REQ-ABOVE-CEILING,OD-CAP-REQ-DENY-CEILING\n[WILDCARD]",
+      "output": "auto.out",
       "exitCode": 0
     },
     "noninteractive_prompt_is_unanswered_and_memoized": {
@@ -22,7 +22,7 @@
         "ODEN_CAPSEC_AUDIT": "prompt-audit.ndjson",
         "PROMPT_ME": "value"
       },
-      "output": "[WILDCARD]first: denied\nsecond: denied\ncodes: OD-CAP-REQ-UNANSWERED,OD-CAP-REQ-UNANSWERED\nmemoized: false,true\n[WILDCARD]",
+      "output": "prompt.out",
       "exitCode": 0
     },
     "root_permissions_api_remains_stock": {
@@ -32,7 +32,7 @@
         "ODEN_CAPSEC_AUDIT": "root-audit.ndjson",
         "ROOT_VALUE": "root-value"
       },
-      "output": "query: granted\nrequest: granted\ndynamic-events: 0\n",
+      "output": "root.out",
       "exitCode": 0
     }
   }

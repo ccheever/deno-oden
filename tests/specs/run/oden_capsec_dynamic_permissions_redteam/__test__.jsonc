@@ -14,7 +14,7 @@
         "ALLOWED": "allowed-value",
         "TAMPER": "tamper-value"
       },
-      "output": "[WILDCARD]frame-forged: denied\ndeputy-request: granted\ndeputy-launder: NotCapable\ndeputy-direct: deputy-value\nmapping: prompt/denied\nfatigue: denied/denied\nconflict: denied\noverlay-legit: allowed-value\noverlay-forged-status: granted\noverlay-tamper-read: NotCapable\ncodes: OD-CAP-REQ-UNATTRIBUTED,OD-CAP-REQ-GRANTED,OD-CAP-REQ-UNANSWERED,OD-CAP-REQ-UNANSWERED,OD-CAP-REQ-DENY-CEILING,OD-CAP-REQ-GRANTED\nfatigue-memoized: false,true\nmapping-audit: 2\n[WILDCARD]",
+      "output": "redteam.out",
       "exitCode": 0
     }
   }

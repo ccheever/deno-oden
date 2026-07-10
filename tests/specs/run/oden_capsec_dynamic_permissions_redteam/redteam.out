@@ -1,0 +1,13 @@
+[WILDCARD]frame-forged: denied
+[WILDCARD]deputy-request: granted
+[WILDCARD]deputy-launder: NotCapable
+[WILDCARD]deputy-direct: deputy-value
+[WILDCARD]mapping: prompt/denied
+[WILDCARD]fatigue: denied/denied
+[WILDCARD]conflict: denied
+[WILDCARD]overlay-legit: allowed-value
+[WILDCARD]overlay-forged-status: granted
+[WILDCARD]overlay-tamper-read: NotCapable
+[WILDCARD]codes: OD-CAP-REQ-UNATTRIBUTED,OD-CAP-REQ-GRANTED,OD-CAP-REQ-UNANSWERED,OD-CAP-REQ-UNANSWERED,OD-CAP-REQ-DENY-CEILING,OD-CAP-REQ-GRANTED
+[WILDCARD]fatigue-memoized: false,true
+[WILDCARD]mapping-audit: 2
