@@ -714,7 +714,13 @@ fn oden_capsec_armed_uncached() -> bool {
       Err(_) => return false,
     },
   };
-  root.join(".oden").join("policy.json").exists()
+  match std::fs::symlink_metadata(root.join(".oden").join("policy.json")) {
+    Ok(_) => true,
+    // A dangling symlink or an uninspectable directory entry is still a
+    // present artifact. Arm so the permission plane can read it, latch the
+    // exact failure, and refuse instead of treating it as no policy.
+    Err(err) => err.kind() != std::io::ErrorKind::NotFound,
+  }
 }
 
 // Opaque-token registry for the CPED slot (LLP 0001 token invariants). The slot

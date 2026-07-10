@@ -199,7 +199,8 @@ impl Policy {
     authority: &str,
     on_request: OnRequest,
   ) {
-    let parsed = Grant::parse_many(authority);
+    let parsed = Grant::parse_many(authority)
+      .expect("dynamic authority is validated before policy construction");
     self
       .ceilings
       .entry(selector.to_string())
@@ -214,7 +215,11 @@ impl Policy {
   }
 
   pub fn deny_ceiling(&mut self, authority: &str) {
-    self.deny_ceiling.extend(Grant::parse_many(authority));
+    self
+      .deny_ceiling
+      .extend(Grant::parse_many(authority).expect(
+        "dynamic deny ceiling is validated before policy construction",
+      ));
   }
 
   pub fn validate_envelopes(&self) -> Vec<PolicyValidationIssue> {
@@ -540,7 +545,7 @@ mod tests {
   #[test]
   fn every_state_machine_row_is_bounded_and_memoized() {
     let mut p = Policy::new(Mode::Enforce);
-    p.grant("dep", "env:read:FLOOR");
+    p.grant("dep", "env:read:FLOOR").unwrap();
     p.ceiling(
       "dep",
       "env:read:FLOOR,env:read:OK,env:read:NEVER",
@@ -659,7 +664,7 @@ mod tests {
   #[test]
   fn ambient_existing_deny_disposition_and_refusal_rows_are_terminal() {
     let mut p = Policy::new(Mode::Enforce);
-    p.grant("dep", "env:read:FLOOR");
+    p.grant("dep", "env:read:FLOOR").unwrap();
     p.ceiling("dep", "env:read:FLOOR,env:read:PROMPT", OnRequest::Prompt);
     assert_eq!(
       p.evaluate_dynamic_request(&Principal::Root, Some(&env("PROMPT"))),

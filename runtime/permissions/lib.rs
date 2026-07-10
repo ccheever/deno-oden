@@ -306,10 +306,22 @@ fn oden_capsec_armed_uncached() -> bool {
   if root.is_empty() {
     return false;
   }
-  std::path::Path::new(&root)
-    .join(".oden")
-    .join("policy.json")
-    .exists()
+  oden_policy_path_present(
+    &std::path::Path::new(&root)
+      .join(".oden")
+      .join("policy.json"),
+  )
+}
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "distinguishes an absent policy path from a present dangling symlink or uninspectable directory entry"
+)]
+fn oden_policy_path_present(path: &std::path::Path) -> bool {
+  match std::fs::symlink_metadata(path) {
+    Ok(_) => true,
+    Err(err) => err.kind() != std::io::ErrorKind::NotFound,
+  }
 }
 
 fn oden_capsec_active() -> bool {
@@ -576,7 +588,7 @@ fn oden_suggested_grant_token(
   let token = match family {
     OdenFamily::Ffi => "ffi".to_string(),
     OdenFamily::Run => format!("run:{target}"),
-    OdenFamily::Env => format!("env:read:{target}"),
+    OdenFamily::Env => format!("env:{action}:{target}"),
     OdenFamily::Fs => format!("fs:{action}:{target}"),
     OdenFamily::Network => {
       format!("network:{action}:{}", oden_host_of(target))
@@ -629,34 +641,40 @@ impl OdenReadiness {
     if !self.seal_applied {
       missing.push("Deno.core / CPED seal");
     }
+    if oden_policy_unreadable() {
+      missing.push("valid capsec policy artifact");
+    }
     missing
   }
 
-  fn degraded_states(&self) -> Vec<&'static str> {
+  fn degraded_states(&self) -> Vec<String> {
     let mut degraded = Vec::new();
     if self.mode == OdenMode::Enforce && !self.lockdown_on {
       // Under the Phase-3 posture enforce defaults lockdown on, so this state
       // is only reachable through the explicit ODEN_CAPSEC_LOCKDOWN=0
       // override — named honestly rather than refused (LLP 0001 Phase 3).
       degraded.push(
-        "enforce without lockdown (explicit override) — intrinsics unfrozen (integrity gap)",
+        "enforce without lockdown (explicit override) — intrinsics unfrozen (integrity gap)"
+          .to_string(),
       );
     }
     if self.compartment_globals_requested && !self.compartment_globals_on {
       if self.mode != OdenMode::Enforce {
         degraded.push(
-          "compartment globals requested outside enforce — disabled (enforce-gated)",
+          "compartment globals requested outside enforce — disabled (enforce-gated)"
+            .to_string(),
         );
       } else if !self.lockdown_on {
         degraded.push(
-          "compartment globals requested without lockdown — disabled (dynamic channels remain porous)",
+          "compartment globals requested without lockdown — disabled (dynamic channels remain porous)"
+            .to_string(),
         );
       }
     }
-    if oden_policy_unreadable() {
-      degraded.push(
-        "policy artifact present but unreadable — fail-closed enforce with zero grants",
-      );
+    if let Some(reason) = oden_policy_unreadable_reason() {
+      degraded.push(format!(
+        "policy artifact rejected — fail-closed enforce with zero grants: {reason}"
+      ));
     }
     // Integrity binding of the loader principal index (ENG-23763). No lockfile
     // means package locators stay path-derived — the forged-version residual is
@@ -664,12 +682,14 @@ impl OdenReadiness {
     // already fail-closed (package principals quarantine), named for honesty.
     if self.mode == OdenMode::Enforce && self.integrity.is_absent() {
       degraded.push(
-        "no deno.lock — package locators are path-derived, not integrity-bound",
+        "no deno.lock — package locators are path-derived, not integrity-bound"
+          .to_string(),
       );
     }
     if self.integrity.is_unreadable() {
       degraded.push(
-        "deno.lock present but unreadable — package principals fail closed to quarantine",
+        "deno.lock present but unreadable — package principals fail closed to quarantine"
+          .to_string(),
       );
     }
     degraded
@@ -771,7 +791,7 @@ fn oden_capsec_readiness() -> OdenReadiness {
         let policy_path = std::path::Path::new(oden_capsec_project_root())
           .join(".oden")
           .join("policy.json");
-        if policy_path.exists() {
+        if oden_policy_path_present(&policy_path) {
           Some(policy_path.to_string_lossy().into_owned())
         } else {
           None
@@ -1013,16 +1033,22 @@ fn oden_capsec_readiness_gate() -> Result<(), PermissionCheckError> {
         "[oden-capsec] enforce is missing prerequisites: {}",
         missing.join(", ")
       );
+      if let Some(reason) = oden_policy_unreadable_reason() {
+        eprintln!("[oden-capsec] policy artifact rejected: {reason}");
+      }
     }
     if !advisory {
+      let policy_reason = oden_policy_unreadable_reason()
+        .map(|reason| format!(" Policy error: {reason}."))
+        .unwrap_or_default();
       return Err(PermissionCheckError::PermissionDenied(
         PermissionDeniedError {
           access: "capsec enforce".to_string(),
           name: "capsec",
           custom_message: Some(format!(
             "oden capsec: enforce refuses to run — missing {}. \
-             Pass ODEN_CAPSEC_ALLOW_ADVISORY to accept the named degraded state.",
-            missing.join(", ")
+             Pass ODEN_CAPSEC_ALLOW_ADVISORY to accept the named degraded state.{policy_reason}",
+            missing.join(", "),
           )),
           state: PermissionState::Denied,
         },
@@ -1077,6 +1103,10 @@ fn oden_capsec_audit_record(
   oden_capsec_write_audit_record(&rec);
 }
 
+#[allow(
+  clippy::disallowed_methods,
+  reason = "the capsec audit sink path is supplied through the bootstrap environment and opened append-only"
+)]
 fn oden_capsec_write_audit_record(rec: &serde_json::Value) {
   let Some(path) = std::env::var_os("ODEN_CAPSEC_AUDIT") else {
     return;
@@ -1354,7 +1384,7 @@ fn oden_handle_parse_capability(
 ) -> Option<(OdenGrant, OdenRequest, String)> {
   let root = oden_capsec_project_root();
   let resolved = oden_resolve_grant_scopes(cap_str.trim(), root);
-  let grant = OdenGrant::parse(&resolved)?;
+  let grant = OdenGrant::parse(&resolved).ok()?;
   let req = OdenRequest {
     family: grant.family,
     action: grant.action.clone(),
@@ -1739,9 +1769,13 @@ fn oden_capsec_project_root() -> &'static str {
   &ROOT
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(Debug, serde::Deserialize, Default)]
 struct OdenPolicyFile {
-  #[serde(default)]
+  // `Option<String>` alone would deserialize an explicit JSON `null` as
+  // absence and silently fall back to audit. Invoke a string deserializer only
+  // when the field is present so missing remains optional but null/wrong-shaped
+  // values reject the artifact.
+  #[serde(default, deserialize_with = "oden_deserialize_optional_mode")]
   mode: Option<String>,
   #[serde(default)]
   grants: std::collections::HashMap<String, String>,
@@ -1764,7 +1798,7 @@ struct OdenPolicyFile {
   deputy_classes: Vec<String>,
 }
 
-#[derive(serde::Deserialize, Clone)]
+#[derive(Debug, serde::Deserialize, Clone)]
 #[serde(untagged)]
 enum OdenCeilingFile {
   Authority(String),
@@ -1777,6 +1811,15 @@ enum OdenCeilingFile {
 
 fn oden_default_on_request() -> String {
   "prompt".to_string()
+}
+
+fn oden_deserialize_optional_mode<'de, D>(
+  deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  <String as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
 // The policy source: `.oden/policy.json` in the project root — the same file
@@ -1804,6 +1847,10 @@ fn oden_capsec_policy_file() -> Option<&'static OdenPolicyFile> {
   FILE.as_ref()
 }
 
+#[allow(
+  clippy::disallowed_methods,
+  reason = "bootstrap reads the explicit capsec policy handoff once; the sys-traits resolver is staged separately"
+)]
 fn oden_capsec_policy_file_uncached() -> Option<OdenPolicyFile> {
   // Explicit policy-file path override (ODEN_CAPSEC_POLICY) — the seam the oden
   // CLI uses to hand the engine a merged policy (`.oden/policy.json` unioned with
@@ -1828,20 +1875,106 @@ fn oden_capsec_policy_file_uncached() -> Option<OdenPolicyFile> {
   // to audit-with-zero-grants. The latch forces enforce (packages get denied)
   // and readiness names the state.
   match std::fs::read_to_string(&path) {
-    Ok(text) => match serde_json::from_str::<OdenPolicyFile>(&text) {
+    Ok(text) => match oden_parse_policy_file(&text, &path) {
       Ok(file) => Some(file),
-      Err(_) => {
-        oden_policy_unreadable_latch();
+      Err(reason) => {
+        oden_policy_unreadable_latch(reason);
         None
       }
     },
-    Err(_) => {
+    Err(err) => {
       if oden_capsec_armed() {
-        oden_policy_unreadable_latch();
+        oden_policy_unreadable_latch(format!(
+          "{}: cannot read present artifact: {err}",
+          path.display()
+        ));
       }
       None
     }
   }
+}
+
+/// Parse and validate the complete artifact before any grant is installed. A
+/// serde shape/syntax error includes line+column; a grant error includes the
+/// JSON selector path and token offset. This is the fork-side source-location
+/// adapter around the same strict grammar as TS / `crates/oden_policy`.
+fn oden_parse_policy_file(
+  text: &str,
+  path: &std::path::Path,
+) -> Result<OdenPolicyFile, String> {
+  let file = serde_json::from_str::<OdenPolicyFile>(text).map_err(|err| {
+    format!(
+      "{}:{}:{}: invalid policy JSON/shape: {err}",
+      path.display(),
+      err.line(),
+      err.column()
+    )
+  })?;
+
+  if let Some(mode) = file.mode.as_deref()
+    && !matches!(mode, "permissive" | "audit" | "enforce")
+  {
+    return Err(format!(
+      "{}#mode: unknown mode {mode:?}; expected permissive, audit, or enforce",
+      path.display()
+    ));
+  }
+  for (selector, grant_str) in &file.grants {
+    if selector.trim().is_empty() {
+      return Err(format!(
+        "{}#grants: package selector must not be empty",
+        path.display()
+      ));
+    }
+    OdenGrant::parse_many(grant_str).map_err(|err| {
+      format!(
+        "{}#grants[{:?}]: invalid capsec grant: {err}",
+        path.display(),
+        selector
+      )
+    })?;
+  }
+  OdenGrant::parse_many(&file.deny_ceiling).map_err(|err| {
+    format!(
+      "{}#denyCeiling: invalid capsec grant: {err}",
+      path.display()
+    )
+  })?;
+  for (selector, ceiling) in &file.ceilings {
+    if selector.trim().is_empty() {
+      return Err(format!(
+        "{}#ceilings: package selector must not be empty",
+        path.display()
+      ));
+    }
+    let (authority, on_request) = match ceiling {
+      OdenCeilingFile::Authority(authority) => {
+        (authority.as_str(), Some(OdenOnRequest::Prompt))
+      }
+      OdenCeilingFile::Detailed {
+        authority,
+        on_request,
+      } => (
+        authority.as_str(),
+        OdenOnRequest::parse(on_request.as_str()),
+      ),
+    };
+    if on_request.is_none() {
+      return Err(format!(
+        "{}#ceilings[{:?}].on_request: expected prompt, auto, or deny",
+        path.display(),
+        selector
+      ));
+    }
+    OdenGrant::parse_many(authority).map_err(|err| {
+      format!(
+        "{}#ceilings[{:?}].authority: invalid capsec grant: {err}",
+        path.display(),
+        selector
+      )
+    })?;
+  }
+  Ok(file)
 }
 
 // Latched when the policy artifact that armed this process cannot be read or
@@ -1849,11 +1982,13 @@ fn oden_capsec_policy_file_uncached() -> Option<OdenPolicyFile> {
 // audit downgrade a deleted temp file would otherwise buy an attacker.
 static ODEN_POLICY_UNREADABLE: std::sync::atomic::AtomicBool =
   std::sync::atomic::AtomicBool::new(false);
+static ODEN_POLICY_INVALID_REASON: OnceLock<String> = OnceLock::new();
 
 static ODEN_POLICY_INVALID: std::sync::atomic::AtomicBool =
   std::sync::atomic::AtomicBool::new(false);
 
-fn oden_policy_unreadable_latch() {
+fn oden_policy_unreadable_latch(reason: String) {
+  let _ = ODEN_POLICY_INVALID_REASON.set(reason);
   ODEN_POLICY_UNREADABLE.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -1865,6 +2000,10 @@ fn oden_policy_invalid() -> bool {
   ODEN_POLICY_INVALID.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+fn oden_policy_unreadable_reason() -> Option<&'static str> {
+  ODEN_POLICY_INVALID_REASON.get().map(String::as_str)
+}
+
 // Resolve fs grant scopes against $HOME/root, mirroring the userland policy
 // loader so a `fs:read:./data` grant authored in `.oden/policy.json` matches the
 // absolute path the op actually requests.
@@ -1873,27 +2012,30 @@ fn oden_policy_invalid() -> bool {
   reason = "resolves fs grant scopes against $HOME to match the userland policy format"
 )]
 fn oden_resolve_grant_scopes(grant_str: &str, root: &str) -> String {
-  grant_str
-    .split(',')
-    .map(|g| {
-      let g = g.trim();
-      if let Some(rest) = g.strip_prefix("fs:")
-        && let Some((action, scope)) = rest.split_once(':')
-      {
-        let resolved = if let Some(r) = scope.strip_prefix("~/") {
-          match std::env::var("HOME") {
-            Ok(home) => format!("{home}/{r}"),
-            Err(_) => scope.to_string(),
-          }
-        } else if scope.starts_with('/') {
-          scope.to_string()
-        } else {
-          format!("{root}/{}", scope.strip_prefix("./").unwrap_or(scope))
-        };
-        return format!("fs:{action}:{resolved}");
+  let Ok(mut grants) = OdenGrant::parse_many(grant_str) else {
+    return grant_str.to_string();
+  };
+  for grant in &mut grants {
+    if grant.family != OdenFamily::Fs {
+      continue;
+    }
+    grant.scope = if let Some(r) = grant.scope.strip_prefix("~/") {
+      match std::env::var("HOME") {
+        Ok(home) => format!("{home}/{r}"),
+        Err(_) => grant.scope.clone(),
       }
-      g.to_string()
-    })
+    } else if grant.scope.starts_with('/') {
+      grant.scope.clone()
+    } else {
+      format!(
+        "{root}/{}",
+        grant.scope.strip_prefix("./").unwrap_or(&grant.scope)
+      )
+    };
+  }
+  grants
+    .iter()
+    .map(OdenGrant::to_string_canonical)
     .collect::<Vec<_>>()
     .join(",")
 }
@@ -1950,20 +2092,22 @@ fn oden_capsec_policy() -> &'static OdenPolicy {
       // Policy-file grants (the userland `.oden/policy.json` format).
       if let Some(file) = file {
         for (selector, grant_str) in &file.grants {
-          let selector = selector.trim();
-          if !selector.is_empty() {
-            policy
-              .grant(selector, &oden_resolve_grant_scopes(grant_str, &root));
+          // The artifact was validated atomically before it was admitted, so
+          // this cannot fail. Preserve the exact selector bytes: trimming a
+          // non-empty key here could accidentally turn `" dep "` into authority
+          // for the real `dep` principal when the other policy planes do not.
+          if policy
+            .grant(selector, &oden_resolve_grant_scopes(grant_str, root))
+            .is_err()
+          {
+            oden_policy_unreadable_latch(format!(
+              "policy selector {selector:?} failed validation after scope resolution"
+            ));
+            return OdenPolicy::new(OdenMode::Enforce);
           }
         }
-        if OdenGrant::valid_dynamic_authority(&file.deny_ceiling) {
-          policy.deny_ceiling(&oden_resolve_grant_scopes(
-            &file.deny_ceiling,
-            &root,
-          ));
-        } else {
-          ODEN_POLICY_INVALID.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
+        policy
+          .deny_ceiling(&oden_resolve_grant_scopes(&file.deny_ceiling, root));
         for (selector, ceiling) in &file.ceilings {
           let (authority, disposition) = match ceiling {
             OdenCeilingFile::Authority(authority) => {
@@ -1977,27 +2121,13 @@ fn oden_capsec_policy() -> &'static OdenPolicy {
               OdenOnRequest::parse(on_request.as_str()),
             ),
           };
-          let Some(disposition) = disposition else {
-            ODEN_POLICY_INVALID
-              .store(true, std::sync::atomic::Ordering::Relaxed);
-            continue;
-          };
-          if !OdenGrant::valid_dynamic_authority(authority) {
-            ODEN_POLICY_INVALID
-              .store(true, std::sync::atomic::Ordering::Relaxed);
-            eprintln!(
-              "[oden-capsec] invalid authority envelope: {selector} contains malformed ceiling vocabulary"
-            );
-            continue;
-          }
-          let selector = selector.trim();
-          if !selector.is_empty() {
-            policy.ceiling(
-              selector,
-              &oden_resolve_grant_scopes(authority, &root),
-              disposition,
-            );
-          }
+          let disposition = disposition
+            .expect("dynamic disposition validated before policy construction");
+          policy.ceiling(
+            selector,
+            &oden_resolve_grant_scopes(authority, root),
+            disposition,
+          );
         }
       }
       for issue in policy.validate_envelopes() {
@@ -2034,15 +2164,15 @@ fn oden_capsec_policy() -> &'static OdenPolicy {
   &POLICY
 }
 
-// Mode comes from the policy artifact: file mode > default (audit). A typo in
-// the file mode is ignored rather than silently downgrading enforcement, and a
-// present-but-unreadable artifact forces enforce (fail closed). The retired
+// Mode comes from the policy artifact: file mode > default (audit). Unknown or
+// wrong-shaped modes reject the entire artifact before this point, and any
+// present-but-unreadable/malformed artifact forces enforce (fail closed). The retired
 // ODEN_CAPSEC_MODE/_ENFORCE env overrides are gone: with structural arming the
 // mode name is the artifact's guarantee, and no environment may downgrade it.
 fn oden_capsec_mode(file: Option<&OdenPolicyFile>) -> OdenMode {
   fn parse_mode(s: &str) -> Option<OdenMode> {
     match s {
-      "off" | "permissive" => Some(OdenMode::Permissive),
+      "permissive" => Some(OdenMode::Permissive),
       "audit" => Some(OdenMode::Audit),
       "enforce" => Some(OdenMode::Enforce),
       _ => None,
@@ -7759,6 +7889,73 @@ mod tests {
   use sys_traits::EnvCurrentDir;
 
   use super::*;
+
+  #[test]
+  fn oden_policy_artifact_validation_is_strict_and_source_aware() {
+    let path = Path::new("/project/.oden/policy.json");
+    let valid = oden_parse_policy_file(
+      r#"{"mode":"enforce","grants":{"dep":"env:write:TOKEN,sys:hostname"}}"#,
+      path,
+    )
+    .unwrap();
+    assert_eq!(valid.mode.as_deref(), Some("enforce"));
+
+    let malformed = oden_parse_policy_file("{", path).unwrap_err();
+    assert!(malformed.contains("/project/.oden/policy.json:1:"));
+    assert!(malformed.contains("invalid policy JSON/shape"));
+
+    let wrong_shape = oden_parse_policy_file(
+      r#"{"mode":"enforce","grants":["env:read:TOKEN"]}"#,
+      path,
+    )
+    .unwrap_err();
+    assert!(wrong_shape.contains("invalid policy JSON/shape"));
+
+    let invalid_grant = oden_parse_policy_file(
+      r#"{"mode":"enforce","grants":{"dep":"fs:read:/safe,env:writ:SECRET"}}"#,
+      path,
+    )
+    .unwrap_err();
+    assert!(invalid_grant.contains("#grants[\"dep\"]"));
+    assert!(invalid_grant.contains("env:writ:SECRET"));
+
+    let empty_selector = oden_parse_policy_file(
+      r#"{"mode":"enforce","grants":{" ":"env:read:TOKEN"}}"#,
+      path,
+    )
+    .unwrap_err();
+    assert!(empty_selector.contains("package selector must not be empty"));
+
+    let bad_mode =
+      oden_parse_policy_file(r#"{"mode":"enfroce","grants":{}}"#, path)
+        .unwrap_err();
+    assert!(bad_mode.contains("#mode"));
+
+    let null_mode =
+      oden_parse_policy_file(r#"{"mode":null,"grants":{}}"#, path).unwrap_err();
+    assert!(null_mode.contains("invalid policy JSON/shape"));
+
+    let invalid_dynamic = oden_parse_policy_file(
+      r#"{"mode":"enforce","denyCeiling":"env:writ:SECRET","ceilings":{}}"#,
+      path,
+    )
+    .unwrap_err();
+    assert!(invalid_dynamic.contains("#denyCeiling"));
+    let invalid_disposition = oden_parse_policy_file(
+      r#"{"mode":"enforce","ceilings":{"dep":{"authority":"env:read:TOKEN","on_request":"sometimes"}}}"#,
+      path,
+    )
+    .unwrap_err();
+    assert!(invalid_disposition.contains("#ceilings[\"dep\"].on_request"));
+
+    assert_eq!(
+      oden_resolve_grant_scopes(
+        "file:READ:./data,FS:write:./output,env:TOKEN",
+        "/project"
+      ),
+      "fs:read:/project/data,fs:write:/project/output,env:read:TOKEN"
+    );
+  }
 
   #[test]
   fn resource_use_decision_owner_semantics() {

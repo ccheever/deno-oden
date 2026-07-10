@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -24,8 +25,8 @@ pub enum Family {
 impl Family {
   fn parse(s: &str) -> Option<Family> {
     match s.to_lowercase().as_str() {
-      "fs" | "file" | "read" | "write" => Some(Family::Fs),
-      "network" | "net" | "fetch" => Some(Family::Network),
+      "fs" | "file" => Some(Family::Fs),
+      "network" | "net" => Some(Family::Network),
       "env" => Some(Family::Env),
       "run" | "spawn" => Some(Family::Run),
       "ffi" | "napi" => Some(Family::Ffi),
@@ -45,6 +46,45 @@ impl Family {
     }
   }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantParseError {
+  pub token: String,
+  pub token_index: usize,
+  pub token_offset: usize,
+  pub reason: String,
+}
+
+impl GrantParseError {
+  fn new(
+    token: &str,
+    token_index: usize,
+    token_offset: usize,
+    reason: impl Into<String>,
+  ) -> Self {
+    Self {
+      token: token.to_string(),
+      token_index,
+      token_offset,
+      reason: reason.into(),
+    }
+  }
+}
+
+impl fmt::Display for GrantParseError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "entry {} at offset {} ({:?}): {}",
+      self.token_index + 1,
+      self.token_offset,
+      self.token,
+      self.reason
+    )
+  }
+}
+
+impl std::error::Error for GrantParseError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Grant {
@@ -175,66 +215,133 @@ pub fn endow(grants: &[Grant]) -> BTreeSet<String> {
 }
 
 impl Grant {
-  pub fn parse(s: &str) -> Option<Grant> {
-    let s = s.trim();
-    let parts: Vec<&str> = s.split(':').collect();
-    let family = Family::parse(parts.first()?.trim())?;
+  /// Strict mirror of `src/capsec/policy.ts` and `crates/oden_policy`: closed
+  /// family/action enums, documented aliases only, and non-empty scopes for
+  /// every family except terminal `ffi`.
+  // @ref LLP 0010#the-grammar [implements]
+  pub fn parse(s: &str) -> Result<Grant, GrantParseError> {
+    let token = s.trim();
+    Self::parse_token(token).map_err(|reason| {
+      let leading = s.len() - s.trim_start().len();
+      GrantParseError::new(token, 0, leading, reason)
+    })
+  }
+
+  fn parse_token(token: &str) -> Result<Grant, String> {
+    if token.is_empty() {
+      return Err("grant entry is empty".into());
+    }
+    let parts: Vec<&str> = token.split(':').collect();
+    let family_token = parts.first().copied().unwrap_or("").trim();
+    let family = Family::parse(family_token)
+      .ok_or_else(|| format!("unknown family {family_token:?}"))?;
     match family {
-      Family::Ffi => Some(Grant {
-        family,
-        action: "load".into(),
-        scope: String::new(),
-      }),
+      Family::Ffi => {
+        if parts.len() != 1 {
+          return Err(format!(
+            "{} is terminal and takes no action or scope",
+            family_token.to_lowercase()
+          ));
+        }
+        Ok(Grant {
+          family,
+          action: "load".into(),
+          scope: String::new(),
+        })
+      }
       Family::Run => {
-        let scope = if parts.len() >= 3 {
+        if parts.len() < 2 {
+          return Err("run requires a command scope".into());
+        }
+        let explicit_action =
+          parts.len() >= 3 && parts[1].trim().eq_ignore_ascii_case("run");
+        let scope = if explicit_action {
           parts[2..].join(":")
         } else {
-          parts.get(1).copied().unwrap_or("").to_string()
+          parts[1..].join(":")
         };
-        Some(Grant {
+        if scope.trim().is_empty() {
+          return Err("run requires a non-empty command scope".into());
+        }
+        Ok(Grant {
           family,
           action: "run".into(),
           scope,
         })
       }
       Family::Env => {
-        let mid = parts.get(1).copied().unwrap_or("").to_lowercase();
-        let action = if parts.len() >= 3 && (mid == "write" || mid == "*") {
-          mid
+        if parts.len() < 2 {
+          return Err("env requires a variable-name scope".into());
+        }
+        let (action, scope) = if parts.len() == 2 {
+          ("read".to_string(), parts[1].to_string())
         } else {
-          "read".to_string()
+          let action = parts[1].trim().to_lowercase();
+          if !matches!(action.as_str(), "read" | "write" | "*") {
+            return Err(format!("unknown env action {:?}", parts[1]));
+          }
+          (action, parts[2..].join(":"))
         };
-        let scope = if parts.len() >= 3 {
-          parts[2..].join(":")
-        } else {
-          parts.get(1).copied().unwrap_or("").to_string()
-        };
-        Some(Grant {
+        if scope.trim().is_empty() {
+          return Err("env requires a non-empty variable-name scope".into());
+        }
+        Ok(Grant {
           family,
           action,
           scope,
         })
       }
       Family::Sys => {
-        let scope = if parts.len() >= 3 {
-          parts[2..].join(":")
+        if parts.len() < 2 {
+          return Err("sys requires an information-kind scope".into());
+        }
+        let scope = if parts.len() == 2 {
+          parts[1].to_string()
         } else {
-          parts.get(1).copied().unwrap_or("").to_string()
+          if !parts[1].trim().eq_ignore_ascii_case("read") {
+            return Err(format!(
+              "unknown sys action {:?}; sys is read-only",
+              parts[1]
+            ));
+          }
+          parts[2..].join(":")
         };
-        Some(Grant {
+        if scope.trim().is_empty() {
+          return Err("sys requires a non-empty information-kind scope".into());
+        }
+        Ok(Grant {
           family,
           action: "read".into(),
           scope,
         })
       }
       Family::Fs | Family::Network => {
-        let action = parts.get(1).copied().unwrap_or("*").trim().to_lowercase();
-        let scope = if parts.len() >= 3 {
-          parts[2..].join(":")
-        } else {
-          String::new()
+        if parts.len() < 3 {
+          return Err(format!(
+            "{} requires family:action:scope",
+            family.name()
+          ));
+        }
+        let action = parts[1].trim().to_lowercase();
+        let action_valid = match family {
+          Family::Fs => matches!(action.as_str(), "read" | "write" | "*"),
+          Family::Network => {
+            matches!(action.as_str(), "fetch" | "connect" | "listen" | "*")
+          }
+          _ => unreachable!(),
         };
-        Some(Grant {
+        if !action_valid {
+          return Err(format!(
+            "unknown {} action {:?}",
+            family.name(),
+            parts[1]
+          ));
+        }
+        let scope = parts[2..].join(":");
+        if scope.trim().is_empty() {
+          return Err(format!("{} requires a non-empty scope", family.name()));
+        }
+        Ok(Grant {
           family,
           action,
           scope,
@@ -243,15 +350,22 @@ impl Grant {
     }
   }
 
-  pub fn parse_many(s: &str) -> Vec<Grant> {
-    s.split(',').filter_map(Grant::parse).collect()
-  }
-
-  pub fn valid_dynamic_authority(s: &str) -> bool {
-    s.split(',')
-      .map(str::trim)
-      .filter(|token| !token.is_empty())
-      .all(valid_dynamic_authority_token)
+  pub fn parse_many(s: &str) -> Result<Vec<Grant>, GrantParseError> {
+    if s.trim().is_empty() {
+      return Ok(Vec::new());
+    }
+    let mut grants = Vec::new();
+    let mut offset = 0;
+    for (token_index, raw) in s.split(',').enumerate() {
+      let leading = raw.len() - raw.trim_start().len();
+      let token = raw.trim();
+      let grant = Self::parse_token(token).map_err(|reason| {
+        GrantParseError::new(token, token_index, offset + leading, reason)
+      })?;
+      grants.push(grant);
+      offset += raw.len() + 1;
+    }
+    Ok(grants)
   }
 
   pub fn to_string_canonical(&self) -> String {
@@ -284,58 +398,6 @@ impl Grant {
   }
 }
 
-fn valid_dynamic_authority_token(token: &str) -> bool {
-  let parts = token.split(':').collect::<Vec<_>>();
-  let Some(family) = parts.first().and_then(|value| Family::parse(value))
-  else {
-    return false;
-  };
-  match family {
-    Family::Ffi => parts.len() == 1,
-    Family::Run => match parts.as_slice() {
-      [_] => true,
-      [_, scope] => !scope.is_empty(),
-      [_, action, scope @ ..] => {
-        action.eq_ignore_ascii_case("run")
-          && !scope.is_empty()
-          && scope.iter().any(|part| !part.is_empty())
-      }
-      [] => false,
-    },
-    Family::Env => match parts.as_slice() {
-      [_, scope] => !scope.is_empty(),
-      [_, action, scope @ ..] => {
-        matches!(action.to_lowercase().as_str(), "read" | "write" | "*")
-          && !scope.is_empty()
-          && scope.iter().any(|part| !part.is_empty())
-      }
-      _ => false,
-    },
-    Family::Sys => match parts.as_slice() {
-      [_, scope] => !scope.is_empty(),
-      [_, action, scope @ ..] => {
-        action.eq_ignore_ascii_case("read")
-          && !scope.is_empty()
-          && scope.iter().any(|part| !part.is_empty())
-      }
-      _ => false,
-    },
-    Family::Fs => {
-      parts.len() >= 3
-        && matches!(parts[1].to_lowercase().as_str(), "read" | "write" | "*")
-        && parts[2..].iter().any(|part| !part.is_empty())
-    }
-    Family::Network => {
-      parts.len() >= 3
-        && matches!(
-          parts[1].to_lowercase().as_str(),
-          "fetch" | "connect" | "listen" | "*"
-        )
-        && parts[2..].iter().any(|part| !part.is_empty())
-    }
-  }
-}
-
 pub fn covers(grants: &[Grant], req: &Request) -> bool {
   grants.iter().any(|g| covers_one(g, req))
 }
@@ -360,13 +422,13 @@ fn covers_one(g: &Grant, req: &Request) -> bool {
       (g.action == req.action || g.action == "*")
         && (g.scope == "*" || g.scope == req.target)
     }
+    Family::Sys => g.scope == "*" || g.scope == req.target,
     Family::Run => {
       g.scope == "*"
         || g.scope == req.target
         || g.scope == basename(&req.target)
     }
     Family::Ffi => true,
-    Family::Sys => g.scope == "*" || g.scope == req.target,
   }
 }
 
@@ -427,12 +489,8 @@ pub fn path_under(child: &str, parent: &str) -> bool {
   if child == parent {
     return true;
   }
-  let boundary = if parent.ends_with('/') {
-    parent.to_string()
-  } else {
-    format!("{parent}/")
-  };
-  child.starts_with(&boundary)
+  let parent = parent.strip_suffix('/').unwrap_or(parent);
+  child == parent || child.starts_with(&format!("{parent}/"))
 }
 
 fn host_covered(grant_host: &str, host: &str) -> bool {
@@ -637,12 +695,28 @@ impl Policy {
     }
   }
 
-  pub fn grant(&mut self, selector: &str, grant_str: &str) {
+  pub fn grant(
+    &mut self,
+    selector: &str,
+    grant_str: &str,
+  ) -> Result<(), GrantParseError> {
+    if selector.trim().is_empty() {
+      return Err(GrantParseError::new(
+        selector,
+        0,
+        0,
+        "package selector must not be empty",
+      ));
+    }
+    // Parse before mutation: one malformed token rejects the whole authored
+    // value instead of leaving earlier grants applied.
+    let grants = Grant::parse_many(grant_str)?;
     self
       .packages
       .entry(selector.to_string())
       .or_default()
-      .extend(Grant::parse_many(grant_str));
+      .extend(grants);
+    Ok(())
   }
 
   /// Mode-independent grant check: does this principal, on its own, hold a
@@ -765,6 +839,93 @@ mod tests {
   use super::*;
 
   #[test]
+  fn strict_grant_grammar_matches_the_parent_planes() {
+    assert_eq!(Grant::parse("file:READ:/tmp").unwrap().family, Family::Fs);
+    assert_eq!(
+      Grant::parse("net:listen:localhost").unwrap().action,
+      "listen"
+    );
+    assert_eq!(Grant::parse("env:TOKEN").unwrap().action, "read");
+    assert_eq!(Grant::parse("env:write:TOKEN").unwrap().action, "write");
+    assert_eq!(Grant::parse("os:hostname").unwrap().family, Family::Sys);
+    assert_eq!(Grant::parse("spawn:git").unwrap().scope, "git");
+    assert_eq!(Grant::parse("napi").unwrap().family, Family::Ffi);
+
+    for invalid in [
+      "bogus:x",
+      "fs:execute:/tmp",
+      "network:resolve:example.com",
+      "env:writ:SECRET",
+      "sys:write:hostname",
+      "fs:read:",
+      "network:fetch:",
+      "env:read:",
+      "run",
+      "ffi:load",
+    ] {
+      assert!(
+        Grant::parse(invalid).is_err(),
+        "fork accepted invalid grant {invalid:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn malformed_union_is_atomic_and_actions_are_distinct() {
+    let mut policy = Policy::new(Mode::Enforce);
+    assert!(policy.grant(" ", "fs:read:/safe").is_err());
+    assert!(
+      policy
+        .grant("dep", "fs:read:/safe, env:writ:SECRET")
+        .is_err()
+    );
+    assert!(!policy.packages.contains_key("dep"));
+
+    policy
+      .grant(
+        "dep",
+        "env:read:SECRET,network:fetch:api.example,sys:hostname",
+      )
+      .unwrap();
+    let dep = pkg("dep");
+    assert!(!policy.grants(
+      &dep,
+      &Request {
+        family: Family::Env,
+        action: "write".into(),
+        target: "SECRET".into(),
+      }
+    ));
+    assert!(!policy.grants(
+      &dep,
+      &Request {
+        family: Family::Network,
+        action: "listen".into(),
+        target: "api.example".into(),
+      }
+    ));
+    assert!(policy.grants(
+      &dep,
+      &Request {
+        family: Family::Sys,
+        action: "read".into(),
+        target: "hostname".into(),
+      }
+    ));
+
+    let mut exact_selector = Policy::new(Mode::Enforce);
+    exact_selector.grant(" dep ", "env:read:SECRET").unwrap();
+    assert!(!exact_selector.grants(
+      &pkg("dep"),
+      &Request {
+        family: Family::Env,
+        action: "read".into(),
+        target: "SECRET".into(),
+      }
+    ));
+  }
+
+  #[test]
   fn classifies_node_modules_and_root() {
     assert_eq!(
       classify("file:///proj/node_modules/evil-dep/mod.js", "/proj"),
@@ -783,7 +944,7 @@ mod tests {
   #[test]
   fn policy_denies_ungranted_package_under_enforce() {
     let mut policy = Policy::new(Mode::Enforce);
-    policy.grant("evil-dep", "env:read:ALLOWED");
+    policy.grant("evil-dep", "env:read:ALLOWED").unwrap();
     let principal = Principal::Package {
       name: "evil-dep".into(),
       version: None,
@@ -815,9 +976,13 @@ mod tests {
   #[test]
   fn endowment_derivation_is_action_sensitive_and_fs_empty() {
     let mut policy = Policy::new(Mode::Enforce);
-    policy.grant("fetcher", "network:fetch:api.example");
-    policy.grant("socket", "network:connect:socket.example");
-    policy.grant("reader", "fs:read:/tmp");
+    policy
+      .grant("fetcher", "network:fetch:api.example")
+      .unwrap();
+    policy
+      .grant("socket", "network:connect:socket.example")
+      .unwrap();
+    policy.grant("reader", "fs:read:/tmp").unwrap();
 
     let fetcher = policy.endowments(&pkg("fetcher"));
     assert!(fetcher.contains("fetch"));
@@ -837,12 +1002,13 @@ mod tests {
 
   #[test]
   fn dynamic_authority_vocabulary_is_strict() {
-    assert!(Grant::valid_dynamic_authority(
+    assert!(Grant::parse_many(
       "fs:read:./cache,network:connect:example.com,env:*:TOKEN,run:git,sys:read:hostname,ffi"
-    ));
-    assert!(!Grant::valid_dynamic_authority("telepathy:read:thoughts"));
-    assert!(!Grant::valid_dynamic_authority("env:execute:PATH"));
-    assert!(!Grant::valid_dynamic_authority("network:connect:"));
+    )
+    .is_ok());
+    assert!(Grant::parse_many("telepathy:read:thoughts").is_err());
+    assert!(Grant::parse_many("env:execute:PATH").is_err());
+    assert!(Grant::parse_many("network:connect:").is_err());
   }
 
   #[test]
@@ -884,7 +1050,7 @@ mod tests {
     // [deputy, evil] must deny because evil is ungranted -- deputy laundering
     // is closed.
     let mut policy = Policy::new(Mode::Enforce);
-    policy.grant("deputy-dep", "env:read:SECRET");
+    policy.grant("deputy-dep", "env:read:SECRET").unwrap();
     assert_eq!(
       policy.decide_set(&[pkg("deputy-dep"), pkg("evil-dep")], &req_secret()),
       Decision::Deny,
@@ -894,8 +1060,8 @@ mod tests {
   #[test]
   fn stack_intersection_allows_when_all_granted() {
     let mut policy = Policy::new(Mode::Enforce);
-    policy.grant("deputy-dep", "env:read:SECRET");
-    policy.grant("evil-dep", "env:read:SECRET");
+    policy.grant("deputy-dep", "env:read:SECRET").unwrap();
+    policy.grant("evil-dep", "env:read:SECRET").unwrap();
     assert_eq!(
       policy.decide_set(&[pkg("deputy-dep"), pkg("evil-dep")], &req_secret()),
       Decision::Allow,
@@ -907,7 +1073,7 @@ mod tests {
     // A package scheduling its own callback yields [evil, evil], which collapses
     // to [evil]; a grant to evil allows, exactly as the single-principal path.
     let mut policy = Policy::new(Mode::Enforce);
-    policy.grant("evil-dep", "env:read:SECRET");
+    policy.grant("evil-dep", "env:read:SECRET").unwrap();
     assert_eq!(
       policy.decide_set(&[pkg("evil-dep"), pkg("evil-dep")], &req_secret()),
       Decision::Allow,
@@ -919,7 +1085,7 @@ mod tests {
     // root on the stack beneath a granted package does not deny; an all-ambient
     // set is unconstrained.
     let mut policy = Policy::new(Mode::Enforce);
-    policy.grant("evil-dep", "env:read:SECRET");
+    policy.grant("evil-dep", "env:read:SECRET").unwrap();
     assert_eq!(
       policy.decide_set(&[Principal::Root, pkg("evil-dep")], &req_secret()),
       Decision::Allow,
@@ -935,7 +1101,7 @@ mod tests {
     // An unattributable frame (no-user) in the intersection denies under
     // enforce even alongside a granted package -- fail closed, never launder.
     let mut policy = Policy::new(Mode::Enforce);
-    policy.grant("deputy-dep", "env:read:SECRET");
+    policy.grant("deputy-dep", "env:read:SECRET").unwrap();
     assert_eq!(
       policy.decide_set(&[pkg("deputy-dep"), Principal::NoUser], &req_secret()),
       Decision::Deny,
