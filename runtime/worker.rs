@@ -130,8 +130,8 @@ pub fn create_validate_import_attributes_callback(
         // structurally armed. A declaration in dependency code still grants
         // nothing because it was never added to the policy artifact.
         //
-        // @ref LLP 0012#open-questions (import-site grants)
-        // @ref LLP 0015#the-authority-envelope (the resolved floor)
+        // @ref LLP 0012#open-questions [implements] — import-site grants
+        // @ref LLP 0015#the-authority-envelope [implements] — resolved floor
         let msg = if key == "grants" && deno_permissions::oden_capsec_armed() {
           None
         } else if key != "type" {

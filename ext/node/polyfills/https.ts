@@ -17,6 +17,7 @@ const {
   FunctionPrototypeCall,
   JSONStringify,
   Number,
+  NumberIsFinite,
   ObjectAssign,
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
@@ -29,7 +30,7 @@ const {
   StringPrototypeSplit,
   SymbolAsyncDispose,
 } = primordials;
-const { op_get_env_no_permission_check } = core.ops;
+const { op_get_env_no_permission_check, op_node_http_net_token } = core.ops;
 const lazyTls = core.createLazyLoader("node:tls");
 const lazyNet = core.createLazyLoader("node:net");
 const { urlToHttpOptions } = core.loadExtScript(
@@ -72,6 +73,24 @@ function getExtraCACertificates() {
     return undefined;
   }
   return tls.getCACertificates("default");
+}
+
+function withOdenHttpNetToken(options: any): any {
+  const socketPath = options.socketPath;
+  const rawPort = Number(options.port ?? 0);
+  const port = NumberIsFinite(rawPort) && rawPort >= 0 && rawPort <= 65535
+    ? rawPort
+    : 0;
+  return {
+    __proto__: null,
+    ...options,
+    __odenHttpNetToken: op_node_http_net_token(
+      socketPath ? "" : (options.hostname || options.host || "localhost"),
+      port,
+      socketPath,
+      "node:https.request()",
+    ),
+  };
 }
 
 // https.Server extends tls.Server (which extends net.Server).
@@ -396,7 +415,7 @@ Agent.prototype.createConnection = function createConnection(
     return openCONNECTTunnel(this, options, cb);
   }
 
-  const socket = tls.connect(options as any);
+  const socket = tls.connect(withOdenHttpNetToken(options));
 
   // Cache session on new session event
   if (options._agentKey) {
@@ -455,9 +474,11 @@ function openCONNECTTunnel(agent: any, options: any, cb: any) {
     if (options.rejectUnauthorized !== undefined) {
       proxyConnectOpts.rejectUnauthorized = options.rejectUnauthorized;
     }
-    tunnelSocket = tls.connect(proxyConnectOpts);
+    tunnelSocket = tls.connect(withOdenHttpNetToken(proxyConnectOpts));
   } else {
-    tunnelSocket = lazyNet().default.createConnection(proxyConnectOpts);
+    tunnelSocket = lazyNet().default.createConnection(
+      withOdenHttpNetToken(proxyConnectOpts),
+    );
   }
 
   let settled = false;

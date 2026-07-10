@@ -228,6 +228,15 @@ const CHECKLIST: HoleClass[] = [
     note:
       "the layer-1-compiled ceiling denies hold under --allow-all through direct ops and the node: require path",
   },
+  {
+    category: "network-action-confusion",
+    attack:
+      "a fetch/connect/listen grant is reused by another protocol-class action",
+    status: "closed",
+    tests: ["oden_capsec_network_actions"],
+    note:
+      "the typed action is selected at each resource-creating operation and the full positive/negative matrix covers Deno, Node, Unix, vsock, QUIC, WebSocket, and WebTransport; the syntax-aware call manifest rejects unclassified checks",
+  },
   // --- Minimal lockdown -------------------------------------------------------
   {
     category: "lockdown",

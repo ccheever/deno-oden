@@ -32,6 +32,7 @@ use deno_fetch::Options as FetchOptions;
 use deno_fetch::create_http_client;
 use deno_fetch::get_or_create_client_from_state;
 use deno_net::raw::NetworkStream;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
 use deno_tls::SocketUse;
@@ -129,12 +130,11 @@ pub fn op_ws_check_permission_and_cancel_handle(
   #[string] url: String,
   cancel_handle: bool,
 ) -> Result<Option<ResourceId>, WebsocketError> {
-  state
-    .borrow_mut::<PermissionsContainer>()
-    .check_net_url_connect(
-      &url::Url::parse(&url).map_err(WebsocketError::Url)?,
-      &api_name,
-    )?;
+  state.borrow_mut::<PermissionsContainer>().check_net_url(
+    NetPermissionAction::Connect,
+    &url::Url::parse(&url).map_err(WebsocketError::Url)?,
+    &api_name,
+  )?;
 
   if cancel_handle {
     let rid = state
@@ -425,6 +425,7 @@ fn create_client_from_websocket_options(
       proxy: options.proxy.clone(),
       dns_resolver: options.resolver.clone(),
       permissions: Some(permissions),
+      net_action: NetPermissionAction::Connect,
       unsafely_ignore_certificate_errors: unsafely_ignore_certificate_errors
         .then_some(vec![]),
       client_cert_chain_and_key: options
@@ -457,7 +458,8 @@ pub async fn op_ws_create(
   let (client, allow_host) = {
     let mut s = state.borrow_mut();
     s.borrow_mut::<PermissionsContainer>()
-      .check_net_url_connect(
+      .check_net_url(
+        NetPermissionAction::Connect,
         &url::Url::parse(&url).map_err(WebsocketError::Url)?,
         &api_name,
       )

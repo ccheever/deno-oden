@@ -10,6 +10,7 @@ use std::task::Poll;
 use std::task::{self};
 use std::vec;
 
+use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
 use hickory_resolver::TokioResolver;
 use http::Uri;
@@ -173,6 +174,7 @@ pub struct PermissionedHttpConnector {
   resolver: Resolver,
   local_address: Option<IpAddr>,
   permissions: Option<PermissionsContainer>,
+  net_action: NetPermissionAction,
 }
 
 impl PermissionedHttpConnector {
@@ -180,11 +182,13 @@ impl PermissionedHttpConnector {
     resolver: Resolver,
     local_address: Option<IpAddr>,
     permissions: Option<PermissionsContainer>,
+    net_action: NetPermissionAction,
   ) -> Self {
     Self {
       resolver,
       local_address,
       permissions,
+      net_action,
     }
   }
 
@@ -230,12 +234,13 @@ impl std::error::Error for DnsError {
 
 fn check_resolved(
   permissions: &PermissionsContainer,
+  action: NetPermissionAction,
   ip: &IpAddr,
   port: u16,
 ) -> Result<(), BoxError> {
   permissions
     .clone()
-    .check_net_resolved(ip, port, "fetch()")
+    .check_net_resolved(action, ip, port, "fetch()")
     .map_err(|e| {
       io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()).into()
     })
@@ -290,7 +295,7 @@ impl Service<Uri> for PermissionedHttpConnector {
       if let Ok(ip) = bare_host.parse::<IpAddr>() {
         // IP literal: `HttpConnector` connects to it directly without
         // consulting the resolver.
-        check_resolved(permissions, &ip, port)?;
+        check_resolved(permissions, this.net_action, &ip, port)?;
         let mut connector = this.http_connector(this.resolver.clone());
         return connector.call(uri).await.map_err(Into::into);
       }
@@ -306,7 +311,7 @@ impl Service<Uri> for PermissionedHttpConnector {
         .map_err(|e| -> BoxError { DnsError(e).into() })?
         .collect();
       for addr in &addrs {
-        check_resolved(permissions, &addr.ip(), port)?;
+        check_resolved(permissions, this.net_action, &addr.ip(), port)?;
       }
 
       let mut connector =
@@ -349,7 +354,7 @@ impl CheckDst for PermissionedHttpConnector {
         return Ok(());
       };
       if let Ok(ip) = bare_host.parse::<IpAddr>() {
-        return check_resolved(permissions, &ip, port);
+        return check_resolved(permissions, this.net_action, &ip, port);
       }
       let Ok(name) = Name::from_str(bare_host) else {
         return Ok(());
@@ -360,7 +365,7 @@ impl CheckDst for PermissionedHttpConnector {
         return Ok(());
       };
       for addr in addrs {
-        check_resolved(permissions, &addr.ip(), port)?;
+        check_resolved(permissions, this.net_action, &addr.ip(), port)?;
       }
       Ok(())
     })

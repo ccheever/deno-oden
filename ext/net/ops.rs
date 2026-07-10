@@ -22,6 +22,7 @@ use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::ToV8;
 use deno_core::op2;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
 use hickory_proto::rr::RData;
 use hickory_proto::rr::RecordType;
@@ -279,6 +280,7 @@ pub async fn op_net_send_udp(
   {
     let mut s = state.borrow_mut();
     s.borrow_mut::<PermissionsContainer>().check_net(
+      NetPermissionAction::Connect,
       &(&addr.hostname, Some(addr.port)),
       "Deno.DatagramConn.send()",
     )?;
@@ -293,6 +295,7 @@ pub async fn op_net_send_udp(
       .borrow_mut()
       .borrow_mut::<PermissionsContainer>()
       .check_net_resolved(
+        NetPermissionAction::Connect,
         &addr.ip(),
         addr.port(),
         "Deno.DatagramConn.send()",
@@ -551,9 +554,11 @@ pub async fn op_net_connect_tcp_inner(
       Some(token) => token.check_host(&addr.hostname).to_string(),
       None => addr.hostname.clone(),
     };
-    state_
-      .borrow_mut::<PermissionsContainer>()
-      .check_net(&(&hostname_to_check, Some(addr.port)), "Deno.connect()")?;
+    state_.borrow_mut::<PermissionsContainer>().check_net(
+      NetPermissionAction::Connect,
+      &(&hostname_to_check, Some(addr.port)),
+      "Deno.connect()",
+    )?;
   }
 
   let options = options.unwrap_or_default();
@@ -601,6 +606,7 @@ pub async fn op_net_connect_tcp_inner(
       };
       for addr in checked {
         permissions.check_net_resolved(
+          NetPermissionAction::Connect,
           &addr.ip(),
           addr.port(),
           "Deno.connect()",
@@ -682,15 +688,22 @@ pub fn op_net_listen_tcp(
   if reuse_port {
     super::check_unstable(state, "Deno.listen({ reusePort: true })");
   }
-  state
-    .borrow_mut::<PermissionsContainer>()
-    .check_net_listen(&(&addr.hostname, Some(addr.port)), "Deno.listen()")?;
+  state.borrow_mut::<PermissionsContainer>().check_net(
+    NetPermissionAction::Listen,
+    &(&addr.hostname, Some(addr.port)),
+    "Deno.listen()",
+  )?;
   let addr = resolve_addr_sync(&addr.hostname, addr.port)?
     .next()
     .ok_or_else(|| NetError::NoResolvedAddress)?;
   state
     .borrow_mut::<PermissionsContainer>()
-    .check_net_resolved(&addr.ip(), addr.port(), "Deno.listen()")?;
+    .check_net_resolved(
+      NetPermissionAction::Listen,
+      &addr.ip(),
+      addr.port(),
+      "Deno.listen()",
+    )?;
 
   let listener = if load_balanced {
     TcpListener::bind_load_balanced(addr, tcp_backlog)
@@ -710,18 +723,22 @@ fn net_listen_udp(
   reuse_address: bool,
   loopback: bool,
 ) -> Result<(ResourceId, IpAddr), NetError> {
-  state
-    .borrow_mut::<PermissionsContainer>()
-    .check_net_listen(
-      &(&addr.hostname, Some(addr.port)),
-      "Deno.listenDatagram()",
-    )?;
+  state.borrow_mut::<PermissionsContainer>().check_net(
+    NetPermissionAction::Listen,
+    &(&addr.hostname, Some(addr.port)),
+    "Deno.listenDatagram()",
+  )?;
   let addr = resolve_addr_sync(&addr.hostname, addr.port)?
     .next()
     .ok_or_else(|| NetError::NoResolvedAddress)?;
   state
     .borrow_mut::<PermissionsContainer>()
-    .check_net_resolved(&addr.ip(), addr.port(), "Deno.listenDatagram()")?;
+    .check_net_resolved(
+      NetPermissionAction::Listen,
+      &addr.ip(),
+      addr.port(),
+      "Deno.listenDatagram()",
+    )?;
 
   let domain = if addr.is_ipv4() {
     Domain::IPV4
@@ -816,7 +833,12 @@ pub async fn op_net_connect_vsock(
   state
     .borrow_mut()
     .borrow_mut::<PermissionsContainer>()
-    .check_net_vsock(cid, port, "Deno.connect()")?;
+    .check_net_vsock(
+      NetPermissionAction::Connect,
+      cid,
+      port,
+      "Deno.connect()",
+    )?;
 
   let addr = VsockAddr::new(cid, port);
   let vsock_stream = VsockStream::connect(addr).await?;
@@ -865,9 +887,12 @@ pub fn op_net_listen_vsock(
     .borrow::<Arc<FeatureChecker>>()
     .check_or_exit("vsock", "Deno.listen");
 
-  state
-    .borrow_mut::<PermissionsContainer>()
-    .check_net_vsock_listen(cid, port, "Deno.listen()")?;
+  state.borrow_mut::<PermissionsContainer>().check_net_vsock(
+    NetPermissionAction::Listen,
+    cid,
+    port,
+    "Deno.listen()",
+  )?;
 
   let addr = VsockAddr::new(cid, port);
   let listener = VsockListener::bind(addr)?;
@@ -1103,7 +1128,8 @@ pub async fn op_dns_resolve(
     for ns in config.name_servers() {
       let ip = ns.ip.to_string();
       for connection in &ns.connections {
-        perm.check_net_fetch(
+        perm.check_net(
+          NetPermissionAction::Fetch,
           &(&ip, Some(connection.port)),
           "Deno.resolveDns()",
         )?;

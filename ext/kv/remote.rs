@@ -12,6 +12,7 @@ use deno_core::futures::Stream;
 use deno_error::JsErrorBox;
 use deno_fetch::CreateHttpClientOptions;
 use deno_fetch::create_http_client;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
 use deno_tls::Proxy;
 use deno_tls::RootCertStoreProvider;
@@ -71,7 +72,7 @@ impl denokv_remote::RemotePermissions for PermissionChecker {
     let mut state = self.state.borrow_mut();
     let permissions = state.borrow_mut::<PermissionsContainer>();
     permissions
-      .check_net_url(url, "Deno.openKv")
+      .check_net_url(NetPermissionAction::Fetch, url, "Deno.openKv")
       .map_err(JsErrorBox::from_err)
   }
 }
@@ -156,7 +157,7 @@ impl DatabaseHandler for RemoteDbHandler {
         .check_env(ENV_VAR_NAME)
         .map_err(JsErrorBox::from_err)?;
       permissions
-        .check_net_url(&parsed_url, "Deno.openKv")
+        .check_net_url(NetPermissionAction::Fetch, &parsed_url, "Deno.openKv")
         .map_err(JsErrorBox::from_err)?;
     }
 
@@ -180,6 +181,7 @@ impl DatabaseHandler for RemoteDbHandler {
         proxy: options.proxy.clone(),
         dns_resolver: Default::default(),
         permissions: None,
+        net_action: NetPermissionAction::Fetch,
         unsafely_ignore_certificate_errors: options
           .unsafely_ignore_certificate_errors
           .clone(),

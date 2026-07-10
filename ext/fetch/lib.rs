@@ -55,6 +55,7 @@ use deno_core::v8;
 use deno_error::JsErrorBox;
 pub use deno_fs::FsError;
 use deno_path_util::PathToUrlError;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::OpenAccessKind;
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
@@ -335,6 +336,7 @@ pub fn create_client_from_options(
       proxy: options.proxy.clone(),
       dns_resolver: options.resolver.clone(),
       permissions,
+      net_action: NetPermissionAction::Fetch,
       unsafely_ignore_certificate_errors: options
         .unsafely_ignore_certificate_errors
         .clone(),
@@ -468,7 +470,7 @@ pub fn op_fetch(
     }
     "http" | "https" => {
       let permissions = state.borrow_mut::<PermissionsContainer>();
-      permissions.check_net_url(&url, "fetch()")?;
+      permissions.check_net_url(NetPermissionAction::Fetch, &url, "fetch()")?;
 
       let maybe_authority = extract_authority(&mut url);
       let uri = url
@@ -869,10 +871,15 @@ pub fn op_fetch_custom_client(
     match proxy {
       Proxy::Http { url, .. } => {
         let url = Url::parse(url)?;
-        permissions.check_net_url(&url, "Deno.createHttpClient()")?;
+        permissions.check_net_url(
+          NetPermissionAction::Fetch,
+          &url,
+          "Deno.createHttpClient()",
+        )?;
       }
       Proxy::Tcp { hostname, port } => {
-        permissions.check_net_fetch(
+        permissions.check_net(
+          NetPermissionAction::Fetch,
           &(hostname, Some(*port)),
           "Deno.createHttpClient()",
         )?;
@@ -892,8 +899,8 @@ pub fn op_fetch_custom_client(
         // requires an `--allow-net=unix:<path>` rule in addition to the
         // filesystem check above, mirroring the direct Unix socket ops.
         permissions.check_net_unix_socket(
+          NetPermissionAction::Fetch,
           &resolved_path,
-          "fetch",
           Some("Deno.createHttpClient()"),
         )?;
         if path != resolved_path {
@@ -902,7 +909,12 @@ pub fn op_fetch_custom_client(
       }
       Proxy::Vsock { cid, port } => {
         let permissions = state.borrow_mut::<PermissionsContainer>();
-        permissions.check_net_vsock(*cid, *port, "Deno.createHttpClient()")?;
+        permissions.check_net_vsock(
+          NetPermissionAction::Fetch,
+          *cid,
+          *port,
+          "Deno.createHttpClient()",
+        )?;
       }
     }
   }
@@ -925,6 +937,7 @@ pub fn op_fetch_custom_client(
       proxy: args.proxy,
       dns_resolver: dns::Resolver::default(),
       permissions: Some(permissions),
+      net_action: NetPermissionAction::Fetch,
       unsafely_ignore_certificate_errors: options
         .unsafely_ignore_certificate_errors
         .clone(),
@@ -962,6 +975,8 @@ pub struct CreateHttpClientOptions {
   /// When set, every connection runs the net-deny check against the IP it
   /// actually connected to, mirroring `Deno.connect`.
   pub permissions: Option<PermissionsContainer>,
+  /// Package-capability class retained by every resolved-IP check.
+  pub net_action: NetPermissionAction,
   pub unsafely_ignore_certificate_errors: Option<Vec<String>>,
   pub client_cert_chain_and_key: Option<TlsKey>,
   pub pool_max_idle_per_host: Option<usize>,
@@ -980,6 +995,7 @@ impl Default for CreateHttpClientOptions {
       proxy: None,
       dns_resolver: dns::Resolver::default(),
       permissions: None,
+      net_action: NetPermissionAction::Fetch,
       unsafely_ignore_certificate_errors: None,
       client_cert_chain_and_key: None,
       pool_max_idle_per_host: None,
@@ -1060,6 +1076,7 @@ pub fn create_http_client(
     options.dns_resolver.clone(),
     local_address,
     options.permissions,
+    options.net_action,
   );
 
   let user_agent = user_agent.parse::<HeaderValue>().map_err(|_| {

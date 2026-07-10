@@ -36,6 +36,7 @@ use deno_core::error::ResourceError;
 use deno_core::op2;
 use deno_error::JsError;
 use deno_error::JsErrorBox;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
 use deno_tls::SocketUse;
@@ -259,7 +260,8 @@ pub(crate) fn op_quic_endpoint_create(
     state
       .borrow_mut()
       .borrow_mut::<PermissionsContainer>()
-      .check_net_listen(
+      .check_net(
+        NetPermissionAction::Listen,
         &(&addr.ip().to_string(), Some(addr.port())),
         "new Deno.QuicEndpoint()",
       )?
@@ -566,6 +568,7 @@ pub(crate) fn op_quic_endpoint_connect(
     .borrow_mut()
     .borrow_mut::<PermissionsContainer>()
     .check_net(
+      NetPermissionAction::Connect,
       &(&args.addr.hostname, Some(args.addr.port)),
       "Deno.connectQuic()",
     )?;
@@ -577,6 +580,7 @@ pub(crate) fn op_quic_endpoint_connect(
     .borrow_mut()
     .borrow_mut::<PermissionsContainer>()
     .check_net_resolved(
+      NetPermissionAction::Connect,
       &sock_addr.ip(),
       sock_addr.port(),
       "Deno.connectQuic()",

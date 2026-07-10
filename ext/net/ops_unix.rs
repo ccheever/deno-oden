@@ -30,6 +30,7 @@ use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::op2;
 use deno_permissions::CheckedPath;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::OpenAccessKind;
 use deno_permissions::PermissionsContainer;
 use serde::Deserialize;
@@ -147,9 +148,9 @@ pub async fn op_net_connect_unix(
     let mut state = state.borrow_mut();
     check_unix_socket_path(
       state.borrow_mut::<PermissionsContainer>(),
+      NetPermissionAction::Connect,
       Cow::Owned(PathBuf::from(address_path)),
       OpenAccessKind::ReadWriteNoFollow,
-      "connect",
       Some("Deno.connect()"),
     )?
   };
@@ -197,9 +198,9 @@ pub async fn op_net_send_unixpacket(
     let mut s = state.borrow_mut();
     check_unix_socket_path(
       s.borrow_mut::<PermissionsContainer>(),
+      NetPermissionAction::Connect,
       Cow::Owned(PathBuf::from(address_path)),
       OpenAccessKind::WriteNoFollow,
-      "connect",
       Some("Deno.DatagramConn.send()"),
     )?
   };
@@ -228,9 +229,9 @@ pub fn op_net_listen_unix(
   let api_call_expr = format!("{}()", api_name);
   let address_path = check_unix_socket_path(
     permissions,
+    NetPermissionAction::Listen,
     Cow::Borrowed(Path::new(address_path)),
     OpenAccessKind::ReadWriteNoFollow,
-    "listen",
     Some(&api_call_expr),
   )?;
   let listener = UnixListener::bind(&address_path)?;
@@ -253,9 +254,9 @@ pub fn net_listen_unixpacket(
       let permissions = state.borrow_mut::<PermissionsContainer>();
       let address_path = check_unix_socket_path(
         permissions,
+        NetPermissionAction::Listen,
         Cow::Borrowed(Path::new(address_path)),
         OpenAccessKind::ReadWriteNoFollow,
-        "listen",
         Some("Deno.listenDatagram()"),
       )?;
       bind_unix_datagram(address_path.as_ref())?
@@ -360,9 +361,9 @@ async fn send_to_unix_datagram(
 
 fn check_unix_socket_path<'a>(
   permissions: &mut PermissionsContainer,
+  action: NetPermissionAction,
   path: Cow<'a, Path>,
   access_kind: OpenAccessKind,
-  network_action: &str,
   api_name: Option<&str>,
 ) -> Result<CheckedPath<'a>, NetError> {
   let checked = if is_unix_socket_abstract_path(path.as_ref()) {
@@ -378,7 +379,7 @@ fn check_unix_socket_path<'a>(
   // `--allow-read=/var/run/docker.sock` could connect to local IPC services
   // (Docker, dbus, podman, etc.) with no `--allow-net` grant.
   permissions
-    .check_net_unix_socket(&checked, network_action, api_name)
+    .check_net_unix_socket(action, &checked, api_name)
     .map_err(NetError::Permission)?;
   Ok(checked)
 }

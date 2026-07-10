@@ -27,6 +27,9 @@ const MANIFEST = ROOT + "tools/oden/op_coverage.manifest.md";
 // Directories scanned for op-body skips. Kept explicit so the scan is stable.
 const SKIP_SCAN_DIRS = ["ext", "runtime", "libs"];
 const MEDIATION_FILE = "runtime/permissions/lib.rs";
+const NETWORK_ACTIONS = ["fetch", "connect", "listen"] as const;
+
+type NetworkAction = (typeof NETWORK_ACTIONS)[number];
 
 type TaxonomyEntry = {
   deno: string;
@@ -60,20 +63,20 @@ const CAPABILITY_TAXONOMY: Record<string, TaxonomyEntry> = {
     target: "canonical path or *",
     grant: "fs:write:<path>",
   },
-  "network:fetch": {
-    deno: "NetDescriptor / ImportDescriptor",
-    target: "host, URL, vsock, or unix socket",
-    grant: "network:fetch:<host>",
-  },
   "network:connect": {
-    deno: "NetDescriptor",
+    deno: "NetDescriptor (typed operation action)",
     target: "host, URL, vsock, or unix socket",
-    grant: "network:connect:<host>",
+    grant: "network:connect:<endpoint>",
+  },
+  "network:fetch": {
+    deno: "NetDescriptor / ImportDescriptor (typed operation action)",
+    target: "HTTP(S) host, redirect hop, proxy, vsock, or unix socket",
+    grant: "network:fetch:<endpoint>",
   },
   "network:listen": {
-    deno: "NetDescriptor",
-    target: "bind host, vsock, or unix socket",
-    grant: "network:listen:<host>",
+    deno: "NetDescriptor (typed operation action)",
+    target: "bound host, vsock, or unix socket",
+    grant: "network:listen:<endpoint>",
   },
   "run:run": {
     deno: "RunQueryDescriptor",
@@ -81,9 +84,9 @@ const CAPABILITY_TAXONOMY: Record<string, TaxonomyEntry> = {
     grant: "run:<command>",
   },
   "sys:read": {
-    deno: "SysDescriptor",
-    target: "information kind or *",
-    grant: "sys:<kind>",
+    deno: "SysDescriptor / SysQueryDescriptor",
+    target: "system-information kind or *",
+    grant: "sys:read:<kind>",
   },
   "worker:create": {
     deno: "op_create_worker capsec gate",
@@ -118,47 +121,647 @@ function* walk(dir: string): Generator<string> {
   }
 }
 
+type RustCall = {
+  args: string[];
+  fn: string;
+  line: number;
+  name: string;
+  offset: number;
+};
+
+/**
+ * Replace Rust comments and string/character contents with spaces while
+ * preserving offsets and newlines. Balanced-call parsing can then ignore
+ * parentheses and commas that are not syntax. This is deliberately a small
+ * lexer, not a line regex: every matching call is either parsed or fatal.
+ */
+function maskRust(src: string): string {
+  // `split("")` intentionally preserves UTF-16 code-unit offsets; spreading
+  // would collapse astral characters and desynchronize every later slice.
+  const out = src.split("");
+  let i = 0;
+  let blockDepth = 0;
+  let quote: '"' | "'" | null = null;
+  let rawHashes = -1;
+
+  const blank = (at: number) => {
+    if (out[at] !== "\n" && out[at] !== "\r") out[at] = " ";
+  };
+
+  while (i < src.length) {
+    if (blockDepth > 0) {
+      if (src.startsWith("/*", i)) {
+        blank(i++);
+        blank(i++);
+        blockDepth++;
+      } else if (src.startsWith("*/", i)) {
+        blank(i++);
+        blank(i++);
+        blockDepth--;
+      } else {
+        blank(i++);
+      }
+      continue;
+    }
+
+    if (rawHashes >= 0) {
+      const close = '"' + "#".repeat(rawHashes);
+      if (src.startsWith(close, i)) {
+        for (let j = 0; j < close.length; j++) blank(i++);
+        rawHashes = -1;
+      } else {
+        blank(i++);
+      }
+      continue;
+    }
+
+    if (quote !== null) {
+      if (src[i] === "\\") {
+        blank(i++);
+        if (i < src.length) blank(i++);
+      } else if (src[i] === quote) {
+        blank(i++);
+        quote = null;
+      } else {
+        blank(i++);
+      }
+      continue;
+    }
+
+    if (src.startsWith("//", i)) {
+      while (i < src.length && src[i] !== "\n") blank(i++);
+      continue;
+    }
+    if (src.startsWith("/*", i)) {
+      blank(i++);
+      blank(i++);
+      blockDepth = 1;
+      continue;
+    }
+
+    const raw = src.slice(i).match(/^r(#+)?"/);
+    if (raw) {
+      rawHashes = raw[1]?.length ?? 0;
+      for (let j = 0; j < raw[0].length; j++) blank(i++);
+      continue;
+    }
+    if (src[i] === '"') {
+      quote = '"';
+      blank(i++);
+      continue;
+    }
+    // Do not mistake Rust lifetimes ('a) for character literals.
+    if (
+      src[i] === "'" &&
+      (src[i + 2] === "'" ||
+        (src[i + 1] === "\\" && src[i + 3] === "'"))
+    ) {
+      quote = "'";
+      blank(i++);
+      continue;
+    }
+    i++;
+  }
+
+  if (blockDepth !== 0 || quote !== null || rawHashes >= 0) {
+    throw new Error("unterminated Rust comment or literal while scanning");
+  }
+  return out.join("");
+}
+
+function lineAt(src: string, offset: number): number {
+  let line = 1;
+  for (let i = 0; i < offset; i++) if (src.charCodeAt(i) === 10) line++;
+  return line;
+}
+
+function enclosingFn(masked: string, offset: number): string {
+  // The name token is sufficient here and avoids pretending nested Rust
+  // generic bounds (for example `T: AsRef<str>`) are a regular language.
+  const re = /\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  let found = "<module>";
+  for (let m; (m = re.exec(masked)) && m.index < offset;) found = m[1];
+  return found;
+}
+
+function closeParen(masked: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < masked.length; i++) {
+    if (masked[i] === "(") depth++;
+    if (masked[i] === ")" && --depth === 0) return i;
+  }
+  throw new Error(`unterminated Rust call at line ${lineAt(masked, open)}`);
+}
+
+function splitArgs(
+  src: string,
+  masked: string,
+  start: number,
+  end: number,
+): string[] {
+  const args: string[] = [];
+  let part = start;
+  const stack: string[] = [];
+  const closes: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+  for (let i = start; i < end; i++) {
+    const c = masked[i];
+    if (c === "(" || c === "[" || c === "{") stack.push(c);
+    else if (c === ")" || c === "]" || c === "}") {
+      if (stack.pop() !== closes[c]) {
+        throw new Error(`unbalanced Rust argument at line ${lineAt(src, i)}`);
+      }
+    } else if (c === "," && stack.length === 0) {
+      args.push(src.slice(part, i).trim());
+      part = i + 1;
+    }
+  }
+  const final = src.slice(part, end).trim();
+  if (final !== "") args.push(final);
+  return args;
+}
+
+function collectCalls(
+  src: string,
+  callRe: RegExp,
+  requireReceiver: boolean,
+): RustCall[] {
+  const masked = maskRust(src);
+  const calls: RustCall[] = [];
+  for (let m; (m = callRe.exec(masked));) {
+    const name = m.groups?.name;
+    if (!name) throw new Error("call scanner regex must provide a name group");
+    const nameOffset = m.index + m[0].indexOf(name);
+    if (requireReceiver) {
+      const prefix = masked.slice(m.index, nameOffset);
+      if (!prefix.includes(".") && !prefix.includes("::")) continue;
+    } else if (
+      /\bfn\s*$/.test(masked.slice(Math.max(0, m.index - 12), m.index))
+    ) {
+      continue;
+    }
+    const open = masked.indexOf("(", nameOffset + name.length);
+    const close = closeParen(masked, open);
+    calls.push({
+      args: splitArgs(src, masked, open + 1, close),
+      fn: enclosingFn(masked, nameOffset),
+      line: lineAt(src, nameOffset),
+      name,
+      offset: nameOffset,
+    });
+  }
+  return calls;
+}
+
+type NetworkCheck = RustCall & {
+  action: NetworkAction;
+  actionSource: "explicit" | "propagated";
+  file: string;
+};
+
+const PROPAGATED_NETWORK_ACTIONS: Record<string, readonly NetworkAction[]> = {
+  "ext/fetch/dns.rs:check_resolved": ["fetch", "connect"],
+  "ext/net/ops_unix.rs:check_unix_socket_path": NETWORK_ACTIONS,
+};
+
+function collectNetworkChecks(): NetworkCheck[] {
+  const enumSrc = Deno.readTextFileSync(ROOT + MEDIATION_FILE);
+  const enumBody = maskRust(enumSrc).match(
+    /pub enum NetPermissionAction\s*\{([^}]+)\}/s,
+  );
+  if (!enumBody) throw new Error("NetPermissionAction enum is missing");
+  const variants = enumBody[1].split(",")
+    .map((variant) => variant.trim())
+    .filter(Boolean)
+    .map((variant) => variant.toLowerCase())
+    .sort();
+  const expected = [...NETWORK_ACTIONS].sort();
+  if (variants.join(",") !== expected.join(",")) {
+    throw new Error(
+      `NetPermissionAction must be exactly ${expected.join(", ")}; found ${
+        variants.join(", ")
+      }`,
+    );
+  }
+
+  const found: NetworkCheck[] = [];
+  const callRe =
+    /\b(?<name>check_net(?:_url|_resolved|_vsock|_unix_socket)?)\s*\(/g;
+  for (const file of walk(ROOT.replace(/\/$/, ""))) {
+    const rel = file.slice(ROOT.length);
+    const src = Deno.readTextFileSync(file);
+    for (const call of collectCalls(src, callRe, false)) {
+      const first = call.args[0]?.replace(/\s+/g, " ").trim();
+      const explicit = first?.match(
+        /^NetPermissionAction::(Fetch|Connect|Listen)$/,
+      );
+      if (explicit) {
+        found.push({
+          ...call,
+          action: explicit[1].toLowerCase() as NetworkAction,
+          actionSource: "explicit",
+          file: rel,
+        });
+        continue;
+      }
+      const helper = `${rel}:${call.fn}`;
+      const propagated = PROPAGATED_NETWORK_ACTIONS[helper];
+      if (first === "action" && propagated) {
+        for (const action of propagated) {
+          found.push({
+            ...call,
+            action,
+            actionSource: "propagated",
+            file: rel,
+          });
+        }
+        continue;
+      }
+      throw new Error(
+        `unclassified ${call.name} action at ${rel}:${call.line} in ${call.fn}(): ${
+          call.args[0] ?? "<missing>"
+        }`,
+      );
+    }
+  }
+  if (found.length === 0) throw new Error("no network permission calls found");
+  return found.sort((a, b) =>
+    `${a.file}:${String(a.line).padStart(8, "0")}:${a.action}`.localeCompare(
+      `${b.file}:${String(b.line).padStart(8, "0")}:${b.action}`,
+    )
+  );
+}
+
+type NetworkSurface = {
+  action: NetworkAction;
+  enforcement: "direct" | "inherited";
+  file: string;
+  fn: string;
+  note: string;
+  surface: string;
+};
+
+// Resource-creating and packet-originating network surfaces. Direct rows must
+// contain a classified check in the named function. Inherited rows name the
+// operation that consumes an already-authorized resource; those functions are
+// still existence-checked so upstream renames or removals are manifest drift.
+const NETWORK_SURFACES: NetworkSurface[] = [
+  {
+    surface: "fetch() HTTP(S)",
+    action: "fetch",
+    file: "ext/fetch/lib.rs",
+    fn: "op_fetch",
+    enforcement: "direct",
+    note: "URL before request",
+  },
+  {
+    surface: "fetch() custom HTTP/TCP/Unix/vsock client",
+    action: "fetch",
+    file: "ext/fetch/lib.rs",
+    fn: "op_fetch_custom_client",
+    enforcement: "direct",
+    note: "logical proxy endpoint",
+  },
+  {
+    surface: "remote KV HTTP",
+    action: "fetch",
+    file: "ext/kv/remote.rs",
+    fn: "check_net_url",
+    enforcement: "direct",
+    note: "every remote request URL",
+  },
+  {
+    surface: "WebSocket permission/create",
+    action: "connect",
+    file: "ext/websocket/lib.rs",
+    fn: "op_ws_check_permission_and_cancel_handle",
+    enforcement: "direct",
+    note: "initial URL",
+  },
+  {
+    surface: "WebSocket redirect/final URL",
+    action: "connect",
+    file: "ext/websocket/lib.rs",
+    fn: "op_ws_create",
+    enforcement: "direct",
+    note: "connector and redirect",
+  },
+  {
+    surface: "Deno TCP connect",
+    action: "connect",
+    file: "ext/net/ops.rs",
+    fn: "op_net_connect_tcp_inner",
+    enforcement: "direct",
+    note: "logical host plus resolved IP",
+  },
+  {
+    surface: "Deno TCP listen",
+    action: "listen",
+    file: "ext/net/ops.rs",
+    fn: "op_net_listen_tcp",
+    enforcement: "direct",
+    note: "bind host plus resolved IP",
+  },
+  {
+    surface: "Deno UDP send",
+    action: "connect",
+    file: "ext/net/ops.rs",
+    fn: "op_net_send_udp",
+    enforcement: "direct",
+    note: "destination plus resolved IP",
+  },
+  {
+    surface: "Deno UDP listen",
+    action: "listen",
+    file: "ext/net/ops.rs",
+    fn: "net_listen_udp",
+    enforcement: "direct",
+    note: "bind host plus resolved IP",
+  },
+  {
+    surface: "Deno standalone DNS (v1 resolve fold)",
+    action: "fetch",
+    file: "ext/net/ops.rs",
+    fn: "op_dns_resolve",
+    enforcement: "direct",
+    note: "configured name-server endpoint",
+  },
+  {
+    surface: "Deno TLS connect",
+    action: "connect",
+    file: "ext/net/ops_tls.rs",
+    fn: "op_net_connect_tls",
+    enforcement: "direct",
+    note: "logical host plus resolved IP",
+  },
+  {
+    surface: "Deno TLS listen",
+    action: "listen",
+    file: "ext/net/ops_tls.rs",
+    fn: "op_net_listen_tls",
+    enforcement: "direct",
+    note: "bind host plus resolved IP",
+  },
+  {
+    surface: "Deno Unix stream connect",
+    action: "connect",
+    file: "ext/net/ops_unix.rs",
+    fn: "op_net_connect_unix",
+    enforcement: "inherited",
+    note: "typed check_unix_socket_path helper",
+  },
+  {
+    surface: "Deno Unix datagram send",
+    action: "connect",
+    file: "ext/net/ops_unix.rs",
+    fn: "op_net_send_unixpacket",
+    enforcement: "inherited",
+    note: "typed check_unix_socket_path helper",
+  },
+  {
+    surface: "Deno Unix stream listen",
+    action: "listen",
+    file: "ext/net/ops_unix.rs",
+    fn: "op_net_listen_unix",
+    enforcement: "inherited",
+    note: "typed check_unix_socket_path helper",
+  },
+  {
+    surface: "Deno Unix datagram listen",
+    action: "listen",
+    file: "ext/net/ops_unix.rs",
+    fn: "net_listen_unixpacket",
+    enforcement: "inherited",
+    note: "typed check_unix_socket_path helper",
+  },
+  {
+    surface: "Deno vsock connect",
+    action: "connect",
+    file: "ext/net/ops.rs",
+    fn: "op_net_connect_vsock",
+    enforcement: "direct",
+    note: "vsock:cid:port",
+  },
+  {
+    surface: "Deno vsock listen",
+    action: "listen",
+    file: "ext/net/ops.rs",
+    fn: "op_net_listen_vsock",
+    enforcement: "direct",
+    note: "vsock:cid:port",
+  },
+  {
+    surface: "Deno QUIC endpoint bind",
+    action: "listen",
+    file: "ext/net/quic.rs",
+    fn: "op_quic_endpoint_create",
+    enforcement: "direct",
+    note: "can-listen endpoint creation",
+  },
+  {
+    surface: "Deno QUIC listener",
+    action: "listen",
+    file: "ext/net/quic.rs",
+    fn: "op_quic_endpoint_listen",
+    enforcement: "inherited",
+    note: "authorized can-listen endpoint",
+  },
+  {
+    surface: "Deno QUIC connect",
+    action: "connect",
+    file: "ext/net/quic.rs",
+    fn: "op_quic_endpoint_connect",
+    enforcement: "direct",
+    note: "logical host plus resolved IP",
+  },
+  {
+    surface: "WebTransport connect",
+    action: "connect",
+    file: "ext/net/quic.rs",
+    fn: "op_webtransport_connect",
+    enforcement: "inherited",
+    note: "authorized QUIC connection",
+  },
+  {
+    surface: "Node HTTP(S) direct connection",
+    action: "fetch",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    enforcement: "direct",
+    note: "endpoint-bound opaque HTTP token",
+  },
+  {
+    surface: "Node HTTP(S) proxy",
+    action: "fetch",
+    file: "ext/node/ops/http.rs",
+    fn: "op_node_http_check_proxy_net",
+    enforcement: "direct",
+    note: "logical proxy endpoint",
+  },
+  {
+    surface: "Node TCP connect",
+    action: "connect",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    enforcement: "direct",
+    note: "untokenized raw socket",
+  },
+  {
+    surface: "Node TCP bind/listen",
+    action: "listen",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "bind_inner",
+    enforcement: "direct",
+    note: "bind before listener creation",
+  },
+  {
+    surface: "Node UDP send",
+    action: "connect",
+    file: "ext/node/ops/udp.rs",
+    fn: "op_node_udp_send",
+    enforcement: "direct",
+    note: "destination plus resolved IP",
+  },
+  {
+    surface: "Node UDP bind",
+    action: "listen",
+    file: "ext/node/ops/udp.rs",
+    fn: "op_node_udp_bind",
+    enforcement: "direct",
+    note: "bind host plus resolved IP",
+  },
+  {
+    surface: "Node HTTP(S) Unix socket",
+    action: "fetch",
+    file: "ext/node/ops/pipe_wrap.rs",
+    fn: "connect",
+    enforcement: "direct",
+    note: "endpoint-bound opaque HTTP token",
+  },
+  {
+    surface: "Node Unix pipe connect",
+    action: "connect",
+    file: "ext/node/ops/pipe_wrap.rs",
+    fn: "connect",
+    enforcement: "direct",
+    note: "untokenized raw pipe",
+  },
+  {
+    surface: "Node Unix pipe bind",
+    action: "listen",
+    file: "ext/node/ops/pipe_wrap.rs",
+    fn: "bind",
+    enforcement: "direct",
+    note: "bind path",
+  },
+  {
+    surface: "Node Unix pipe listen",
+    action: "listen",
+    file: "ext/node/ops/pipe_wrap.rs",
+    fn: "listen",
+    enforcement: "direct",
+    note: "bound path recheck",
+  },
+  {
+    surface: "Node DNS lookup/reverse lookup",
+    action: "fetch",
+    file: "ext/node/ops/dns.rs",
+    fn: "op_node_getaddrinfo",
+    enforcement: "direct",
+    note: "query target",
+  },
+  {
+    surface: "Node DNS reverse lookup (v1 resolve fold)",
+    action: "fetch",
+    file: "ext/node/ops/dns.rs",
+    fn: "op_node_getnameinfo",
+    enforcement: "direct",
+    note: "query target",
+  },
+  {
+    surface: "Node inspector listener",
+    action: "listen",
+    file: "ext/node/ops/inspector.rs",
+    fn: "op_inspector_open",
+    enforcement: "direct",
+    note: "inspector bind host/port",
+  },
+];
+
+function validateNetworkSurfaces(network: NetworkCheck[]): void {
+  const direct = new Set(
+    network.map((call) => `${call.file}:${call.fn}:${call.action}`),
+  );
+  const errors: string[] = [];
+  for (const row of NETWORK_SURFACES) {
+    const src = Deno.readTextFileSync(ROOT + row.file);
+    const fnRe = new RegExp(`\\bfn\\s+${row.fn}\\b`);
+    if (!fnRe.test(maskRust(src))) {
+      errors.push(`${row.surface}: missing ${row.file}:${row.fn}()`);
+    } else if (
+      row.enforcement === "direct" &&
+      !direct.has(`${row.file}:${row.fn}:${row.action}`)
+    ) {
+      errors.push(
+        `${row.surface}: ${row.file}:${row.fn}() has no classified ${row.action} check`,
+      );
+    }
+  }
+  if (errors.length > 0) {
+    throw new Error(
+      "network resource/action registry is incomplete:\n" +
+        errors.map((error) => `  - ${error}`).join("\n"),
+    );
+  }
+}
+
 // --- 1. mediated (family, action) pairs + enclosing fn -----------------------
-function collectMediation(): string[] {
+function collectMediation(network: NetworkCheck[]): string[] {
   const src = Deno.readTextFileSync(ROOT + MEDIATION_FILE);
   const found = new Set<string>();
-  const functions = [...src.matchAll(/\bfn\s+([a-z0-9_]+)\s*(?:<[^>]*>)?\s*\(/g)]
-    .map((match) => ({ name: match[1], index: match.index ?? 0 }));
-  const enclosing = (index: number): string => {
-    let name = "<module>";
-    for (const fn of functions) {
-      if (fn.index > index) break;
-      name = fn.name;
-    }
-    return name;
-  };
-  // Match over the whole source, not one line: rustfmt deliberately lays many
-  // calls out vertically. (ENG-23978)
-  const decideRe =
-    /oden_capsec_decide\(\s*OdenFamily::([A-Za-z]+)\s*,\s*"([a-z]+)"/gs;
-  for (const match of src.matchAll(decideRe)) {
-    const family = match[1].toLowerCase();
-    const action = match[2];
-    found.add(`${family}:${action}\tvia ${enclosing(match.index ?? 0)}()`);
+  const networkByMethod = new Map<string, Set<NetworkAction>>();
+  for (const call of network) {
+    const actions = networkByMethod.get(call.name) ?? new Set<NetworkAction>();
+    actions.add(call.action);
+    networkByMethod.set(call.name, actions);
   }
-  // Action-parameterized network helpers are classified at their public API,
-  // so the manifest cannot collapse them to the helper's variable `action`.
-  const semanticMethods: Record<string, string> = {
-    check_env: "env:read",
-    check_env_action: "env:write",
-    check_net: "network:connect",
-    check_net_fetch: "network:fetch",
-    check_net_listen: "network:listen",
-    check_net_url: "network:fetch",
-    check_net_url_connect: "network:connect",
-    check_net_vsock: "network:connect",
-    check_net_vsock_listen: "network:listen",
-  };
-  for (const [method, capability] of Object.entries(semanticMethods)) {
-    if (!new RegExp(`\\bfn\\s+${method}\\b`).test(src)) {
-      throw new Error(`semantic permission method missing: ${method}`);
+  const decideRe = /(?<name>oden_capsec_decide)\s*\(/g;
+  for (const call of collectCalls(src, decideRe, false)) {
+    const familyMatch = call.args[0]?.match(/^OdenFamily::([A-Za-z]+)$/);
+    if (!familyMatch) {
+      throw new Error(
+        `unclassified capsec family at ${MEDIATION_FILE}:${call.line}`,
+      );
     }
-    found.add(`${capability}\tvia ${method}()`);
+    const family = familyMatch[1].toLowerCase();
+    const literalAction = call.args[1]?.match(/^"([a-z]+)"$/)?.[1];
+    if (literalAction) {
+      found.add(`${family}:${literalAction}\tvia ${call.fn}()`);
+    } else if (
+      family === "network" &&
+      call.args[1]?.replace(/\s+/g, "") === "action.as_str()"
+    ) {
+      const actions = networkByMethod.get(call.fn);
+      if (!actions || actions.size === 0) {
+        throw new Error(
+          `network mediation in ${call.fn}() has no classified call sites`,
+        );
+      }
+      for (const action of actions) {
+        found.add(`${family}:${action}\tvia ${call.fn}()`);
+      }
+    } else if (
+      family === "env" && call.fn === "check_env_action" &&
+      call.args[1]?.trim() === "action"
+    ) {
+      found.add("env:read\tvia check_env_action()");
+      found.add("env:write\tvia check_env_action()");
+    } else {
+      throw new Error(
+        `unclassified capsec action at ${MEDIATION_FILE}:${call.line}: ${
+          call.args[1] ?? "<missing>"
+        }`,
+      );
+    }
   }
   // Standalone capsec checks that don't go through oden_capsec_decide.
   if (src.includes("fn oden_capsec_check_worker_create")) {
@@ -206,7 +809,9 @@ function collectResourceCreationSites(): string[] {
     for (const file of walk(ROOT + d)) {
       const rel = file.slice(ROOT.length);
       const src = Deno.readTextFileSync(file);
-      for (const match of src.matchAll(/resource_table\s*\.\s*add(?:_rc)?\s*\(/gs)) {
+      for (
+        const match of src.matchAll(/resource_table\s*\.\s*add(?:_rc)?\s*\(/gs)
+      ) {
         const line = src.slice(0, match.index ?? 0).split("\n").length;
         sites.push(`${rel}:${line}`);
       }
@@ -265,12 +870,62 @@ function renderTaxonomy(): string[] {
   return out;
 }
 
+function renderNetworkChecks(network: NetworkCheck[]): string[] {
+  const out: string[] = [];
+  out.push("## Network permission call-site matrix");
+  out.push("");
+  out.push(
+    "The balanced Rust scanner classifies every `check_net*` call. A missing,",
+  );
+  out.push(
+    "unknown, or implicitly selected action fails generation. `propagated` is",
+  );
+  out.push(
+    "allowed only at the two audited typed helpers named by the generator.",
+  );
+  out.push("");
+  out.push("| Action | Check | Enclosing function | Source | Selection |");
+  out.push("| --- | --- | --- | --- | --- |");
+  for (const call of network) {
+    out.push(
+      `| ${call.action} | ${call.name} | ${call.fn}() | ${call.file}:${call.line} | ${call.actionSource} |`,
+    );
+  }
+  out.push("");
+  return out;
+}
+
+function renderNetworkSurfaces(): string[] {
+  const out: string[] = [];
+  out.push("## Network resource/API action matrix");
+  out.push("");
+  out.push(
+    "Resource-creating and packet-originating APIs are registered explicitly.",
+  );
+  out.push(
+    "Direct rows must contain the named classified check; inherited rows must",
+  );
+  out.push("consume a resource authorized by the operation named in the note.");
+  out.push("");
+  out.push("| Surface | Action | Enforcement | Rust owner | Note |");
+  out.push("| --- | --- | --- | --- | --- |");
+  for (const row of NETWORK_SURFACES) {
+    out.push(
+      `| ${row.surface} | ${row.action} | ${row.enforcement} | ${row.file}:${row.fn}() | ${row.note} |`,
+    );
+  }
+  out.push("");
+  return out;
+}
+
 function render(): string {
-  const mediation = collectMediation();
+  const network = collectNetworkChecks();
+  const mediation = collectMediation(network);
   const skips = collectSkips();
   const permissionMethods = collectPermissionMethods();
   const resourceSites = collectResourceCreationSites();
   validateTaxonomy(mediation);
+  validateNetworkSurfaces(network);
   const out: string[] = [];
   out.push("# Oden op-coverage manifest (generated)");
   out.push("");
@@ -284,6 +939,8 @@ function render(): string {
   for (const m of mediation) out.push(`- ${m}`);
   out.push("");
   out.push(...renderTaxonomy());
+  out.push(...renderNetworkChecks(network));
+  out.push(...renderNetworkSurfaces());
   out.push("## Permission methods (closed inventory)");
   out.push("");
   for (const method of permissionMethods) out.push(`- ${method}()`);
