@@ -23,7 +23,7 @@ pub enum Family {
 
 impl Family {
   fn parse(s: &str) -> Option<Family> {
-    match s.to_lowercase().as_str() {
+    match s.to_ascii_lowercase().as_str() {
       "fs" | "file" | "read" | "write" => Some(Family::Fs),
       "network" | "net" | "fetch" => Some(Family::Network),
       "env" => Some(Family::Env),
@@ -198,12 +198,13 @@ impl Grant {
         })
       }
       Family::Env => {
-        let mid = parts.get(1).copied().unwrap_or("").to_lowercase();
-        let action = if parts.len() >= 3 && (mid == "write" || mid == "*") {
-          mid
-        } else {
-          "read".to_string()
-        };
+        let mid = parts.get(1).copied().unwrap_or("").to_ascii_lowercase();
+        let action =
+          if parts.len() >= 3 && matches!(mid.as_str(), "write" | "*") {
+            mid
+          } else {
+            "read".to_string()
+          };
         let scope = if parts.len() >= 3 {
           parts[2..].join(":")
         } else {
@@ -350,7 +351,7 @@ fn covers_one(g: &Grant, req: &Request) -> bool {
         return false;
       }
       (g.action == req.action || g.action == "*")
-        && (g.scope == "*" || path_under(&req.target, &g.scope))
+        && path_under(&req.target, &g.scope)
     }
     Family::Network => {
       (g.action == req.action || g.action == "*")
@@ -436,8 +437,8 @@ pub fn path_under(child: &str, parent: &str) -> bool {
 }
 
 fn host_covered(grant_host: &str, host: &str) -> bool {
-  let grant_host = grant_host.to_lowercase();
-  let host = host.to_lowercase();
+  let grant_host = grant_host.to_ascii_lowercase();
+  let host = host.to_ascii_lowercase();
   grant_host == "*"
     || host == grant_host
     || host.ends_with(&format!(".{grant_host}"))
@@ -500,6 +501,32 @@ impl Principal {
       Principal::NoUser => "no-user".to_string(),
     }
   }
+
+  /// Integrity-bearing runtime/cache key. Policy selectors and diagnostics
+  /// remain human-readable bare names, but compartment records and emit caches
+  /// must distinguish coexisting versions and locator instances. (ENG-23973)
+  // @ref LLP 0014#at-which-loader-stage [implements]
+  pub fn key(&self) -> String {
+    match self {
+      Principal::Root => "root".to_string(),
+      Principal::Package { name, version } => {
+        format!(
+          "npm:{name}@{}",
+          version.as_deref().unwrap_or("<unversioned>")
+        )
+      }
+      Principal::Jsr { name, version } => {
+        format!(
+          "jsr:{name}@{}",
+          version.as_deref().unwrap_or("<unversioned>")
+        )
+      }
+      Principal::Url { canonical } => format!("url:{canonical}"),
+      Principal::Runtime => "runtime".to_string(),
+      Principal::Quarantine => "quarantine".to_string(),
+      Principal::NoUser => "no-user".to_string(),
+    }
+  }
 }
 
 pub fn classify(locator: &str, project_root: &str) -> Principal {
@@ -511,12 +538,6 @@ pub fn classify(locator: &str, project_root: &str) -> Principal {
   }
   if locator.starts_with("data:") || locator.starts_with("blob:") {
     return Principal::Quarantine;
-  }
-  if let Some(idx) = locator.rfind("/node_modules/") {
-    let rest = &locator[idx + "/node_modules/".len()..];
-    if let Some((name, version)) = package_from_node_modules(rest) {
-      return Principal::Package { name, version };
-    }
   }
   if let Some(spec) = locator.strip_prefix("npm:") {
     let (name, version) = npm_name_version(spec);
@@ -534,6 +555,12 @@ pub fn classify(locator: &str, project_root: &str) -> Principal {
     return Principal::Url {
       canonical: locator.to_string(),
     };
+  }
+  if let Some(idx) = locator.rfind("/node_modules/") {
+    let rest = &locator[idx + "/node_modules/".len()..];
+    if let Some((name, version)) = package_from_node_modules(rest) {
+      return Principal::Package { name, version };
+    }
   }
 
   let path = locator.strip_prefix("file://").unwrap_or(locator);
@@ -778,6 +805,71 @@ mod tests {
       classify("file:///elsewhere/app.js", "/proj"),
       Principal::Quarantine
     );
+    assert_eq!(
+      classify("https://example.test/node_modules/evil/mod.js", "/proj"),
+      Principal::Url {
+        canonical: "https://example.test/node_modules/evil/mod.js".into()
+      },
+      "remote URLs containing node_modules remain URL principals"
+    );
+  }
+
+  #[test]
+  fn fork_policy_is_action_sensitive_and_fail_closed() {
+    let net = Grant::parse_many("NETWORK:fetch:API.Example.test");
+    assert!(covers(
+      &net,
+      &Request {
+        family: Family::Network,
+        action: "fetch".into(),
+        target: "api.example.test".into(),
+      }
+    ));
+    assert!(!covers(
+      &net,
+      &Request {
+        family: Family::Network,
+        action: "listen".into(),
+        target: "api.example.test".into(),
+      }
+    ));
+    let env = Grant::parse_many("env:read:TOKEN");
+    assert!(!covers(
+      &env,
+      &Request {
+        family: Family::Env,
+        action: "write".into(),
+        target: "TOKEN".into(),
+      }
+    ));
+    assert!(!covers(
+      &Grant::parse_many("fs:read"),
+      &Request {
+        family: Family::Fs,
+        action: "read".into(),
+        target: "/etc/passwd".into(),
+      }
+    ));
+    assert_eq!(Grant::parse("os:hostname").unwrap().family, Family::Sys);
+  }
+
+  #[test]
+  fn compartment_key_distinguishes_versions_and_ecosystems() {
+    let npm_v1 = Principal::Package {
+      name: "same".into(),
+      version: Some("1.0.0".into()),
+    };
+    let npm_v2 = Principal::Package {
+      name: "same".into(),
+      version: Some("2.0.0".into()),
+    };
+    let jsr = Principal::Jsr {
+      name: "same".into(),
+      version: Some("1.0.0".into()),
+    };
+    assert_eq!(npm_v1.label(), npm_v2.label());
+    assert_ne!(npm_v1.key(), npm_v2.key());
+    assert_ne!(npm_v1.key(), jsr.key());
   }
 
   #[test]

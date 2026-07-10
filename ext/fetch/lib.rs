@@ -872,8 +872,10 @@ pub fn op_fetch_custom_client(
         permissions.check_net_url(&url, "Deno.createHttpClient()")?;
       }
       Proxy::Tcp { hostname, port } => {
-        permissions
-          .check_net(&(hostname, Some(*port)), "Deno.createHttpClient()")?;
+        permissions.check_net_fetch(
+          &(hostname, Some(*port)),
+          "Deno.createHttpClient()",
+        )?;
       }
       Proxy::Unix {
         path: original_path,
@@ -891,6 +893,7 @@ pub fn op_fetch_custom_client(
         // filesystem check above, mirroring the direct Unix socket ops.
         permissions.check_net_unix_socket(
           &resolved_path,
+          "fetch",
           Some("Deno.createHttpClient()"),
         )?;
         if path != resolved_path {

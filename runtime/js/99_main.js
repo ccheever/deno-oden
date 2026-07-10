@@ -1051,9 +1051,10 @@ function odenMaybeInstallHandles(denoNs) {
   if ((flags & 1) === 0) {
     return;
   }
-  const { oden, compartmentGlobals } = core.loadExtScript(
+  const { oden, compartmentGlobals, installAmbientGuards } = core.loadExtScript(
     "ext:runtime/42_oden.js",
   );
+  installAmbientGuards?.();
   if (oden) {
     ObjectDefineProperty(denoNs, "oden", core.propReadOnly(oden));
   }

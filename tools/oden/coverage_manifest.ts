@@ -40,6 +40,11 @@ const CAPABILITY_TAXONOMY: Record<string, TaxonomyEntry> = {
     target: "name or *",
     grant: "env:read:<name>",
   },
+  "env:write": {
+    deno: "EnvDescriptor / EnvQueryDescriptor",
+    target: "name",
+    grant: "env:write:<name>",
+  },
   "ffi:load": {
     deno: "FfiQueryDescriptor",
     target: "path or *",
@@ -60,10 +65,25 @@ const CAPABILITY_TAXONOMY: Record<string, TaxonomyEntry> = {
     target: "host, URL, vsock, or unix socket",
     grant: "network:fetch:<host>",
   },
+  "network:connect": {
+    deno: "NetDescriptor",
+    target: "host, URL, vsock, or unix socket",
+    grant: "network:connect:<host>",
+  },
+  "network:listen": {
+    deno: "NetDescriptor",
+    target: "bind host, vsock, or unix socket",
+    grant: "network:listen:<host>",
+  },
   "run:run": {
     deno: "RunQueryDescriptor",
     target: "command display name or *",
     grant: "run:<command>",
+  },
+  "sys:read": {
+    deno: "SysDescriptor",
+    target: "information kind or *",
+    grant: "sys:<kind>",
   },
   "worker:create": {
     deno: "op_create_worker capsec gate",
@@ -101,21 +121,44 @@ function* walk(dir: string): Generator<string> {
 // --- 1. mediated (family, action) pairs + enclosing fn -----------------------
 function collectMediation(): string[] {
   const src = Deno.readTextFileSync(ROOT + MEDIATION_FILE);
-  const lines = src.split("\n");
-  let currentFn = "<module>";
   const found = new Set<string>();
-  const fnRe = /\bfn\s+([a-z0-9_]+)\s*(?:<[^>]*>)?\s*\(/;
-  const decideRe =
-    /oden_capsec_decide\(\s*OdenFamily::([A-Za-z]+)\s*,\s*"([a-z]+)"/;
-  for (const line of lines) {
-    const fnM = line.match(fnRe);
-    if (fnM) currentFn = fnM[1];
-    const dM = line.match(decideRe);
-    if (dM) {
-      const family = dM[1].toLowerCase();
-      const action = dM[2];
-      found.add(`${family}:${action}\tvia ${currentFn}()`);
+  const functions = [...src.matchAll(/\bfn\s+([a-z0-9_]+)\s*(?:<[^>]*>)?\s*\(/g)]
+    .map((match) => ({ name: match[1], index: match.index ?? 0 }));
+  const enclosing = (index: number): string => {
+    let name = "<module>";
+    for (const fn of functions) {
+      if (fn.index > index) break;
+      name = fn.name;
     }
+    return name;
+  };
+  // Match over the whole source, not one line: rustfmt deliberately lays many
+  // calls out vertically. (ENG-23978)
+  const decideRe =
+    /oden_capsec_decide\(\s*OdenFamily::([A-Za-z]+)\s*,\s*"([a-z]+)"/gs;
+  for (const match of src.matchAll(decideRe)) {
+    const family = match[1].toLowerCase();
+    const action = match[2];
+    found.add(`${family}:${action}\tvia ${enclosing(match.index ?? 0)}()`);
+  }
+  // Action-parameterized network helpers are classified at their public API,
+  // so the manifest cannot collapse them to the helper's variable `action`.
+  const semanticMethods: Record<string, string> = {
+    check_env: "env:read",
+    check_env_action: "env:write",
+    check_net: "network:connect",
+    check_net_fetch: "network:fetch",
+    check_net_listen: "network:listen",
+    check_net_url: "network:fetch",
+    check_net_url_connect: "network:connect",
+    check_net_vsock: "network:connect",
+    check_net_vsock_listen: "network:listen",
+  };
+  for (const [method, capability] of Object.entries(semanticMethods)) {
+    if (!new RegExp(`\\bfn\\s+${method}\\b`).test(src)) {
+      throw new Error(`semantic permission method missing: ${method}`);
+    }
+    found.add(`${capability}\tvia ${method}()`);
   }
   // Standalone capsec checks that don't go through oden_capsec_decide.
   if (src.includes("fn oden_capsec_check_worker_create")) {
@@ -129,7 +172,7 @@ function collectMediation(): string[] {
   return [...found].sort();
 }
 
-// --- 2. op-body pre-check skips (query_read_all call sites) -------------------
+// --- 2. op-body pre-check skips (every query_*_all call site) ----------------
 function collectSkips(): string[] {
   const skips: string[] = [];
   for (const d of SKIP_SCAN_DIRS) {
@@ -139,16 +182,37 @@ function collectSkips(): string[] {
       const lines = src.split("\n");
       for (let i = 0; i < lines.length; i++) {
         // Call sites, not the definition (`pub fn query_read_all`).
-        if (
-          lines[i].includes("query_read_all()") &&
-          !lines[i].includes("fn query_read_all")
-        ) {
-          skips.push(`${rel}:${i + 1}`);
+        const match = lines[i].match(/\b(query_[a-z0-9_]+_all)\s*\(/);
+        if (match && !lines[i].includes(`fn ${match[1]}`)) {
+          skips.push(`${match[1]}\t${rel}:${i + 1}`);
         }
       }
     }
   }
   return skips.sort();
+}
+
+function collectPermissionMethods(): string[] {
+  const src = Deno.readTextFileSync(ROOT + MEDIATION_FILE);
+  return [...src.matchAll(/\bpub fn (check_[a-z0-9_]+)\s*(?:<[^>]*>)?\s*\(/g)]
+    .map((match) => match[1])
+    .filter((name, index, all) => all.indexOf(name) === index)
+    .sort();
+}
+
+function collectResourceCreationSites(): string[] {
+  const sites: string[] = [];
+  for (const d of SKIP_SCAN_DIRS) {
+    for (const file of walk(ROOT + d)) {
+      const rel = file.slice(ROOT.length);
+      const src = Deno.readTextFileSync(file);
+      for (const match of src.matchAll(/resource_table\s*\.\s*add(?:_rc)?\s*\(/gs)) {
+        const line = src.slice(0, match.index ?? 0).split("\n").length;
+        sites.push(`${rel}:${line}`);
+      }
+    }
+  }
+  return sites.sort();
 }
 
 function capabilityOf(mediationLine: string): string {
@@ -204,6 +268,8 @@ function renderTaxonomy(): string[] {
 function render(): string {
   const mediation = collectMediation();
   const skips = collectSkips();
+  const permissionMethods = collectPermissionMethods();
+  const resourceSites = collectResourceCreationSites();
   validateTaxonomy(mediation);
   const out: string[] = [];
   out.push("# Oden op-coverage manifest (generated)");
@@ -218,13 +284,21 @@ function render(): string {
   for (const m of mediation) out.push(`- ${m}`);
   out.push("");
   out.push(...renderTaxonomy());
-  out.push("## Op-body pre-check skips (query_read_all call sites)");
+  out.push("## Permission methods (closed inventory)");
+  out.push("");
+  for (const method of permissionMethods) out.push(`- ${method}()`);
+  out.push("");
+  out.push("## Resource-creating op sites (closed inventory)");
+  out.push("");
+  for (const site of resourceSites) out.push(`- ${site}`);
+  out.push("");
+  out.push("## Op-body pre-check skips (query_*_all call sites)");
   out.push("");
   out.push(
-    "These bypass the permission container when read is fully granted; capsec",
+    "These bypass the permission container when a family is fully granted; capsec",
   );
   out.push(
-    "forces `query_read_all()` false while armed. Each site must remain",
+    "forces each relevant query false while armed. Each site must remain",
   );
   out.push("covered by the layer-2-independence proof.");
   out.push("");

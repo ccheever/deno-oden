@@ -568,7 +568,7 @@ pub fn op_net_listen_tls(
   {
     let permissions = state.borrow_mut::<PermissionsContainer>();
     permissions
-      .check_net(&(&addr.hostname, Some(addr.port)), "Deno.listenTls()")
+      .check_net_listen(&(&addr.hostname, Some(addr.port)), "Deno.listenTls()")
       .map_err(NetError::Permission)?;
   }
 

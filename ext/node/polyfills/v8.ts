@@ -76,7 +76,12 @@ const {
   op_v8_gc_profiler_new,
   op_v8_gc_profiler_start,
   op_v8_gc_profiler_stop,
+  op_oden_guard_surface,
 } = core.ops;
+
+function guardV8(name: string) {
+  op_oden_guard_surface("inspector", "activate", `node:v8.${name}`, `node:v8.${name}`);
+}
 
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const lazyFs = core.createLazyLoader("node:fs");
@@ -122,6 +127,7 @@ function cachedDataVersionTag() {
 const heapCodeStatisticsBuffer = new Float64Array(4);
 
 function getHeapCodeStatistics() {
+  guardV8("getHeapCodeStatistics");
   op_v8_get_heap_code_statistics(heapCodeStatisticsBuffer);
   return {
     code_and_metadata_size: heapCodeStatisticsBuffer[0],
@@ -131,6 +137,7 @@ function getHeapCodeStatistics() {
   };
 }
 function getHeapSnapshot(options?: Record<string, unknown>) {
+  guardV8("getHeapSnapshot");
   if (options !== undefined) {
     validateObject(options, "options");
   }
@@ -140,6 +147,7 @@ function getHeapSnapshot(options?: Record<string, unknown>) {
 const heapSpaceStatisticsBuffer = new Float64Array(4);
 
 function getHeapSpaceStatistics() {
+  guardV8("getHeapSpaceStatistics");
   const numberOfHeapSpaces = op_v8_number_of_heap_spaces();
   const heapSpaceStatistics = new Array(numberOfHeapSpaces);
   for (let i = 0; i < numberOfHeapSpaces; i++) {
@@ -161,6 +169,7 @@ function getHeapSpaceStatistics() {
 const buffer = new Float64Array(15);
 
 function getHeapStatistics() {
+  guardV8("getHeapStatistics");
   op_v8_get_heap_statistics(buffer);
 
   return {
@@ -183,6 +192,7 @@ function getHeapStatistics() {
 }
 
 function setFlagsFromString(flags: string) {
+  guardV8("setFlagsFromString");
   // NOTE(bartlomieju): From Node.js docs:
   // The v8.setFlagsFromString() method can be used to programmatically set V8
   // command-line flags. This method should be used with care. Changing settings
@@ -192,9 +202,11 @@ function setFlagsFromString(flags: string) {
   op_v8_set_flags_from_string(flags);
 }
 function stopCoverage() {
+  guardV8("stopCoverage");
   notImplemented("v8.stopCoverage");
 }
 function takeCoverage() {
+  guardV8("takeCoverage");
   notImplemented("v8.takeCoverage");
 }
 
@@ -204,6 +216,7 @@ function writeHeapSnapshot(
   filename?: string,
   options?: Record<string, unknown>,
 ) {
+  guardV8("writeHeapSnapshot");
   if (filename !== undefined) {
     filename = lazyFsUtils().getValidatedPath(filename) as string;
   } else {
@@ -257,6 +270,7 @@ let heapSnapshotNearHeapLimitSet = false;
 // Installs a V8 near-heap-limit callback that writes a `.heapsnapshot` file to
 // disk (up to `limit` times) right before the process would run out of memory.
 function setHeapSnapshotNearHeapLimit(limit: number) {
+  guardV8("setHeapSnapshotNearHeapLimit");
   validateUint32(limit, "limit", true);
   if (heapSnapshotNearHeapLimitSet) {
     return;
@@ -276,6 +290,7 @@ function queryObjects(
     | { format?: "count" | "summary" }
     | undefined = undefined,
 ) {
+  guardV8("queryObjects");
   validateFunction(ctor, "constructor");
   if (options !== undefined) {
     validateObject(options, "options");
@@ -525,6 +540,7 @@ class GCProfiler {
   [kGCStartTime]: number = 0;
 
   start() {
+    guardV8("GCProfiler.start");
     if (this[kGCHandle] !== null) return;
     const handle = op_v8_gc_profiler_new();
     this[kGCStartTime] = DateNow();
@@ -576,6 +592,7 @@ function startupSnapshotSetDeserializeMainFunction(
   fn: SnapshotCallback,
   data?: unknown,
 ) {
+  guardV8("startupSnapshot.setDeserializeMainFunction");
   validateFunction(fn, "callback");
   if (deserializeMainCalled) {
     throw new Error(
@@ -590,6 +607,7 @@ function startupSnapshotAddSerializeCallback(
   fn: SnapshotCallback,
   data?: unknown,
 ) {
+  guardV8("startupSnapshot.addSerializeCallback");
   validateFunction(fn, "callback");
   ArrayPrototypePush(serializeCallbacks, { fn, data });
 }
@@ -598,6 +616,7 @@ function startupSnapshotAddDeserializeCallback(
   fn: SnapshotCallback,
   data?: unknown,
 ) {
+  guardV8("startupSnapshot.addDeserializeCallback");
   validateFunction(fn, "callback");
   ArrayPrototypePush(deserializeCallbacks, { fn, data });
 }

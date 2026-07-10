@@ -3330,6 +3330,7 @@ dependencies = [
  "phf 0.11.2",
  "serde",
  "serde_json",
+ "sourcemap",
  "sys_traits",
  "test_util",
  "thiserror 2.0.12",

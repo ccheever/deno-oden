@@ -7,17 +7,29 @@ run the generator and commit. Drift fails the rebase canary.
 
 - env:read	via check_env()
 - env:read	via check_env_all()
+- env:write	via check_env_action()
+- ffi:load	via check_ffi()
 - ffi:load	via check_ffi_all()
 - ffi:load	via check_ffi_partial_no_path()
+- ffi:load	via check_ffi_partial_with_path()
 - fs:read	via check_open_with_requested()
 - fs:read	via check_read_all()
 - fs:write	via check_open_with_requested()
+- fs:write	via check_write()
 - fs:write	via check_write_all()
+- fs:write	via check_write_partial()
 - import:graph	via oden_capsec_gate_import() [loader-attributed]
-- network:fetch	via check_net_unix_socket()
+- network:connect	via check_net()
+- network:connect	via check_net_url_connect()
+- network:connect	via check_net_vsock()
+- network:fetch	via check_net_fetch()
 - network:fetch	via check_net_url()
-- network:fetch	via check_net_vsock()
+- network:listen	via check_net_listen()
+- network:listen	via check_net_vsock_listen()
+- run:run	via check_run()
 - run:run	via check_run_all()
+- sys:read	via check_sys()
+- sys:read	via check_sys_all()
 - worker:create	via oden_capsec_check_worker_create()
 
 ## Capability taxonomy / descriptor mapping
@@ -27,20 +39,161 @@ run the generator and commit. Drift fails the rebase canary.
 | Capability | Deno descriptor / gate | Target shape | Grant / status |
 | --- | --- | --- | --- |
 | env:read | EnvDescriptor / EnvQueryDescriptor | name or * | env:read:<name> |
+| env:write | EnvDescriptor / EnvQueryDescriptor | name | env:write:<name> |
 | ffi:load | FfiQueryDescriptor | path or * | ffi |
 | fs:read | ReadDescriptor / ReadQueryDescriptor | canonical path or * | fs:read:<path> |
 | fs:write | WriteDescriptor / WriteQueryDescriptor | canonical path or * | fs:write:<path> |
 | import:graph | ModuleLoader inner_resolve capsec gate (referrer-attributed) | resolved import specifier (data:/blob:/http(s):) | remote/data imports default-denied for package principals under enforce |
+| network:connect | NetDescriptor | host, URL, vsock, or unix socket | network:connect:<host> |
 | network:fetch | NetDescriptor / ImportDescriptor | host, URL, vsock, or unix socket | network:fetch:<host> |
+| network:listen | NetDescriptor | bind host, vsock, or unix socket | network:listen:<host> |
 | run:run | RunQueryDescriptor | command display name or * | run:<command> |
+| sys:read | SysDescriptor | information kind or * | sys:<kind> |
 | worker:create | op_create_worker capsec gate | worker specifier | default-denied for package principals until inheritance is designed |
 
-## Op-body pre-check skips (query_read_all call sites)
+## Permission methods (closed inventory)
 
-These bypass the permission container when read is fully granted; capsec
-forces `query_read_all()` false while armed. Each site must remain
+- check_all()
+- check_all_api()
+- check_env()
+- check_env_action()
+- check_env_all()
+- check_ffi()
+- check_ffi_all()
+- check_ffi_partial_no_path()
+- check_ffi_partial_with_path()
+- check_has_all_permissions()
+- check_net_resolved()
+- check_net_unix_socket()
+- check_net_url()
+- check_net_url_connect()
+- check_net_vsock()
+- check_net_vsock_listen()
+- check_open()
+- check_open_blind()
+- check_partial()
+- check_read_all()
+- check_resolved_ip_deny()
+- check_run()
+- check_run_all()
+- check_special_file()
+- check_specifier()
+- check_sys()
+- check_sys_all()
+- check_write()
+- check_write_all()
+- check_write_partial()
+
+## Resource-creating op sites (closed inventory)
+
+- ext/cache/lib.rs:381
+- ext/cron/lib.rs:122
+- ext/fetch/lib.rs:462
+- ext/fetch/lib.rs:465
+- ext/fetch/lib.rs:549
+- ext/fetch/lib.rs:555
+- ext/fetch/lib.rs:575
+- ext/fetch/lib.rs:675
+- ext/fetch/lib.rs:951
+- ext/ffi/callback.rs:651
+- ext/ffi/dlfcn.rs:242
+- ext/fs/ops.rs:218
+- ext/fs/ops.rs:256
+- ext/fs/ops.rs:787
+- ext/http/http_next.rs:1735
+- ext/http/http_next.rs:1751
+- ext/http/http_next.rs:2569
+- ext/http/http_next.rs:5284
+- ext/http/http_next.rs:5356
+- ext/http/lib.rs:1184
+- ext/http/lib.rs:1188
+- ext/http/lib.rs:931
+- ext/kv/lib.rs:230
+- ext/kv/lib.rs:460
+- ext/kv/lib.rs:493
+- ext/net/ops.rs:1644
+- ext/net/ops.rs:241
+- ext/net/ops.rs:653
+- ext/net/ops.rs:702
+- ext/net/ops.rs:772
+- ext/net/ops.rs:829
+- ext/net/ops.rs:876
+- ext/net/ops.rs:917
+- ext/net/ops.rs:948
+- ext/net/ops.rs:976
+- ext/net/ops_tls.rs:397
+- ext/net/ops_tls.rs:541
+- ext/net/ops_tls.rs:621
+- ext/net/ops_tls.rs:655
+- ext/net/ops_unix.rs:137
+- ext/net/ops_unix.rs:163
+- ext/net/ops_unix.rs:242
+- ext/net/ops_unix.rs:273
+- ext/net/quic.rs:1121
+- ext/net/quic.rs:1153
+- ext/net/quic.rs:1214
+- ext/net/quic.rs:1215
+- ext/net/quic.rs:1273
+- ext/net/quic.rs:1274
+- ext/net/quic.rs:902
+- ext/net/quic.rs:903
+- ext/net/quic.rs:935
+- ext/net/quic.rs:936
+- ext/net/quic.rs:949
+- ext/net/quic.rs:983
+- ext/node/ops/ipc.rs:201
+- ext/node/ops/ipc.rs:212
+- ext/node/ops/tcp_wrap.rs:630
+- ext/node/ops/tls.rs:773
+- ext/node/ops/tls.rs:774
+- ext/node/ops/udp.rs:117
+- ext/node/ops/udp.rs:688
+- ext/node_crypto/lib.rs:655
+- ext/node_crypto/lib.rs:734
+- ext/os/ops/signal.rs:66
+- ext/process/lib.rs:1030
+- ext/process/lib.rs:1038
+- ext/process/lib.rs:1044
+- ext/process/lib.rs:1052
+- ext/process/lib.rs:1058
+- ext/process/lib.rs:1066
+- ext/process/lib.rs:1077
+- ext/process/lib.rs:1084
+- ext/process/lib.rs:1154
+- ext/process/lib.rs:2033
+- ext/process/lib.rs:2045
+- ext/process/lib.rs:2057
+- ext/process/lib.rs:2067
+- ext/process/lib.rs:726
+- ext/process/lib.rs:732
+- ext/process/lib.rs:843
+- ext/process/lib.rs:849
+- ext/web/broadcast_channel.rs:110
+- ext/web/locks.rs:249
+- ext/web/locks.rs:254
+- ext/web/locks.rs:293
+- ext/web/message_port.rs:201
+- ext/web/message_port.rs:206
+- ext/web/stream_resource.rs:489
+- ext/web/stream_resource.rs:507
+- ext/websocket/lib.rs:141
+- ext/websocket/lib.rs:533
+- ext/websocket/lib.rs:740
+- libs/core/ops_builtin.rs:577
+- libs/core/ops_builtin_v8.rs:1420
+- libs/core_testing/checkin/runner/ops_io.rs:122
+- libs/core_testing/checkin/runner/ops_io.rs:64
+- libs/core_testing/checkin/runner/ops_io.rs:68
+- runtime/ops/fs_events.rs:581
+- runtime/ops/worker_host.rs:642
+
+## Op-body pre-check skips (query_*_all call sites)
+
+These bypass the permission container when a family is fully granted; capsec
+forces each relevant query false while armed. Each site must remain
 covered by the layer-2-independence proof.
 
-- ext/node/ops/require.rs:45
-- ext/node/ops/worker_threads.rs:38
+- query_read_all	ext/node/ops/require.rs:45
+- query_read_all	ext/node/ops/worker_threads.rs:38
+- query_run_all	ext/process/lib.rs:1388
 

@@ -33,6 +33,8 @@ const {
   op_oden_handle_exit,
   op_oden_handle_revoke,
   op_oden_compartment_endowments,
+  op_oden_guard_surface,
+  op_oden_attestation,
 } = core.ops;
 const {
   ArrayPrototypeFilter,
@@ -46,6 +48,8 @@ const {
   Proxy,
   ReferenceError,
   ReflectDeleteProperty,
+  ReflectApply,
+  ReflectConstruct,
   ReflectGet,
   ReflectOwnKeys,
   StringPrototypeSplit,
@@ -59,6 +63,7 @@ const {
 const realGlobal = globalThis;
 const realGlobalKeys = ReflectOwnKeys(realGlobal);
 const records = ObjectCreate(null);
+let guardsInstalled = false;
 
 const helperName = "__oden_compartment_globals__";
 const aliases = ObjectCreate(null);
@@ -252,6 +257,70 @@ function compartmentGlobals() {
   return records[descriptor];
 }
 
+function guardMethod(object, name, family, action, targetPrefix) {
+  if (!object) return;
+  const original = ReflectGet(object, name, object);
+  if (typeof original !== "function") return;
+  try {
+    ObjectDefineProperty(object, name, {
+      __proto__: null,
+      value: function (...args) {
+        const target = `${targetPrefix}:${String(args[0] ?? "*")}`;
+        op_oden_guard_surface(family, action, target, targetPrefix);
+        return ReflectApply(original, object, args);
+      },
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  } catch {
+    // If a host object cannot accept an own override, leave it for its native
+    // op gate; the readiness manifest must not claim this JS seam as covered.
+  }
+}
+
+// Default-closed ambient globals whose underlying Deno ops have no native
+// per-package descriptor. Installed on every armed runtime, independent of the
+// opt-in compartment rewrite. (ENG-23954, ENG-23957)
+function installAmbientGuards() {
+  if (guardsInstalled) return;
+  guardsInstalled = true;
+
+  const OriginalBroadcastChannel = realGlobal.BroadcastChannel;
+  if (typeof OriginalBroadcastChannel === "function") {
+    const guarded = new Proxy(OriginalBroadcastChannel, {
+      construct(target, args, newTarget) {
+        const name = String(args[0] ?? "");
+        op_oden_guard_surface(
+          "ipc",
+          "broadcast",
+          name,
+          "BroadcastChannel",
+        );
+        return ReflectConstruct(target, args, newTarget);
+      },
+    });
+    ObjectDefineProperty(
+      realGlobal,
+      "BroadcastChannel",
+      core.propNonEnumerable(guarded),
+    );
+  }
+
+  // Web Storage is guarded in ext/webstorage's Proxy traps. Defining own
+  // methods here would itself route through Storage.defineProperty and create
+  // string-valued storage entries rather than wrapping the native methods.
+  const caches = realGlobal.caches;
+  for (const method of ["match", "has", "keys"]) {
+    guardMethod(caches, method, "storage", "read", "caches");
+  }
+  for (const method of ["open", "delete"]) {
+    guardMethod(caches, method, "storage", "write", "caches");
+  }
+  const gpu = realGlobal.navigator && realGlobal.navigator.gpu;
+  guardMethod(gpu, "requestAdapter", "gpu", "access", "navigator.gpu");
+}
+
 // Build a frozen carrier object for a handle id. The id lives only in these
 // closures; the carrier exposes behavior, never the id.
 function makeHandle(id, capability) {
@@ -304,9 +373,14 @@ function mint(capability) {
 
 const oden = { __proto__: null };
 ObjectDefineProperty(oden, "mint", core.propReadOnly(mint));
+ObjectDefineProperty(
+  oden,
+  "attest",
+  core.propReadOnly(() => op_oden_attestation()),
+);
 ObjectFreeze(oden);
 
 // Returned to 99_main.js (via loadExtScript) for conditional install onto the
 // Deno namespace when capsec is armed.
-return { oden, compartmentGlobals };
+return { oden, compartmentGlobals, installAmbientGuards };
 })();

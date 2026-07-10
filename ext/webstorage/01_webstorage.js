@@ -4,7 +4,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { op_webstorage_iterate_keys, Storage } = core.ops;
+const { op_oden_guard_surface, op_webstorage_iterate_keys, Storage } = core.ops;
 const {
   SymbolFor,
   ObjectFromEntries,
@@ -18,12 +18,16 @@ const {
 
 function createStorage(persistent) {
   const storage = new Storage(persistent);
+  const storageName = persistent ? "localStorage" : "sessionStorage";
+  const guard = (action, target) =>
+    op_oden_guard_surface("storage", action, `${storageName}:${target}`);
 
   const proxy = new Proxy(storage, {
     deleteProperty(target, key) {
       if (typeof key === "symbol") {
         return ReflectDeleteProperty(target, key);
       }
+      guard("write", key);
       target.removeItem(key);
       return true;
     },
@@ -32,6 +36,7 @@ function createStorage(persistent) {
       if (typeof key === "symbol") {
         return ReflectDefineProperty(target, key, descriptor);
       }
+      guard("write", key);
       target.setItem(key, descriptor.value);
       return true;
     },
@@ -43,10 +48,41 @@ function createStorage(persistent) {
       if (ReflectHas(target, key)) {
         const value = target[key];
         if (typeof value === "function") {
-          return FunctionPrototypeBind(value, target);
+          const bound = FunctionPrototypeBind(value, target);
+          switch (key) {
+            case "getItem":
+              return (itemKey) => {
+                guard("read", itemKey);
+                return bound(itemKey);
+              };
+            case "key":
+              return (index) => {
+                guard("read", `index:${index}`);
+                return bound(index);
+              };
+            case "setItem":
+              return (itemKey, itemValue) => {
+                guard("write", itemKey);
+                return bound(itemKey, itemValue);
+              };
+            case "removeItem":
+              return (itemKey) => {
+                guard("write", itemKey);
+                return bound(itemKey);
+              };
+            case "clear":
+              return () => {
+                guard("write", "*");
+                return bound();
+              };
+            default:
+              return bound;
+          }
         }
+        if (key === "length") guard("read", "length");
         return value;
       }
+      guard("read", key);
       return target.getItem(key) ?? undefined;
     },
 
@@ -58,6 +94,7 @@ function createStorage(persistent) {
           configurable: true,
         });
       }
+      guard("write", key);
       target.setItem(key, value);
       return true;
     },
@@ -66,11 +103,13 @@ function createStorage(persistent) {
       if (ReflectHas(target, key)) {
         return true;
       }
+      if (typeof key === "string") guard("read", key);
       return typeof key === "string" &&
         typeof target.getItem(key) === "string";
     },
 
     ownKeys() {
+      guard("read", "*");
       return op_webstorage_iterate_keys(storage);
     },
 
@@ -81,6 +120,7 @@ function createStorage(persistent) {
       if (typeof key === "symbol") {
         return undefined;
       }
+      guard("read", key);
       const value = target.getItem(key);
       if (value === null) {
         return undefined;

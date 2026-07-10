@@ -149,6 +149,7 @@ pub async fn op_net_connect_unix(
       state.borrow_mut::<PermissionsContainer>(),
       Cow::Owned(PathBuf::from(address_path)),
       OpenAccessKind::ReadWriteNoFollow,
+      "connect",
       Some("Deno.connect()"),
     )?
   };
@@ -198,6 +199,7 @@ pub async fn op_net_send_unixpacket(
       s.borrow_mut::<PermissionsContainer>(),
       Cow::Owned(PathBuf::from(address_path)),
       OpenAccessKind::WriteNoFollow,
+      "connect",
       Some("Deno.DatagramConn.send()"),
     )?
   };
@@ -228,6 +230,7 @@ pub fn op_net_listen_unix(
     permissions,
     Cow::Borrowed(Path::new(address_path)),
     OpenAccessKind::ReadWriteNoFollow,
+    "listen",
     Some(&api_call_expr),
   )?;
   let listener = UnixListener::bind(&address_path)?;
@@ -252,6 +255,7 @@ pub fn net_listen_unixpacket(
         permissions,
         Cow::Borrowed(Path::new(address_path)),
         OpenAccessKind::ReadWriteNoFollow,
+        "listen",
         Some("Deno.listenDatagram()"),
       )?;
       bind_unix_datagram(address_path.as_ref())?
@@ -358,6 +362,7 @@ fn check_unix_socket_path<'a>(
   permissions: &mut PermissionsContainer,
   path: Cow<'a, Path>,
   access_kind: OpenAccessKind,
+  network_action: &str,
   api_name: Option<&str>,
 ) -> Result<CheckedPath<'a>, NetError> {
   let checked = if is_unix_socket_abstract_path(path.as_ref()) {
@@ -373,7 +378,7 @@ fn check_unix_socket_path<'a>(
   // `--allow-read=/var/run/docker.sock` could connect to local IPC services
   // (Docker, dbus, podman, etc.) with no `--allow-net` grant.
   permissions
-    .check_net_unix_socket(&checked, api_name)
+    .check_net_unix_socket(&checked, network_action, api_name)
     .map_err(NetError::Permission)?;
   Ok(checked)
 }

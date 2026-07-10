@@ -323,7 +323,7 @@ impl TCPWrap {
   ) -> Result<i32, deno_permissions::PermissionCheckError> {
     state
       .borrow_mut::<PermissionsContainer>()
-      .check_net(&(address, Some(port as u16)), "node:net.listen()")?;
+      .check_net_listen(&(address, Some(port as u16)), "node:net.listen()")?;
 
     let addr_str = format!("{}:{}", address, port);
     let socket_addr = match addr_str.to_socket_addrs() {
@@ -546,7 +546,7 @@ impl TCPWrap {
   ) -> Result<i32, deno_permissions::PermissionCheckError> {
     state
       .borrow_mut::<PermissionsContainer>()
-      .check_net(&(address, Some(port as u16)), "node:net.listen()")?;
+      .check_net_listen(&(address, Some(port as u16)), "node:net.listen()")?;
 
     let addr_str = format!("{}:{}", address, port);
     let socket_addr = match addr_str.to_socket_addrs() {

@@ -192,7 +192,7 @@ fn op_set_env(
   #[string] key: &str,
   #[string] value: &str,
 ) -> Result<(), OsError> {
-  if check_env_with_maybe_exit(state, key)?.is_break() {
+  if check_env_with_maybe_exit(state, key, "write")?.is_break() {
     return Ok(());
   }
   if key.is_empty() {
@@ -219,8 +219,12 @@ fn op_set_env(
 fn check_env_with_maybe_exit(
   state: &mut OpState,
   key: &str,
+  action: &str,
 ) -> Result<ControlFlow<()>, PermissionCheckError> {
-  match state.borrow_mut::<PermissionsContainer>().check_env(key) {
+  match state
+    .borrow_mut::<PermissionsContainer>()
+    .check_env_action(key, action)
+  {
     Ok(()) => Ok(ControlFlow::Continue(())),
     Err(PermissionCheckError::PermissionDenied(err))
       if err.state == PermissionState::Ignored =>
@@ -318,7 +322,8 @@ fn op_get_env(
   let skip_permission_check =
     SORTED_NODE_ENV_VAR_ALLOWLIST.binary_search(&key).is_ok();
 
-  if !skip_permission_check && check_env_with_maybe_exit(state, key)?.is_break()
+  if !skip_permission_check
+    && check_env_with_maybe_exit(state, key, "read")?.is_break()
   {
     return Ok(None);
   }
@@ -331,7 +336,7 @@ fn op_delete_env(
   state: &mut OpState,
   #[string] key: &str,
 ) -> Result<(), OsError> {
-  if check_env_with_maybe_exit(state, key)?.is_break() {
+  if check_env_with_maybe_exit(state, key, "write")?.is_break() {
     return Ok(());
   }
   if key.is_empty() || key.contains(&['=', '\0'] as &[char]) {

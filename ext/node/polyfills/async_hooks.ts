@@ -3,6 +3,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_oden_guard_surface } = core.ops;
 const {
   validateFunction,
   validateObject,
@@ -219,7 +220,15 @@ function triggerAsyncId() {
   return 0;
 }
 
-const executionAsyncResource = internalExecutionAsyncResource;
+function executionAsyncResource() {
+  op_oden_guard_surface(
+    "inspector",
+    "observe",
+    "async-resource",
+    "node:async_hooks.executionAsyncResource",
+  );
+  return internalExecutionAsyncResource();
+}
 
 const asyncWrapProviders = ObjectFreeze({
   __proto__: null,
@@ -301,6 +310,12 @@ function createHook(callbacks: {
   destroy?: (asyncId: number) => void;
   promiseResolve?: (asyncId: number) => void;
 }) {
+  op_oden_guard_surface(
+    "inspector",
+    "observe",
+    "async-hooks",
+    "node:async_hooks.createHook",
+  );
   return new AsyncHook(callbacks);
 }
 

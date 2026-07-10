@@ -7,6 +7,7 @@ const {
   op_node_database_backup,
   Session,
   StatementSync,
+  op_oden_guard_surface,
 } = core.ops;
 const { isUint8Array } = core.loadExtScript(
   "ext:deno_node/internal/util/types.ts",
@@ -146,6 +147,7 @@ function DatabaseSync(
   path,
   options,
 ) {
+  op_oden_guard_surface("database", "open", String(path), "node:sqlite.DatabaseSync");
   if (new.target === undefined) {
     throw new ConstructCallRequiredError();
   }
@@ -164,6 +166,7 @@ async function backup(
   path,
   options,
 ) {
+  op_oden_guard_surface("database", "backup", String(path), "node:sqlite.backup");
   if (!ObjectPrototypeIsPrototypeOf(DatabaseSync.prototype, sourceDb)) {
     throw new InvalidArgTypeError(
       'The "sourceDb" argument must be an object.',

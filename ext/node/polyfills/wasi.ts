@@ -5,7 +5,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { WasiContext } = core.ops;
+const { WasiContext, op_oden_guard_surface } = core.ops;
 const { statSync } = core.loadExtScript("ext:deno_node/fs.ts");
 const { exit } = core.loadExtScript("ext:deno_os/30_os.js");
 const {
@@ -153,6 +153,7 @@ class WASI {
   #wasiImport;
 
   constructor(options?: WasiOptions) {
+    op_oden_guard_surface("wasi", "instantiate", "preview1", "node:wasi.WASI");
     emitExperimentalWarning();
     if (options === undefined) {
       throw new ERR_INVALID_ARG_TYPE("options.version", "string", undefined);

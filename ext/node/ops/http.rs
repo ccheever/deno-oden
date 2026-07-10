@@ -27,5 +27,5 @@ pub fn op_node_http_check_proxy_net(
 ) -> Result<(), PermissionCheckError> {
   state
     .borrow_mut::<PermissionsContainer>()
-    .check_net(&(hostname, Some(port)), api_name)
+    .check_net_fetch(&(hostname, Some(port)), api_name)
 }
