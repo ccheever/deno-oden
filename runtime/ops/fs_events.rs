@@ -53,6 +53,11 @@ deno_core::extension!(
 const FS_EVENT_QUEUE_CAPACITY: usize = 1024;
 
 struct FsEventsResource {
+  /// Rust-only ownership metadata travels with this concrete resource. Numeric
+  /// rids are local to each worker's resource table and cannot identify an
+  /// owner process-wide.
+  // @ref llp/0001-adding-capability-security-to-deno.plan.md (Native resource ownership)
+  owner: deno_permissions::OdenResourceOwner,
   receiver: AsyncRefCell<mpsc::Receiver<Result<FsEvent, NotifyError>>>,
   cancel: CancelHandle,
   /// Shared backend used to clean up our watch on drop.
@@ -571,6 +576,7 @@ fn op_fs_events_open(
   }
 
   let resource = FsEventsResource {
+    owner: deno_permissions::OdenResourceOwner::capture(),
     receiver: AsyncRefCell::new(receiver),
     cancel: Default::default(),
     inner,
@@ -579,9 +585,12 @@ fn op_fs_events_open(
     overflowed,
   };
   let rid = state.resource_table.add(resource);
-  // Oden capsec: stamp the acting package as the watcher's owner so a guessed
-  // rid from another package cannot poll it (Native resource ownership).
-  deno_permissions::oden_capsec_own_resource(rid, "fs:watch");
+  state
+    .resource_table
+    .get::<FsEventsResource>(rid)
+    .expect("newly inserted fs-events resource must remain in its table")
+    .owner
+    .record_open(rid, "fs:watch");
   Ok(rid)
 }
 
@@ -615,10 +624,10 @@ async fn op_fs_events_poll(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
 ) -> Result<Option<FsEvent>, FsEventsError> {
-  // Oden capsec: a different package polling this watcher's rid (guessed or
-  // handed) denies under enforce; the owner polls freely.
-  deno_permissions::oden_capsec_check_resource_owner(rid, "fs:watch")?;
+  // Resolve the current worker's concrete resource before checking ownership:
+  // another worker may have the same small rid in a different resource table.
   let resource = state.borrow().resource_table.get::<FsEventsResource>(rid)?;
+  resource.owner.check(rid, "fs:watch")?;
   let mut receiver = RcRef::map(&resource, |r| &r.receiver).borrow_mut().await;
 
   // If the event queue overflowed since the last poll, events were dropped:
