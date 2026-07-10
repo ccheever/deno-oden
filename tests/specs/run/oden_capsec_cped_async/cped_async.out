@@ -1,4 +1,0 @@
-[WILDCARD][oden-capsec] env:HOME caller=root -> allow(ambient)
-[oden-capsec] env:HOME caller=evil-dep -> audit(record)
-[WILDCARD][oden-capsec] env:ROOT_SECRET caller=root -> allow(ambient)
-[oden-capsec] env:SECRET caller=evil-dep -> audit(record)

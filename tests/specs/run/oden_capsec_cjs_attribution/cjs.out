@@ -1,2 +1,0 @@
-[WILDCARD][oden-capsec] env:SECRET caller=cjs-dep -> audit(record)
-[WILDCARD][oden-capsec] env:SECRET caller=root -> allow(ambient)

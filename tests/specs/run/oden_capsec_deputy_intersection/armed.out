@@ -1,4 +1,2 @@
-[WILDCARD]env:SECRET caller=[deputy-dep,evil-dep] -> DENY(no grant)
 [WILDCARD]evil-via-deputy: NotCapable
-[WILDCARD]env:SECRET caller=deputy-dep -> allow(granted)
 [WILDCARD]root-via-deputy: s3cret

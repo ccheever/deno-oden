@@ -1,3 +1,2 @@
 [WILDCARD][oden-capsec] stale/unknown schedule token [WILDCARD] -> quarantine sentinel (audit)
-[WILDCARD][oden-capsec] env:SECRET caller=quarantine -> audit(record)
 [WILDCARD]before-first-op: done

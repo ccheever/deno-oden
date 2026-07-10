@@ -114,6 +114,12 @@ function wrapStoreRun(store, data, next, transform = defaultTransform) {
 
 class ActiveChannel {
   subscribe(subscription) {
+    op_oden_guard_surface(
+      "ipc",
+      "broadcast",
+      String(this.name),
+      "node:diagnostics_channel.subscribe",
+    );
     validateFunction(subscription, "subscription");
     // Replace the subscriber array with a copy so any in-flight publish that
     // captured the previous reference keeps iterating over the snapshot
@@ -143,6 +149,12 @@ class ActiveChannel {
   }
 
   bindStore(store, transform) {
+    op_oden_guard_surface(
+      "ipc",
+      "broadcast",
+      String(this.name),
+      "node:diagnostics_channel.bindStore",
+    );
     const replacing = this._stores.has(store);
     if (!replacing) channels.incRef(this.name);
     this._stores.set(store, transform);
@@ -248,12 +260,6 @@ class Channel {
 const channels = new WeakRefMap();
 
 function channel(name) {
-  op_oden_guard_surface(
-    "ipc",
-    "broadcast",
-    String(name),
-    "node:diagnostics_channel.channel",
-  );
   const ch = channels.get(name);
   if (ch) return ch;
 

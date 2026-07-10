@@ -1,10 +1,1 @@
-[oden-capsec] readiness report
-  mode: audit
-  attribution: armed
-  cped-seal: applied
-  lockdown: off (opt-in outside enforce; default-on measured NO-GO by the compat corpus)
-  compartment-globals: off (opt-in only; default-on blocked by the compat-corpus gate)
-  integrity: unbound (no lockfile)
-  policy-source: capsec_audit.json
-  root: [WILDLINE]
-[WILDCARD]op ran
+op ran

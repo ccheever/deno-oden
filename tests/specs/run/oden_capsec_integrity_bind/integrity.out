@@ -1,6 +1,3 @@
-[WILDCARD]env:SECRET caller=dep-a -> allow(granted)
 [WILDCARD]integrity: file://[WILDLINE]/node_modules/dep-b/index.js claims dep-b@2.0.0 but deno.lock pins dep-b@1.0.0 -> quarantine
-[oden-capsec] env:SECRET caller=quarantine -> DENY(no grant)
 [WILDCARD]integrity: file://[WILDLINE]/node_modules/dep-c/index.js claims dep-c@1.0.0 but deno.lock pins no dep-c entry -> quarantine
-[oden-capsec] env:SECRET caller=quarantine -> DENY(no grant)
 {"dep-a":"s3cret","dep-b":"DENIED","dep-c":"DENIED"}

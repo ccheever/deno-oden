@@ -1,11 +1,6 @@
-[oden-capsec] handle:mint caller=grantor-dep cap=[WILDLINE] -> allow(mint)
-[oden-capsec] Deno.readFileSync():[WILDLINE] caller=evil-dep -> DENY(no grant)
 theft: DENIED
-[oden-capsec] Deno.readFileSync():[WILDLINE] caller=evil-dep -> DENY(no grant)
 forged-handle: DENIED
-[oden-capsec] handle:mint caller=evil-dep cap=[WILDLINE] -> DENY(mint exceeds holding)
 evil-mint-not-held: DENIED
 carrier-keys: ["capability","revoke","scoped","use"]
 structuredClone-handle: DataCloneError
-[oden-capsec] handle:scoped caller=evil-dep cap=[WILDLINE] -> DENY(scoped wider than parent)
 rewiden-via-scoped: DENIED

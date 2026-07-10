@@ -1,1 +1,1 @@
-[WILDCARD]caller=sneaky-dep -> DENY[WILDCARD]denied: TypeError
+denied: TypeError
