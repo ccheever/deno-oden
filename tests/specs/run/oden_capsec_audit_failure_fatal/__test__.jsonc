@@ -1,0 +1,42 @@
+{
+  // Authenticated evidence loss is a process failure, not a catchable
+  // permission result. The overflow arm reaches the hard 1 MiB writer bound;
+  // the broken-handoff arm fails before user code starts.
+  "tempDir": true,
+  "tests": {
+    "authenticated_overflow_is_process_fatal": {
+      "steps": [
+        {
+          "args": "run -A setup.js overflow",
+          "output": ""
+        },
+        {
+          "args": "run --allow-env overflow.js",
+          "envs": {
+            "ODEN_CAPSEC_POLICY": "control/policy.json",
+            "ODEN_CAPSEC_AUDIT": "control/audit.ndjson"
+          },
+          "output": "overflow.out",
+          "exitCode": 74
+        }
+      ]
+    },
+    "broken_authenticated_handoff_is_process_fatal": {
+      "steps": [
+        {
+          "args": "run -A setup.js broken",
+          "output": ""
+        },
+        {
+          "args": "run unavailable.js",
+          "envs": {
+            "ODEN_CAPSEC_POLICY": "control/policy.json",
+            "ODEN_CAPSEC_AUDIT": "control/unavailable"
+          },
+          "output": "unavailable.out",
+          "exitCode": 74
+        }
+      ]
+    }
+  }
+}

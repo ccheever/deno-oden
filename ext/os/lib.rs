@@ -43,6 +43,10 @@ impl ExitCode {
 
 pub fn exit(code: i32) -> ! {
   deno_signals::run_exit();
+  // `Deno.exit()` bypasses the CLI's normal completion path. Seal the
+  // authenticated stream here too; failure exits with the reserved engine
+  // status instead of allowing package code to choose a clean status.
+  deno_permissions::oden_capsec_finish_audit_channel();
   #[allow(
     clippy::disallowed_methods,
     reason = "exit is the intended behavior"
