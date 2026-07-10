@@ -2,7 +2,10 @@
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 
 import { core, primordials } from "ext:core/mod.js";
-import { op_get_env_no_permission_check } from "ext:core/ops";
+import {
+  op_get_env_no_permission_check,
+  op_node_http_net_token,
+} from "ext:core/ops";
 import * as net from "node:net";
 import httpProxy from "node:_http_proxy";
 const lazyTls = core.createLazyLoader("node:tls");
@@ -282,12 +285,34 @@ function maybeEnableKeylog(eventName) {
 
 Agent.defaultMaxSockets = Infinity;
 
+function withOdenHttpNetToken(options, apiName) {
+  const socketPath = options.socketPath;
+  const rawPort = NumberParseInt(options.port ?? 0, 10);
+  const port = NumberIsFinite(rawPort) && rawPort >= 0 && rawPort <= 65535
+    ? rawPort
+    : 0;
+  return {
+    __proto__: null,
+    ...options,
+    __odenHttpNetToken: op_node_http_net_token(
+      socketPath ? "" : (options.hostname || options.host || "localhost"),
+      port,
+      socketPath,
+      apiName,
+    ),
+  };
+}
+
 // Default connection factory. When a proxy applies to the request, we
 // connect to the proxy host/port instead of the target. For HTTPS targets
 // going through an HTTP proxy, this base http.Agent still produces a TCP
 // socket to the proxy; the https.Agent override builds on top of this to
 // perform CONNECT-then-TLS tunneling.
 Agent.prototype.createConnection = function createConnection(options, cb) {
+  const apiName = options?._proxyProtocol === "https:" ||
+      options?.protocol === "https:"
+    ? "node:https.request()"
+    : "node:http.request()";
   const proxy = options && options._proxy;
   if (proxy && options._proxyProtocol === "http:") {
     const connectOpts = {
@@ -311,11 +336,14 @@ Agent.prototype.createConnection = function createConnection(options, cb) {
       ) {
         connectOpts.ca = lazyTls().default.getCACertificates("default");
       }
-      return lazyTls().default.connect(connectOpts, cb);
+      return lazyTls().default.connect(
+        withOdenHttpNetToken(connectOpts, apiName),
+        cb,
+      );
     }
-    return net.createConnection(connectOpts, cb);
+    return net.createConnection(withOdenHttpNetToken(connectOpts, apiName), cb);
   }
-  return net.createConnection(options, cb);
+  return net.createConnection(withOdenHttpNetToken(options, apiName), cb);
 };
 
 // Get the key for a given set of request options

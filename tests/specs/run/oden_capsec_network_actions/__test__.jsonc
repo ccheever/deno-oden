@@ -1,0 +1,25 @@
+{
+  // Semantic network actions are operation-selected and remain distinct across
+  // Deno, Node, Unix, vsock, QUIC, WebTransport, and redirect-capable clients.
+  "tempDir": true,
+  "tests": {
+    "fetch_grant_does_not_connect_or_listen": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js fetch",
+      "envs": { "ODEN_CAPSEC_POLICY": "fetch.json" },
+      "output": "fetch.out",
+      "exitCode": 0
+    },
+    "connect_grant_does_not_fetch_or_listen": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js connect",
+      "envs": { "ODEN_CAPSEC_POLICY": "connect.json" },
+      "output": "connect.out",
+      "exitCode": 0
+    },
+    "listen_grant_does_not_fetch_or_connect": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js listen",
+      "envs": { "ODEN_CAPSEC_POLICY": "listen.json" },
+      "output": "listen.out",
+      "exitCode": 0
+    }
+  }
+}

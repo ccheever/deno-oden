@@ -26,6 +26,7 @@ use deno_core::futures::TryFutureExt;
 use deno_core::op2;
 use deno_core::v8;
 use deno_error::JsErrorBox;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::OpenAccessKind;
 use deno_permissions::PermissionsContainer;
 use deno_tls::ServerConfigProvider;
@@ -421,7 +422,11 @@ pub async fn op_net_connect_tls(
     let mut s = state.borrow_mut();
     let permissions = s.borrow_mut::<PermissionsContainer>();
     permissions
-      .check_net(&(&addr.hostname, Some(addr.port)), "Deno.connectTls()")
+      .check_net(
+        NetPermissionAction::Connect,
+        &(&addr.hostname, Some(addr.port)),
+        "Deno.connectTls()",
+      )
       .map_err(NetError::Permission)?;
     if let Some(path) = cert_file {
       Some(
@@ -489,6 +494,7 @@ pub async fn op_net_connect_tls(
     };
     for addr in checked {
       permissions.check_net_resolved(
+        NetPermissionAction::Connect,
         &addr.ip(),
         addr.port(),
         "Deno.connectTls()",
@@ -568,7 +574,11 @@ pub fn op_net_listen_tls(
   {
     let permissions = state.borrow_mut::<PermissionsContainer>();
     permissions
-      .check_net(&(&addr.hostname, Some(addr.port)), "Deno.listenTls()")
+      .check_net(
+        NetPermissionAction::Listen,
+        &(&addr.hostname, Some(addr.port)),
+        "Deno.listenTls()",
+      )
       .map_err(NetError::Permission)?;
   }
 
@@ -578,6 +588,7 @@ pub fn op_net_listen_tls(
   state
     .borrow_mut::<PermissionsContainer>()
     .check_net_resolved(
+      NetPermissionAction::Listen,
       &bind_addr.ip(),
       bind_addr.port(),
       "Deno.listenTls()",

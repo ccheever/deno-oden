@@ -444,12 +444,23 @@ fn host_covered(grant_host: &str, host: &str) -> bool {
 }
 
 fn host_of(target: &str) -> String {
+  if target.starts_with("unix:") || target.starts_with("vsock:") {
+    return target.to_string();
+  }
   let t = target
     .strip_prefix("https://")
     .or_else(|| target.strip_prefix("http://"))
     .unwrap_or(target);
   let t = t.split('/').next().unwrap_or(t);
-  t.split(':').next().unwrap_or(t).to_string()
+  if let Some(bracketed) = t.strip_prefix('[')
+    && let Some(end) = bracketed.find(']')
+  {
+    return format!("[{}]", &bracketed[..end]);
+  }
+  if t.matches(':').count() == 1 {
+    return t.split(':').next().unwrap_or(t).to_string();
+  }
+  t.to_string()
 }
 
 fn basename(p: &str) -> String {
@@ -833,6 +844,39 @@ mod tests {
       ALWAYS_ENDOWED_GLOBALS.len()
     );
     assert!(policy.endowments(&Principal::Root).contains("fetch"));
+  }
+
+  #[test]
+  fn network_coverage_preserves_unix_vsock_and_ipv6_endpoint_shapes() {
+    let cases = [
+      (
+        "network:fetch:unix:/tmp/oden.sock",
+        "fetch",
+        "unix:/tmp/oden.sock",
+      ),
+      ("network:connect:vsock:2:8000", "connect", "vsock:2:8000"),
+      ("network:connect:[::1]", "connect", "[::1]:443"),
+    ];
+    for (grant, action, target) in cases {
+      let grant = Grant::parse(grant).unwrap();
+      assert!(covers(
+        &[grant],
+        &Request {
+          family: Family::Network,
+          action: action.into(),
+          target: target.into(),
+        }
+      ));
+    }
+
+    assert!(!covers(
+      &[Grant::parse("network:fetch:unix:/tmp/oden.sock").unwrap()],
+      &Request {
+        family: Family::Network,
+        action: "connect".into(),
+        target: "unix:/tmp/oden.sock".into(),
+      }
+    ));
   }
 
   #[test]

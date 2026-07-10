@@ -627,6 +627,7 @@ TLSSocket.prototype._wrapHandle = function (wrap, handle) {
   // stream. We proxy them explicitly here.
   const proxyMethods = [
     "setNetPermToken",
+    "setOdenHttpNetToken",
     "getsockname",
     "getpeername",
     "connect",

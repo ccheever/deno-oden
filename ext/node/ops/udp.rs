@@ -16,6 +16,7 @@ use deno_core::RcRef;
 use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::op2;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
 use socket2::Domain;
 use socket2::Protocol;
@@ -72,16 +73,23 @@ pub fn op_node_udp_bind(
   reuse_address: bool,
   ipv6_only: bool,
 ) -> Result<(ResourceId, String, u16), NodeUdpError> {
-  state
-    .borrow_mut::<PermissionsContainer>()
-    .check_net(&(hostname, Some(port)), "dgram.createSocket()")?;
+  state.borrow_mut::<PermissionsContainer>().check_net(
+    NetPermissionAction::Listen,
+    &(hostname, Some(port)),
+    "dgram.createSocket()",
+  )?;
 
   let addr = deno_net::resolve_addr::resolve_addr_sync(hostname, port)?
     .next()
     .ok_or(NodeUdpError::NoResolvedAddress)?;
   state
     .borrow_mut::<PermissionsContainer>()
-    .check_net_resolved(&addr.ip(), addr.port(), "dgram.createSocket()")?;
+    .check_net_resolved(
+      NetPermissionAction::Listen,
+      &addr.ip(),
+      addr.port(),
+      "dgram.createSocket()",
+    )?;
 
   let domain = if addr.is_ipv4() {
     Domain::IPV4
@@ -573,7 +581,11 @@ pub async fn op_node_udp_send(
     state
       .borrow_mut()
       .borrow_mut::<PermissionsContainer>()
-      .check_net(&(&hostname, Some(port)), "socket.send()")?;
+      .check_net(
+        NetPermissionAction::Connect,
+        &(&hostname, Some(port)),
+        "socket.send()",
+      )?;
   }
 
   let resource = state
@@ -589,7 +601,12 @@ pub async fn op_node_udp_send(
     state
       .borrow_mut()
       .borrow_mut::<PermissionsContainer>()
-      .check_net_resolved(&addr.ip(), addr.port(), "socket.send()")?;
+      .check_net_resolved(
+        NetPermissionAction::Connect,
+        &addr.ip(),
+        addr.port(),
+        "socket.send()",
+      )?;
   }
 
   let cancel = RcRef::map(&resource, |r| &r.cancel);

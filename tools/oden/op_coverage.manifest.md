@@ -7,17 +7,32 @@ run the generator and commit. Drift fails the rebase canary.
 
 - env:read	via check_env()
 - env:read	via check_env_all()
+- ffi:load	via check_ffi()
 - ffi:load	via check_ffi_all()
 - ffi:load	via check_ffi_partial_no_path()
+- ffi:load	via check_ffi_partial_with_path()
 - fs:read	via check_open_with_requested()
 - fs:read	via check_read_all()
 - fs:write	via check_open_with_requested()
+- fs:write	via check_write()
 - fs:write	via check_write_all()
+- fs:write	via check_write_partial()
 - import:graph	via oden_capsec_gate_import() [loader-attributed]
+- network:connect	via check_net()
+- network:connect	via check_net_unix_socket()
+- network:connect	via check_net_url()
+- network:connect	via check_net_vsock()
+- network:fetch	via check_net()
 - network:fetch	via check_net_unix_socket()
 - network:fetch	via check_net_url()
 - network:fetch	via check_net_vsock()
+- network:listen	via check_net()
+- network:listen	via check_net_unix_socket()
+- network:listen	via check_net_vsock()
+- run:run	via check_run()
 - run:run	via check_run_all()
+- sys:read	via check_sys()
+- sys:read	via check_sys_all()
 - worker:create	via oden_capsec_check_worker_create()
 
 ## Capability taxonomy / descriptor mapping
@@ -31,9 +46,137 @@ run the generator and commit. Drift fails the rebase canary.
 | fs:read | ReadDescriptor / ReadQueryDescriptor | canonical path or * | fs:read:<path> |
 | fs:write | WriteDescriptor / WriteQueryDescriptor | canonical path or * | fs:write:<path> |
 | import:graph | ModuleLoader inner_resolve capsec gate (referrer-attributed) | resolved import specifier (data:/blob:/http(s):) | remote/data imports default-denied for package principals under enforce |
-| network:fetch | NetDescriptor / ImportDescriptor | host, URL, vsock, or unix socket | network:fetch:<host> |
+| network:connect | NetDescriptor (typed operation action) | host, URL, vsock, or unix socket | network:connect:<endpoint> |
+| network:fetch | NetDescriptor / ImportDescriptor (typed operation action) | HTTP(S) host, redirect hop, proxy, vsock, or unix socket | network:fetch:<endpoint> |
+| network:listen | NetDescriptor (typed operation action) | bound host, vsock, or unix socket | network:listen:<endpoint> |
 | run:run | RunQueryDescriptor | command display name or * | run:<command> |
+| sys:read | SysDescriptor / SysQueryDescriptor | system-information kind or * | sys:read:<kind> |
 | worker:create | op_create_worker capsec gate | worker specifier | default-denied for package principals until inheritance is designed |
+
+## Network permission call-site matrix
+
+The balanced Rust scanner classifies every `check_net*` call. A missing,
+unknown, or implicitly selected action fails generation. `propagated` is
+allowed only at the two audited typed helpers named by the generator.
+
+| Action | Check | Enclosing function | Source | Selection |
+| --- | --- | --- | --- | --- |
+| connect | check_net_resolved | check_resolved() | ext/fetch/dns.rs:244 | propagated |
+| fetch | check_net_resolved | check_resolved() | ext/fetch/dns.rs:244 | propagated |
+| fetch | check_net_url | op_fetch() | ext/fetch/lib.rs:473 | explicit |
+| fetch | check_net_url | op_fetch_custom_client() | ext/fetch/lib.rs:874 | explicit |
+| fetch | check_net | op_fetch_custom_client() | ext/fetch/lib.rs:881 | explicit |
+| fetch | check_net_unix_socket | op_fetch_custom_client() | ext/fetch/lib.rs:901 | explicit |
+| fetch | check_net_vsock | op_fetch_custom_client() | ext/fetch/lib.rs:912 | explicit |
+| fetch | check_net_url | check_net_url() | ext/kv/remote.rs:75 | explicit |
+| fetch | check_net_url | open() | ext/kv/remote.rs:160 | explicit |
+| connect | check_net | op_net_connect_tls() | ext/net/ops_tls.rs:425 | explicit |
+| connect | check_net_resolved | op_net_connect_tls() | ext/net/ops_tls.rs:496 | explicit |
+| listen | check_net | op_net_listen_tls() | ext/net/ops_tls.rs:577 | explicit |
+| listen | check_net_resolved | op_net_listen_tls() | ext/net/ops_tls.rs:590 | explicit |
+| connect | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
+| fetch | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
+| listen | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
+| connect | check_net | op_net_send_udp() | ext/net/ops.rs:282 | explicit |
+| connect | check_net_resolved | op_net_send_udp() | ext/net/ops.rs:297 | explicit |
+| connect | check_net | op_net_connect_tcp_inner() | ext/net/ops.rs:557 | explicit |
+| connect | check_net_resolved | op_net_connect_tcp_inner() | ext/net/ops.rs:608 | explicit |
+| listen | check_net | op_net_listen_tcp() | ext/net/ops.rs:691 | explicit |
+| listen | check_net_resolved | op_net_listen_tcp() | ext/net/ops.rs:701 | explicit |
+| listen | check_net | net_listen_udp() | ext/net/ops.rs:726 | explicit |
+| listen | check_net_resolved | net_listen_udp() | ext/net/ops.rs:736 | explicit |
+| connect | check_net_vsock | op_net_connect_vsock() | ext/net/ops.rs:836 | explicit |
+| listen | check_net_vsock | op_net_listen_vsock() | ext/net/ops.rs:890 | explicit |
+| fetch | check_net | op_dns_resolve() | ext/net/ops.rs:1130 | explicit |
+| listen | check_net | op_quic_endpoint_create() | ext/net/quic.rs:263 | explicit |
+| connect | check_net | op_quic_endpoint_connect() | ext/net/quic.rs:570 | explicit |
+| connect | check_net_resolved | op_quic_endpoint_connect() | ext/net/quic.rs:582 | explicit |
+| fetch | check_net | op_node_getaddrinfo() | ext/node/ops/dns.rs:71 | explicit |
+| fetch | check_net | op_node_getnameinfo() | ext/node/ops/dns.rs:274 | explicit |
+| fetch | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:99 | explicit |
+| listen | check_net | op_inspector_open() | ext/node/ops/inspector.rs:101 | explicit |
+| listen | check_net_unix_socket | bind() | ext/node/ops/pipe_wrap.rs:385 | explicit |
+| listen | check_net_unix_socket | listen() | ext/node/ops/pipe_wrap.rs:419 | explicit |
+| fetch | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:460 | explicit |
+| connect | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:466 | explicit |
+| listen | check_net | bind_inner() | ext/node/ops/tcp_wrap.rs:339 | explicit |
+| listen | check_net | bind6() | ext/node/ops/tcp_wrap.rs:564 | explicit |
+| fetch | check_net | connect() | ext/node/ops/tcp_wrap.rs:726 | explicit |
+| connect | check_net | connect() | ext/node/ops/tcp_wrap.rs:732 | explicit |
+| fetch | check_net_resolved | connect() | ext/node/ops/tcp_wrap.rs:754 | explicit |
+| connect | check_net_resolved | connect() | ext/node/ops/tcp_wrap.rs:763 | explicit |
+| fetch | check_net | connect6() | ext/node/ops/tcp_wrap.rs:816 | explicit |
+| connect | check_net | connect6() | ext/node/ops/tcp_wrap.rs:822 | explicit |
+| fetch | check_net_resolved | connect6() | ext/node/ops/tcp_wrap.rs:842 | explicit |
+| connect | check_net_resolved | connect6() | ext/node/ops/tcp_wrap.rs:851 | explicit |
+| listen | check_net | op_node_udp_bind() | ext/node/ops/udp.rs:76 | explicit |
+| listen | check_net_resolved | op_node_udp_bind() | ext/node/ops/udp.rs:87 | explicit |
+| connect | check_net | op_node_udp_send() | ext/node/ops/udp.rs:584 | explicit |
+| connect | check_net_resolved | op_node_udp_send() | ext/node/ops/udp.rs:604 | explicit |
+| connect | check_net_url | op_ws_check_permission_and_cancel_handle() | ext/websocket/lib.rs:133 | explicit |
+| connect | check_net_url | op_ws_create() | ext/websocket/lib.rs:461 | explicit |
+| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:8496 | explicit |
+| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:9701 | explicit |
+| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:9731 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:9758 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:9764 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:9774 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:9780 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:9798 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:9803 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:9827 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:9836 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:9846 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:12934 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:12943 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:12957 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:12964 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:12971 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:12979 | explicit |
+
+## Network resource/API action matrix
+
+Resource-creating and packet-originating APIs are registered explicitly.
+Direct rows must contain the named classified check; inherited rows must
+consume a resource authorized by the operation named in the note.
+
+| Surface | Action | Enforcement | Rust owner | Note |
+| --- | --- | --- | --- | --- |
+| fetch() HTTP(S) | fetch | direct | ext/fetch/lib.rs:op_fetch() | URL before request |
+| fetch() custom HTTP/TCP/Unix/vsock client | fetch | direct | ext/fetch/lib.rs:op_fetch_custom_client() | logical proxy endpoint |
+| remote KV HTTP | fetch | direct | ext/kv/remote.rs:check_net_url() | every remote request URL |
+| WebSocket permission/create | connect | direct | ext/websocket/lib.rs:op_ws_check_permission_and_cancel_handle() | initial URL |
+| WebSocket redirect/final URL | connect | direct | ext/websocket/lib.rs:op_ws_create() | connector and redirect |
+| Deno TCP connect | connect | direct | ext/net/ops.rs:op_net_connect_tcp_inner() | logical host plus resolved IP |
+| Deno TCP listen | listen | direct | ext/net/ops.rs:op_net_listen_tcp() | bind host plus resolved IP |
+| Deno UDP send | connect | direct | ext/net/ops.rs:op_net_send_udp() | destination plus resolved IP |
+| Deno UDP listen | listen | direct | ext/net/ops.rs:net_listen_udp() | bind host plus resolved IP |
+| Deno standalone DNS (v1 resolve fold) | fetch | direct | ext/net/ops.rs:op_dns_resolve() | configured name-server endpoint |
+| Deno TLS connect | connect | direct | ext/net/ops_tls.rs:op_net_connect_tls() | logical host plus resolved IP |
+| Deno TLS listen | listen | direct | ext/net/ops_tls.rs:op_net_listen_tls() | bind host plus resolved IP |
+| Deno Unix stream connect | connect | inherited | ext/net/ops_unix.rs:op_net_connect_unix() | typed check_unix_socket_path helper |
+| Deno Unix datagram send | connect | inherited | ext/net/ops_unix.rs:op_net_send_unixpacket() | typed check_unix_socket_path helper |
+| Deno Unix stream listen | listen | inherited | ext/net/ops_unix.rs:op_net_listen_unix() | typed check_unix_socket_path helper |
+| Deno Unix datagram listen | listen | inherited | ext/net/ops_unix.rs:net_listen_unixpacket() | typed check_unix_socket_path helper |
+| Deno vsock connect | connect | direct | ext/net/ops.rs:op_net_connect_vsock() | vsock:cid:port |
+| Deno vsock listen | listen | direct | ext/net/ops.rs:op_net_listen_vsock() | vsock:cid:port |
+| Deno QUIC endpoint bind | listen | direct | ext/net/quic.rs:op_quic_endpoint_create() | can-listen endpoint creation |
+| Deno QUIC listener | listen | inherited | ext/net/quic.rs:op_quic_endpoint_listen() | authorized can-listen endpoint |
+| Deno QUIC connect | connect | direct | ext/net/quic.rs:op_quic_endpoint_connect() | logical host plus resolved IP |
+| WebTransport connect | connect | inherited | ext/net/quic.rs:op_webtransport_connect() | authorized QUIC connection |
+| Node HTTP(S) direct connection | fetch | direct | ext/node/ops/tcp_wrap.rs:connect() | endpoint-bound opaque HTTP token |
+| Node HTTP(S) proxy | fetch | direct | ext/node/ops/http.rs:op_node_http_check_proxy_net() | logical proxy endpoint |
+| Node TCP connect | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | untokenized raw socket |
+| Node TCP bind/listen | listen | direct | ext/node/ops/tcp_wrap.rs:bind_inner() | bind before listener creation |
+| Node UDP send | connect | direct | ext/node/ops/udp.rs:op_node_udp_send() | destination plus resolved IP |
+| Node UDP bind | listen | direct | ext/node/ops/udp.rs:op_node_udp_bind() | bind host plus resolved IP |
+| Node HTTP(S) Unix socket | fetch | direct | ext/node/ops/pipe_wrap.rs:connect() | endpoint-bound opaque HTTP token |
+| Node Unix pipe connect | connect | direct | ext/node/ops/pipe_wrap.rs:connect() | untokenized raw pipe |
+| Node Unix pipe bind | listen | direct | ext/node/ops/pipe_wrap.rs:bind() | bind path |
+| Node Unix pipe listen | listen | direct | ext/node/ops/pipe_wrap.rs:listen() | bound path recheck |
+| Node DNS lookup/reverse lookup | fetch | direct | ext/node/ops/dns.rs:op_node_getaddrinfo() | query target |
+| Node DNS reverse lookup (v1 resolve fold) | fetch | direct | ext/node/ops/dns.rs:op_node_getnameinfo() | query target |
+| Node inspector listener | listen | direct | ext/node/ops/inspector.rs:op_inspector_open() | inspector bind host/port |
 
 ## Op-body pre-check skips (query_read_all call sites)
 

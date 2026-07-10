@@ -68,6 +68,31 @@ use self::oden_policy::Request as OdenRequest;
 use self::prompter::PromptResponse;
 use self::which::WhichSys;
 
+/// The protocol class of a network operation at the package-capability layer.
+///
+/// Deno's process-level `net` descriptor deliberately combines these classes,
+/// but Oden grants do not: HTTP request/response traffic, arbitrary outbound
+/// streams, and listeners are distinct authority. Callers must select the
+/// action at the resource-creating operation and carry it unchanged through
+/// URL, DNS-resolution, redirect, Unix-socket, and vsock checks.
+// @ref llp/0010-the-capability-surface.spec.md#network [implements] -- Network actions are authority classes, not aliases for one generic net descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetPermissionAction {
+  Fetch,
+  Connect,
+  Listen,
+}
+
+impl NetPermissionAction {
+  const fn as_str(self) -> &'static str {
+    match self {
+      Self::Fetch => "fetch",
+      Self::Connect => "connect",
+      Self::Listen => "listen",
+    }
+  }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum BrokerResponse {
   Allow,
@@ -586,14 +611,27 @@ fn oden_suggested_grant_token(
   Some(token)
 }
 
-// Host of a net target for a suggestion scope (strip scheme, path, and port).
+// Host/endpoint of a net target for a suggestion scope. URL and ordinary
+// host:port targets collapse to their host, while authority-bearing endpoint
+// forms remain whole so `unix:/path` and `vsock:cid:port` grants are usable.
 fn oden_host_of(target: &str) -> String {
+  if target.starts_with("unix:") || target.starts_with("vsock:") {
+    return target.to_string();
+  }
   let t = target
     .strip_prefix("https://")
     .or_else(|| target.strip_prefix("http://"))
     .unwrap_or(target);
   let t = t.split('/').next().unwrap_or(t);
-  t.split(':').next().unwrap_or(t).to_string()
+  if let Some(bracketed) = t.strip_prefix('[')
+    && let Some(end) = bracketed.find(']')
+  {
+    return format!("[{}]", &bracketed[..end]);
+  }
+  if t.matches(':').count() == 1 {
+    return t.split(':').next().unwrap_or(t).to_string();
+  }
+  t.to_string()
 }
 
 // --- Readiness report + fail-closed honesty (LLP 0001 Phase 2) --------------
@@ -6748,12 +6786,13 @@ impl PermissionsContainer {
   #[inline(always)]
   pub fn check_net_url(
     &mut self,
+    action: NetPermissionAction,
     url: &Url,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
     oden_capsec_decide(
       OdenFamily::Network,
-      "fetch",
+      action.as_str(),
       url.as_str(),
       Some(api_name),
     )?;
@@ -6771,13 +6810,19 @@ impl PermissionsContainer {
   #[inline(always)]
   pub fn check_net<T: AsRef<str>>(
     &mut self,
+    action: NetPermissionAction,
     host: &(T, Option<u16>),
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
     let hostname = Host::parse_for_query(host.0.as_ref())?;
     let descriptor = NetDescriptor(hostname, host.1.map(Into::into));
     let target = descriptor.display_name().into_owned();
-    oden_capsec_decide(OdenFamily::Network, "fetch", &target, Some(api_name))?;
+    oden_capsec_decide(
+      OdenFamily::Network,
+      action.as_str(),
+      &target,
+      Some(api_name),
+    )?;
     let mut inner = self.inner.lock();
     let inner = &mut inner.net;
     audit_and_skip_check_if_is_permission_fully_granted!(
@@ -6795,6 +6840,7 @@ impl PermissionsContainer {
   #[inline(always)]
   pub fn check_net_resolved(
     &mut self,
+    _action: NetPermissionAction,
     resolved_ip: &std::net::IpAddr,
     port: u16,
     api_name: &str,
@@ -6808,12 +6854,18 @@ impl PermissionsContainer {
   #[inline(always)]
   pub fn check_net_vsock(
     &mut self,
+    action: NetPermissionAction,
     cid: u32,
     port: u32,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
-    let target = format!("{cid}:{port}");
-    oden_capsec_decide(OdenFamily::Network, "fetch", &target, Some(api_name))?;
+    let target = format!("vsock:{cid}:{port}");
+    oden_capsec_decide(
+      OdenFamily::Network,
+      action.as_str(),
+      &target,
+      Some(api_name),
+    )?;
     let mut inner = self.inner.lock();
     audit_and_skip_check_if_is_permission_fully_granted!(
       inner.net,
@@ -6840,11 +6892,17 @@ impl PermissionsContainer {
   /// an unscoped `--allow-net` grant.
   pub fn check_net_unix_socket(
     &mut self,
+    action: NetPermissionAction,
     path: &Path,
     api_name: Option<&str>,
   ) -> Result<(), PermissionCheckError> {
     let target = format!("unix:{}", path.display());
-    oden_capsec_decide(OdenFamily::Network, "fetch", &target, api_name)?;
+    oden_capsec_decide(
+      OdenFamily::Network,
+      action.as_str(),
+      &target,
+      api_name,
+    )?;
     let mut inner = self.inner.lock();
     audit_and_skip_check_if_is_permission_fully_granted!(
       inner.net,
@@ -7761,6 +7819,17 @@ mod tests {
   use super::*;
 
   #[test]
+  fn oden_network_scope_normalization_preserves_special_endpoints() {
+    assert_eq!(
+      oden_host_of("https://example.test:8443/path"),
+      "example.test"
+    );
+    assert_eq!(oden_host_of("[::1]:8443"), "[::1]");
+    assert_eq!(oden_host_of("unix:/tmp/oden.sock"), "unix:/tmp/oden.sock");
+    assert_eq!(oden_host_of("vsock:2:8000"), "vsock:2:8000");
+  }
+
+  #[test]
   fn resource_use_decision_owner_semantics() {
     // Untracked rid (opened by root, or a family whose check isn't wired) is a
     // named residual: recorded, allowed.
@@ -8421,7 +8490,14 @@ mod tests {
 
     for (url_str, is_ok) in url_tests {
       let u = Url::parse(url_str).unwrap();
-      assert_eq!(is_ok, perms.check_net_url(&u, "api()").is_ok(), "{}", u);
+      assert_eq!(
+        is_ok,
+        perms
+          .check_net_url(NetPermissionAction::Fetch, &u, "api()")
+          .is_ok(),
+        "{}",
+        u
+      );
     }
   }
 
@@ -9620,7 +9696,12 @@ mod tests {
     ];
 
     for (host, is_ok) in cases {
-      assert_eq!(perms.check_net(&(host, None), "api").is_ok(), is_ok);
+      assert_eq!(
+        perms
+          .check_net(NetPermissionAction::Connect, &(host, None), "api")
+          .is_ok(),
+        is_ok
+      );
     }
   }
 
@@ -9645,7 +9726,12 @@ mod tests {
     ];
 
     for (host, is_ok) in cases {
-      assert_eq!(perms.check_net(&(host, None), "api").is_ok(), is_ok);
+      assert_eq!(
+        perms
+          .check_net(NetPermissionAction::Connect, &(host, None), "api")
+          .is_ok(),
+        is_ok
+      );
     }
   }
 
@@ -9667,13 +9753,33 @@ mod tests {
     let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
 
     // Direct IPv4 is denied
-    assert!(perms.check_net(&("127.0.0.1", None), "api").is_err());
+    assert!(
+      perms
+        .check_net(NetPermissionAction::Connect, &("127.0.0.1", None), "api")
+        .is_err()
+    );
     // IPv4-mapped IPv6 form must also be denied
-    assert!(perms.check_net(&("::ffff:127.0.0.1", None), "api").is_err());
+    assert!(
+      perms
+        .check_net(
+          NetPermissionAction::Connect,
+          &("::ffff:127.0.0.1", None),
+          "api"
+        )
+        .is_err()
+    );
     // Regular IPv6 loopback is a different address, should be allowed
-    assert!(perms.check_net(&("::1", None), "api").is_ok());
+    assert!(
+      perms
+        .check_net(NetPermissionAction::Connect, &("::1", None), "api")
+        .is_ok()
+    );
     // Other IPv4 addresses should be allowed
-    assert!(perms.check_net(&("192.168.1.1", None), "api").is_ok());
+    assert!(
+      perms
+        .check_net(NetPermissionAction::Connect, &("192.168.1.1", None), "api")
+        .is_ok()
+    );
 
     // Allow an IPv4-mapped IPv6, verify it's accessible via IPv4 too
     let parser = TestPermissionDescriptorParser;
@@ -9687,8 +9793,20 @@ mod tests {
     .unwrap();
     let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
 
-    assert!(perms.check_net(&("10.0.0.1", None), "api").is_ok());
-    assert!(perms.check_net(&("::ffff:10.0.0.1", None), "api").is_ok());
+    assert!(
+      perms
+        .check_net(NetPermissionAction::Connect, &("10.0.0.1", None), "api")
+        .is_ok()
+    );
+    assert!(
+      perms
+        .check_net(
+          NetPermissionAction::Connect,
+          &("::ffff:10.0.0.1", None),
+          "api"
+        )
+        .is_ok()
+    );
 
     // Port-qualified: deny 127.0.0.1:8080, verify IPv4-mapped form
     // with port is also denied (exercises the SocketAddr parse path)
@@ -9704,16 +9822,32 @@ mod tests {
     .unwrap();
     let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
 
-    assert!(perms.check_net(&("127.0.0.1", Some(8080)), "api").is_err());
     assert!(
       perms
-        .check_net(&("::ffff:127.0.0.1", Some(8080)), "api")
+        .check_net(
+          NetPermissionAction::Connect,
+          &("127.0.0.1", Some(8080)),
+          "api"
+        )
+        .is_err()
+    );
+    assert!(
+      perms
+        .check_net(
+          NetPermissionAction::Connect,
+          &("::ffff:127.0.0.1", Some(8080)),
+          "api",
+        )
         .is_err()
     );
     // Different port should be allowed
     assert!(
       perms
-        .check_net(&("::ffff:127.0.0.1", Some(9090)), "api")
+        .check_net(
+          NetPermissionAction::Connect,
+          &("::ffff:127.0.0.1", Some(9090)),
+          "api",
+        )
         .is_ok()
     );
   }
@@ -12795,10 +12929,22 @@ mod tests {
     let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
 
     // Subdomain should match wildcard allow
-    assert!(perms.check_net(&("sub.example.com", None), "api").is_ok());
     assert!(
       perms
-        .check_net(&("deep.sub.example.com", None), "api")
+        .check_net(
+          NetPermissionAction::Connect,
+          &("sub.example.com", None),
+          "api"
+        )
+        .is_ok()
+    );
+    assert!(
+      perms
+        .check_net(
+          NetPermissionAction::Connect,
+          &("deep.sub.example.com", None),
+          "api",
+        )
         .is_ok()
     );
 
@@ -12806,17 +12952,33 @@ mod tests {
     // because the fqdn crate's is_subdomain_of is inclusive (a domain is a
     // subdomain of itself). This is intentional and consistent with the
     // existing test_check_net_with_values test for *.discord.gg.
-    assert!(perms.check_net(&("example.com", None), "api").is_ok());
+    assert!(
+      perms
+        .check_net(NetPermissionAction::Connect, &("example.com", None), "api")
+        .is_ok()
+    );
 
     // Subdomain of denied wildcard should be denied
-    assert!(perms.check_net(&("sub.evil.com", None), "api").is_err());
+    assert!(
+      perms
+        .check_net(NetPermissionAction::Connect, &("sub.evil.com", None), "api")
+        .is_err()
+    );
 
     // Bare domain also matches wildcard deny (same inclusive semantics)
-    assert!(perms.check_net(&("evil.com", None), "api").is_err());
+    assert!(
+      perms
+        .check_net(NetPermissionAction::Connect, &("evil.com", None), "api")
+        .is_err()
+    );
 
     // Unrelated domain should prompt (denied since no-prompt by default
     // in test)
-    assert!(perms.check_net(&("other.com", None), "api").is_err());
+    assert!(
+      perms
+        .check_net(NetPermissionAction::Connect, &("other.com", None), "api")
+        .is_err()
+    );
   }
 
   #[test]
