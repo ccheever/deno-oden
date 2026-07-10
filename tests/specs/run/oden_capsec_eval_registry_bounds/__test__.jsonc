@@ -1,0 +1,17 @@
+{
+  // ENG-23982: one abandoned dependency Function cannot tax unrelated root
+  // ops, while out-of-order execution beyond both registry limits remains
+  // correctly attributed. Rust unit tests assert the exact structure bounds;
+  // this engine-backed case protects the end-to-end behavior and hot path.
+  "tests": {
+    "eval_registry_is_bounded_and_isolate_local": {
+      "args": "run --allow-env app.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec.json",
+        "SECRET": "s3cret"
+      },
+      "output": "registry.out",
+      "exitCode": 0
+    }
+  }
+}

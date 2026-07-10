@@ -1,0 +1,4 @@
+[oden-capsec] env:SECRET caller=root -> allow(ambient)
+[oden-capsec] env:SECRET caller=good-dep -> allow(granted)
+out-of-order-attribution: s3cret
+root-hot-path-unaffected: true

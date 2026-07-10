@@ -5,6 +5,6 @@
   lockdown: off (opt-in outside enforce; default-on measured NO-GO by the compat corpus)
   compartment-globals: off (opt-in only; default-on blocked by the compat-corpus gate)
   integrity: unbound (no lockfile)
-  policy-source: capsec_audit.json
+  policy-source: engine-handoff
   root: [WILDLINE]
 [WILDCARD]op ran
