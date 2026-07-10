@@ -142,7 +142,11 @@ struct PackageRequest {
   name: String,
   version: String,
   integrity: Option<String>,
+  /// Registry selected by the current npm configuration.
   registry: String,
+  /// Persisted resolved tarball URL. This remains authoritative when a
+  /// lockfile is reused under different npm configuration.
+  tarball: String,
 }
 
 impl PackageRequest {
@@ -152,11 +156,21 @@ impl PackageRequest {
 
   fn key(&self) -> String {
     format!(
-      "{}|{}|{}",
-      normalize_registry(&self.registry),
+      "{}|{}|{}|{}",
+      self.report_registry(),
+      tarball_provenance(&self.tarball),
       self.purl(),
       self.integrity.as_deref().unwrap_or("integrity-unknown")
     )
+  }
+
+  fn report_registry(&self) -> String {
+    if tarball_belongs_to_registry(&self.tarball, &self.registry) {
+      normalize_registry(&self.registry)
+    } else {
+      tarball_origin_registry(&self.tarball)
+        .unwrap_or_else(|| normalize_registry(&self.registry))
+    }
   }
 }
 
@@ -287,11 +301,19 @@ impl SocketVerdictProvider {
       version: nv.version.to_string(),
       integrity: dist.integrity().for_lockfile().map(|v| v.into_owned()),
       registry,
+      tarball: dist.tarball.clone(),
     })
   }
 
+  // @ref llp/0002-the-oden-installer.plan.md#privacy [implements] — Current
+  // registry configuration and persisted tarball provenance must both be
+  // public before an identity may leave the installer.
   fn is_public_request(&self, request: &PackageRequest) -> bool {
     normalize_registry(&request.registry) == self.inner.public_registry
+      && tarball_belongs_to_registry(
+        &request.tarball,
+        &self.inner.public_registry,
+      )
   }
 
   fn cache_is_fresh(&self, request: &PackageRequest, now: u64) -> bool {
@@ -569,6 +591,7 @@ impl SocketVerdictProvider {
           version: package.id.nv.version.to_string(),
           integrity: dist.integrity().for_lockfile().map(|v| v.into_owned()),
           registry,
+          tarball: dist.tarball.clone(),
         };
         Some((request.key(), request))
       })
@@ -709,7 +732,7 @@ impl NpmPackageVerdictProvider for SocketVerdictProvider {
           entry,
           cached,
           false,
-          request.registry,
+          request.report_registry(),
           None,
         ));
       }
@@ -906,7 +929,7 @@ impl NpmPackageVerdictProvider for SocketVerdictProvider {
           entry.clone(),
           cached,
           stale,
-          request.registry,
+          request.report_registry(),
           None,
         ));
         store_changed |= store.entries.get(&key) != Some(&entry);
@@ -1363,6 +1386,44 @@ fn unix_now() -> u64 {
     .as_secs()
 }
 
+fn tarball_belongs_to_registry(tarball: &str, registry: &str) -> bool {
+  let Ok(tarball) = Url::parse(tarball) else {
+    return false;
+  };
+  let Ok(registry) = Url::parse(&normalize_registry(registry)) else {
+    return false;
+  };
+  if !tarball.username().is_empty()
+    || tarball.password().is_some()
+    || !registry.username().is_empty()
+    || registry.password().is_some()
+  {
+    return false;
+  }
+  tarball.scheme() == registry.scheme()
+    && tarball.host_str() == registry.host_str()
+    && tarball.port_or_known_default() == registry.port_or_known_default()
+    && tarball.path().starts_with(registry.path())
+}
+
+fn tarball_provenance(value: &str) -> String {
+  let Ok(mut url) = Url::parse(value) else {
+    return "invalid-tarball-url".to_string();
+  };
+  if url.set_username("").is_err() || url.set_password(None).is_err() {
+    return "invalid-tarball-url".to_string();
+  }
+  url.set_query(None);
+  url.set_fragment(None);
+  url.to_string()
+}
+
+fn tarball_origin_registry(value: &str) -> Option<String> {
+  let url = Url::parse(value).ok()?;
+  let origin = url.origin().ascii_serialization();
+  (origin != "null").then(|| normalize_registry(&origin))
+}
+
 fn normalize_registry(value: &str) -> String {
   format!("{}/", value.trim_end_matches('/'))
 }
@@ -1382,6 +1443,7 @@ mod tests {
       version: version.to_string(),
       integrity: Some("sha512-test".to_string()),
       registry: DEFAULT_PUBLIC_REGISTRY.to_string(),
+      tarball: format!("{}{}-{}.tgz", DEFAULT_PUBLIC_REGISTRY, name, version),
     }
   }
 
@@ -1451,14 +1513,36 @@ mod tests {
   }
 
   #[test]
-  fn cache_identity_binds_registry_and_integrity() {
+  fn cache_identity_binds_registry_tarball_provenance_and_integrity() {
     let original = request("same-name", "1.0.0");
     let mut private = original.clone();
     private.registry = "https://registry.example/npm/".to_string();
+    private.tarball =
+      "https://registry.example/npm/same-name-1.0.0.tgz".to_string();
+    let mut drifted = original.clone();
+    drifted.tarball =
+      "https://registry.private.example/same-name-1.0.0.tgz".to_string();
     let mut republished = original.clone();
     republished.integrity = Some("sha512-different".to_string());
     assert_ne!(original.key(), private.key());
+    assert_ne!(original.key(), drifted.key());
     assert_ne!(original.key(), republished.key());
+  }
+
+  #[test]
+  fn public_registry_requires_matching_persisted_tarball_provenance() {
+    assert!(tarball_belongs_to_registry(
+      "https://registry.npmjs.org/chalk/-/chalk-5.0.1.tgz",
+      DEFAULT_PUBLIC_REGISTRY,
+    ));
+    assert!(!tarball_belongs_to_registry(
+      "https://registry.private.example/chalk/-/chalk-5.0.1.tgz",
+      DEFAULT_PUBLIC_REGISTRY,
+    ));
+    assert!(!tarball_belongs_to_registry(
+      "https://registry.npmjs.org.evil.example/chalk.tgz",
+      DEFAULT_PUBLIC_REGISTRY,
+    ));
   }
 
   #[test]

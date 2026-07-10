@@ -264,6 +264,32 @@ switch (scenario) {
     assertEquals(report.error, undefined, "private registry report error");
     break;
   }
+  case "private_registry_from_persisted_tarball": {
+    assertEquals(report.mode, "default", "scan mode");
+    expectRecords(2, { clean: 1, unsupported_source: 1 });
+    expectRecord("chalk", "5.0.1", {
+      status: "clean",
+      provider: "socket",
+      registry: "http://localhost:4260/",
+      cached: true,
+      stale: false,
+      dependency_path: ["chalk@5.0.1"],
+    });
+    expectRecord("@denotest/basic", "1.0.0", {
+      status: "unsupported_source",
+      provider: "policy",
+      registry: "http://localhost:4261/",
+      cached: true,
+      stale: false,
+      dependency_path: ["@denotest/basic@1.0.0"],
+    });
+    assertEquals(
+      report.error,
+      undefined,
+      "persisted private registry report error",
+    );
+    break;
+  }
   default:
     throw new Error(`unknown report assertion scenario: ${scenario}`);
 }
@@ -285,6 +311,9 @@ const expectedCaptures: Record<string, string[]> = {
   stale_cached: ["pkg:npm/@denotest/add@1.0.0"],
   // The private @denotest/basic identity must never leave the installer.
   private_registry: ["pkg:npm/chalk@5.0.1"],
+  // Both verdicts are cached, so a second install should not send either
+  // identity after the private registry configuration has been removed.
+  private_registry_from_persisted_tarball: [],
 };
 
 const captureResponse = await fetch(

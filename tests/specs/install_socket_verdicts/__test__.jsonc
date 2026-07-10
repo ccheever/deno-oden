@@ -289,6 +289,32 @@
           ],
           "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
           "output": "ok private_registry\n"
+        },
+        {
+          "cwd": "private_registry",
+          "args": ["eval", "Deno.removeSync('.npmrc')"],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": ""
+        },
+        {
+          "cwd": "private_registry",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/clean/eng23997-private-registry-persisted-tarball"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "private_registry_from_persisted_tarball",
+            "private_registry/socket-report.json",
+            "eng23997-private-registry-persisted-tarball"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok private_registry_from_persisted_tarball\n"
         }
       ]
     }
