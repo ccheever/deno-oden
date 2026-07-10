@@ -196,19 +196,16 @@ fn oden_capsec_decide(
   // The rescue does not widen: `active_covers` matches the attenuated scope, so
   // a use outside the handle's scope still denies through the normal path.
   if decision == OdenDecision::Deny && oden_handle::active_covers(&req) {
-    let api = api_name.unwrap_or_else(|| family.name());
-    eprintln!(
-      "[oden-capsec] {api}:{} caller={principal_label} -> allow(handle)",
-      req.target
-    );
-    oden_capsec_audit_record(
+    if !oden_capsec_audit_record(
       &principal_label,
       family.name(),
       action,
       &req.target,
       "allow(handle)",
       None,
-    );
+    ) {
+      return Err(oden_capsec_audit_incomplete_error());
+    }
     return Ok(());
   }
 
@@ -219,35 +216,18 @@ fn oden_capsec_decide(
     (OdenDecision::Deny, _) => "DENY(no grant)",
   };
   let api = api_name.unwrap_or_else(|| family.name());
-  // Audit-as-conversation feedback. ALLOW verdicts are deduped to one stderr
-  // line per distinct (principal, api, target, verdict) per process: emitting
-  // them per event priced an unbuffered stderr write into every mediated op
-  // (~100x on a gated-op hot loop, ENG-23764 benchmark) and buried the signal
-  // in repeats. audit(record) and DENY stay per-event — they are the
-  // conversation (the deferral-channel conformance spec counts one record per
-  // channel), and a denied op throws, so a deny loop cannot spam. The NDJSON
-  // sink (ODEN_CAPSEC_AUDIT) stays per-event for machine consumption.
-  let emit = if matches!(decision, OdenDecision::Allow) {
-    static SEEN_ALLOWS: Lazy<Mutex<std::collections::HashSet<String>>> =
-      Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
-    let key = format!("{principal_label}\u{1}{api}\u{1}{target}\u{1}{verdict}");
-    SEEN_ALLOWS.lock().insert(key)
-  } else {
-    true
-  };
-  if emit {
-    eprintln!(
-      "[oden-capsec] {api}:{target} caller={principal_label} -> {verdict}"
-    );
-  }
-  oden_capsec_audit_record(
+  // Operational diagnostics travel only on the authenticated audit file. App
+  // stderr is application data and must never be classified by text prefix.
+  if !oden_capsec_audit_record(
     &principal_label,
     family.name(),
     action,
     &req.target,
     verdict,
     suggestion.as_deref(),
-  );
+  ) {
+    return Err(oden_capsec_audit_incomplete_error());
+  }
   if decision == OdenDecision::Deny {
     let fix = suggestion
       .as_deref()
@@ -764,18 +744,14 @@ fn oden_capsec_readiness_gate() -> Result<(), PermissionCheckError> {
   // Emitting the full report is gated on ODEN_CAPSEC_READINESS while capsec is
   // itself env-gated (auto-emit at startup under audit/enforce wires on with the
   // structural, non-env arming). The fail-closed refusal below is unconditional.
+  // The readiness report is consumed through engine-owned state/audit paths;
+  // application stderr remains byte-faithful runtime content.
   if first && oden_capsec_env_flag("ODEN_CAPSEC_READINESS") {
-    eprint!("{}", readiness.render());
+    let _ = readiness.render();
   }
   let missing = readiness.missing_required();
   if readiness.mode == OdenMode::Enforce && !missing.is_empty() {
     let advisory = oden_capsec_env_flag("ODEN_CAPSEC_ALLOW_ADVISORY");
-    if first {
-      eprintln!(
-        "[oden-capsec] enforce is missing prerequisites: {}",
-        missing.join(", ")
-      );
-    }
     if !advisory {
       return Err(PermissionCheckError::PermissionDenied(
         PermissionDeniedError {
@@ -790,11 +766,6 @@ fn oden_capsec_readiness_gate() -> Result<(), PermissionCheckError> {
         },
       ));
     }
-    if first {
-      eprintln!(
-        "[oden-capsec] running enforce in a NAMED DEGRADED STATE (advisory accepted)"
-      );
-    }
   }
   Ok(())
 }
@@ -807,6 +778,115 @@ fn oden_capsec_readiness_gate() -> Result<(), PermissionCheckError> {
   clippy::disallowed_methods,
   reason = "Phase-1 per-package audit log path is supplied through an env var; a resolver replaces it later."
 )]
+struct OdenAuditWriter {
+  enabled: bool,
+  file: Option<std::fs::File>,
+  bytes: usize,
+  records: usize,
+  max_bytes: usize,
+  max_records: usize,
+  incomplete: bool,
+  seen: std::collections::HashSet<u64>,
+}
+
+impl OdenAuditWriter {
+  fn new() -> Self {
+    let Some(path) = std::env::var_os("ODEN_CAPSEC_AUDIT") else {
+      return Self {
+        enabled: false,
+        file: None,
+        bytes: 0,
+        records: 0,
+        max_bytes: 0,
+        max_records: 0,
+        incomplete: false,
+        seen: std::collections::HashSet::new(),
+      };
+    };
+    let max_bytes = std::env::var("ODEN_CAPSEC_AUDIT_MAX_BYTES")
+      .ok()
+      .and_then(|value| value.parse().ok())
+      .filter(|value| *value > 0)
+      .unwrap_or(1024 * 1024);
+    let max_records = std::env::var("ODEN_CAPSEC_AUDIT_MAX_RECORDS")
+      .ok()
+      .and_then(|value| value.parse().ok())
+      .filter(|value| *value > 0)
+      .unwrap_or(10_000);
+    let file = std::fs::OpenOptions::new()
+      .create(true)
+      .append(true)
+      .open(path)
+      .ok();
+    Self {
+      enabled: true,
+      incomplete: file.is_none(),
+      file,
+      bytes: 0,
+      records: 0,
+      max_bytes,
+      max_records,
+      seen: std::collections::HashSet::new(),
+    }
+  }
+
+  fn append(&mut self, line: &str) -> bool {
+    if !self.enabled {
+      return true;
+    }
+    if self.incomplete {
+      return false;
+    }
+    // The policy conversation is site-insensitive and suggestions are deduped
+    // by resolved row. Repeated hot-loop operations therefore pay one trusted
+    // write, while this hash set remains bounded by max_records.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    line.hash(&mut hasher);
+    if !self.seen.insert(hasher.finish()) {
+      return true;
+    }
+    // Reserve enough space for the one authenticated overflow marker.
+    const OVERFLOW_RESERVE: usize = 192;
+    if self.records >= self.max_records
+      || self.bytes + line.len() + 1 + OVERFLOW_RESERVE > self.max_bytes
+    {
+      return self.mark_incomplete("quota-overflow");
+    }
+    let Some(file) = self.file.as_mut() else {
+      self.incomplete = true;
+      return false;
+    };
+    if file.write_all(line.as_bytes()).is_err()
+      || file.write_all(b"\n").is_err()
+    {
+      self.incomplete = true;
+      return false;
+    }
+    self.bytes += line.len() + 1;
+    self.records += 1;
+    true
+  }
+
+  fn mark_incomplete(&mut self, reason: &str) -> bool {
+    let marker = serde_json::json!({
+      "v": 1,
+      "event": "audit-incomplete",
+      "reason": reason,
+    });
+    if let (Some(file), Ok(line)) =
+      (self.file.as_mut(), serde_json::to_string(&marker))
+    {
+      let _ = file.write_all(line.as_bytes());
+      let _ = file.write_all(b"\n");
+    }
+    self.incomplete = true;
+    false
+  }
+}
+
+static ODEN_AUDIT_WRITER: Lazy<Mutex<OdenAuditWriter>> =
+  Lazy::new(|| Mutex::new(OdenAuditWriter::new()));
+
 fn oden_capsec_audit_record(
   principal: &str,
   family: &str,
@@ -814,10 +894,7 @@ fn oden_capsec_audit_record(
   target: &str,
   verdict: &str,
   suggestion: Option<&str>,
-) {
-  let Some(path) = std::env::var_os("ODEN_CAPSEC_AUDIT") else {
-    return;
-  };
+) -> bool {
   let decision = match verdict {
     v if v.starts_with("allow(ambient") => "allow-ambient",
     v if v.starts_with("allow(granted") => "allow-granted",
@@ -840,15 +917,23 @@ fn oden_capsec_audit_record(
     "suggestion": suggestion,
   });
   if let Ok(line) = serde_json::to_string(&rec) {
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-      .create(true)
-      .append(true)
-      .open(path)
-    {
-      let _ = writeln!(f, "{line}");
-    }
+    return ODEN_AUDIT_WRITER.lock().append(&line);
   }
+  ODEN_AUDIT_WRITER
+    .lock()
+    .mark_incomplete("serialization-failure")
+}
+
+fn oden_capsec_audit_incomplete_error() -> PermissionCheckError {
+  PermissionCheckError::PermissionDenied(PermissionDeniedError {
+    access: "capsec audit sink".to_string(),
+    name: "capsec",
+    custom_message: Some(
+      "oden capsec: bounded audit evidence is incomplete; refusing to continue"
+        .to_string(),
+    ),
+    state: PermissionState::Denied,
+  })
 }
 
 // --- Resource ownership (LLP 0001 Native resource ownership, ENG-23776) ------
@@ -924,6 +1009,7 @@ pub fn oden_capsec_check_resource_owner(
   }
   let label = principal.label();
   let owner = ODEN_RESOURCE_OWNERS.lock().get(&rid).cloned();
+  let owner_label = owner.as_deref().unwrap_or("(untracked)");
   let mode = oden_capsec_mode(oden_capsec_policy_file());
   let decision = oden_resource_use_decision(&label, owner.as_deref(), mode);
   if matches!(decision, OdenDecision::Allow)
@@ -931,15 +1017,11 @@ pub fn oden_capsec_check_resource_owner(
   {
     return Ok(()); // caller owns it; no audit noise
   }
-  let owner_label = owner.as_deref().unwrap_or("(untracked)");
   let verdict = match decision {
     OdenDecision::Deny => "DENY(cross-principal rid)",
     _ => "audit(record)",
   };
   if !matches!(decision, OdenDecision::Allow) {
-    eprintln!(
-      "[oden-capsec] {family}:use rid={rid} caller={label} owner={owner_label} -> {verdict}"
-    );
     oden_capsec_audit_record(
       &label,
       family,
@@ -1042,9 +1124,6 @@ fn oden_handle_denied(
   cap: &str,
   reason: &str,
 ) -> PermissionCheckError {
-  eprintln!(
-    "[oden-capsec] handle:{action} caller={label} cap={cap} -> DENY({reason})"
-  );
   oden_capsec_audit_record(
     label,
     "handle",
@@ -1101,9 +1180,6 @@ pub fn oden_capsec_handle_mint(
   }
   let id =
     oden_handle::insert_handle(label.clone(), grant, canonical.clone(), None);
-  eprintln!(
-    "[oden-capsec] handle:mint caller={label} cap={canonical} -> allow(mint)"
-  );
   oden_capsec_audit_record(
     &label,
     "handle",
@@ -1172,9 +1248,6 @@ pub fn oden_capsec_handle_scoped(
     canonical.clone(),
     Some(parent_id),
   );
-  eprintln!(
-    "[oden-capsec] handle:scoped caller={label} cap={canonical} -> allow(scoped)"
-  );
   oden_capsec_audit_record(
     &label,
     "handle",
@@ -1219,9 +1292,6 @@ pub fn oden_capsec_handle_enter(hex: &str) -> Result<(), PermissionCheckError> {
       // Boundary-crossing audit: fire once per new cross-package possessor.
       let crossed = oden_handle::with_table(|t| t.note_possessor(id, &label));
       if crossed {
-        eprintln!(
-          "[oden-capsec] handle:transfer {minter}->{label} cap={cap_str} -> allow(transfer)"
-        );
         oden_capsec_audit_record(
           &label,
           "handle",
@@ -1263,7 +1333,6 @@ pub fn oden_capsec_handle_revoke(hex: &str) {
     } else {
       "allow(revoke cascade)"
     };
-    eprintln!("[oden-capsec] handle:revoke caller={label} cap={cap} -> {kind}");
     oden_capsec_audit_record(&label, "handle", "revoke", &cap, kind, None);
   }
 }
@@ -1299,7 +1368,7 @@ fn oden_handle_inactive() -> PermissionCheckError {
 pub fn oden_capsec_gate_import(
   specifier: &Url,
   referrer: &Url,
-  is_dynamic: bool,
+  _is_dynamic: bool,
 ) -> Result<(), PermissionCheckError> {
   if !oden_capsec_active() {
     return Ok(());
@@ -1319,7 +1388,6 @@ pub fn oden_capsec_gate_import(
   let label = principal.label();
   let target = specifier.as_str();
   let deny = mode == OdenMode::Enforce;
-  let kindstr = if is_dynamic { "dynamic" } else { "static" };
   let verdict = if deny {
     "DENY(remote/data import default-denied under enforce)"
   } else if mode == OdenMode::Audit {
@@ -1327,9 +1395,6 @@ pub fn oden_capsec_gate_import(
   } else {
     "allow(permissive)"
   };
-  eprintln!(
-    "[oden-capsec] import({kindstr}):{target} caller={label} -> {verdict}"
-  );
   oden_capsec_audit_record(&label, "import", scheme, target, verdict, None);
   if deny {
     return Err(PermissionCheckError::PermissionDenied(
@@ -1369,7 +1434,6 @@ pub fn oden_capsec_check_worker_create() -> Result<(), PermissionCheckError> {
   } else {
     "audit(record)"
   };
-  eprintln!("[oden-capsec] worker:create caller={label} -> {verdict}");
   oden_capsec_audit_record(&label, "worker", "create", "", verdict, None);
   if deny {
     return Err(PermissionCheckError::PermissionDenied(
