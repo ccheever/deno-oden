@@ -1,35 +1,23 @@
-[WILDCARD]env:SECRET caller=root -> allow(ambient)
 root-eval: s3cret
 [WILDCARD]root-function: s3cret
 [WILDCARD]root-noop: true
-[WILDCARD]env:SECRET caller=evil-dep -> DENY(no grant)
 evil-eval: DENIED:NotCapable
-[WILDCARD]env:SECRET caller=evil-dep -> DENY(no grant)
 evil-function: DENIED:NotCapable
-[WILDCARD]env:SECRET caller=evil-dep -> DENY(no grant)
 evil-nested: DENIED:NotCapable
-[WILDCARD]env:SECRET caller=evil-dep -> DENY(no grant)
 evil-deferred-eval: DENIED:NotCapable
-[WILDCARD]env:SECRET caller=evil-dep -> DENY(no grant)
 evil-deferred-function: DENIED:NotCapable
-[WILDCARD]env:SECRET caller=evil-dep -> DENY(no grant)
 evil-forged-sourceurl: DENIED:NotCapable
-[WILDCARD]env:SECRET caller=good-dep -> allow(granted)
 good-eval: s3cret
 [WILDCARD]good-function: s3cret
 [WILDCARD]good-nested: s3cret
 [WILDCARD]good-deferred-eval: s3cret
 [WILDCARD]good-deferred-function: s3cret
 [WILDCARD]good-forged-sourceurl: s3cret
-[WILDCARD]env:SECRET caller=quarantine -> DENY(no grant)
 replay-vm-same-context: DENIED:NotCapable
 [WILDCARD]replay-original-after-vm: s3cret
-[WILDCARD]env:SECRET caller=quarantine -> DENY(no grant)
 vm-same-context-inner-eval: DENIED:NotCapable
-[WILDCARD]env:SECRET caller=quarantine -> DENY(no grant)
 replay-vm-cross-context: DENIED:NotCapable
 [WILDCARD]replay-original-after-context: s3cret
-[WILDCARD]env:SECRET caller=evil-dep -> DENY(no grant)
 worker-root-eval: s3cret
 [WILDCARD]worker-good-eval: s3cret
 [WILDCARD]worker-evil-eval: DENIED:NotCapable

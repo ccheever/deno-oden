@@ -7410,7 +7410,7 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn query_run_all(&mut self, api_name: &str) -> bool {
-    if oden_capsec_active() {
+    if oden_capsec_active() && !oden_capsec_principal().is_ambient() {
       return false;
     }
     self.inner.lock().run.query_all(Some(api_name))
