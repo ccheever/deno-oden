@@ -459,7 +459,9 @@ pub fn op_node_private_decrypt(
   let k = key.size();
   let mut rng = rand::thread_rng();
   match padding {
-    1 => Ok(key.decrypt(Pkcs1v15Encrypt, &msg)?.into()),
+    // @ref LLP 0016#rust-advisory-gate [constrained-by] — Keep every private
+    // operation blinded while RUSTSEC-2023-0071 has no patched rsa 0.9 release.
+    1 => Ok(key.decrypt_blinded(&mut rng, Pkcs1v15Encrypt, &msg)?.into()),
     3 => {
       // RSA_NO_PADDING: raw private-key exponentiation
       let int = BigUint::from_bytes_be(&msg);
@@ -473,7 +475,7 @@ pub fn op_node_private_decrypt(
     4 => {
       let oaep = create_oaep(oaep_hash.as_deref(), oaep_label.as_deref())?;
       key
-        .decrypt(oaep, &msg)
+        .decrypt_blinded(&mut rng, oaep, &msg)
         .map(|v| v.into())
         .map_err(|_| PrivateEncryptDecryptError::OaepDecodingError)
     }

@@ -21,6 +21,7 @@ use ctr::Ctr32BE;
 use ctr::Ctr64BE;
 use ctr::Ctr128BE;
 use ctr::cipher::StreamCipher;
+use rand::rngs::OsRng;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use sha1::Sha1;
 use sha2::Sha256;
@@ -125,8 +126,10 @@ pub(crate) fn decrypt_rsa_oaep(
     },
   };
 
+  // @ref LLP 0016#rust-advisory-gate [constrained-by] — RUSTSEC-2023-0071 has
+  // no fixed rsa 0.9 release, so private operations require randomized blinding.
   private_key
-    .decrypt(padding, data)
+    .decrypt_blinded(&mut OsRng, padding, data)
     .map_err(DecryptError::Rsa)
 }
 
