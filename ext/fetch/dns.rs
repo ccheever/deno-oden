@@ -12,7 +12,7 @@ use std::vec;
 
 use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::TokioResolver;
 use http::Uri;
 use http::uri::Scheme;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -34,7 +34,7 @@ enum ResolverKind {
   /// A resolver using blocking `getaddrinfo` calls in a threadpool.
   Gai(GaiResolver),
   /// hickory-resolver's userspace resolver.
-  Hickory(hickory_resolver::Resolver<TokioConnectionProvider>),
+  Hickory(TokioResolver),
   /// A custom resolver that implements `Resolve`.
   Custom(Arc<dyn Resolve>),
 }
@@ -69,17 +69,13 @@ impl Resolver {
   }
 
   /// Create a [`AsyncResolver`] from system conf.
-  pub fn hickory() -> Result<Self, hickory_resolver::ResolveError> {
+  pub fn hickory() -> Result<Self, hickory_resolver::net::NetError> {
     Ok(Self {
-      kind: ResolverKind::Hickory(
-        hickory_resolver::Resolver::builder_tokio()?.build(),
-      ),
+      kind: ResolverKind::Hickory(TokioResolver::builder_tokio()?.build()?),
     })
   }
 
-  pub fn hickory_from_resolver(
-    resolver: hickory_resolver::Resolver<TokioConnectionProvider>,
-  ) -> Self {
+  pub fn hickory_from_resolver(resolver: TokioResolver) -> Self {
     Self {
       kind: ResolverKind::Hickory(resolver),
     }
@@ -143,9 +139,12 @@ impl Service<Name> for Resolver {
       ResolverKind::Hickory(async_resolver) => {
         let resolver = async_resolver.clone();
         tokio::spawn(async move {
-          let result = resolver.lookup_ip(name.as_str()).await?;
+          let result = resolver
+            .lookup_ip(name.as_str())
+            .await
+            .map_err(io::Error::other)?;
           let addrs: Vec<_> =
-            result.into_iter().map(|x| SocketAddr::new(x, 0)).collect();
+            result.iter().map(|x| SocketAddr::new(x, 0)).collect();
           Ok(addrs.into_iter())
         })
       }
