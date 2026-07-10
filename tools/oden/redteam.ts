@@ -45,9 +45,13 @@ const CHECKLIST: HoleClass[] = [
     category: "attribution-laundering",
     attack: "script-identity forgery via //# sourceURL= / eval naming",
     status: "closed",
-    tests: ["oden_capsec_cjs_attribution", "oden_capsec_compilefn_forgery"],
+    tests: [
+      "oden_capsec_cjs_attribution",
+      "oden_capsec_compilefn_forgery",
+      "oden_capsec_eval_quarantine",
+    ],
     note:
-      "attribution keys on the unforgeable V8 script_id; a forged sourceURL quarantines",
+      "attribution keys on the unforgeable V8 script_id; eval's callback-owned final sourceURL overrides caller text and binds only to the registered live caller",
   },
   {
     category: "attribution-laundering",
@@ -130,9 +134,12 @@ const CHECKLIST: HoleClass[] = [
     category: "runtime-escape-hatch",
     attack: "node:vm fresh-context eval by a package",
     status: "closed",
-    tests: ["oden_capsec_compilefn_forgery"],
+    tests: [
+      "oden_capsec_compilefn_forgery",
+      "oden_capsec_eval_quarantine",
+    ],
     note:
-      "node:vm filename is caller-supplied and NOT trusted for attribution; vm code quarantines (userland ENG-23804 also denies it)",
+      "node:vm filename is caller-supplied and NOT trusted for attribution; vm code and vm-to-eval laundering quarantine, including same-/cross-context nonce replay (userland ENG-23804 also denies it)",
   },
   {
     category: "runtime-escape-hatch",
@@ -149,15 +156,10 @@ const CHECKLIST: HoleClass[] = [
   {
     category: "runtime-escape-hatch",
     attack: "eval / new Function minting unattributed code bound to caller",
-    status: "residual",
+    status: "closed",
     tests: ["oden_capsec_eval_quarantine"],
-    residual: {
-      ticket: "ENG-23783",
-      why:
-        "eval-to-caller binding blocked on a rusty_v8 with SetModifyCodeGenerationFromStringsCallback, which no rusty_v8 release exposes (ENG-23791: needs a vendored fork, not a version bump); until then eval quarantines (fail-closed), now CI-guarded by oden_capsec_eval_quarantine",
-    },
     note:
-      "eval'd code quarantines today (sound, over-denies even first-party eval); the guard asserts the fail-closed DENY so a regression to fail-open (eval inheriting caller authority) breaks CI; attributing it to the caller needs the code-gen hook",
+      "the exact-pin V8 callback captures the registered live caller and appends a one-shot CSPRNG source identity; first matching eval frame binds its script_id, while stale/replayed/cross-context/node:vm paths quarantine",
   },
   // --- Path / fs semantics ----------------------------------------------------
   {
@@ -257,9 +259,9 @@ const CHECKLIST: HoleClass[] = [
     status: "residual",
     tests: ["oden_capsec_compartment_globals"],
     residual: {
-      ticket: "ENG-23783",
+      ticket: "ENG-23968",
       why:
-        "package eval is never-endowed and the fixture proves fail-closed ReferenceError; caller-bound evaluator semantics remain blocked on the code-generation hook",
+        "caller identity/op attribution is now closed, but package eval remains never-endowed; exposing exactly the caller's filtered global record is the separate LLP 0014 Slice-4 reachability task",
     },
     note:
       "sound over-deny only; this slice does not relabel eval-to-caller as complete",
@@ -270,12 +272,12 @@ const CHECKLIST: HoleClass[] = [
     status: "residual",
     tests: ["oden_capsec_compartment_globals", "oden_capsec_eval_quarantine"],
     residual: {
-      ticket: "ENG-23783",
+      ticket: "ENG-23968",
       why:
-        "the fixture intentionally observes that the reference is reachable, then proves its eventual operation is attributed to and denied for the ungranted package",
+        "the raw constructor can still recover the reference; ENG-23783 now proves its eventual operation is attributed to and denied for the true caller, while endowment reachability remains open",
     },
     note:
-      "quarantine/op denial is preserved; complete reachability closure belongs to evaluator taming",
+      "caller-attributed op denial is preserved; complete reachability closure belongs to evaluator endowment taming",
   },
   {
     category: "compartment-globals",
@@ -283,9 +285,9 @@ const CHECKLIST: HoleClass[] = [
     status: "residual",
     tests: ["oden_capsec_compartment_globals", "oden_capsec_eval_quarantine"],
     residual: {
-      ticket: "ENG-23783",
+      ticket: "ENG-23968",
       why:
-        "frozen prototypes prevent mutation but the constructor family still creates quarantine code; the op-denial fixture keeps the current sound boundary explicit",
+        "frozen prototypes prevent mutation and dynamic code is caller-attributed, but the constructor family can still recover an unendowed reference",
     },
     note: "not claimed closed by the lexical rewrite",
   },
@@ -306,9 +308,9 @@ const CHECKLIST: HoleClass[] = [
       "oden_capsec_compilefn_forgery",
     ],
     residual: {
-      ticket: "ENG-23783 / ENG-23779",
+      ticket: "ENG-23968 / ENG-23779",
       why:
-        "process is never-endowed and a fresh node:vm context has no fetch, but runInThisContext is a generated-code route and remains quarantine/op-denied pending evaluator and hatch closure",
+        "process is never-endowed and node:vm sourceURL/nonces remain quarantine, but generated-code global reachability still awaits evaluator endowment taming and hatch closure",
     },
     note:
       "the fixture distinguishes a closed namespace path from the honestly labeled generated-code residual",
@@ -479,8 +481,8 @@ function render(): string {
       "**GO** — every attack class in the inherited hole checklist is either " +
         "closed with a guarding fixture or a documented residual with an owning " +
         "ticket. No undocumented open holes. The remaining residuals are the " +
-        "default-denied inspector/WASI story, fail-closed eval-to-caller, and " +
-        "per-family resource owner-check wiring.",
+        "default-denied inspector/WASI story, evaluator endowment reachability, " +
+        "and per-family resource owner-check wiring.",
     );
   } else {
     out.push("**NO-GO** — open holes / missing fixtures:");

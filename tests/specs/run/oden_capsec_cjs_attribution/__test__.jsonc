@@ -1,8 +1,8 @@
 {
   // Script-creation coverage (LLP 0001): a CommonJS dependency is attributed to
   // its package (not blanket-quarantined), and a forged //# sourceURL in eval'd
-  // code cannot impersonate it -- attribution keys on the unforgeable script id.
-  // Audit mode records + allows (exit 0).
+  // code cannot impersonate it -- the eval's unforgeable script id binds to its
+  // true root caller. Audit mode records + allows (exit 0).
   "tests": {
     "cjs_attribution_and_sourceurl_redteam": {
       "args": "run --allow-env --allow-read app.js",

@@ -302,6 +302,7 @@ pub fn create_isolate(
   isolate.set_wasm_streaming_callback(
     crate::ops_builtin_v8::wasm_streaming_callback,
   );
+  crate::oden_eval::maybe_install_callback(&mut isolate);
 
   isolate
 }

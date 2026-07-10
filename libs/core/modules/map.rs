@@ -992,7 +992,11 @@ impl ModuleMap {
     if let Some(script_id) = module.script_id()
       && script_id >= 0
     {
-      crate::error::oden_register_script_locator_global(
+      // SAFETY: `tc_scope` is active for this compilation; the pointer is used
+      // only as an opaque registry key.
+      let isolate = unsafe { tc_scope.as_raw_isolate_ptr() };
+      crate::error::oden_register_script_locator(
+        isolate,
         script_id as usize,
         name.as_str(),
       );

@@ -1,19 +1,23 @@
 {
-  // eval-quarantine invariant (LLP 0001; ENG-23783 fail-closed guard). Code
-  // minted through eval()/new Function() gets a fresh V8 script id the loader
-  // index never registered; the frame walk attributes it to quarantine (no
-  // grants), so under enforce a privileged read DENIES. Locks in the sound
-  // over-deny until eval-taming (attribute-to-caller) is unblocked by a
-  // rusty_v8 code-generation hook (ENG-23791). A regression to fail-open
-  // (eval'd code inheriting its caller's authority) breaks this test.
+  // Eval-to-caller attribution (ENG-23791/ENG-23783). Armed dynamic scripts
+  // inherit the callback-time registered caller locator; a one-shot CSPRNG
+  // sourceURL only bridges compile to first engine-observed script ID. The
+  // fixture covers root, granted/ungranted deps, nested/deferred code,
+  // caller-forged sourceURL, same-/cross-context nonce replay, workers, and
+  // no-op eval. The baseline case proves the hook is not installed unarmed.
   "tests": {
-    "eval_and_new_function_quarantine_deny_under_enforce": {
-      "args": "run --allow-env app.js",
+    "eval_and_function_bind_to_registered_caller": {
+      "args": "run --unstable-worker-options --allow-env --allow-read app.js",
       "envs": {
-        "ODEN_CAPSEC_POLICY": "capsec_enforce.json",
+        "ODEN_CAPSEC_POLICY": "capsec_attribution.json",
         "SECRET": "s3cret"
       },
-      "output": "quarantine.out",
+      "output": "attribution.out",
+      "exitCode": 0
+    },
+    "unarmed_eval_behavior_is_unchanged": {
+      "args": "run unarmed.js",
+      "output": "unarmed.out",
       "exitCode": 0
     }
   }

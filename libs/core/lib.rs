@@ -27,12 +27,13 @@ mod inspector;
 mod io;
 mod module_specifier;
 mod modules;
+mod oden_eval;
+mod oden_v8_abi;
 mod ops;
 mod ops_builtin;
 mod ops_builtin_types;
 mod ops_builtin_v8;
 mod ops_metrics;
-mod oden_v8_abi;
 pub mod reactor;
 #[cfg(feature = "reactor-tokio")]
 pub mod reactor_tokio;

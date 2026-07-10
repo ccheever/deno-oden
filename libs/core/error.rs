@@ -616,23 +616,25 @@ pub fn oden_register_script_locator(
   script_id: usize,
   locator: &str,
 ) {
-  if script_id == usize::MAX {
-    return;
-  }
-  ODEN_SCRIPT_LOCATORS
-    .lock()
-    .unwrap()
-    .insert((oden_isolate_key(isolate), script_id), locator.to_string());
+  oden_register_script_locator_by_key(
+    oden_isolate_key(isolate),
+    script_id,
+    locator,
+  );
 }
 
-pub fn oden_register_script_locator_global(script_id: usize, locator: &str) {
+pub(crate) fn oden_register_script_locator_by_key(
+  isolate_id: usize,
+  script_id: usize,
+  locator: &str,
+) {
   if script_id == usize::MAX {
     return;
   }
   ODEN_SCRIPT_LOCATORS
     .lock()
     .unwrap()
-    .insert((0, script_id), locator.to_string());
+    .insert((isolate_id, script_id), locator.to_string());
 }
 
 pub fn oden_script_locator(
@@ -640,10 +642,7 @@ pub fn oden_script_locator(
   script_id: usize,
 ) -> Option<String> {
   let locators = ODEN_SCRIPT_LOCATORS.lock().unwrap();
-  locators
-    .get(&(isolate_id, script_id))
-    .or_else(|| locators.get(&(0, script_id)))
-    .cloned()
+  locators.get(&(isolate_id, script_id)).cloned()
 }
 
 /// Whether the human-facing permission-prompt trace should carry the rich
@@ -665,13 +664,18 @@ pub fn capture_op_stack_frames(
   };
   let isolate_id = oden_isolate_key(isolate);
   let frame_count = stack.get_frame_count();
-  (0..frame_count)
+  let frames = (0..frame_count)
     .filter_map(|i| {
       stack.get_frame(scope, i).map(|frame| {
         JsStackFrame::from_v8_stack_frame(scope, isolate_id, frame)
       })
     })
-    .collect()
+    .collect::<Vec<_>>();
+  // Eval/new Function receive a callback-owned sourceURL nonce at compile
+  // time. The first engine-observed frame carrying that nonce consumes it and
+  // binds the unforgeable script ID to the callback-time caller locator.
+  crate::oden_eval::bind_pending_frames(scope, &frames);
+  frames
 }
 
 // --- Oden CPED async-attribution slot (LLP 0001) ---------------------------
@@ -685,7 +689,7 @@ pub fn capture_op_stack_frames(
 // dispatch, a live user frame stamps the slot; a detached callback with no user
 // frame reads it back (precedence row 2). Inert unless capsec is armed.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md
-fn oden_capsec_armed() -> bool {
+pub(crate) fn oden_capsec_armed() -> bool {
   static ARMED: LazyLock<bool> = LazyLock::new(oden_capsec_armed_uncached);
   *ARMED
 }
@@ -878,21 +882,25 @@ pub fn oden_read_schedule_slot(scope: &mut v8::PinScope) -> Vec<String> {
 /// locator at the schedule call, nearest first. Capturing the complete stack is
 /// what preserves an ungranted caller underneath a granted deputy; storing only
 /// the nearest frame would reopen the nested async confused-deputy hole.
-/// Internal runtime frames carry no locator and are skipped. Locators register
-/// into the global (`isolate_id = 0`) registry, so ids resolve without threading
-/// the exact isolate through the schedule op.
+/// Internal runtime frames carry no locator and are skipped. V8 script IDs are
+/// isolate-scoped, so this walk must resolve them against the current isolate;
+/// a process-global script-id fallback would let worker IDs collide.
 fn oden_schedule_principals_from_stack(
   scope: &mut v8::PinScope,
 ) -> Vec<String> {
   let Some(stack) = v8::StackTrace::current_stack_trace(scope, 32) else {
     return Vec::new();
   };
+  // SAFETY: `scope` is active for this stack walk; the pointer is used only as
+  // an opaque registry key and is not retained as a dereferenceable handle.
+  let isolate = unsafe { scope.as_raw_isolate_ptr() };
+  let isolate_id = oden_isolate_key(isolate);
   let mut out = Vec::new();
   for i in 0..stack.get_frame_count() {
     if let Some(frame) = stack.get_frame(scope, i) {
       let sid = frame.get_script_id();
       if sid != usize::MAX
-        && let Some(loc) = oden_script_locator(0, sid)
+        && let Some(loc) = oden_script_locator(isolate_id, sid)
         && !out.contains(&loc)
       {
         out.push(loc);

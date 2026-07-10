@@ -540,7 +540,11 @@ pub fn op_compile_function<'s, 'i>(
   // @ref llp/0001-adding-capability-security-to-deno.plan.md
   let oden_script_id = function.script_id();
   if oden_script_id >= 0 {
-    crate::error::oden_register_script_locator_global(
+    // SAFETY: `tc_scope` is active for this compilation; the pointer is used
+    // only as an opaque registry key.
+    let isolate = unsafe { tc_scope.as_raw_isolate_ptr() };
+    crate::error::oden_register_script_locator(
+      isolate,
       oden_script_id as usize,
       specifier.as_str(),
     );

@@ -80,9 +80,9 @@ for (const name of [
   "sessionStorage",
 ]) gated[name] = true;
 
-// Namespace/escape-hatch globals never endowed to a package. `eval` and the
-// Function-constructor family remain governed by ENG-23783's quarantine path;
-// this list does not weaken or relabel that residual.
+// Namespace/escape-hatch globals never endowed to a package. Dynamic scripts
+// are caller-attributed by ENG-23783, while evaluator endowment inheritance is
+// the separate ENG-23968 reachability task; this list does not weaken it.
 const never = ObjectCreate(null);
 for (const name of [
   "Deno",

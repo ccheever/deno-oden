@@ -1,4 +1,0 @@
-[WILDCARD][oden-capsec] env:SECRET caller=quarantine -> DENY(no grant)[WILDCARD]
-eval: DENIED:NotCapable
-[WILDCARD][oden-capsec] env:SECRET caller=quarantine -> DENY(no grant)[WILDCARD]
-newFunction: DENIED:NotCapable

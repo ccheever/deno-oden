@@ -2830,6 +2830,8 @@ fn create_context<'s, 'i>(
     )
   };
 
+  crate::oden_eval::maybe_enable_for_context(scope, context);
+
   let scope = &mut v8::ContextScope::new(scope, context);
 
   let global = context.global(scope);

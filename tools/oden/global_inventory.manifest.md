@@ -53,7 +53,7 @@ Pin inventory: 219 ambient string-key globals. 201 always-endowed; 7 grant-deriv
 | `Float32Array` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `Float64Array` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `FormData` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
-| `Function` | always-endowed | pure constructor value today; generated-code attribution remains fail-closed/quarantined under ENG-23783 |
+| `Function` | always-endowed | constructor value remains reachable; generated code is caller-attributed, while per-caller endowment inheritance is ENG-23968 |
 | `GPU` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `GPUAdapter` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `GPUAdapterInfo` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
@@ -193,7 +193,7 @@ Pin inventory: 219 ambient string-key globals. 201 always-endowed; 7 grant-deriv
 | `encodeURI` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `encodeURIComponent` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `escape` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
-| `eval` | never-endowed | direct evaluator reach stays fail-closed pending ENG-23783; Function-family quarantine remains a residual |
+| `eval` | never-endowed | dynamic script identity is caller-bound; direct evaluator endowment reach stays fail-closed pending ENG-23968 |
 | `fetch` | grant-derived | network:fetch derives reachability; resolved endpoint is still op-gated |
 | `global` | mediated-view | rewritten to the per-principal filtered global record, never the real global |
 | `globalThis` | mediated-view | rewritten to the per-principal filtered global record, never the real global |

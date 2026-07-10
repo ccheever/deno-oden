@@ -5,12 +5,11 @@ asserts each `registered`/`quarantine-by-design` marker is present.
 
 | mechanism | status | note |
 | --- | --- | --- |
-| ESM modules | registered | script id registered to the module locator at instantiation |
-| CommonJS require (core.compileFunction) | registered | compiled function's script id registered to the loader-resolved specifier |
+| ESM modules | registered | (isolate, script id) registered to the module locator at instantiation |
+| CommonJS require (core.compileFunction) | registered | compiled function's (isolate, script id) registered to the loader-resolved specifier |
 | compileFunction / evalContext wrappers (user reach) | quarantine-by-design | sealed off Deno[Deno.internal].core while armed so a forged specifier cannot register |
-| eval / new Function | blocked-rusty_v8 | bind fresh eval script id to caller principal; needs SetModifyCodeGenerationFromStringsCallback (absent in rusty_v8 149.4.0). Quarantines until then. |
-| op_eval_context (Module.wrap / patched _compile) | blocked-rusty_v8 | compiles a Script; rusty_v8 149.4.0 exposes no script_id accessor on Script/UnboundScript. Wrapper is sealed, so not a forgery vector. |
+| eval / new Function | registered | exact-pin V8 callback appends a one-shot CSPRNG source identity; first matching eval frame binds its script id to the registered live caller |
+| op_eval_context (Module.wrap / patched _compile) | quarantine-by-design | bare Script ids remain unreadable; wrapper is sealed while armed, so this rare patched-Module path stays fail-closed rather than trusting a caller filename |
 | node:vm (op_vm_create_script / op_vm_compile_function) | quarantine-by-design | caller-supplied filename is forgeable, so NOT registered; vm code quarantines (verified). |
 | snapshot-baked internal scripts | owed | snapshot script-id registration is Phase-0/1 owed work. |
 | remote / module-cache ownership | owed | loader ownership of remote + cached module sources is owed. |
-

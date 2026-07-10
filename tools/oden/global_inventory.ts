@@ -291,7 +291,7 @@ const OVERRIDES: Record<string, Classification> = {
   eval: {
     status: "never-endowed",
     reason:
-      "direct evaluator reach stays fail-closed pending ENG-23783; Function-family quarantine remains a residual",
+      "dynamic script identity is caller-bound; direct evaluator endowment reach stays fail-closed pending ENG-23968",
   },
   process: {
     status: "never-endowed",
@@ -322,7 +322,7 @@ const OVERRIDES: Record<string, Classification> = {
   Function: {
     status: "always-endowed",
     reason:
-      "pure constructor value today; generated-code attribution remains fail-closed/quarantined under ENG-23783",
+      "constructor value remains reachable; generated code is caller-attributed, while per-caller endowment inheritance is ENG-23968",
   },
 };
 

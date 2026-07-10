@@ -3,16 +3,37 @@
 //! Exact-pin V8 ABI seam used by Oden's eval attribution.
 //!
 //! rusty_v8 149.4.0 bundles V8's public
-//! `Isolate::SetModifyCodeGenerationFromStringsCallback` implementation in
-//! every supported prebuilt archive, but does not expose its six-line C/Rust
-//! wrapper. Calling the public C++ member directly avoids maintaining custom
-//! 139 MiB archives. This module is intentionally coupled to the exact
-//! `=149.4.0` workspace pin: changing that pin requires re-proving the symbols
-//! and layouts below. A missing/changed symbol fails at link time.
+//! `Isolate::SetModifyCodeGenerationFromStringsCallback` and
+//! `StackTrace::CurrentScriptData` implementations in every supported prebuilt
+//! archive, but does not expose their small C/Rust wrappers. Calling the public
+//! C++ members directly avoids maintaining custom 139 MiB archives. This
+//! module is intentionally coupled to the exact `=149.4.0` workspace pin:
+//! changing that pin requires re-proving the symbols and layouts below. A
+//! missing/changed symbol fails at link time.
 //!
 //! @ref llp/0001-adding-capability-security-to-deno.plan.md#attribution-of-evalnew-function-code [implements] — eval compilation must bind to its live caller without a read-time fail-open fallback
 
 use std::ffi::c_void;
+
+/// ABI mirror of V8 14.9's `StackTrace::ScriptData`.
+///
+/// V8 deliberately reports the root script ID in `id` for eval frames. Oden
+/// instead calls `function.script_id()` on the returned function to pair the
+/// engine-observed dynamic script ID with its native context.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct CurrentScriptData<'s> {
+  pub(crate) id: i32,
+  pub(crate) function: v8::Local<'s, v8::Function>,
+  pub(crate) context: v8::Local<'s, v8::Context>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MemorySpan<T> {
+  data: *mut T,
+  size: usize,
+}
 
 /// ABI mirror of V8 14.9's `ModifyCodeGenerationFromStringsResult`.
 ///
@@ -46,6 +67,26 @@ const _: () = {
     std::mem::size_of::<Option<v8::Local<'static, v8::String>>>()
       == std::mem::size_of::<*mut c_void>()
   );
+  assert!(
+    std::mem::offset_of!(
+      ModifyCodeGenerationFromStringsResult<'static>,
+      codegen_allowed
+    ) == 0
+  );
+  assert!(
+    std::mem::offset_of!(
+      ModifyCodeGenerationFromStringsResult<'static>,
+      modified_source
+    ) == 8
+  );
+  assert!(
+    std::mem::size_of::<ModifyCodeGenerationFromStringsResult<'static>>() == 16
+  );
+  assert!(std::mem::offset_of!(CurrentScriptData<'static>, id) == 0);
+  assert!(std::mem::offset_of!(CurrentScriptData<'static>, function) == 8);
+  assert!(std::mem::offset_of!(CurrentScriptData<'static>, context) == 16);
+  assert!(std::mem::size_of::<CurrentScriptData<'static>>() == 24);
+  assert!(std::mem::size_of::<MemorySpan<c_void>>() == 16);
 };
 
 #[cfg(not(target_pointer_width = "64"))]
@@ -67,6 +108,12 @@ unsafe extern "C" {
     isolate: *mut c_void,
     callback: ModifyCodeGenerationFromStringsCallback,
   );
+
+  #[link_name = "_ZN2v810StackTrace17CurrentScriptDataEPNS_7IsolateENS_10MemorySpanINS0_10ScriptDataEEE"]
+  fn current_script_data_abi(
+    isolate: *mut c_void,
+    frame_data: MemorySpan<CurrentScriptData<'static>>,
+  ) -> MemorySpan<CurrentScriptData<'static>>;
 }
 
 // MSVC uses a different decoration for the same public member. The symbol was
@@ -82,6 +129,12 @@ unsafe extern "C" {
     isolate: *mut c_void,
     callback: ModifyCodeGenerationFromStringsCallback,
   );
+
+  #[link_name = "?CurrentScriptData@StackTrace@v8@@SA?AV?$MemorySpan@UScriptData@StackTrace@v8@@@2@PEAVIsolate@2@V32@@Z"]
+  fn current_script_data_abi(
+    isolate: *mut c_void,
+    frame_data: MemorySpan<CurrentScriptData<'static>>,
+  ) -> MemorySpan<CurrentScriptData<'static>>;
 }
 
 #[cfg(all(target_os = "windows", not(target_env = "msvc")))]
@@ -108,6 +161,39 @@ pub(crate) unsafe fn set_modify_code_generation_from_strings_callback(
   unsafe {
     set_modify_code_generation_from_strings_callback_abi(raw, callback)
   };
+}
+
+/// Capture the current JavaScript functions and their native contexts.
+///
+/// V8 writes local handles into the caller-provided storage. The returned
+/// lifetime is tied to `scope`, whose active handle scope owns those handles.
+pub(crate) fn current_script_data<'s>(
+  _scope: &mut v8::PinScope<'s, '_>,
+  isolate: v8::UnsafeRawIsolatePtr,
+  frame_limit: usize,
+) -> Vec<CurrentScriptData<'s>> {
+  if frame_limit == 0 {
+    return Vec::new();
+  }
+  let mut storage =
+    vec![std::mem::MaybeUninit::<CurrentScriptData<'s>>::uninit(); frame_limit];
+  let raw = unsafe {
+    std::mem::transmute::<v8::UnsafeRawIsolatePtr, *mut c_void>(isolate)
+  };
+  let input = MemorySpan {
+    data: storage.as_mut_ptr().cast::<CurrentScriptData<'static>>(),
+    size: storage.len(),
+  };
+  // SAFETY: the exact-pin layout assertions cover MemorySpan and ScriptData;
+  // `scope` proves that V8 has an active handle scope for the returned Locals.
+  let written = unsafe { current_script_data_abi(raw, input) }.size;
+  debug_assert!(written <= storage.len());
+  let written = written.min(storage.len());
+  storage
+    .into_iter()
+    .take(written)
+    .map(|value| unsafe { value.assume_init() })
+    .collect()
 }
 
 #[cfg(test)]
