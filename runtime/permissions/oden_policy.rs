@@ -987,7 +987,7 @@ mod tests {
 
   #[test]
   fn fork_policy_is_action_sensitive_and_fail_closed() {
-    let net = Grant::parse_many("NETWORK:fetch:API.Example.test");
+    let net = Grant::parse_many("NETWORK:fetch:API.Example.test").unwrap();
     assert!(covers(
       &net,
       &Request {
@@ -1004,7 +1004,7 @@ mod tests {
         target: "api.example.test".into(),
       }
     ));
-    let env = Grant::parse_many("env:read:TOKEN");
+    let env = Grant::parse_many("env:read:TOKEN").unwrap();
     assert!(!covers(
       &env,
       &Request {
@@ -1013,14 +1013,7 @@ mod tests {
         target: "TOKEN".into(),
       }
     ));
-    assert!(!covers(
-      &Grant::parse_many("fs:read"),
-      &Request {
-        family: Family::Fs,
-        action: "read".into(),
-        target: "/etc/passwd".into(),
-      }
-    ));
+    assert!(Grant::parse_many("fs:read").is_err());
     assert_eq!(Grant::parse("os:hostname").unwrap().family, Family::Sys);
   }
 

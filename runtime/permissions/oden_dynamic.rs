@@ -1153,7 +1153,7 @@ mod tests {
   #[test]
   fn evicted_reallow_never_restores_a_covering_static_floor() {
     let mut p = Policy::new(Mode::Enforce);
-    p.grant("dep", "env:read:EVICTED");
+    p.grant("dep", "env:read:EVICTED").unwrap();
     p.ceiling("dep", "env:read:*", OnRequest::Auto);
     let evicted = env("EVICTED");
 
@@ -1281,7 +1281,7 @@ mod tests {
   #[test]
   fn revoke_overflow_never_restores_static_floor_authority() {
     let mut p = Policy::new(Mode::Enforce);
-    p.grant("dep", "env:read:*");
+    p.grant("dep", "env:read:*").unwrap();
     for index in 0..=MAX_OVERLAY_ENTRIES_PER_PRINCIPAL {
       p.revoke_dynamic(&dep("dep"), &env(&format!("REVOKED_{index}")));
     }

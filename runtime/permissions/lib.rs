@@ -289,11 +289,6 @@ fn oden_capsec_decide_inner(
   // The rescue does not widen: `active_covers` matches the attenuated scope, so
   // a use outside the handle's scope still denies through the normal path.
   if decision == OdenDecision::Deny && oden_handle::active_covers(&req) {
-    let api = api_name.unwrap_or_else(|| family.name());
-    eprintln!(
-      "[oden-capsec] {api}:{} caller={principal_label} -> allow(handle)",
-      req.target
-    );
     oden_capsec_audit_record(
       &principal_label,
       family.name(),
@@ -312,27 +307,8 @@ fn oden_capsec_decide_inner(
     (OdenDecision::Deny, _) => "DENY(no grant)",
   };
   let api = api_name.unwrap_or_else(|| family.name());
-  // Audit-as-conversation feedback. ALLOW verdicts are deduped to one stderr
-  // line per distinct (principal, api, target, verdict) per process: emitting
-  // them per event priced an unbuffered stderr write into every mediated op
-  // (~100x on a gated-op hot loop, ENG-23764 benchmark) and buried the signal
-  // in repeats. audit(record) and DENY stay per-event — they are the
-  // conversation (the deferral-channel conformance spec counts one record per
-  // channel), and a denied op throws, so a deny loop cannot spam. The NDJSON
-  // sink (ODEN_CAPSEC_AUDIT) stays per-event for machine consumption.
-  let emit = if matches!(decision, OdenDecision::Allow) {
-    static SEEN_ALLOWS: Lazy<Mutex<std::collections::HashSet<String>>> =
-      Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
-    let key = format!("{principal_label}\u{1}{api}\u{1}{target}\u{1}{verdict}");
-    SEEN_ALLOWS.lock().insert(key)
-  } else {
-    true
-  };
-  if emit {
-    eprintln!(
-      "[oden-capsec] {api}:{target} caller={principal_label} -> {verdict}"
-    );
-  }
+  // Operational diagnostics travel only on the authenticated audit channel.
+  // App stderr is application data and must remain byte-faithful.
   oden_capsec_audit_record(
     &principal_label,
     family.name(),
@@ -1392,24 +1368,16 @@ fn oden_capsec_readiness_gate() -> Result<(), PermissionCheckError> {
   static EMITTED: AtomicFlag = AtomicFlag::lowered();
   let readiness = oden_capsec_readiness();
   let first = EMITTED.raise();
-  // Emitting the full report is gated on ODEN_CAPSEC_READINESS while capsec is
-  // itself env-gated (auto-emit at startup under audit/enforce wires on with the
-  // structural, non-env arming). The fail-closed refusal below is unconditional.
+  // The full report is gated on ODEN_CAPSEC_READINESS while capsec is itself
+  // env-gated. It is consumed through engine-owned state/audit paths;
+  // application stderr remains byte-faithful runtime content. The fail-closed
+  // refusal below is unconditional.
   if first && oden_capsec_env_flag("ODEN_CAPSEC_READINESS") {
-    eprint!("{}", readiness.render());
+    let _ = readiness.render();
   }
   let missing = readiness.missing_required();
   if readiness.mode == OdenMode::Enforce && !missing.is_empty() {
     let advisory = oden_capsec_env_flag("ODEN_CAPSEC_ALLOW_ADVISORY");
-    if first {
-      eprintln!(
-        "[oden-capsec] enforce is missing prerequisites: {}",
-        missing.join(", ")
-      );
-      if let Some(reason) = oden_policy_unreadable_reason() {
-        eprintln!("[oden-capsec] policy artifact rejected: {reason}");
-      }
-    }
     if !advisory {
       let policy_reason = oden_policy_unreadable_reason()
         .map(|reason| format!(" Policy error: {reason}."))
@@ -1426,11 +1394,6 @@ fn oden_capsec_readiness_gate() -> Result<(), PermissionCheckError> {
           state: PermissionState::Denied,
         },
       ));
-    }
-    if first {
-      eprintln!(
-        "[oden-capsec] running enforce in a NAMED DEGRADED STATE (advisory accepted)"
-      );
     }
   }
   Ok(())
@@ -1869,7 +1832,7 @@ fn oden_capsec_dynamic_request_audit_record(
     "memoized": result.memoized,
     "suggestion": suggestion,
   });
-  let _ = oden_capsec_write_audit_record(&rec);
+  oden_capsec_write_audit_record(&rec);
 }
 
 fn oden_capsec_dynamic_query_audit_record(
@@ -2152,9 +2115,6 @@ fn oden_handle_denied(
   cap: &str,
   reason: &str,
 ) -> PermissionCheckError {
-  eprintln!(
-    "[oden-capsec] handle:{action} caller={label} cap={cap} -> DENY({reason})"
-  );
   oden_capsec_audit_record(
     label,
     "handle",
@@ -2211,9 +2171,6 @@ pub fn oden_capsec_handle_mint(
   }
   let id =
     oden_handle::insert_handle(label.clone(), grant, canonical.clone(), None);
-  eprintln!(
-    "[oden-capsec] handle:mint caller={label} cap={canonical} -> allow(mint)"
-  );
   oden_capsec_audit_record(
     &label,
     "handle",
@@ -2282,9 +2239,6 @@ pub fn oden_capsec_handle_scoped(
     canonical.clone(),
     Some(parent_id),
   );
-  eprintln!(
-    "[oden-capsec] handle:scoped caller={label} cap={canonical} -> allow(scoped)"
-  );
   oden_capsec_audit_record(
     &label,
     "handle",
@@ -2329,9 +2283,6 @@ pub fn oden_capsec_handle_enter(hex: &str) -> Result<(), PermissionCheckError> {
       // Boundary-crossing audit: fire once per new cross-package possessor.
       let crossed = oden_handle::with_table(|t| t.note_possessor(id, &label));
       if crossed {
-        eprintln!(
-          "[oden-capsec] handle:transfer {minter}->{label} cap={cap_str} -> allow(transfer)"
-        );
         oden_capsec_audit_record(
           &label,
           "handle",
@@ -2373,7 +2324,6 @@ pub fn oden_capsec_handle_revoke(hex: &str) {
     } else {
       "allow(revoke cascade)"
     };
-    eprintln!("[oden-capsec] handle:revoke caller={label} cap={cap} -> {kind}");
     oden_capsec_audit_record(&label, "handle", "revoke", &cap, kind, None);
   }
 }
@@ -2409,7 +2359,7 @@ fn oden_handle_inactive() -> PermissionCheckError {
 pub fn oden_capsec_gate_import(
   specifier: &Url,
   referrer: &Url,
-  is_dynamic: bool,
+  _is_dynamic: bool,
 ) -> Result<(), PermissionCheckError> {
   if !oden_capsec_active() {
     return Ok(());
@@ -2429,7 +2379,6 @@ pub fn oden_capsec_gate_import(
   let label = principal.label();
   let target = specifier.as_str();
   let deny = mode == OdenMode::Enforce;
-  let kindstr = if is_dynamic { "dynamic" } else { "static" };
   let verdict = if deny {
     "DENY(remote/data import default-denied under enforce)"
   } else if mode == OdenMode::Audit {
@@ -2437,9 +2386,6 @@ pub fn oden_capsec_gate_import(
   } else {
     "allow(permissive)"
   };
-  eprintln!(
-    "[oden-capsec] import({kindstr}):{target} caller={label} -> {verdict}"
-  );
   oden_capsec_audit_record(&label, "import", scheme, target, verdict, None);
   if deny {
     return Err(PermissionCheckError::PermissionDenied(
@@ -2479,7 +2425,6 @@ pub fn oden_capsec_check_worker_create() -> Result<(), PermissionCheckError> {
   } else {
     "audit(record)"
   };
-  eprintln!("[oden-capsec] worker:create caller={label} -> {verdict}");
   oden_capsec_audit_record(&label, "worker", "create", "", verdict, None);
   if deny {
     return Err(PermissionCheckError::PermissionDenied(
@@ -2915,7 +2860,7 @@ fn oden_capsec_policy() -> &'static OdenPolicy {
             deny,
           } => {
             let _ = deny;
-            let _ = oden_capsec_audit_record(
+            oden_capsec_audit_record(
               &selector,
               "ceiling",
               "conflict",

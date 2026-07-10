@@ -66,16 +66,16 @@ allowed only at the two audited typed helpers named by the generator.
 | fetch | check_net_url | op_fetch_custom_client() | ext/fetch/lib.rs:874 | explicit |
 | fetch | check_net | op_fetch_custom_client() | ext/fetch/lib.rs:881 | explicit |
 | fetch | check_net_unix_socket | op_fetch_custom_client() | ext/fetch/lib.rs:901 | explicit |
-| fetch | check_net_vsock | op_fetch_custom_client() | ext/fetch/lib.rs:913 | explicit |
+| fetch | check_net_vsock | op_fetch_custom_client() | ext/fetch/lib.rs:912 | explicit |
 | fetch | check_net_url | check_net_url() | ext/kv/remote.rs:75 | explicit |
 | fetch | check_net_url | open() | ext/kv/remote.rs:160 | explicit |
 | connect | check_net | op_net_connect_tls() | ext/net/ops_tls.rs:425 | explicit |
 | connect | check_net_resolved | op_net_connect_tls() | ext/net/ops_tls.rs:496 | explicit |
 | listen | check_net | op_net_listen_tls() | ext/net/ops_tls.rs:577 | explicit |
 | listen | check_net_resolved | op_net_listen_tls() | ext/net/ops_tls.rs:590 | explicit |
-| connect | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:387 | propagated |
-| fetch | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:387 | propagated |
-| listen | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:387 | propagated |
+| connect | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
+| fetch | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
+| listen | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
 | connect | check_net | op_net_send_udp() | ext/net/ops.rs:282 | explicit |
 | connect | check_net_resolved | op_net_send_udp() | ext/net/ops.rs:297 | explicit |
 | connect | check_net | op_net_connect_tcp_inner() | ext/net/ops.rs:557 | explicit |
@@ -114,24 +114,24 @@ allowed only at the two audited typed helpers named by the generator.
 | connect | check_net_resolved | op_node_udp_send() | ext/node/ops/udp.rs:604 | explicit |
 | connect | check_net_url | op_ws_check_permission_and_cancel_handle() | ext/websocket/lib.rs:133 | explicit |
 | connect | check_net_url | op_ws_create() | ext/websocket/lib.rs:461 | explicit |
-| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:9627 | explicit |
-| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:10884 | explicit |
-| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:10914 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10941 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10947 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10957 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10963 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10981 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10986 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11010 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11019 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11029 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14117 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14126 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14140 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14147 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14154 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14162 | explicit |
+| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:9722 | explicit |
+| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:10979 | explicit |
+| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:11009 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11036 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11042 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11052 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11058 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11076 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11081 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11105 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11114 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11124 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14212 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14221 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14235 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14242 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14249 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14257 | explicit |
 
 ## Network resource/API action matrix
 
@@ -218,7 +218,7 @@ consume a resource authorized by the operation named in the note.
 - ext/fetch/lib.rs:557
 - ext/fetch/lib.rs:577
 - ext/fetch/lib.rs:677
-- ext/fetch/lib.rs:965
+- ext/fetch/lib.rs:964
 - ext/ffi/callback.rs:651
 - ext/ffi/dlfcn.rs:242
 - ext/fs/ops.rs:218
@@ -250,9 +250,9 @@ consume a resource authorized by the operation named in the note.
 - ext/net/ops_tls.rs:632
 - ext/net/ops_tls.rs:666
 - ext/net/ops_unix.rs:138
-- ext/net/ops_unix.rs:165
-- ext/net/ops_unix.rs:246
-- ext/net/ops_unix.rs:278
+- ext/net/ops_unix.rs:164
+- ext/net/ops_unix.rs:243
+- ext/net/ops_unix.rs:274
 - ext/net/quic.rs:1125
 - ext/net/quic.rs:1157
 - ext/net/quic.rs:1218
@@ -308,7 +308,7 @@ consume a resource authorized by the operation named in the note.
 - libs/core_testing/checkin/runner/ops_io.rs:122
 - libs/core_testing/checkin/runner/ops_io.rs:64
 - libs/core_testing/checkin/runner/ops_io.rs:68
-- runtime/ops/fs_events.rs:581
+- runtime/ops/fs_events.rs:587
 - runtime/ops/worker_host.rs:650
 
 ## Op-body pre-check skips (query_*_all call sites)
