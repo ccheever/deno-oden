@@ -248,6 +248,12 @@ impl InnerIsolateState {
 
     // Unregister isolate waker before dropping the isolate
     let isolate_ptr = unsafe { self.v8_isolate.as_raw_isolate_ptr() };
+    let isolate_id = crate::error::oden_isolate_key(isolate_ptr);
+    // Eval attribution state is isolate-owned even though its Rust registry is
+    // process-global. Remove it before V8 can recycle the pointer identity.
+    // @ref llp/0001-adding-capability-security-to-deno.plan.md#attribution-of-evalnew-function-code [implements] — bound dynamic attribution by isolate lifetime
+    crate::oden_eval::clear_isolate(isolate_id);
+    crate::error::oden_clear_script_locators(isolate_id);
     setup::unregister_isolate(setup::isolate_ptr_to_key(isolate_ptr));
 
     let state_ptr = self.v8_isolate.get_data(STATE_DATA_OFFSET);
