@@ -1,5 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -11,6 +13,8 @@ use http_body_util::combinators::UnsyncBoxBody;
 use hyper::Request;
 use hyper::Response;
 use hyper::StatusCode;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use percent_encoding;
 use serde_json::json;
 
@@ -20,6 +24,9 @@ use super::empty_body;
 use super::hyper_utils::HandlerOutput;
 use super::run_server;
 use super::string_body;
+
+static CAPTURED_PURLS: Lazy<Mutex<BTreeMap<String, BTreeSet<String>>>> =
+  Lazy::new(Default::default);
 
 pub fn api(port: u16) -> Vec<LocalBoxFuture<'static, ()>> {
   run_socket_dev_server(port, "socket.dev server error", socket_dev_handler)
@@ -63,12 +70,70 @@ async fn run_socket_dev_server_for_addr<F, S>(
 async fn socket_dev_handler(
   req: Request<hyper::body::Incoming>,
 ) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, anyhow::Error> {
-  let path = req.uri().path();
-  let method = req.method();
+  let path = req.uri().path().to_string();
+  let method = req.method().clone();
+
+  if method == hyper::Method::GET
+    && let Some(capture_id) = path.strip_prefix("/capture/")
+  {
+    let purls = CAPTURED_PURLS
+      .lock()
+      .get(capture_id)
+      .cloned()
+      .unwrap_or_default();
+    return Ok(
+      Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(string_body(&json!({ "purls": purls }).to_string()))?,
+    );
+  }
+
+  if method == hyper::Method::GET
+    && let Some(scenario_path) = path.strip_prefix("/scenario/")
+  {
+    let mut parts = scenario_path.splitn(4, '/');
+    let scenario = parts.next();
+    let capture_id = parts.next();
+    let purl_segment = parts.next();
+    let encoded_purl = parts.next();
+    if let (
+      Some(scenario),
+      Some(capture_id),
+      Some("purl"),
+      Some(encoded_purl),
+    ) = (scenario, capture_id, purl_segment, encoded_purl)
+    {
+      let decoded_purl =
+        percent_encoding::percent_decode_str(encoded_purl).decode_utf8()?;
+      CAPTURED_PURLS
+        .lock()
+        .entry(capture_id.to_string())
+        .or_default()
+        .insert(decoded_purl.to_string());
+      if scenario == "outage" {
+        return Ok(
+          Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(empty_body())?,
+        );
+      }
+      let response_json = socket_response_for_purl(&decoded_purl, scenario)?;
+      return Ok(
+        Response::builder()
+          .status(StatusCode::OK)
+          .header("Content-Type", "application/json")
+          .body(string_body(&response_json.to_string()))?,
+      );
+    }
+  }
 
   // Handle authenticated mode: POST /v0/purl
   if method == hyper::Method::POST {
-    return handle_authenticated_request(req).await;
+    let scenario = path
+      .strip_prefix("/scenario/")
+      .and_then(|path| path.split_once('/'));
+    return handle_authenticated_request(req, scenario).await;
   }
 
   // Expected format: /purl/{percent_encoded_purl}
@@ -148,8 +213,55 @@ async fn socket_dev_handler(
   )
 }
 
+fn socket_response_for_purl(
+  purl: &str,
+  scenario: &str,
+) -> Result<serde_json::Value, anyhow::Error> {
+  let package_part = purl
+    .strip_prefix("pkg:npm/")
+    .ok_or_else(|| anyhow::anyhow!("invalid npm PURL"))?;
+  let mut parts = package_part.rsplitn(2, '@');
+  let version = parts
+    .next()
+    .ok_or_else(|| anyhow::anyhow!("PURL is missing a version"))?;
+  let name = parts
+    .next()
+    .ok_or_else(|| anyhow::anyhow!("PURL is missing a package name"))?;
+  let is_malware = match scenario {
+    "direct-malware" => purl == "pkg:npm/@denotest/add@1.0.0",
+    "transitive-malware" => purl == "pkg:npm/@denotest/with-vuln2@1.5.0",
+    _ => false,
+  };
+  let alerts = if is_malware {
+    vec![json!({
+      "type": "malware",
+      "action": "error",
+      "severity": "critical",
+      "category": "supplyChainRisk"
+    })]
+  } else {
+    Vec::new()
+  };
+  Ok(json!({
+    "id": "81646",
+    "inputPurl": purl,
+    "name": name,
+    "version": version,
+    "score": {
+      "license": 1.0,
+      "maintenance": 0.78,
+      "overall": 0.78,
+      "quality": 0.94,
+      "supplyChain": 1.0,
+      "vulnerability": 1.0
+    },
+    "alerts": alerts
+  }))
+}
+
 async fn handle_authenticated_request(
   req: Request<hyper::body::Incoming>,
+  scenario: Option<(&str, &str)>,
 ) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, anyhow::Error> {
   use http_body_util::BodyExt;
 
@@ -162,6 +274,25 @@ async fn handle_authenticated_request(
   let components = body_json["components"]
     .as_array()
     .ok_or_else(|| anyhow::anyhow!("Missing components array"))?;
+
+  if let Some((_, capture_id)) = scenario {
+    let mut captures = CAPTURED_PURLS.lock();
+    let captured = captures.entry(capture_id.to_string()).or_default();
+    captured.extend(
+      components
+        .iter()
+        .filter_map(|component| component["purl"].as_str())
+        .map(ToOwned::to_owned),
+    );
+  }
+
+  if matches!(scenario, Some(("outage", _))) {
+    return Ok(
+      Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .body(empty_body())?,
+    );
+  }
 
   // Build newline-delimited JSON response
   let mut responses = Vec::new();
@@ -185,8 +316,29 @@ async fn handle_authenticated_request(
     let version = parts[0];
     let name = parts[1];
 
+    let is_malware = match scenario.map(|(scenario, _)| scenario) {
+      Some("direct-malware") => purl == "pkg:npm/@denotest/add@1.0.0",
+      Some("transitive-malware") => {
+        purl == "pkg:npm/@denotest/with-vuln2@1.5.0"
+      }
+      // Preserve the original all-malware response for existing Socket tests.
+      None => true,
+      Some(_) => false,
+    };
+    let alerts = if is_malware {
+      vec![json!({
+        "type": "malware",
+        "action": "error",
+        "severity": "critical",
+        "category": "supplyChainRisk"
+      })]
+    } else {
+      Vec::new()
+    };
+
     let response_json = json!({
       "id": "81646",
+      "inputPurl": purl,
       "name": name,
       "version": version,
       "score": {
@@ -197,9 +349,7 @@ async fn handle_authenticated_request(
         "supplyChain": 1.0,
         "vulnerability": 1.0
       },
-      "alerts": [
-        { "type": "malware", "action": "error", "severity": "critical", "category": "supplyChainRisk" }
-      ]
+      "alerts": alerts
     });
 
     responses.push(response_json.to_string());
@@ -211,7 +361,7 @@ async fn handle_authenticated_request(
   Ok(
     Response::builder()
       .status(StatusCode::OK)
-      .header("Content-Type", "application/json")
+      .header("Content-Type", "application/x-ndjson")
       .body(string_body(&response_body))?,
   )
 }

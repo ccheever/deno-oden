@@ -1362,6 +1362,7 @@ impl WorkspaceConfigData {
         lifecycle_scripts_config: LifecycleScriptsConfig::default(),
         production: false,
         skip_types: false,
+        package_verdict_provider: None,
         resolve_npm_resolution_snapshot: Box::new(|| Ok(None)),
       },
     );

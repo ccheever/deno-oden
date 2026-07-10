@@ -32,6 +32,7 @@ use crate::lifecycle_scripts::LifecycleScriptsExecutor;
 use crate::package_json::NpmInstallDepsProvider;
 use crate::resolution::HasJsExecutionStartedFlagRc;
 use crate::resolution::NpmResolutionInstaller;
+use crate::verdicts::NpmPackageVerdictProvider;
 
 // todo(https://github.com/rust-lang/rust/issues/109737): remove once_cell after get_or_try_init is stabilized
 type Deferred<T> = once_cell::sync::OnceCell<T>;
@@ -65,6 +66,7 @@ pub struct NpmInstallerFactoryOptions {
   pub skip_types: bool,
   /// Resolves the npm resolution snapshot from the environment.
   pub resolve_npm_resolution_snapshot: ResolveNpmResolutionSnapshotFn,
+  pub package_verdict_provider: Option<Arc<dyn NpmPackageVerdictProvider>>,
 }
 
 pub trait InstallReporter:
@@ -413,6 +415,10 @@ impl<
                 .workspace
                 .jsr_deps_in_node_modules()
                 .unwrap_or(false),
+              package_verdict_provider: self
+                .options
+                .package_verdict_provider
+                .clone(),
             },
           )))
         }

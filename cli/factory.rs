@@ -108,6 +108,7 @@ use crate::standalone::binary::DenoCompileBinaryWriter;
 use crate::sys::CliSys;
 use crate::tools::installer::BinNameResolver;
 use crate::tools::lint::LintRuleProvider;
+use crate::tools::pm::socket_scan::SocketVerdictProvider;
 use crate::tools::run::hmr::HmrRunnerState;
 use crate::tsc::TypeCheckingCjsTracker;
 use crate::type_checker::TypeChecker;
@@ -593,6 +594,15 @@ impl CliFactory {
       } else {
         NpmPackumentFormat::Abbreviated
       };
+      let package_verdict_provider = SocketVerdictProvider::from_env(
+        self.http_client_provider().clone(),
+        resolver_factory.workspace_factory().npmrc()?.clone(),
+        resolver_factory
+          .workspace_factory()
+          .npm_cache_dir()?
+          .root_dir()
+          .to_path_buf(),
+      )?;
       Ok(CliNpmInstallerFactory::new(
         resolver_factory.clone(),
         Arc::new(CliNpmCacheHttpClient::new(
@@ -728,6 +738,7 @@ impl CliFactory {
             DenoSubcommand::Ci(f) => f.skip_types,
             _ => false,
           },
+          package_verdict_provider,
           resolve_npm_resolution_snapshot: Box::new(|| {
             deno_lib::args::resolve_npm_resolution_snapshot(&CliSys::default())
           }),

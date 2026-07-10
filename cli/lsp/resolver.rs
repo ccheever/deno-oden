@@ -1150,6 +1150,7 @@ impl<'a> ResolverFactory<'a> {
           // The LSP does not materialize packages into node_modules, so it never
           // writes a `.npmrc` or alias symlinks.
           jsr_deps_in_node_modules: false,
+          package_verdict_provider: None,
         },
       ));
       self.set_npm_installer(npm_installer);

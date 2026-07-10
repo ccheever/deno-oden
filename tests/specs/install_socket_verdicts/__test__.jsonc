@@ -1,0 +1,296 @@
+{
+  "tempDir": true,
+  "envs": {
+    "ODEN_SOCKET_SCAN_MODE": "default",
+    "ODEN_SOCKET_PUBLIC_REGISTRY": "http://localhost:4260/",
+    "ODEN_SOCKET_REPORT_PATH": "$PWD/socket-report.json",
+    "ODEN_SOCKET_REPORT_ALL": "1"
+  },
+  "tests": {
+    "clean_public": {
+      "steps": [
+        {
+          "cwd": "clean",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/clean/eng23997-clean"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "clean",
+            "clean/socket-report.json",
+            "eng23997-clean"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok clean\n"
+        }
+      ]
+    },
+    "confirmed_malware_direct": {
+      "steps": [
+        {
+          "cwd": "direct_malware",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/direct-malware/eng23997-direct-malware"
+          },
+          "output": "direct_malware/install.out",
+          "exitCode": 1
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "direct_malware",
+            "direct_malware/socket-report.json",
+            "eng23997-direct-malware"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok direct_malware\n"
+        }
+      ]
+    },
+    "confirmed_malware_transitive": {
+      "steps": [
+        {
+          "cwd": "transitive_malware",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/transitive-malware/eng23997-transitive-malware"
+          },
+          "output": "transitive_malware/install.out",
+          "exitCode": 1
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "transitive_malware",
+            "transitive_malware/socket-report.json",
+            "eng23997-transitive-malware"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok transitive_malware\n"
+        }
+      ]
+    },
+    "provider_outage_default": {
+      "steps": [
+        {
+          "cwd": "outage",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/outage/eng23997-outage-default"
+          },
+          "output": "outage/default.out"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "outage_default",
+            "outage/socket-report.json",
+            "eng23997-outage-default"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok outage_default\n"
+        }
+      ]
+    },
+    "provider_outage_strict": {
+      "steps": [
+        {
+          "cwd": "outage",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/outage/eng23997-outage-strict",
+            "ODEN_SOCKET_SCAN_MODE": "strict"
+          },
+          "output": "outage/strict.out",
+          "exitCode": 1
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "outage_strict",
+            "outage/socket-report.json",
+            "eng23997-outage-strict"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok outage_strict\n"
+        }
+      ]
+    },
+    "off_then_default_with_warm_cache": {
+      "steps": [
+        {
+          "cwd": "warm_cache",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/clean/eng23997-warm-off",
+            "ODEN_SOCKET_SCAN_MODE": "off"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "warm_off",
+            "warm_cache/socket-report.json",
+            "eng23997-warm-off"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok warm_off\n"
+        },
+        {
+          "cwd": "warm_cache",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/clean/eng23997-warm-default"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "warm_default",
+            "warm_cache/socket-report.json",
+            "eng23997-warm-default"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok warm_default\n"
+        }
+      ]
+    },
+    "fresh_cached_verdict_skips_provider": {
+      "steps": [
+        {
+          "cwd": "fresh_cache",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/clean/eng23997-cache-seed",
+            "ODEN_SOCKET_VERDICT_TTL_SECS": "3600"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "cache_seed",
+            "fresh_cache/socket-report.json",
+            "eng23997-cache-seed"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok cache_seed\n"
+        },
+        {
+          "cwd": "fresh_cache",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/outage/eng23997-cache-fresh",
+            "ODEN_SOCKET_VERDICT_TTL_SECS": "3600"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "cache_fresh",
+            "fresh_cache/socket-report.json",
+            "eng23997-cache-fresh"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok cache_fresh\n"
+        }
+      ]
+    },
+    "stale_cached_verdict_survives_outage": {
+      "steps": [
+        {
+          "cwd": "stale_cache",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/clean/eng23997-stale-seed",
+            "ODEN_SOCKET_VERDICT_TTL_SECS": "0"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "stale_seed",
+            "stale_cache/socket-report.json",
+            "eng23997-stale-seed"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok stale_seed\n"
+        },
+        {
+          "cwd": "stale_cache",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/outage/eng23997-stale-refresh",
+            "ODEN_SOCKET_VERDICT_TTL_SECS": "0"
+          },
+          "output": "stale_cache/refresh.out"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "stale_cached",
+            "stale_cache/socket-report.json",
+            "eng23997-stale-refresh"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok stale_cached\n"
+        }
+      ]
+    },
+    "private_registry_identity_is_not_sent": {
+      "steps": [
+        {
+          "cwd": "private_registry",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/clean/eng23997-private-registry"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "private_registry",
+            "private_registry/socket-report.json",
+            "eng23997-private-registry"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok private_registry\n"
+        }
+      ]
+    }
+  }
+}

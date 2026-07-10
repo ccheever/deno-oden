@@ -45,6 +45,7 @@ pub(crate) mod deps;
 pub(crate) mod interactive_picker;
 mod list;
 pub(crate) mod outdated;
+pub(crate) mod socket_scan;
 mod why;
 
 pub use approve_scripts::approve_scripts;

@@ -50,12 +50,25 @@ pub async fn audit(
     .context("Failed to create HTTP client")?;
 
   let use_socket = audit_flags.socket;
+  let use_oden_socket = std::env::var_os("ODEN_SOCKET_SCAN_MODE").is_some();
   let fix = audit_flags.fix;
+
+  if use_oden_socket {
+    // @ref llp/0002-the-oden-installer.plan.md#verdict-cache-revocation-and-re-checking
+    // — Oden audit is the explicit revocation/retry channel and therefore
+    // bypasses fresh-cache TTLs while retaining the same privacy filter and
+    // durable state used by install.
+    factory
+      .npm_installer()
+      .await?
+      .ensure_package_verdicts(true)
+      .await?;
+  }
 
   let result =
     npm::call_audits_api(audit_flags, npm_url, &snapshot, http_client).await?;
 
-  if use_socket {
+  if use_socket && !use_oden_socket {
     socket_dev::call_firewall_api(
       &snapshot,
       http_provider.get_or_create().unwrap(),

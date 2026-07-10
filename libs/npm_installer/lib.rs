@@ -34,6 +34,7 @@ pub mod package_json;
 pub mod process_state;
 pub mod resolution;
 mod rt;
+pub mod verdicts;
 
 pub use bin_entries::BinEntries;
 use deno_terminal::colors;
@@ -66,6 +67,7 @@ use self::resolution::AddPkgReqsResult;
 use self::resolution::NpmResolutionInstaller;
 use self::resolution::NpmResolutionInstallerSys;
 pub use self::resolution::format_unmet_peer_dep_warning;
+use self::verdicts::NpmPackageVerdictProvider;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackageCaching<'a> {
@@ -162,6 +164,9 @@ pub struct NpmInstallerOptions<TSys: NpmInstallerSys> {
   /// Whether `jsr:` dependencies are installed into `node_modules` via JSR's
   /// npm compatibility registry (the `jsrDepsInNodeModules` config option).
   pub jsr_deps_in_node_modules: bool,
+  /// Optional supply-chain verdict gate. Kept behind an interface so the
+  /// installer does not depend on any provider's API, terms, or wire format.
+  pub package_verdict_provider: Option<Arc<dyn NpmPackageVerdictProvider>>,
 }
 
 #[derive(Debug)]
@@ -177,6 +182,7 @@ pub struct NpmInstaller<
   maybe_lockfile: Option<Arc<LockfileLock<TSys>>>,
   npm_cache: Arc<NpmCache<TSys>>,
   npm_resolution: Arc<NpmResolutionCell>,
+  package_verdict_provider: Option<Arc<dyn NpmPackageVerdictProvider>>,
   system_info: NpmSystemInfo,
   tarball_cache: Arc<deno_npm_cache::TarballCache<TNpmCacheHttpClient, TSys>>,
   /// See [`Self::enable_tarball_prefetch`].
@@ -227,6 +233,7 @@ struct SpawningTarballPrefetcher<
 > {
   seen: Mutex<FxHashSet<PackageNv>>,
   system_info: NpmSystemInfo,
+  package_verdict_provider: Option<Arc<dyn NpmPackageVerdictProvider>>,
   #[cfg(not(target_arch = "wasm32"))]
   download_permits: Arc<tokio::sync::Semaphore>,
   tarball_cache: Arc<deno_npm_cache::TarballCache<TNpmCacheHttpClient, TSys>>,
@@ -258,6 +265,9 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
     }
     if !self.seen.lock().insert(nv.clone()) {
       return;
+    }
+    if let Some(provider) = &self.package_verdict_provider {
+      provider.prefetch(nv, version_info);
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -366,6 +376,7 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
       npm_install_deps_provider,
       npm_cache,
       npm_resolution,
+      package_verdict_provider: options.package_verdict_provider,
       npm_resolution_initializer,
       npm_resolution_installer,
       maybe_lockfile: options.maybe_lockfile,
@@ -499,6 +510,7 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
         .set_tarball_prefetcher(Some(Arc::new(SpawningTarballPrefetcher {
           seen: Default::default(),
           system_info: self.system_info.clone(),
+          package_verdict_provider: self.package_verdict_provider.clone(),
           #[cfg(not(target_arch = "wasm32"))]
           download_permits: Arc::new(tokio::sync::Semaphore::new(cap)),
           tarball_cache: self.tarball_cache.clone(),
@@ -516,6 +528,9 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
       && let Some(lockfile) = self.maybe_lockfile.as_ref()
     {
       result.dependencies_result = lockfile.error_if_changed();
+    }
+    if result.dependencies_result.is_ok() {
+      result.dependencies_result = self.ensure_package_verdicts(false).await;
     }
     if result.dependencies_result.is_ok()
       && let Some(caching) = caching
@@ -586,8 +601,25 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
       self.add_package_reqs(&[], caching).await
     } else {
       self.npm_resolution_initializer.ensure_initialized().await?;
+      self.ensure_package_verdicts(false).await?;
       self.fs_installer.cache_packages(caching).await
     }
+  }
+
+  /// Runs the authoritative package-verdict gate for the current graph. This
+  /// method remains public so `oden audit` can force a refresh independently of
+  /// installation, while ordinary install paths use the cached fast path.
+  pub async fn ensure_package_verdicts(
+    &self,
+    force_refresh: bool,
+  ) -> Result<(), JsErrorBox> {
+    let Some(provider) = &self.package_verdict_provider else {
+      return Ok(());
+    };
+    let snapshot = self.npm_resolution.snapshot();
+    provider
+      .ensure_verdicts(&snapshot, &self.system_info, force_refresh)
+      .await
   }
 
   pub fn ensure_no_pkg_json_dep_errors(
