@@ -1078,6 +1078,13 @@ pub struct NameServer {
   port: u16,
 }
 
+// Hickory returns ProtoError on Apple/Windows/Android but its already-wrapped
+// NetError on other Unix targets. Keep that platform split out of the op.
+// @ref LLP 0016#platform-matrix [constrained-by]
+fn system_dns_config_error(error: impl Into<ResolveError>) -> NetError {
+  NetError::Dns(error.into())
+}
+
 #[op2(stack_trace)]
 pub async fn op_dns_resolve(
   state: Rc<RefCell<OpState>>,
@@ -1108,8 +1115,7 @@ pub async fn op_dns_resolve(
       opts
     })
   } else {
-    system_conf::read_system_conf()
-      .map_err(|error| NetError::Dns(ResolveError::Proto(error)))?
+    system_conf::read_system_conf().map_err(system_dns_config_error)?
   };
 
   // When a cancel handle is provided, use a short resolver timeout so
@@ -1363,6 +1369,18 @@ mod tests {
   use socket2::SockRef;
 
   use super::*;
+
+  #[test]
+  fn system_dns_config_errors_accept_protocol_and_network_errors() {
+    assert!(matches!(
+      system_dns_config_error(hickory_proto::ProtoError::from("test")),
+      NetError::Dns(ResolveError::Proto(_))
+    ));
+    assert!(matches!(
+      system_dns_config_error(ResolveError::NoConnections),
+      NetError::Dns(ResolveError::NoConnections)
+    ));
+  }
 
   #[test]
   fn rdata_to_return_record_a() {
