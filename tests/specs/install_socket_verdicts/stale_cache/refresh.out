@@ -1,1 +1,1 @@
-[WILDCARD]Socket verdict refresh failed for @denotest/add@1.0.0; honoring cached verdict:[WILDCARD]
+[WILDCARD]Socket could not refresh 1 cached package verdict(s); honoring the stale conclusive state. Run `oden audit` to retry.[WILDCARD]

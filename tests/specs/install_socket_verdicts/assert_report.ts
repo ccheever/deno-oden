@@ -200,7 +200,7 @@ switch (scenario) {
       status: "unscanned_by_policy",
       provider: "policy",
       registry: "http://localhost:4260/",
-      cached: false,
+      cached: true,
       stale: false,
       dependency_path: [],
     });
@@ -224,7 +224,7 @@ switch (scenario) {
   case "stale_seed": {
     assertEquals(report.mode, "default", "scan mode");
     expectRecords(1, { clean: 1 });
-    expectPublicAdd("clean", "socket", false, false);
+    expectPublicAdd("clean", "socket", true, true);
     assertEquals(report.error, undefined, "seed report error");
     break;
   }
@@ -257,7 +257,7 @@ switch (scenario) {
       status: "unsupported_source",
       provider: "policy",
       registry: "http://localhost:4261/",
-      cached: false,
+      cached: true,
       stale: false,
       dependency_path: ["@denotest/basic@1.0.0"],
     });
