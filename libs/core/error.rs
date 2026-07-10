@@ -689,7 +689,26 @@ pub fn capture_op_stack_frames(
 // dispatch, a live user frame stamps the slot; a detached callback with no user
 // frame reads it back (precedence row 2). Inert unless capsec is armed.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md
+static ODEN_CAPSEC_ARMED_OVERRIDE: std::sync::atomic::AtomicU8 =
+  std::sync::atomic::AtomicU8::new(0);
+
+/// Snapshot the embedder's structural arming decision before it removes the
+/// private policy handoff from the process environment. `deno_core` sits below
+/// `deno_permissions`, so this one-way bootstrap setter keeps CPED/eval capture
+/// aligned without leaving a JS- or subprocess-readable control variable.
+pub fn oden_capsec_set_armed(armed: bool) {
+  ODEN_CAPSEC_ARMED_OVERRIDE.store(
+    if armed { 2 } else { 1 },
+    std::sync::atomic::Ordering::Release,
+  );
+}
+
 pub(crate) fn oden_capsec_armed() -> bool {
+  match ODEN_CAPSEC_ARMED_OVERRIDE.load(std::sync::atomic::Ordering::Acquire) {
+    1 => return false,
+    2 => return true,
+    _ => {}
+  }
   static ARMED: LazyLock<bool> = LazyLock::new(oden_capsec_armed_uncached);
   *ARMED
 }

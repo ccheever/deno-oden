@@ -3219,6 +3219,7 @@ dependencies = [
 name = "deno_permissions"
 version = "0.112.0"
 dependencies = [
+ "base64 0.22.1",
  "capacity_builder",
  "chrono",
  "deno_error",
@@ -3226,7 +3227,9 @@ dependencies = [
  "deno_terminal",
  "deno_unsync",
  "dunce",
+ "faster-hex",
  "fqdn",
+ "hmac",
  "ipnet",
  "libc",
  "log",
@@ -3237,6 +3240,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "sha2",
  "sys_traits",
  "thiserror 2.0.12",
  "unicode-normalization",

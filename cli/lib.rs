@@ -819,6 +819,13 @@ pub fn main() {
   // pointing at this binary), translate the Node.js CLI args to Deno args.
   // Done here, before any threads are spawned, because it may set env vars.
   let args = node_compat_shim::maybe_rewrite_node_arg0(args);
+  // Consume the one-shot audit key and parent policy files, snapshot Oden's
+  // private policy/audit state, and erase their environment handoff before V8.
+  // This scrubs JS reads and ordinary child inheritance; OS initial-environment
+  // snapshots may retain stale paths, but never the key or consumed policy.
+  let oden_capsec_armed =
+    deno_runtime::deno_permissions::oden_capsec_init_control_plane();
+  deno_core::error::oden_capsec_set_armed(oden_capsec_armed);
   let future = async move {
     let roots = LibWorkerFactoryRoots::default();
 
@@ -878,6 +885,10 @@ pub fn main() {
 
   let (result, initial_cwd) =
     create_and_run_current_thread_with_maybe_metrics(future);
+
+  // This is the only clean completion point after subcommand workers join.
+  // The parent rejects any audit stream without this keyed terminal frame.
+  deno_runtime::deno_permissions::oden_capsec_finish_audit_channel();
 
   #[cfg(feature = "dhat-heap")]
   drop(profiler);

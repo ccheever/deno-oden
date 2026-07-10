@@ -340,9 +340,17 @@ fn op_create_worker(
   };
   let cpu_thread_handle = Arc::new(AtomicU64::new(0));
   let cpu_thread_handle_writer = cpu_thread_handle.clone();
+  // Count before spawning: the host may unref and finish before the OS ever
+  // schedules the new thread. If spawning fails, dropping the closure drops
+  // this guard and decrements the already-counted worker.
+  let oden_capsec_worker_guard = deno_permissions::oden_capsec_worker_guard();
 
   // Spawn it
   thread_builder.spawn(move || {
+    // @ref LLP 0015#audit-records [implements] — the capsec audit terminal is
+    // emitted only after every detached worker runtime has actually exited.
+    let _oden_capsec_worker_guard = oden_capsec_worker_guard;
+
     // Capture the OS thread handle for CPU usage queries from the host.
     cpu_thread_handle_writer
       .store(capture_current_thread_handle(), Ordering::Release);

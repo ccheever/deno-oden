@@ -18,19 +18,25 @@ use std::string::ToString;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
 use capacity_builder::StringBuilder;
 use deno_path_util::normalize_path;
 use deno_path_util::url_to_file_path;
 use deno_terminal::colors;
 use deno_unsync::sync::AtomicFlag;
 use fqdn::FQDN;
+use hmac::Hmac;
+use hmac::Mac;
 use ipnet::IpNet;
 use once_cell::sync::Lazy;
+use parking_lot::Condvar;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::de;
+use sha2::Sha256;
 use url::Url;
 
 pub mod broker;
@@ -120,6 +126,25 @@ fn oden_capsec_decide(
   target: &str,
   api_name: Option<&str>,
 ) -> Result<(), PermissionCheckError> {
+  oden_capsec_decide_inner(family, action, target, api_name, false)
+}
+
+fn oden_capsec_decide_aggregate(
+  family: OdenFamily,
+  action: &str,
+  target: &str,
+  api_name: Option<&str>,
+) -> Result<(), PermissionCheckError> {
+  oden_capsec_decide_inner(family, action, target, api_name, true)
+}
+
+fn oden_capsec_decide_inner(
+  family: OdenFamily,
+  action: &str,
+  target: &str,
+  api_name: Option<&str>,
+  aggregate: bool,
+) -> Result<(), PermissionCheckError> {
   if !oden_capsec_active() {
     return Ok(());
   }
@@ -128,16 +153,49 @@ fn oden_capsec_decide(
   // Normalize fs targets to an absolute, lexically-folded path so a relative
   // op (`./data/x`) matches an fs grant scope (also resolved absolute) and a
   // `..` escape resolves out of its granted scope. Non-fs targets pass through.
-  let normalized_target = if matches!(family, OdenFamily::Fs) {
-    oden_normalize_fs_target(target)
-  } else {
-    target.to_string()
+  let normalized_target = match family {
+    OdenFamily::Fs => oden_normalize_fs_target(target),
+    // Match Deno's own environment descriptor semantics: environment names
+    // are case-insensitive on Windows. The reserved namespace must be too.
+    OdenFamily::Env => EnvVarNameRef::new(Cow::Borrowed(target))
+      .as_ref()
+      .to_string(),
+    _ => target.to_string(),
   };
   let req = OdenRequest {
     family,
     action: action.to_string(),
     target: normalized_target,
   };
+
+  // @ref LLP 0015#audit-records [implements] — Shipping control variables
+  // and the authenticated policy/audit directory are never package authority.
+  // This layer-2 hard stop mirrors the parent-injected layer-1 deny flags and
+  // wins even over an authored wildcard grant.
+  let control_target = oden_capsec_is_control_request(&req, aggregate);
+  if control_target {
+    let principal = oden_capsec_principal();
+    let label = principal.label();
+    oden_capsec_audit_record(
+      &label,
+      family.name(),
+      action,
+      &req.target,
+      "DENY(control plane)",
+      None,
+    );
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("capsec control-plane access to {:?}", req.target),
+        name: "capsec",
+        custom_message: Some(
+          "oden capsec: the engine policy and audit channel are not package authority"
+            .to_string(),
+        ),
+        state: PermissionState::Denied,
+      },
+    ));
+  }
 
   // Precedence row 3 (opt-in stack-intersection): if this capability class is
   // deputy-armed AND the live call chain plus the CPED scheduling principal
@@ -294,6 +352,80 @@ pub fn oden_capsec_armed() -> bool {
   *ARMED
 }
 
+/// Snapshot every shipping handoff before user code starts, initialize the
+/// private audit writer (consuming/unlinking its one-shot key file), consume the
+/// authenticated parent's temporary policy artifact, synchronize deno_core's
+/// lower-layer arming bit, and erase the paths from the inherited environment.
+/// Rust-side snapshots remain authoritative for the process lifetime. Current
+/// JS environment reads and ordinary child inheritance are scrubbed; OS views
+/// of the initial exec environment may retain stale path strings, but the key
+/// was never there and the one-shot key/policy files are absent before user code.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "single-threaded bootstrap snapshots and removes the private inherited handoff before V8 or worker threads start"
+)]
+pub fn oden_capsec_init_control_plane() -> bool {
+  let explicit_policy =
+    std::env::var_os("ODEN_CAPSEC_POLICY").filter(|path| !path.is_empty());
+  let armed = oden_capsec_armed();
+  let _ = oden_capsec_project_root();
+  let _ = oden_capsec_policy_file();
+  let _ = oden_capsec_policy_source();
+  let _ = oden_capsec_audit_channel();
+  if let Some(policy) = explicit_policy
+    && let Some(control_root) =
+      oden_capsec_audit_channel().lock().control_root()
+    && let Err(reason) =
+      oden_capsec_consume_parent_policy(&policy, &control_root)
+  {
+    panic!("oden capsec: cannot consume private policy handoff: {reason}");
+  }
+  // SAFETY: the CLI calls this during single-threaded bootstrap, before V8 or
+  // user workers start. These values have already been copied into Rust-owned
+  // process-lifetime state above.
+  unsafe {
+    for name in [
+      "ODEN_CAPSEC_ROOT",
+      "ODEN_CAPSEC_POLICY",
+      "ODEN_CAPSEC_AUDIT",
+      "ODEN_CAPSEC_AUDIT_KEY",
+    ] {
+      std::env::remove_var(name);
+    }
+  }
+  armed
+}
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "single-threaded bootstrap unlinks only the authenticated parent's already-parsed one-shot policy artifact before V8"
+)]
+fn oden_capsec_consume_parent_policy(
+  policy: &std::ffi::OsStr,
+  control_root: &Path,
+) -> Result<(), String> {
+  let policy = Path::new(policy);
+  let metadata = std::fs::symlink_metadata(policy)
+    .map_err(|error| format!("{}: {error}", policy.display()))?;
+  if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+    return Err(format!("{} is not a regular file", policy.display()));
+  }
+  let parent = policy
+    .parent()
+    .ok_or_else(|| format!("{} has no parent", policy.display()))?;
+  let parent = std::fs::canonicalize(parent)
+    .map_err(|error| format!("{}: {error}", parent.display()))?;
+  if parent != control_root {
+    return Err(format!(
+      "{} is outside authenticated control directory {}",
+      policy.display(),
+      control_root.display()
+    ));
+  }
+  std::fs::remove_file(policy)
+    .map_err(|error| format!("{}: {error}", policy.display()))
+}
+
 #[allow(
   clippy::disallowed_methods,
   reason = "structural arming probes the policy artifact (explicit ODEN_CAPSEC_POLICY handoff or <root>/.oden/policy.json); read once and cached."
@@ -326,6 +458,54 @@ fn oden_policy_path_present(path: &std::path::Path) -> bool {
 
 fn oden_capsec_active() -> bool {
   oden_capsec_armed()
+}
+
+fn oden_capsec_is_control_request(req: &OdenRequest, aggregate: bool) -> bool {
+  matches!(req.family, OdenFamily::Env)
+    && (aggregate || req.target.starts_with("ODEN_CAPSEC_"))
+    || matches!(req.family, OdenFamily::Fs)
+      && (aggregate && oden_capsec_has_control_root()
+        || oden_capsec_is_control_path(&req.target))
+}
+
+fn oden_capsec_reject_control_specifier(
+  specifier: &Url,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_active() || specifier.scheme() != "file" {
+    return Ok(());
+  }
+  let Ok(path) = url_to_file_path(specifier) else {
+    return Ok(());
+  };
+  let req = OdenRequest {
+    family: OdenFamily::Fs,
+    action: "read".to_string(),
+    target: oden_normalize_fs_target(&path.to_string_lossy()),
+  };
+  if !oden_capsec_is_control_request(&req, false) {
+    return Ok(());
+  }
+  let principal = oden_capsec_principal();
+  let label = principal.label();
+  oden_capsec_audit_record(
+    &label,
+    req.family.name(),
+    &req.action,
+    &req.target,
+    "DENY(control plane import)",
+    None,
+  );
+  Err(PermissionCheckError::PermissionDenied(
+    PermissionDeniedError {
+      access: format!("capsec control-plane import from {:?}", req.target),
+      name: "capsec",
+      custom_message: Some(
+        "oden capsec: the engine policy and audit channel are not importable package authority"
+          .to_string(),
+      ),
+      state: PermissionState::Denied,
+    },
+  ))
 }
 
 // Always-on seal conformance (LLP 0001 ENG-23775). The bootstrap runs the four
@@ -383,7 +563,10 @@ pub fn oden_capsec_query_dynamic_permission(
     return None;
   }
   let req = oden_dynamic_request(desc);
-  let query = if oden_policy_invalid() {
+  let control_request = req
+    .as_ref()
+    .is_some_and(|req| oden_capsec_is_dynamic_control_request(desc, req));
+  let query = if oden_policy_invalid() || control_request {
     OdenDynamicQueryState::Denied
   } else {
     oden_capsec_policy().query_dynamic(&principal, req.as_ref())
@@ -415,7 +598,19 @@ pub fn oden_capsec_request_dynamic_permission(
   }
   let req = oden_dynamic_request(desc);
   let policy = oden_capsec_policy();
-  let result = if oden_policy_invalid() {
+  let control_request = req
+    .as_ref()
+    .is_some_and(|req| oden_capsec_is_dynamic_control_request(desc, req));
+  let result = if control_request {
+    OdenDynamicRequestResult {
+      state: OdenDynamicPermissionState::Denied,
+      code: OdenDynamicRequestCode::DenyCeiling,
+      decider: None,
+      session_grant: None,
+      ceiling: None,
+      memoized: false,
+    }
+  } else if oden_policy_invalid() {
     OdenDynamicRequestResult {
       state: OdenDynamicPermissionState::Denied,
       code: OdenDynamicRequestCode::Ambiguous,
@@ -506,11 +701,15 @@ pub fn oden_capsec_revoke_dynamic_permission(
     );
     return Some(PermissionState::Denied);
   };
-  let state = match oden_capsec_policy().revoke_dynamic(&principal, &req) {
-    OdenDynamicQueryState::Ambient => return None,
-    OdenDynamicQueryState::Granted => PermissionState::Granted,
-    OdenDynamicQueryState::Prompt => PermissionState::Prompt,
-    OdenDynamicQueryState::Denied => PermissionState::Denied,
+  let state = if oden_capsec_is_dynamic_control_request(desc, &req) {
+    PermissionState::Denied
+  } else {
+    match oden_capsec_policy().revoke_dynamic(&principal, &req) {
+      OdenDynamicQueryState::Ambient => return None,
+      OdenDynamicQueryState::Granted => PermissionState::Granted,
+      OdenDynamicQueryState::Prompt => PermissionState::Prompt,
+      OdenDynamicQueryState::Denied => PermissionState::Denied,
+    }
   };
   oden_capsec_dynamic_query_audit_record(
     "revoke",
@@ -537,7 +736,9 @@ fn oden_dynamic_request(
     "env" => (
       OdenFamily::Env,
       "*",
-      desc.variable.unwrap_or("*").to_string(),
+      EnvVarNameRef::new(Cow::Borrowed(desc.variable.unwrap_or("*")))
+        .as_ref()
+        .to_string(),
     ),
     "sys" => (
       OdenFamily::Sys,
@@ -563,6 +764,41 @@ fn oden_dynamic_request(
     action: action.to_string(),
     target,
   })
+}
+
+fn oden_dynamic_descriptor_is_aggregate(
+  desc: &OdenDynamicPermissionDescriptor,
+) -> bool {
+  match desc.name {
+    "read" | "write" | "ffi" => desc.path.is_none(),
+    "env" => desc.variable.is_none(),
+    "net" => desc.host.is_none(),
+    "sys" => desc.kind.is_none(),
+    "run" => desc.command.is_none(),
+    _ => false,
+  }
+}
+
+fn oden_capsec_is_dynamic_control_request(
+  desc: &OdenDynamicPermissionDescriptor,
+  req: &OdenRequest,
+) -> bool {
+  if oden_capsec_is_control_request(
+    req,
+    oden_dynamic_descriptor_is_aggregate(desc),
+  ) {
+    return true;
+  }
+  if desc.name != "env" {
+    return false;
+  }
+  let Some(pattern) = desc.variable.and_then(|value| value.strip_suffix('*'))
+  else {
+    return false;
+  };
+  let normalized = EnvVarNameRef::new(Cow::Borrowed(pattern));
+  let prefix = normalized.as_ref();
+  "ODEN_CAPSEC_".starts_with(prefix) || prefix.starts_with("ODEN_CAPSEC_")
 }
 
 fn oden_dynamic_path_target(path: Option<&str>) -> String {
@@ -774,19 +1010,14 @@ impl OdenReadiness {
   clippy::disallowed_methods,
   reason = "Phase-2 readiness probes whether the policy file exists on disk; a resolver replaces the raw fs read later."
 )]
-fn oden_capsec_readiness() -> OdenReadiness {
-  let root = oden_capsec_project_root();
-  let file = oden_capsec_policy_file();
-  // Arm-time fact (which artifact armed this process); snapshot to keep the
-  // per-decide readiness gate off the filesystem (an exists() probe per
-  // mediated op otherwise). Live state (seal conformance, forced-unarmed)
-  // stays live below.
+fn oden_capsec_policy_source() -> Option<String> {
   static POLICY_SOURCE: std::sync::LazyLock<Option<String>> =
     std::sync::LazyLock::new(|| {
-      if let Some(p) =
-        std::env::var_os("ODEN_CAPSEC_POLICY").filter(|v| !v.is_empty())
+      if std::env::var_os("ODEN_CAPSEC_POLICY")
+        .filter(|v| !v.is_empty())
+        .is_some()
       {
-        Some(std::path::PathBuf::from(p).to_string_lossy().into_owned())
+        Some("engine-handoff".to_string())
       } else {
         let policy_path = std::path::Path::new(oden_capsec_project_root())
           .join(".oden")
@@ -798,7 +1029,17 @@ fn oden_capsec_readiness() -> OdenReadiness {
         }
       }
     });
-  let policy_source = POLICY_SOURCE.clone();
+  POLICY_SOURCE.clone()
+}
+
+fn oden_capsec_readiness() -> OdenReadiness {
+  let root = oden_capsec_project_root();
+  let file = oden_capsec_policy_file();
+  // Arm-time fact (which artifact armed this process); snapshot to keep the
+  // per-decide readiness gate off the filesystem (an exists() probe per
+  // mediated op otherwise). Live state (seal conformance, forced-unarmed)
+  // stays live below.
+  let policy_source = oden_capsec_policy_source();
   OdenReadiness {
     mode: oden_capsec_mode(file),
     // Attribution is armed whenever capsec is active (they share the arm), but a
@@ -1063,14 +1304,20 @@ fn oden_capsec_readiness_gate() -> Result<(), PermissionCheckError> {
   Ok(())
 }
 
-// Per-package audit log: when ODEN_CAPSEC_AUDIT names a file, append one NDJSON
-// record per mediated op (principal, capability, target, decision) — the
-// structured "see what your dependencies actually touch" data that drives the
-// LLP 0008 grant conversation. @ref llp/0001-adding-capability-security-to-deno.plan.md
-#[allow(
-  clippy::disallowed_methods,
-  reason = "Phase-1 per-package audit log path is supplied through an env var; a resolver replaces it later."
-)]
+// Per-package audit log. The shipping parent supplies a 256-bit key exactly
+// once at bootstrap through a 0600 one-shot file, never argv/environment. The
+// engine reads/unlinks the key, pre-opens the audit file, removes path env
+// variables before JS starts, and writes a sequence + previous-MAC chain. The
+// CLI adds a keyed terminal frame only after every worker has finished, and
+// writer bytes are hard-bounded. A package may still find/rename/truncate the
+// pathname through spawned OS authority after the key handoff is erased, but
+// cannot repair the chain or terminal sequence; the parent rejects the whole
+// stream. In-process FFI/NAPI is explicitly compartment-terminating and can
+// read native memory, including the key, so it ends this guarantee. Direct fork
+// fixtures without a key keep the legacy raw-NDJSON sink for development
+// compatibility only.
+// @ref LLP 0004#the-event-stream [implements]
+// @ref LLP 0015#audit-records [implements]
 fn oden_capsec_audit_record(
   principal: &str,
   family: &str,
@@ -1108,18 +1355,334 @@ fn oden_capsec_audit_record(
   reason = "the capsec audit sink path is supplied through the bootstrap environment and opened append-only"
 )]
 fn oden_capsec_write_audit_record(rec: &serde_json::Value) {
-  let Some(path) = std::env::var_os("ODEN_CAPSEC_AUDIT") else {
+  let Ok(payload) = serde_json::to_vec(rec) else {
     return;
   };
-  if let Ok(line) = serde_json::to_string(&rec) {
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-      .create(true)
-      .append(true)
-      .open(path)
-    {
-      let _ = writeln!(f, "{line}");
+  oden_capsec_audit_channel().lock().write_record(&payload);
+}
+
+const ODEN_AUDIT_DOMAIN: &[u8] = b"oden-capsec-audit-v1\0";
+const ODEN_AUDIT_WRITE_CAP: usize = 1024 * 1024;
+const ODEN_AUDIT_WORKER_DRAIN_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(10);
+
+struct OdenAuthenticatedAudit {
+  file: std::fs::File,
+  key: Vec<u8>,
+  sequence: u64,
+  previous: [u8; 32],
+  terminal: bool,
+  failed: bool,
+  bytes_written: usize,
+  control_root: PathBuf,
+}
+
+enum OdenAuditChannel {
+  Disabled,
+  Legacy(std::fs::File),
+  Authenticated(OdenAuthenticatedAudit),
+  Broken,
+}
+
+impl OdenAuditChannel {
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "single-threaded bootstrap must open and retain the parent-created audit descriptor before erasing its private environment handoff"
+  )]
+  fn from_env() -> Self {
+    let Some(path) = std::env::var_os("ODEN_CAPSEC_AUDIT") else {
+      return Self::Disabled;
+    };
+    let path = PathBuf::from(path);
+    let Some(control_root) = path.parent() else {
+      return Self::Broken;
+    };
+    let key_path = control_root.join("audit.key");
+    let key_metadata = std::fs::symlink_metadata(&key_path);
+    let key = match key_metadata {
+      Ok(metadata)
+        if metadata.file_type().is_file()
+          && !metadata.file_type().is_symlink()
+          && metadata.len() == 32 =>
+      {
+        let key = std::fs::read(&key_path);
+        let removed = std::fs::remove_file(&key_path);
+        match (key, removed) {
+          (Ok(key), Ok(())) if key.len() == 32 => Some(key),
+          _ => return Self::Broken,
+        }
+      }
+      Ok(_) => {
+        let _ = std::fs::remove_file(&key_path);
+        return Self::Broken;
+      }
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+      Err(_) => return Self::Broken,
+    };
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true);
+    if key.is_none() {
+      options.create(true);
     }
+    let Ok(file) = options.open(&path) else {
+      return Self::Broken;
+    };
+    let Some(key) = key else {
+      return Self::Legacy(file);
+    };
+    let Ok(control_root) = std::fs::canonicalize(control_root) else {
+      return Self::Broken;
+    };
+    let Ok(metadata) = file.metadata() else {
+      return Self::Broken;
+    };
+    if !metadata.is_file() || metadata.len() != 0 {
+      return Self::Broken;
+    }
+    Self::Authenticated(OdenAuthenticatedAudit {
+      file,
+      key,
+      sequence: 0,
+      previous: [0; 32],
+      terminal: false,
+      failed: false,
+      bytes_written: 0,
+      control_root,
+    })
+  }
+
+  fn write_record(&mut self, payload: &[u8]) {
+    match self {
+      Self::Legacy(file) => {
+        let _ = file.write_all(payload).and_then(|_| file.write_all(b"\n"));
+      }
+      Self::Authenticated(channel) => {
+        channel.write_frame("record", payload);
+      }
+      Self::Disabled | Self::Broken => {}
+    }
+  }
+
+  fn finish(&mut self) {
+    if let Self::Authenticated(channel) = self
+      && !channel.terminal
+    {
+      channel.terminal = channel.write_frame("terminal", &[]);
+      if channel.terminal && channel.file.sync_all().is_err() {
+        channel.failed = true;
+      }
+    }
+  }
+
+  fn fail(&mut self) {
+    if let Self::Authenticated(channel) = self {
+      channel.failed = true;
+    }
+  }
+
+  fn control_root(&self) -> Option<PathBuf> {
+    match self {
+      Self::Authenticated(channel) => Some(channel.control_root.clone()),
+      _ => None,
+    }
+  }
+}
+
+impl OdenAuthenticatedAudit {
+  fn write_frame(&mut self, kind: &str, payload: &[u8]) -> bool {
+    if self.failed || self.terminal || self.sequence == u64::MAX {
+      self.failed = true;
+      return false;
+    }
+    let sequence = self.sequence + 1;
+    let Ok(mut mac) = <Hmac<Sha256> as Mac>::new_from_slice(&self.key) else {
+      self.failed = true;
+      return false;
+    };
+    mac.update(ODEN_AUDIT_DOMAIN);
+    mac.update(kind.as_bytes());
+    mac.update(&[0]);
+    mac.update(&sequence.to_be_bytes());
+    mac.update(&self.previous);
+    mac.update(payload);
+    let digest: [u8; 32] = mac.finalize().into_bytes().into();
+    let frame = serde_json::json!({
+      "v": 1,
+      "kind": kind,
+      "seq": sequence,
+      "prev": faster_hex::hex_string(&self.previous),
+      "payload": BASE64_STANDARD.encode(payload),
+      "mac": faster_hex::hex_string(&digest),
+    });
+    let Ok(encoded) = serde_json::to_vec(&frame) else {
+      self.failed = true;
+      return false;
+    };
+    let Some(next_size) = self
+      .bytes_written
+      .checked_add(encoded.len())
+      .and_then(|size| size.checked_add(1))
+    else {
+      self.failed = true;
+      return false;
+    };
+    if next_size > ODEN_AUDIT_WRITE_CAP
+      || self
+        .file
+        .write_all(&encoded)
+        .and_then(|_| self.file.write_all(b"\n"))
+        .is_err()
+    {
+      self.failed = true;
+      return false;
+    }
+    self.sequence = sequence;
+    self.previous = digest;
+    self.bytes_written = next_size;
+    true
+  }
+}
+
+fn oden_capsec_audit_channel() -> &'static Mutex<OdenAuditChannel> {
+  static CHANNEL: OnceLock<Mutex<OdenAuditChannel>> = OnceLock::new();
+  CHANNEL.get_or_init(|| Mutex::new(OdenAuditChannel::from_env()))
+}
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "the layer-2 control-plane reservation must resolve symlink and platform aliases independently of Deno's layer-1 path denial"
+)]
+fn oden_capsec_is_control_path(target: &str) -> bool {
+  let root = oden_capsec_audit_channel().lock().control_root();
+  root.is_some_and(|root| oden_path_resolves_within(Path::new(target), &root))
+}
+
+fn oden_capsec_has_control_root() -> bool {
+  oden_capsec_audit_channel().lock().control_root().is_some()
+}
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "security boundary resolves the deepest existing ancestor to catch symlink and platform path aliases"
+)]
+fn oden_path_resolves_within(target: &Path, root: &Path) -> bool {
+  if target.starts_with(root) {
+    return true;
+  }
+  // Resolve the deepest existing ancestor, then put any non-existent suffix
+  // back. This catches both an alias of the control directory itself and a
+  // symlink leading to a not-yet-created target inside it.
+  let mut ancestor = Some(target);
+  while let Some(path) = ancestor {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+      let suffix = target.strip_prefix(path).unwrap_or(Path::new(""));
+      return resolved.join(suffix).starts_with(root);
+    }
+    ancestor = path.parent();
+  }
+  false
+}
+
+struct OdenCapsecWorkerTracker {
+  active: Mutex<usize>,
+  drained: Condvar,
+}
+
+impl OdenCapsecWorkerTracker {
+  fn new() -> Self {
+    Self {
+      active: Mutex::new(0),
+      drained: Condvar::new(),
+    }
+  }
+
+  fn started(&self) {
+    let mut active = self.active.lock();
+    *active = active
+      .checked_add(1)
+      .expect("oden capsec worker count overflow");
+  }
+
+  fn finished(&self) {
+    let mut active = self.active.lock();
+    *active = active
+      .checked_sub(1)
+      .expect("oden capsec worker guard dropped without registration");
+    if *active == 0 {
+      self.drained.notify_all();
+    }
+  }
+
+  fn wait_until_drained(&self, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut active = self.active.lock();
+    while *active != 0 {
+      let Some(remaining) =
+        deadline.checked_duration_since(std::time::Instant::now())
+      else {
+        return false;
+      };
+      if self.drained.wait_for(&mut active, remaining).timed_out()
+        && *active != 0
+      {
+        return false;
+      }
+    }
+    true
+  }
+}
+
+fn oden_capsec_worker_tracker() -> &'static OdenCapsecWorkerTracker {
+  static TRACKER: OnceLock<OdenCapsecWorkerTracker> = OnceLock::new();
+  TRACKER.get_or_init(OdenCapsecWorkerTracker::new)
+}
+
+/// Process-lifetime guard for a web/Node worker thread. Registration happens
+/// before its isolate is built; drop happens only after the worker runtime and
+/// isolate are gone, so the authenticated terminal cannot race either worker
+/// permission records or nested-worker creation.
+pub struct OdenCapsecWorkerGuard {
+  tracked: bool,
+}
+
+impl Drop for OdenCapsecWorkerGuard {
+  fn drop(&mut self) {
+    if self.tracked {
+      oden_capsec_worker_tracker().finished();
+    }
+  }
+}
+
+pub fn oden_capsec_worker_guard() -> OdenCapsecWorkerGuard {
+  let tracked = oden_capsec_armed();
+  if tracked {
+    oden_capsec_worker_tracker().started();
+  }
+  OdenCapsecWorkerGuard { tracked }
+}
+
+/// Write the authenticated terminal frame after the CLI has joined every
+/// worker. Missing this marker (panic, signal, kill, write failure) is itself a
+/// parent-visible tool failure, never a clean capability verdict.
+pub fn oden_capsec_finish_audit_channel() {
+  oden_capsec_finish_audit_channel_with(
+    oden_capsec_worker_tracker(),
+    oden_capsec_audit_channel(),
+    ODEN_AUDIT_WORKER_DRAIN_TIMEOUT,
+  );
+}
+
+fn oden_capsec_finish_audit_channel_with(
+  tracker: &OdenCapsecWorkerTracker,
+  channel: &Mutex<OdenAuditChannel>,
+  timeout: std::time::Duration,
+) {
+  if tracker.wait_until_drained(timeout) {
+    channel.lock().finish();
+  } else {
+    // No terminal means the parent rejects the entire run. Never certify a
+    // prefix while a detached worker may still append a security decision.
+    channel.lock().fail();
   }
 }
 
@@ -1830,10 +2393,6 @@ where
 // no env-var grant or mode overrides an environment could use to widen or
 // silently downgrade what the artifact says.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md ; llp/0012-userland-capability-layer.plan.md
-#[allow(
-  clippy::disallowed_methods,
-  reason = "Phase-1 capsec reads its policy file from the project root; a resolver replaces the raw fs read later."
-)]
 /// Process-lifetime snapshot of the policy artifact. Same doctrine as the
 /// ARMED probe: arming and policy content are bootstrap-time facts, and a
 /// policy artifact that changes or vanishes mid-run must not re-shape a
@@ -1854,9 +2413,11 @@ fn oden_capsec_policy_file() -> Option<&'static OdenPolicyFile> {
 fn oden_capsec_policy_file_uncached() -> Option<OdenPolicyFile> {
   // Explicit policy-file path override (ODEN_CAPSEC_POLICY) — the seam the oden
   // CLI uses to hand the engine a merged policy (`.oden/policy.json` unioned with
-  // deno.json + import-site grants) from a temp file, without writing into the
-  // project tree. Shares the env name with the userland layer (LLP 0012). Falls
-  // back to <root>/.oden/policy.json, the committed artifact.
+  // deno.json + import-site grants) from a one-shot temp file, without writing
+  // into the project tree. Authenticated parent launches unlink that artifact
+  // after this process-lifetime snapshot. Shares the env name with the userland
+  // layer (LLP 0012). Falls back to <root>/.oden/policy.json, the committed
+  // artifact, which bootstrap never unlinks.
   let path = match std::env::var_os("ODEN_CAPSEC_POLICY") {
     // Same non-empty rule as the arming probe, so the two cannot disagree.
     Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
@@ -6351,30 +6912,72 @@ impl PermissionsContainer {
     specifier: &Url,
     kind: CheckSpecifierKind,
   ) -> Result<(), PermissionCheckError> {
+    if specifier.scheme() == "file" {
+      let path = url_to_file_path(specifier).map_err(|_| {
+        PermissionCheckError::InvalidFilePath(specifier.clone())
+      })?;
+      let path = self.descriptor_parser.parse_path_query(Cow::Owned(path))?;
+      let special =
+        self.descriptor_parser.parse_special_file_descriptor(path)?;
+      self.check_special_file(
+        special,
+        OpenAccessKind::Read,
+        Some(match kind {
+          CheckSpecifierKind::Static => "static import",
+          CheckSpecifierKind::Dynamic => "import()",
+        }),
+      )?;
+    }
+    // Static file modules are intentionally exempt from Deno's layer-1 read
+    // permission. Oden's private policy/audit channel is not: enforce the
+    // layer-2 reservation before the stock static-import fast path.
+    oden_capsec_reject_control_specifier(specifier)?;
     let mut inner = self.inner.lock();
     match specifier.scheme() {
       "file" => {
-        if inner.read.is_allow_all() {
-          if kind != CheckSpecifierKind::Static {
-            write_audit(ReadQueryDescriptor::flag_name(), specifier);
+        // Static source loading does not require an allow-read grant, but an
+        // explicit --deny-read remains authoritative. This is the layer-1
+        // half of Oden's private-control-directory boundary.
+        if kind == CheckSpecifierKind::Static {
+          let path = url_to_file_path(specifier).map_err(|_| {
+            PermissionCheckError::InvalidFilePath(specifier.clone())
+          })?;
+          let desc = self
+            .descriptor_parser
+            .parse_path_query(Cow::Owned(path))?
+            .into_read();
+          if matches!(
+            inner
+              .read
+              .query_desc(Some(&desc), AllowPartial::TreatAsDenied),
+            PermissionState::Denied
+              | PermissionState::DeniedPartial
+              | PermissionState::Ignored
+          ) {
+            return inner
+              .read
+              .check(&desc, Some("static import"))
+              .map_err(ignored_to_not_found);
           }
-
           return Ok(());
         }
-        if kind == CheckSpecifierKind::Static {
+        if inner.read.is_allow_all() {
+          write_audit(ReadQueryDescriptor::flag_name(), specifier);
+
           return Ok(());
         }
 
         match url_to_file_path(specifier) {
-          Ok(path) => inner
-            .read
-            .check(
-              // a file: specifier will always go to absolute
-              &PathQueryDescriptor::new_known_absolute(Cow::Owned(path))
-                .into_read(),
-              Some("import()"),
-            )
-            .map_err(ignored_to_not_found),
+          Ok(path) => {
+            let desc = self
+              .descriptor_parser
+              .parse_path_query(Cow::Owned(path))?
+              .into_read();
+            inner
+              .read
+              .check(&desc, Some("import()"))
+              .map_err(ignored_to_not_found)
+          }
           Err(_) => {
             Err(PermissionCheckError::InvalidFilePath(specifier.clone()))
           }
@@ -6515,7 +7118,7 @@ impl PermissionsContainer {
     &self,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
-    oden_capsec_decide(OdenFamily::Fs, "read", "*", Some(api_name))?;
+    oden_capsec_decide_aggregate(OdenFamily::Fs, "read", "*", Some(api_name))?;
     self
       .inner
       .lock()
@@ -6537,7 +7140,7 @@ impl PermissionsContainer {
     &self,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
-    oden_capsec_decide(OdenFamily::Fs, "write", "*", Some(api_name))?;
+    oden_capsec_decide_aggregate(OdenFamily::Fs, "write", "*", Some(api_name))?;
     self.inner.lock().write.check_all(Some(api_name))?;
     Ok(())
   }
@@ -6682,7 +7285,7 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn check_env_all(&self) -> Result<(), PermissionCheckError> {
-    oden_capsec_decide(OdenFamily::Env, "read", "*", None)?;
+    oden_capsec_decide_aggregate(OdenFamily::Env, "read", "*", None)?;
     self.inner.lock().env.check_all()?;
     Ok(())
   }
@@ -7882,6 +8485,7 @@ pub fn is_standalone() -> bool {
 #[cfg(test)]
 mod tests {
   use std::net::Ipv4Addr;
+  use std::sync::atomic::AtomicBool;
 
   use fqdn::fqdn;
   use prompter::tests::*;
@@ -7889,6 +8493,194 @@ mod tests {
   use sys_traits::EnvCurrentDir;
 
   use super::*;
+
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "isolated security test constructs and measures the authenticated audit file directly"
+  )]
+  fn oden_authenticated_audit_write_is_hard_bounded() {
+    let dir = std::env::temp_dir().join(format!(
+      "oden-audit-bound-{}-{}",
+      std::process::id(),
+      rand::random::<u64>()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("audit.ndjson");
+    let file = std::fs::OpenOptions::new()
+      .create_new(true)
+      .append(true)
+      .open(&path)
+      .unwrap();
+    let mut audit = OdenAuthenticatedAudit {
+      file,
+      key: vec![7; 32],
+      sequence: 0,
+      previous: [0; 32],
+      terminal: false,
+      failed: false,
+      bytes_written: 0,
+      control_root: dir.clone(),
+    };
+    let payload = vec![b'x'; 4096];
+    while audit.write_frame("record", &payload) {}
+    assert!(audit.failed);
+    assert!(audit.bytes_written <= ODEN_AUDIT_WRITE_CAP);
+    assert!(
+      std::fs::metadata(&path).unwrap().len() <= ODEN_AUDIT_WRITE_CAP as u64
+    );
+    assert!(!audit.write_frame("terminal", &[]));
+    drop(audit);
+    std::fs::remove_dir_all(dir).unwrap();
+  }
+
+  #[cfg(unix)]
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "isolated security test constructs a symlink alias for the private control directory"
+  )]
+  fn oden_control_path_resolution_catches_symlink_aliases() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!(
+      "oden-audit-alias-{}-{}",
+      std::process::id(),
+      rand::random::<u64>()
+    ));
+    let control = dir.join("control");
+    let alias = dir.join("alias");
+    std::fs::create_dir_all(&control).unwrap();
+    std::fs::write(control.join("audit.ndjson"), b"").unwrap();
+    symlink(&control, &alias).unwrap();
+    let canonical = std::fs::canonicalize(&control).unwrap();
+    assert!(oden_path_resolves_within(
+      &alias.join("audit.ndjson"),
+      &canonical
+    ));
+    assert!(oden_path_resolves_within(
+      &alias.join("not-created-yet"),
+      &canonical
+    ));
+    assert!(!oden_path_resolves_within(&dir.join("outside"), &canonical));
+    std::fs::remove_dir_all(dir).unwrap();
+  }
+
+  #[test]
+  fn oden_worker_tracker_waits_for_detached_threads_and_times_out_closed() {
+    let tracker = Arc::new(OdenCapsecWorkerTracker::new());
+    let exited = Arc::new(AtomicBool::new(false));
+    tracker.started();
+    let worker_tracker = tracker.clone();
+    let worker_exited = exited.clone();
+    let thread = std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(25));
+      worker_exited.store(true, std::sync::atomic::Ordering::Release);
+      worker_tracker.finished();
+    });
+    assert!(tracker.wait_until_drained(std::time::Duration::from_secs(1)));
+    assert!(exited.load(std::sync::atomic::Ordering::Acquire));
+    thread.join().unwrap();
+
+    tracker.started();
+    assert!(!tracker.wait_until_drained(std::time::Duration::ZERO));
+    tracker.finished();
+  }
+
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "isolated lifecycle test constructs and reads an authenticated audit file directly"
+  )]
+  fn oden_terminal_follows_a_registered_workers_late_frame() {
+    let dir = std::env::temp_dir().join(format!(
+      "oden-audit-worker-terminal-{}-{}",
+      std::process::id(),
+      rand::random::<u64>()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("audit.ndjson");
+    let file = std::fs::OpenOptions::new()
+      .create_new(true)
+      .append(true)
+      .open(&path)
+      .unwrap();
+    let channel = Arc::new(Mutex::new(OdenAuditChannel::Authenticated(
+      OdenAuthenticatedAudit {
+        file,
+        key: vec![9; 32],
+        sequence: 0,
+        previous: [0; 32],
+        terminal: false,
+        failed: false,
+        bytes_written: 0,
+        control_root: dir.clone(),
+      },
+    )));
+    let tracker = Arc::new(OdenCapsecWorkerTracker::new());
+    tracker.started();
+    let worker_channel = channel.clone();
+    let worker_tracker = tracker.clone();
+    let thread = std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(25));
+      worker_channel
+        .lock()
+        .write_record(br#"{"principal":"late-worker"}"#);
+      worker_tracker.finished();
+    });
+
+    oden_capsec_finish_audit_channel_with(
+      &tracker,
+      &channel,
+      std::time::Duration::from_secs(1),
+    );
+    thread.join().unwrap();
+    let lines = std::fs::read_to_string(&path).unwrap();
+    let frames = lines
+      .lines()
+      .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+      .collect::<Vec<_>>();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0]["kind"], "record");
+    assert_eq!(frames[1]["kind"], "terminal");
+    drop(channel);
+    std::fs::remove_dir_all(dir).unwrap();
+  }
+
+  #[test]
+  fn oden_dynamic_env_patterns_cannot_overlap_the_control_namespace() {
+    for variable in [
+      "ODEN_CAPSEC_AUDIT_KEY",
+      "*",
+      "ODEN*",
+      "ODEN_CAPSEC*",
+      "ODEN_CAPSEC_FUTURE*",
+    ] {
+      let desc = OdenDynamicPermissionDescriptor {
+        name: "env",
+        path: None,
+        host: None,
+        variable: Some(variable),
+        kind: None,
+        command: None,
+      };
+      let req = oden_dynamic_request(&desc).unwrap();
+      assert!(
+        oden_capsec_is_dynamic_control_request(&desc, &req),
+        "{variable} must overlap the reserved namespace"
+      );
+    }
+    let unrelated = OdenDynamicPermissionDescriptor {
+      name: "env",
+      path: None,
+      host: None,
+      variable: Some("UNRELATED_*"),
+      kind: None,
+      command: None,
+    };
+    let req = oden_dynamic_request(&unrelated).unwrap();
+    assert!(!oden_capsec_is_dynamic_control_request(&unrelated, &req));
+  }
 
   #[test]
   fn oden_policy_artifact_validation_is_strict_and_source_aware() {
@@ -8642,6 +9434,19 @@ mod tests {
     .unwrap();
     let perms = PermissionsContainer::new(Arc::new(parser), perms);
 
+    #[cfg(target_os = "linux")]
+    for kind in [CheckSpecifierKind::Static, CheckSpecifierKind::Dynamic] {
+      assert!(
+        perms
+          .check_specifier(
+            &Url::parse("file:///proc/self/environ").unwrap(),
+            kind,
+          )
+          .is_err(),
+        "{kind:?} file imports must pass the special-file env-all gate"
+      );
+    }
+
     let mut fixtures = vec![
       (
         Url::parse("http://localhost:4545/mod.ts").unwrap(),
@@ -8707,6 +9512,45 @@ mod tests {
         specifier,
       );
     }
+
+    let (blocked_path, blocked_url, allowed_url) =
+      if cfg!(target_os = "windows") {
+        (
+          "C:\\private-control",
+          Url::parse("file:///C:/private-control/policy.json").unwrap(),
+          Url::parse("file:///C:/project/mod.ts").unwrap(),
+        )
+      } else {
+        (
+          "/private-control",
+          Url::parse("file:///private-control/policy.json").unwrap(),
+          Url::parse("file:///project/mod.ts").unwrap(),
+        )
+      };
+    let parser = TestPermissionDescriptorParser;
+    let explicitly_denied = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: None,
+        deny_read: Some(svec![blocked_path]),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let explicitly_denied =
+      PermissionsContainer::new(Arc::new(parser), explicitly_denied);
+    assert!(
+      explicitly_denied
+        .check_specifier(&blocked_url, CheckSpecifierKind::Static)
+        .is_err(),
+      "an explicit deny-read must beat the static-import exemption"
+    );
+    assert!(
+      explicitly_denied
+        .check_specifier(&allowed_url, CheckSpecifierKind::Static)
+        .is_ok(),
+      "static imports remain allow-read exempt when no deny overlaps"
+    );
   }
 
   #[test]
