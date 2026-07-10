@@ -204,7 +204,17 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       .for_specifier(provider.specifier())
       .transpile_options()?;
     if transpile_and_emit_options.no_transpile {
-      return Ok(provider.into_source());
+      let specifier = provider.specifier().clone();
+      let source = provider.into_source();
+      return Ok(
+        maybe_rewrite_oden_compartment_globals(
+          &specifier,
+          module_kind,
+          &source,
+        )?
+        .map(Into::into)
+        .unwrap_or(source),
+      );
     }
     let transpile_options = &transpile_and_emit_options.transpile;
     if matches!(provider.media_type(), MediaType::Jsx)
@@ -271,7 +281,11 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       .for_specifier(specifier)
       .transpile_options()?;
     if transpile_and_emit_options.no_transpile {
-      return Ok(source.clone());
+      return Ok(
+        maybe_rewrite_oden_compartment_globals(specifier, module_kind, source)?
+          .map(Into::into)
+          .unwrap_or_else(|| source.clone()),
+      );
     }
     let transpile_options = &transpile_and_emit_options.transpile;
     if matches!(media_type, MediaType::Jsx) && transpile_options.jsx.is_none() {
@@ -591,6 +605,26 @@ fn oden_is_rewritten_global(name: &str) -> bool {
   ODEN_REWRITTEN_GLOBALS.contains(&name)
 }
 
+/// Allocation-free conservative prefilter. A module that contains none of the
+/// gated identifier spellings cannot possibly need the AST rewrite. False
+/// positives are fine (they take the parser path); false negatives are not.
+fn oden_might_need_compartment_rewrite(source: &str) -> bool {
+  source.contains(ODEN_COMPARTMENT_HELPER)
+    || ODEN_REWRITTEN_GLOBALS
+      .iter()
+      .any(|name| source.contains(name))
+}
+
+fn oden_strict_cjs(source: &str) -> String {
+  if source.trim_start().starts_with("\"use strict\"")
+    || source.trim_start().starts_with("'use strict'")
+  {
+    source.to_string()
+  } else {
+    format!("\"use strict\";\n{source}")
+  }
+}
+
 struct OdenCompartmentGlobalTransform {
   unresolved: deno_ast::swc::common::SyntaxContext,
   record_name: String,
@@ -782,7 +816,17 @@ fn oden_rewrite_compartment_globals(
   module_kind: ModuleKind,
   source: &str,
   fingerprint: u64,
-) -> Result<String, EmitParsedSourceHelperError> {
+  source_map_option: SourceMapOption,
+) -> Result<EmittedSourceText, EmitParsedSourceHelperError> {
+  if !oden_might_need_compartment_rewrite(source) {
+    return Ok(EmittedSourceText {
+      text: match module_kind {
+        ModuleKind::Esm => source.to_string(),
+        ModuleKind::Cjs => oden_strict_cjs(source),
+      },
+      source_map: None,
+    });
+  }
   let parsed = deno_ast::parse_program(deno_ast::ParseParams {
     specifier: specifier.clone(),
     text: source.into(),
@@ -820,8 +864,14 @@ fn oden_rewrite_compartment_globals(
     ))
     .into());
   }
-  if existing_record.is_some() && transform.rewritten_count == 0 {
-    return Ok(source.to_string());
+  if transform.rewritten_count == 0 {
+    return Ok(EmittedSourceText {
+      text: match module_kind {
+        ModuleKind::Esm => source.to_string(),
+        ModuleKind::Cjs => oden_strict_cjs(source),
+      },
+      source_map: None,
+    });
   }
 
   if existing_record.is_none() {
@@ -846,11 +896,11 @@ fn oden_rewrite_compartment_globals(
     &parsed.comments().as_single_threaded(),
     &source_map,
     &deno_ast::EmitOptions {
-      source_map: SourceMapOption::Inline,
+      source_map: source_map_option,
       ..Default::default()
     },
   )?;
-  Ok(emitted.text)
+  Ok(emitted)
 }
 
 /// Rewrite unresolved authority-bearing globals through a caller-derived
@@ -865,8 +915,31 @@ pub fn maybe_rewrite_oden_compartment_globals(
   let Some(fingerprint) = oden_compartment_fingerprint(specifier) else {
     return Ok(None);
   };
-  oden_rewrite_compartment_globals(specifier, module_kind, source, fingerprint)
-    .map(Some)
+  oden_rewrite_compartment_globals(
+    specifier,
+    module_kind,
+    source,
+    fingerprint,
+    SourceMapOption::Inline,
+  )
+  .map(|emitted| Some(emitted.text))
+}
+
+fn oden_compose_source_maps(
+  original: &str,
+  adjustment: &str,
+) -> Result<String, EmitParsedSourceHelperError> {
+  let mut original = sourcemap::SourceMap::from_slice(original.as_bytes())
+    .map_err(|err| JsErrorBox::generic(err.to_string()))?;
+  let adjustment = sourcemap::SourceMap::from_slice(adjustment.as_bytes())
+    .map_err(|err| JsErrorBox::generic(err.to_string()))?;
+  original.adjust_mappings(&adjustment);
+  let mut bytes = Vec::new();
+  original
+    .to_writer(&mut bytes)
+    .map_err(|err| JsErrorBox::generic(err.to_string()))?;
+  String::from_utf8(bytes)
+    .map_err(|err| JsErrorBox::generic(err.to_string()).into())
 }
 
 #[allow(
@@ -919,13 +992,22 @@ fn transpile(
     }
   };
   patch_public_decorator_access_has(&mut transpiled_source.text);
-  if let Some(rewritten) = maybe_rewrite_oden_compartment_globals(
-    &specifier,
-    module_kind,
-    &transpiled_source.text,
-  )? {
-    transpiled_source.text = rewritten;
-    transpiled_source.source_map = None;
+  if let Some(fingerprint) = oden_compartment_fingerprint(&specifier) {
+    let rewritten = oden_rewrite_compartment_globals(
+      &specifier,
+      module_kind,
+      &transpiled_source.text,
+      fingerprint,
+      SourceMapOption::Separate,
+    )?;
+    if let (Some(original), Some(adjustment)) = (
+      transpiled_source.source_map.as_deref(),
+      rewritten.source_map.as_deref(),
+    ) {
+      transpiled_source.source_map =
+        Some(oden_compose_source_maps(original, adjustment)?);
+    }
+    transpiled_source.text = rewritten.text;
   }
   Ok(transpiled_source)
 }
@@ -1098,8 +1180,10 @@ mod oden_compartment_tests {
       kind,
       source,
       fingerprint,
+      SourceMapOption::None,
     )
     .unwrap()
+    .text
   }
 
   #[test]
@@ -1147,8 +1231,25 @@ mod oden_compartment_tests {
       ModuleKind::Esm,
       "const __oden_compartment_globals__ = () => ({ fetch }); fetch();",
       1,
+      SourceMapOption::None,
     )
     .unwrap_err();
     assert!(err.to_string().contains("reserved compartment binding"));
+  }
+
+  #[test]
+  fn rewrite_source_map_composes_with_original_typescript_map() {
+    // The original map maps transpiled JS line 0 to TS line 0. The rewrite map
+    // inserts a generated line and maps its line 1 back to transpiled line 0.
+    // Composition must therefore map rewritten line 1 all the way to TS line 0.
+    let original =
+      r#"{"version":3,"sources":["mod.ts"],"names":[],"mappings":"AAAA"}"#;
+    let adjustment =
+      r#"{"version":3,"sources":["mod.js"],"names":[],"mappings":";AAAA"}"#;
+    let composed = oden_compose_source_maps(original, adjustment).unwrap();
+    let map = sourcemap::SourceMap::from_slice(composed.as_bytes()).unwrap();
+    let token = map.lookup_token(1, 0).unwrap();
+    assert_eq!(token.get_src_line(), 0);
+    assert_eq!(token.get_source(), Some("mod.ts"));
   }
 }

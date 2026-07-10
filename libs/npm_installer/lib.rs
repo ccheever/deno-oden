@@ -494,15 +494,15 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
     if let Some(cap) = prefetch_cap {
       #[cfg(target_arch = "wasm32")]
       let _ = cap;
-      self.npm_resolution_installer.set_tarball_prefetcher(Some(
-        Arc::new(SpawningTarballPrefetcher {
+      self
+        .npm_resolution_installer
+        .set_tarball_prefetcher(Some(Arc::new(SpawningTarballPrefetcher {
           seen: Default::default(),
           system_info: self.system_info.clone(),
           #[cfg(not(target_arch = "wasm32"))]
           download_permits: Arc::new(tokio::sync::Semaphore::new(cap)),
           tarball_cache: self.tarball_cache.clone(),
-        }),
-      ));
+        })));
     }
     let mut result = self
       .npm_resolution_installer

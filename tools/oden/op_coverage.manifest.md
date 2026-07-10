@@ -5,7 +5,8 @@ run the generator and commit. Drift fails the rebase canary.
 
 ## Capsec-mediated permission checks (family:action via fn)
 
-- env:read	via check_env()
+- env:read	via check_env_action()
+- env:write	via check_env_action()
 - ffi:load	via check_ffi()
 - ffi:load	via check_ffi_all()
 - ffi:load	via check_ffi_partial_no_path()
@@ -39,6 +40,7 @@ run the generator and commit. Drift fails the rebase canary.
 | Capability | Deno descriptor / gate | Target shape | Grant / status |
 | --- | --- | --- | --- |
 | env:read | EnvDescriptor / EnvQueryDescriptor | name or * | env:read:<name> |
+| env:write | EnvDescriptor / EnvQueryDescriptor | name | env:write:<name> |
 | ffi:load | FfiQueryDescriptor | path or * | ffi |
 | fs:read | ReadDescriptor / ReadQueryDescriptor | canonical path or * | fs:read:<path> |
 | fs:write | WriteDescriptor / WriteQueryDescriptor | canonical path or * | fs:write:<path> |
@@ -58,22 +60,22 @@ allowed only at the two audited typed helpers named by the generator.
 
 | Action | Check | Enclosing function | Source | Selection |
 | --- | --- | --- | --- | --- |
-| connect | check_net_resolved | check_resolved() | ext/fetch/dns.rs:244 | propagated |
-| fetch | check_net_resolved | check_resolved() | ext/fetch/dns.rs:244 | propagated |
+| connect | check_net_resolved | check_resolved() | ext/fetch/dns.rs:243 | propagated |
+| fetch | check_net_resolved | check_resolved() | ext/fetch/dns.rs:243 | propagated |
 | fetch | check_net_url | op_fetch() | ext/fetch/lib.rs:473 | explicit |
 | fetch | check_net_url | op_fetch_custom_client() | ext/fetch/lib.rs:874 | explicit |
 | fetch | check_net | op_fetch_custom_client() | ext/fetch/lib.rs:881 | explicit |
 | fetch | check_net_unix_socket | op_fetch_custom_client() | ext/fetch/lib.rs:901 | explicit |
-| fetch | check_net_vsock | op_fetch_custom_client() | ext/fetch/lib.rs:912 | explicit |
+| fetch | check_net_vsock | op_fetch_custom_client() | ext/fetch/lib.rs:913 | explicit |
 | fetch | check_net_url | check_net_url() | ext/kv/remote.rs:75 | explicit |
 | fetch | check_net_url | open() | ext/kv/remote.rs:160 | explicit |
 | connect | check_net | op_net_connect_tls() | ext/net/ops_tls.rs:425 | explicit |
 | connect | check_net_resolved | op_net_connect_tls() | ext/net/ops_tls.rs:496 | explicit |
 | listen | check_net | op_net_listen_tls() | ext/net/ops_tls.rs:577 | explicit |
 | listen | check_net_resolved | op_net_listen_tls() | ext/net/ops_tls.rs:590 | explicit |
-| connect | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
-| fetch | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
-| listen | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
+| connect | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:387 | propagated |
+| fetch | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:387 | propagated |
+| listen | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:387 | propagated |
 | connect | check_net | op_net_send_udp() | ext/net/ops.rs:282 | explicit |
 | connect | check_net_resolved | op_net_send_udp() | ext/net/ops.rs:297 | explicit |
 | connect | check_net | op_net_connect_tcp_inner() | ext/net/ops.rs:557 | explicit |
@@ -84,7 +86,7 @@ allowed only at the two audited typed helpers named by the generator.
 | listen | check_net_resolved | net_listen_udp() | ext/net/ops.rs:736 | explicit |
 | connect | check_net_vsock | op_net_connect_vsock() | ext/net/ops.rs:836 | explicit |
 | listen | check_net_vsock | op_net_listen_vsock() | ext/net/ops.rs:890 | explicit |
-| fetch | check_net | op_dns_resolve() | ext/net/ops.rs:1130 | explicit |
+| fetch | check_net | op_dns_resolve() | ext/net/ops.rs:1131 | explicit |
 | listen | check_net | op_quic_endpoint_create() | ext/net/quic.rs:263 | explicit |
 | connect | check_net | op_quic_endpoint_connect() | ext/net/quic.rs:570 | explicit |
 | connect | check_net_resolved | op_quic_endpoint_connect() | ext/net/quic.rs:582 | explicit |
@@ -112,24 +114,24 @@ allowed only at the two audited typed helpers named by the generator.
 | connect | check_net_resolved | op_node_udp_send() | ext/node/ops/udp.rs:604 | explicit |
 | connect | check_net_url | op_ws_check_permission_and_cancel_handle() | ext/websocket/lib.rs:133 | explicit |
 | connect | check_net_url | op_ws_create() | ext/websocket/lib.rs:461 | explicit |
-| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:9514 | explicit |
-| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:10771 | explicit |
-| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:10801 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10828 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10834 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10844 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10850 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10868 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10873 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10897 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10906 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10916 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14004 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14013 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14027 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14034 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14041 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14049 | explicit |
+| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:9627 | explicit |
+| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:10884 | explicit |
+| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:10914 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10941 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10947 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10957 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10963 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10981 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:10986 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11010 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11019 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11029 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14117 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14126 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14140 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14147 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14154 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14162 | explicit |
 
 ## Network resource/API action matrix
 
@@ -175,12 +177,147 @@ consume a resource authorized by the operation named in the note.
 | Node DNS reverse lookup (v1 resolve fold) | fetch | direct | ext/node/ops/dns.rs:op_node_getnameinfo() | query target |
 | Node inspector listener | listen | direct | ext/node/ops/inspector.rs:op_inspector_open() | inspector bind host/port |
 
-## Op-body pre-check skips (query_read_all call sites)
+## Permission methods (closed inventory)
 
-These bypass the permission container when read is fully granted; capsec
-forces `query_read_all()` false while armed. Each site must remain
+- check_all()
+- check_all_api()
+- check_env()
+- check_env_action()
+- check_env_all()
+- check_ffi()
+- check_ffi_all()
+- check_ffi_partial_no_path()
+- check_ffi_partial_with_path()
+- check_has_all_permissions()
+- check_net_resolved()
+- check_net_unix_socket()
+- check_net_url()
+- check_net_vsock()
+- check_open()
+- check_open_blind()
+- check_partial()
+- check_read_all()
+- check_resolved_ip_deny()
+- check_run()
+- check_run_all()
+- check_special_file()
+- check_specifier()
+- check_sys()
+- check_sys_all()
+- check_write()
+- check_write_all()
+- check_write_partial()
+
+## Resource-creating op sites (closed inventory)
+
+- ext/cache/lib.rs:381
+- ext/cron/lib.rs:122
+- ext/fetch/lib.rs:464
+- ext/fetch/lib.rs:467
+- ext/fetch/lib.rs:551
+- ext/fetch/lib.rs:557
+- ext/fetch/lib.rs:577
+- ext/fetch/lib.rs:677
+- ext/fetch/lib.rs:965
+- ext/ffi/callback.rs:651
+- ext/ffi/dlfcn.rs:242
+- ext/fs/ops.rs:218
+- ext/fs/ops.rs:256
+- ext/fs/ops.rs:787
+- ext/http/http_next.rs:1735
+- ext/http/http_next.rs:1751
+- ext/http/http_next.rs:2569
+- ext/http/http_next.rs:5284
+- ext/http/http_next.rs:5356
+- ext/http/lib.rs:1184
+- ext/http/lib.rs:1188
+- ext/http/lib.rs:931
+- ext/kv/lib.rs:230
+- ext/kv/lib.rs:460
+- ext/kv/lib.rs:493
+- ext/net/ops.rs:1001
+- ext/net/ops.rs:1670
+- ext/net/ops.rs:242
+- ext/net/ops.rs:659
+- ext/net/ops.rs:715
+- ext/net/ops.rs:789
+- ext/net/ops.rs:851
+- ext/net/ops.rs:901
+- ext/net/ops.rs:942
+- ext/net/ops.rs:973
+- ext/net/ops_tls.rs:398
+- ext/net/ops_tls.rs:547
+- ext/net/ops_tls.rs:632
+- ext/net/ops_tls.rs:666
+- ext/net/ops_unix.rs:138
+- ext/net/ops_unix.rs:165
+- ext/net/ops_unix.rs:246
+- ext/net/ops_unix.rs:278
+- ext/net/quic.rs:1125
+- ext/net/quic.rs:1157
+- ext/net/quic.rs:1218
+- ext/net/quic.rs:1219
+- ext/net/quic.rs:1277
+- ext/net/quic.rs:1278
+- ext/net/quic.rs:906
+- ext/net/quic.rs:907
+- ext/net/quic.rs:939
+- ext/net/quic.rs:940
+- ext/net/quic.rs:953
+- ext/net/quic.rs:987
+- ext/node/ops/ipc.rs:201
+- ext/node/ops/ipc.rs:212
+- ext/node/ops/tcp_wrap.rs:649
+- ext/node/ops/tls.rs:773
+- ext/node/ops/tls.rs:774
+- ext/node/ops/udp.rs:125
+- ext/node/ops/udp.rs:705
+- ext/node_crypto/lib.rs:657
+- ext/node_crypto/lib.rs:736
+- ext/os/ops/signal.rs:66
+- ext/process/lib.rs:1030
+- ext/process/lib.rs:1038
+- ext/process/lib.rs:1044
+- ext/process/lib.rs:1052
+- ext/process/lib.rs:1058
+- ext/process/lib.rs:1066
+- ext/process/lib.rs:1077
+- ext/process/lib.rs:1084
+- ext/process/lib.rs:1154
+- ext/process/lib.rs:2033
+- ext/process/lib.rs:2045
+- ext/process/lib.rs:2057
+- ext/process/lib.rs:2067
+- ext/process/lib.rs:726
+- ext/process/lib.rs:732
+- ext/process/lib.rs:843
+- ext/process/lib.rs:849
+- ext/web/broadcast_channel.rs:110
+- ext/web/locks.rs:249
+- ext/web/locks.rs:254
+- ext/web/locks.rs:293
+- ext/web/message_port.rs:201
+- ext/web/message_port.rs:206
+- ext/web/stream_resource.rs:489
+- ext/web/stream_resource.rs:507
+- ext/websocket/lib.rs:141
+- ext/websocket/lib.rs:535
+- ext/websocket/lib.rs:742
+- libs/core/ops_builtin.rs:577
+- libs/core/ops_builtin_v8.rs:1420
+- libs/core_testing/checkin/runner/ops_io.rs:122
+- libs/core_testing/checkin/runner/ops_io.rs:64
+- libs/core_testing/checkin/runner/ops_io.rs:68
+- runtime/ops/fs_events.rs:581
+- runtime/ops/worker_host.rs:650
+
+## Op-body pre-check skips (query_*_all call sites)
+
+These bypass the permission container when a family is fully granted; capsec
+forces each relevant query false while armed. Each site must remain
 covered by the layer-2-independence proof.
 
-- ext/node/ops/require.rs:45
-- ext/node/ops/worker_threads.rs:38
+- query_read_all	ext/node/ops/require.rs:45
+- query_read_all	ext/node/ops/worker_threads.rs:38
+- query_run_all	ext/process/lib.rs:1388
 

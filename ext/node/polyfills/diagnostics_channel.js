@@ -5,6 +5,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_oden_guard_surface } = core.ops;
 const { ERR_INVALID_ARG_TYPE } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
@@ -247,6 +248,12 @@ class Channel {
 const channels = new WeakRefMap();
 
 function channel(name) {
+  op_oden_guard_surface(
+    "ipc",
+    "broadcast",
+    String(name),
+    "node:diagnostics_channel.channel",
+  );
   const ch = channels.get(name);
   if (ch) return ch;
 

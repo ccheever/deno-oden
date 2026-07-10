@@ -581,6 +581,7 @@ struct ModuleCodeStringSource {
   pub code: ModuleSourceCode,
   pub found_url: ModuleSpecifier,
   pub module_type: ModuleType,
+  pub compartment_rewrite_applied: bool,
 }
 
 struct CliModuleLoaderInner<TGraphContainer: ModuleGraphContainer> {
@@ -822,7 +823,9 @@ impl<TGraphContainer: ModuleGraphContainer>
     // inert unless its registered fingerprint provider says the explicit,
     // enforce+lockdown-gated compartment mode is active.
     // @ref LLP 0014#mechanism-the-load-time-free-global-rewrite [implements]
-    let code = if code_source.module_type == ModuleType::JavaScript {
+    let code = if code_source.module_type == ModuleType::JavaScript
+      && !code_source.compartment_rewrite_applied
+    {
       rewrite_oden_compartment_globals_source(specifier, ModuleKind::Esm, code)?
     } else {
       code
@@ -981,6 +984,7 @@ impl<TGraphContainer: ModuleGraphContainer>
         loaded_module.media_type,
         requested_module_type,
       ),
+      compartment_rewrite_applied: loaded_module.media_type.is_emittable(),
     }
   }
 
@@ -1038,6 +1042,7 @@ impl<TGraphContainer: ModuleGraphContainer>
       code: ModuleSourceCode::Bytes(file.source.into()),
       found_url: file.url,
       module_type,
+      compartment_rewrite_applied: false,
     })
   }
 
@@ -2107,13 +2112,6 @@ impl<TGraphContainer: ModuleGraphContainer> NodeRequireLoader
           &text.into(),
         )
         .map_err(JsErrorBox::from_err)?;
-      let text = deno_resolver::emit::maybe_rewrite_oden_compartment_globals(
-        &specifier,
-        ModuleKind::Cjs,
-        &text,
-      )
-      .map_err(JsErrorBox::from_err)?
-      .unwrap_or_else(|| text.to_string());
       Ok(text.into())
     } else {
       let specifier = deno_path_util::url_from_file_path(path)

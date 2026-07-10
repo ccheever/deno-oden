@@ -361,6 +361,50 @@ fn oden_capsec_decide_inner(
   Ok(())
 }
 
+/// Gate a security-sensitive surface that does not yet have a safe grant
+/// grammar. Packages are denied under enforce and observed under audit;
+/// root/runtime remain ambient. This is used for inspector/V8, WASI, native
+/// database, storage, GPU, and process-global IPC entry points. (ENG-23953–57)
+// @ref LLP 0010#escape-hatch-families [implements]
+pub fn oden_capsec_guard_surface(
+  family: &str,
+  action: &str,
+  target: &str,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_active() {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  let principal = oden_capsec_principal();
+  let label = principal.label();
+  if principal.is_ambient()
+    || oden_capsec_mode(oden_capsec_policy_file()) == OdenMode::Permissive
+  {
+    return Ok(());
+  }
+  let mode = oden_capsec_mode(oden_capsec_policy_file());
+  let verdict = if mode == OdenMode::Enforce {
+    "DENY(default-closed surface)"
+  } else {
+    "audit(record)"
+  };
+  oden_capsec_audit_record(&label, family, action, target, verdict, None);
+  if mode == OdenMode::Enforce {
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("{api_name} access to {target:?}"),
+        name: "capsec",
+        custom_message: Some(format!(
+          "oden capsec: principal \"{label}\" may not use default-closed {family}:{action}:{target}"
+        )),
+        state: PermissionState::Denied,
+      },
+    ));
+  }
+  Ok(())
+}
+
 /// Structural arming (LLP 0001, ENG-23764/23772): the presence of the policy
 /// artifact arms capsec — either an explicit `ODEN_CAPSEC_POLICY` handoff (the
 /// seam the oden CLI uses to pass a merged policy in a temp file) or a
@@ -854,7 +898,7 @@ fn oden_suggested_grant_token(
     OdenFamily::Network => {
       format!("network:{action}:{}", oden_host_of(target))
     }
-    OdenFamily::Sys => format!("sys:read:{target}"),
+    OdenFamily::Sys => format!("sys:{target}"),
   };
   Some(token)
 }
@@ -1269,7 +1313,7 @@ pub fn oden_capsec_compartment_globals_fingerprint(
   let principal = oden_principal_index::resolve_locator(locator);
   let names = oden_capsec_policy().endowments(&principal);
   let mut hasher = std::collections::hash_map::DefaultHasher::new();
-  principal.label().hash(&mut hasher);
+  oden_capsec_compartment_key(&principal, Some(locator)).hash(&mut hasher);
   for name in names {
     name.hash(&mut hasher);
   }
@@ -1296,13 +1340,34 @@ pub fn oden_capsec_compartment_endowments()
     ));
   }
   oden_capsec_readiness_gate()?;
-  let principal = oden_capsec_principal();
+  let (principal, locator) = oden_capsec_principal_with_locator();
   let names = oden_capsec_policy()
     .endowments(&principal)
     .into_iter()
     .collect::<Vec<_>>()
     .join(",");
-  Ok(format!("{}\0{names}", principal.label()))
+  Ok(format!(
+    "{}\0{names}",
+    oden_capsec_compartment_key(&principal, locator.as_deref())
+  ))
+}
+
+/// A compartment is keyed by the integrity-bound principal *and* the exact
+/// loader locator that produced it. The latter is required when a project has
+/// no lockfile (and therefore no trustworthy package version claim), and also
+/// prevents two physical package instances from aliasing one filtered-global
+/// proxy merely because their human-readable policy selector is the same.
+fn oden_capsec_compartment_key(
+  principal: &OdenPrincipal,
+  locator: Option<&str>,
+) -> String {
+  let Some(locator) = locator else {
+    return principal.key();
+  };
+  let mut hasher = std::collections::hash_map::DefaultHasher::new();
+  locator.hash(&mut hasher);
+  oden_principal_index::integrity_of(locator).hash(&mut hasher);
+  format!("{}#locator:{:016x}", principal.key(), hasher.finish())
 }
 
 // Emit the readiness report once, and enforce fail-closed honesty. Returns Err
@@ -1804,14 +1869,7 @@ fn oden_capsec_dynamic_request_audit_record(
     "memoized": result.memoized,
     "suggestion": suggestion,
   });
-  eprintln!(
-    "[oden-capsec] Deno.permissions.{operation} caller={} capability={} -> {}{}",
-    principal.label(),
-    capability.as_deref().unwrap_or("ambiguous"),
-    result.code.as_str(),
-    if result.memoized { " (memoized)" } else { "" },
-  );
-  oden_capsec_write_audit_record(&rec);
+  let _ = oden_capsec_write_audit_record(&rec);
 }
 
 fn oden_capsec_dynamic_query_audit_record(
@@ -1854,17 +1912,19 @@ static ODEN_RESOURCE_OWNERS: Lazy<
 
 // Pure decision core, unit-testable without the op-dispatch stack: given the
 // acting principal's label, the rid's recorded owner (if any), and the mode,
-// decide whether a resource use is allowed. An untracked rid (opened by
-// root/ambient, or a family whose owner-check isn't wired) is a named residual:
-// allowed, recorded. Ownership match: allowed. Cross-principal: denied under
-// enforce, recorded under audit.
+// decide whether a resource use is allowed. An untracked rid is not proof of
+// authority: small integer ids are guessable, so package use fails closed.
 fn oden_resource_use_decision(
   caller: &str,
   owner: Option<&str>,
   mode: OdenMode,
 ) -> OdenDecision {
   match owner {
-    None => OdenDecision::AllowRecord, // untracked residual
+    None => match mode {
+      OdenMode::Enforce => OdenDecision::Deny,
+      OdenMode::Audit => OdenDecision::AllowRecord,
+      OdenMode::Permissive => OdenDecision::Allow,
+    },
     Some(o) if o == caller => OdenDecision::Allow,
     Some(_) => match mode {
       OdenMode::Enforce => OdenDecision::Deny,
@@ -2668,10 +2728,11 @@ fn oden_resolve_grant_scopes(grant_str: &str, root: &str) -> String {
     .join(",")
 }
 
-// Resolve an fs op target to an absolute, lexically-normalized path (join cwd
-// for relative paths; fold `.` and `..`), so scope matching is done on canonical
-// paths and a `..` escape lands outside its granted scope. Purely lexical (does
-// not touch the filesystem); symlink/TOCTOU hardening is separate.
+// Resolve an fs op target through the deepest existing ancestor. Existing
+// paths therefore match on their real inode location; not-yet-existing write
+// leaves inherit the canonical identity of the nearest existing directory.
+// This closes lexical symlink-out grants while preserving creation semantics.
+// @ref LLP 0010#paths [implements]
 #[allow(
   clippy::disallowed_methods,
   reason = "resolves a relative fs op target against the process cwd for scope matching"
@@ -2702,6 +2763,28 @@ fn oden_normalize_fs_target(target: &str) -> String {
   let mut pb = std::path::PathBuf::new();
   for c in out {
     pb.push(c.as_os_str());
+  }
+  if let Ok(real) = std::fs::canonicalize(&pb) {
+    return real.to_string_lossy().into_owned();
+  }
+
+  let mut ancestor = pb.clone();
+  let mut suffix = Vec::new();
+  while !ancestor.as_os_str().is_empty() {
+    if let Ok(real) = std::fs::canonicalize(&ancestor) {
+      let mut resolved = real;
+      for part in suffix.iter().rev() {
+        resolved.push(part);
+      }
+      return resolved.to_string_lossy().into_owned();
+    }
+    let Some(name) = ancestor.file_name().map(|s| s.to_os_string()) else {
+      break;
+    };
+    suffix.push(name);
+    if !ancestor.pop() {
+      break;
+    }
   }
   pb.to_string_lossy().into_owned()
 }
@@ -2763,19 +2846,15 @@ fn oden_capsec_policy() -> &'static OdenPolicy {
           OdenPolicyValidationIssue::FloorAboveCeiling { selector, grant } => {
             ODEN_POLICY_INVALID
               .store(true, std::sync::atomic::Ordering::Relaxed);
-            eprintln!(
-              "[oden-capsec] invalid authority envelope: {selector} floor {grant} exceeds escalation ceiling"
-            );
+            let _ = (selector, grant);
           }
           OdenPolicyValidationIssue::CeilingConflicted {
             selector,
             ceiling,
             deny,
           } => {
-            eprintln!(
-              "[oden-capsec] ceiling-conflicted: {selector} {ceiling} intersects deny ceiling {deny}; entry inert"
-            );
-            oden_capsec_audit_record(
+            let _ = deny;
+            let _ = oden_capsec_audit_record(
               &selector,
               "ceiling",
               "conflict",
@@ -2815,7 +2894,7 @@ fn oden_capsec_mode(file: Option<&OdenPolicyFile>) -> OdenMode {
   OdenMode::Audit
 }
 
-fn oden_capsec_principal() -> OdenPrincipal {
+fn oden_capsec_principal_with_locator() -> (OdenPrincipal, Option<String>) {
   let frames = MAYBE_CURRENT_ODEN_STACKTRACE
     .lock()
     .as_ref()
@@ -2826,7 +2905,8 @@ fn oden_capsec_principal() -> OdenPrincipal {
     // classification (a locator whose lockfile binding fails resolves to
     // quarantine, never a path-string principal), memoized per script ID for
     // the op-dispatch hot path (ENG-23763).
-    let principal = match frame.locator.as_deref() {
+    let locator = frame.locator;
+    let principal = match locator.as_deref() {
       Some(locator) => oden_principal_index::resolve_frame(
         frame.isolate_id,
         frame.script_id,
@@ -2842,21 +2922,25 @@ fn oden_capsec_principal() -> OdenPrincipal {
       continue;
     }
     // Precedence row 1: the nearest live user frame wins.
-    return principal;
+    return (principal, locator);
   }
   // Precedence row 2: no live user frame, but a scheduling principal survives
   // in the CPED slot (a detached callback) — attribute to the scheduler.
   if let Some(locator) = prompter::current_oden_cped_locator() {
     let principal = oden_principal_index::resolve_locator(&locator);
     if principal != OdenPrincipal::Runtime {
-      return principal;
+      return (principal, Some(locator));
     }
   }
   // Precedence row 4: no live user frame and no scheduling principal — the
   // fail-closed sentinel, never root. A genuine timer/immediate boundary now
   // carries schedule-before-first-op through ENG-23881; this fallthrough remains
   // for contexts with no attributable boundary at all.
-  OdenPrincipal::NoUser
+  (OdenPrincipal::NoUser, None)
+}
+
+fn oden_capsec_principal() -> OdenPrincipal {
+  oden_capsec_principal_with_locator().0
 }
 
 // The full set of principals implicated in the current op, for stack-
@@ -7326,6 +7410,9 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn query_run_all(&mut self, api_name: &str) -> bool {
+    if oden_capsec_active() {
+      return false;
+    }
     self.inner.lock().run.query_all(Some(api_name))
   }
 
@@ -7345,7 +7432,16 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn check_env(&self, var: &str) -> Result<(), PermissionCheckError> {
-    oden_capsec_decide(OdenFamily::Env, "read", var, None)?;
+    self.check_env_action(var, "read")
+  }
+
+  #[inline(always)]
+  pub fn check_env_action(
+    &self,
+    var: &str,
+    action: &str,
+  ) -> Result<(), PermissionCheckError> {
+    oden_capsec_decide(OdenFamily::Env, action, var, None)?;
     self.inner.lock().env.check(var, None)?;
     Ok(())
   }
@@ -8848,12 +8944,28 @@ mod tests {
   }
 
   #[test]
+  fn compartment_keys_do_not_alias_physical_package_instances() {
+    let principal = OdenPrincipal::Package {
+      name: "same-name".to_string(),
+      version: None,
+    };
+    let first = oden_capsec_compartment_key(
+      &principal,
+      Some("file:///app/node_modules/same-name/mod.ts"),
+    );
+    let second = oden_capsec_compartment_key(
+      &principal,
+      Some("file:///app/node_modules/parent/node_modules/same-name/mod.ts"),
+    );
+    assert_ne!(first, second);
+  }
+
+  #[test]
   fn resource_use_decision_owner_semantics() {
-    // Untracked rid (opened by root, or a family whose check isn't wired) is a
-    // named residual: recorded, allowed.
+    // An untracked rid is guessable and therefore denied under enforce.
     assert_eq!(
       oden_resource_use_decision("dep-a", None, OdenMode::Enforce),
-      OdenDecision::AllowRecord
+      OdenDecision::Deny
     );
     // The owner uses its own rid freely.
     assert_eq!(

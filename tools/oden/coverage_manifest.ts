@@ -43,6 +43,11 @@ const CAPABILITY_TAXONOMY: Record<string, TaxonomyEntry> = {
     target: "name or *",
     grant: "env:read:<name>",
   },
+  "env:write": {
+    deno: "EnvDescriptor / EnvQueryDescriptor",
+    target: "name",
+    grant: "env:write:<name>",
+  },
   "ffi:load": {
     deno: "FfiQueryDescriptor",
     target: "path or *",
@@ -732,6 +737,12 @@ function collectMediation(network: NetworkCheck[]): string[] {
     if (literalAction) {
       found.add(`${family}:${literalAction}\tvia ${call.fn}()`);
     } else if (
+      family === "env" && call.fn === "check_env_action" &&
+      call.args[1]?.replace(/\s+/g, "") === "action"
+    ) {
+      found.add("env:read\tvia check_env_action()");
+      found.add("env:write\tvia check_env_action()");
+    } else if (
       family === "network" &&
       call.args[1]?.replace(/\s+/g, "") === "action.as_str()"
     ) {
@@ -764,7 +775,7 @@ function collectMediation(network: NetworkCheck[]): string[] {
   return [...found].sort();
 }
 
-// --- 2. op-body pre-check skips (query_read_all call sites) -------------------
+// --- 2. op-body pre-check skips (every query_*_all call site) ----------------
 function collectSkips(): string[] {
   const skips: string[] = [];
   for (const d of SKIP_SCAN_DIRS) {
@@ -774,16 +785,39 @@ function collectSkips(): string[] {
       const lines = src.split("\n");
       for (let i = 0; i < lines.length; i++) {
         // Call sites, not the definition (`pub fn query_read_all`).
-        if (
-          lines[i].includes("query_read_all()") &&
-          !lines[i].includes("fn query_read_all")
-        ) {
-          skips.push(`${rel}:${i + 1}`);
+        const match = lines[i].match(/\b(query_[a-z0-9_]+_all)\s*\(/);
+        if (match && !lines[i].includes(`fn ${match[1]}`)) {
+          skips.push(`${match[1]}\t${rel}:${i + 1}`);
         }
       }
     }
   }
   return skips.sort();
+}
+
+function collectPermissionMethods(): string[] {
+  const src = Deno.readTextFileSync(ROOT + MEDIATION_FILE);
+  return [...src.matchAll(/\bpub fn (check_[a-z0-9_]+)\s*(?:<[^>]*>)?\s*\(/g)]
+    .map((match) => match[1])
+    .filter((name, index, all) => all.indexOf(name) === index)
+    .sort();
+}
+
+function collectResourceCreationSites(): string[] {
+  const sites: string[] = [];
+  for (const d of SKIP_SCAN_DIRS) {
+    for (const file of walk(ROOT + d)) {
+      const rel = file.slice(ROOT.length);
+      const src = Deno.readTextFileSync(file);
+      for (
+        const match of src.matchAll(/resource_table\s*\.\s*add(?:_rc)?\s*\(/gs)
+      ) {
+        const line = src.slice(0, match.index ?? 0).split("\n").length;
+        sites.push(`${rel}:${line}`);
+      }
+    }
+  }
+  return sites.sort();
 }
 
 function capabilityOf(mediationLine: string): string {
@@ -888,6 +922,8 @@ function render(): string {
   const network = collectNetworkChecks();
   const mediation = collectMediation(network);
   const skips = collectSkips();
+  const permissionMethods = collectPermissionMethods();
+  const resourceSites = collectResourceCreationSites();
   validateTaxonomy(mediation);
   validateNetworkSurfaces(network);
   const out: string[] = [];
@@ -905,13 +941,21 @@ function render(): string {
   out.push(...renderTaxonomy());
   out.push(...renderNetworkChecks(network));
   out.push(...renderNetworkSurfaces());
-  out.push("## Op-body pre-check skips (query_read_all call sites)");
+  out.push("## Permission methods (closed inventory)");
+  out.push("");
+  for (const method of permissionMethods) out.push(`- ${method}()`);
+  out.push("");
+  out.push("## Resource-creating op sites (closed inventory)");
+  out.push("");
+  for (const site of resourceSites) out.push(`- ${site}`);
+  out.push("");
+  out.push("## Op-body pre-check skips (query_*_all call sites)");
   out.push("");
   out.push(
-    "These bypass the permission container when read is fully granted; capsec",
+    "These bypass the permission container when a family is fully granted; capsec",
   );
   out.push(
-    "forces `query_read_all()` false while armed. Each site must remain",
+    "forces each relevant query false while armed. Each site must remain",
   );
   out.push("covered by the layer-2-independence proof.");
   out.push("");

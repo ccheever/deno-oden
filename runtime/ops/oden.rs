@@ -27,8 +27,33 @@ deno_core::extension!(
     op_oden_handle_exit,
     op_oden_handle_revoke,
     op_oden_compartment_endowments,
+    op_oden_guard_surface,
+    op_oden_attestation,
   ],
 );
+
+/// Versioned, compile-time feature attestation consumed by the Oden CLI before
+/// selecting this binary as its enforcement backend. Behavioral probes remain
+/// defense in depth; this closed feature set prevents a partially patched fork
+/// from being certified by one passing env denial. (ENG-23930)
+#[op2]
+#[string]
+pub fn op_oden_attestation() -> &'static str {
+  r#"{"schema":2,"semantics":"oden-capsec-2026-07-10","features":["action-sensitive-env","action-sensitive-network","canonical-fs","closed-op-inventory","compartment-principal-key-v2","default-closed-escape-hatches","layer2-run-fastpath","resource-ownership"]}"#
+}
+
+/// Default-deny a capability surface that has no safe scoped grant yet.
+#[op2(fast, stack_trace)]
+pub fn op_oden_guard_surface(
+  #[string] family: String,
+  #[string] action: String,
+  #[string] target: String,
+  #[string] api_name: String,
+) -> Result<(), PermissionCheckError> {
+  deno_permissions::oden_capsec_guard_surface(
+    &family, &action, &target, &api_name,
+  )
+}
 
 /// Return the caller-derived endowment descriptor used by trusted bootstrap JS
 /// to construct a filtered global record. The live frame is load-bearing: user

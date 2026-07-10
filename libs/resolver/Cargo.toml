@@ -14,7 +14,7 @@ description = "Deno resolution algorithm"
 path = "lib.rs"
 
 [features]
-deno_ast = ["dep:deno_ast", "deno_graph/swc"]
+deno_ast = ["dep:deno_ast", "dep:sourcemap", "deno_graph/swc"]
 graph = ["deno_graph", "node_resolver/graph", "http", "deno_permissions"]
 sync = [
   "dashmap",
@@ -62,6 +62,7 @@ parking_lot.workspace = true
 phf = { workspace = true, features = ["macros"] }
 serde.workspace = true
 serde_json.workspace = true
+sourcemap = { workspace = true, optional = true }
 sys_traits.workspace = true
 thiserror.workspace = true
 twox-hash.workspace = true
@@ -70,5 +71,10 @@ yaml_parser.workspace = true
 
 [dev-dependencies]
 node_resolver.workspace = true
-sys_traits = { workspace = true, features = ["memory", "real", "serde_json"] }
+sys_traits = { workspace = true, features = [
+  "getrandom",
+  "memory",
+  "real",
+  "serde_json",
+] }
 test_util.workspace = true
