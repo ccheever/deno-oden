@@ -114,24 +114,24 @@ allowed only at the two audited typed helpers named by the generator.
 | connect | check_net_resolved | op_node_udp_send() | ext/node/ops/udp.rs:604 | explicit |
 | connect | check_net_url | op_ws_check_permission_and_cancel_handle() | ext/websocket/lib.rs:133 | explicit |
 | connect | check_net_url | op_ws_create() | ext/websocket/lib.rs:461 | explicit |
-| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:9722 | explicit |
-| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:10979 | explicit |
-| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:11009 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11036 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11042 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11052 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11058 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11076 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11081 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11105 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11114 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11124 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14212 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14221 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14235 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14242 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14249 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14257 | explicit |
+| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:9817 | explicit |
+| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:11074 | explicit |
+| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:11104 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11131 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11137 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11147 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11153 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11171 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11176 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11200 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11209 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11219 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14307 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14316 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14330 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14337 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14344 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14352 | explicit |
 
 ## Network resource/API action matrix
 

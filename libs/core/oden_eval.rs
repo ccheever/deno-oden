@@ -17,13 +17,29 @@ use std::pin::pin;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
+use deno_ast::MediaType;
+use deno_ast::ParseParams;
+use deno_ast::swc::ast::AssignTarget;
+use deno_ast::swc::ast::Expr;
+use deno_ast::swc::ast::Program;
+use deno_ast::swc::ast::Prop;
+use deno_ast::swc::ast::SimpleAssignTarget;
+use deno_ast::swc::ast::Stmt;
+use deno_ast::swc::common::Span;
+use deno_ast::swc::common::Spanned;
+use deno_ast::swc::common::SyntaxContext;
+use deno_ast::swc::ecma_visit::Visit;
+use deno_ast::swc::ecma_visit::VisitWith;
 use indexmap::IndexMap;
 use rand::RngCore;
+use url::Url;
 
 use crate::error::JsStackFrame;
 use crate::oden_v8_abi::ModifyCodeGenerationFromStringsResult;
 
 const EVAL_SOURCE_URL_PREFIX: &str = "oden-eval://";
+const EVAL_CONTEXT_PREFIX: &str = "oden-eval-context:";
+const COMPARTMENT_HELPER: &str = "__oden_compartment_globals__";
 const MAX_PENDING_EVALS_PER_ISOLATE: usize = 4096;
 // Context embedder slots 1/2 belong to ContextState/ModuleMap, while node:vm
 // uses 1/2/3 plus its own tag in slot 4. Slot 5 is Oden's unforgeable realm
@@ -32,6 +48,353 @@ const MAX_PENDING_EVALS_PER_ISOLATE: usize = 4096;
 // op callback's current context, prevents a nonce observed in one realm from
 // being replayed by eval or node:vm code in another context of the isolate.
 const ODEN_EVAL_CONTEXT_SLOT: i32 = 5;
+// Trusted runtime bootstrap sets this slot only after installing the
+// non-configurable helper. A user-created property with the same public name
+// therefore cannot opt an audit/non-compartment context into source rewriting.
+const ODEN_EVAL_ENDOWMENT_SLOT: i32 = 6;
+
+const ODEN_DYNAMIC_GLOBALS: &[&str] = &[
+  "BroadcastChannel",
+  "Deno",
+  "EventSource",
+  "WebSocket",
+  "Worker",
+  "alert",
+  "caches",
+  "confirm",
+  "fetch",
+  "global",
+  "globalThis",
+  "localStorage",
+  "navigator",
+  "process",
+  "prompt",
+  "self",
+  "sessionStorage",
+];
+
+#[derive(Debug)]
+struct SourceEdit {
+  start: usize,
+  end: usize,
+  replacement: String,
+}
+
+struct DynamicEndowmentEdits<'a> {
+  unresolved: SyntaxContext,
+  alias_name: &'a str,
+  record_name: &'a str,
+  edits: Vec<SourceEdit>,
+  shadows_injected_name: bool,
+  contains_with: bool,
+  unsupported_assignment_pattern: bool,
+}
+
+impl DynamicEndowmentEdits<'_> {
+  fn is_rewritten_global(&self, ident: &deno_ast::swc::ast::Ident) -> bool {
+    ident.ctxt == self.unresolved
+      && ODEN_DYNAMIC_GLOBALS.contains(&ident.sym.as_ref())
+  }
+
+  fn note_injected_name(&mut self, ident: &deno_ast::swc::ast::Ident) {
+    if ident.sym == self.alias_name || ident.sym == self.record_name {
+      self.shadows_injected_name = true;
+    }
+  }
+
+  fn replace_ident(&mut self, ident: &deno_ast::swc::ast::Ident) {
+    if !self.is_rewritten_global(ident) {
+      return;
+    }
+    if let Some((start, end)) = byte_range(ident.span) {
+      self.edits.push(SourceEdit {
+        start,
+        end,
+        replacement: format!("{}.{}", self.record_name, ident.sym),
+      });
+    }
+  }
+
+  fn pattern_has_rewritten_global(
+    &self,
+    pattern: &deno_ast::swc::ast::Pat,
+  ) -> bool {
+    use deno_ast::swc::ast::ObjectPatProp;
+    use deno_ast::swc::ast::Pat;
+    match pattern {
+      Pat::Ident(binding) => self.is_rewritten_global(&binding.id),
+      Pat::Array(array) => array
+        .elems
+        .iter()
+        .flatten()
+        .any(|pattern| self.pattern_has_rewritten_global(pattern)),
+      Pat::Rest(rest) => self.pattern_has_rewritten_global(&rest.arg),
+      Pat::Object(object) => {
+        object.props.iter().any(|property| match property {
+          ObjectPatProp::KeyValue(property) => {
+            self.pattern_has_rewritten_global(&property.value)
+          }
+          ObjectPatProp::Assign(property) => {
+            self.is_rewritten_global(&property.key.id)
+          }
+          ObjectPatProp::Rest(rest) => {
+            self.pattern_has_rewritten_global(&rest.arg)
+          }
+        })
+      }
+      Pat::Assign(assign) => self.pattern_has_rewritten_global(&assign.left),
+      Pat::Expr(_) | Pat::Invalid(_) => false,
+    }
+  }
+
+  fn assignment_target_pattern_has_rewritten_global(
+    &self,
+    pattern: &deno_ast::swc::ast::AssignTargetPat,
+  ) -> bool {
+    use deno_ast::swc::ast::AssignTargetPat;
+    match pattern {
+      AssignTargetPat::Array(array) => array
+        .elems
+        .iter()
+        .flatten()
+        .any(|pattern| self.pattern_has_rewritten_global(pattern)),
+      AssignTargetPat::Object(object) => object.props.iter().any(|property| {
+        use deno_ast::swc::ast::ObjectPatProp;
+        match property {
+          ObjectPatProp::KeyValue(property) => {
+            self.pattern_has_rewritten_global(&property.value)
+          }
+          ObjectPatProp::Assign(property) => {
+            self.is_rewritten_global(&property.key.id)
+          }
+          ObjectPatProp::Rest(rest) => {
+            self.pattern_has_rewritten_global(&rest.arg)
+          }
+        }
+      }),
+      AssignTargetPat::Invalid(_) => false,
+    }
+  }
+
+  fn rewrite_for_head(&mut self, head: &deno_ast::swc::ast::ForHead) {
+    use deno_ast::swc::ast::ForHead;
+    use deno_ast::swc::ast::Pat;
+    let ForHead::Pat(pattern) = head else {
+      return;
+    };
+    if let Pat::Ident(binding) = &**pattern {
+      self.replace_ident(&binding.id);
+    } else if self.pattern_has_rewritten_global(pattern) {
+      self.unsupported_assignment_pattern = true;
+    }
+  }
+}
+
+impl Visit for DynamicEndowmentEdits<'_> {
+  fn visit_ident(&mut self, ident: &deno_ast::swc::ast::Ident) {
+    self.note_injected_name(ident);
+  }
+
+  fn visit_expr(&mut self, expr: &Expr) {
+    if let Expr::Ident(ident) = expr {
+      self.note_injected_name(ident);
+      self.replace_ident(ident);
+      return;
+    }
+    expr.visit_children_with(self);
+  }
+
+  fn visit_prop(&mut self, prop: &Prop) {
+    if let Prop::Shorthand(ident) = prop {
+      self.note_injected_name(ident);
+      if self.is_rewritten_global(ident)
+        && let Some((start, end)) = byte_range(ident.span)
+      {
+        self.edits.push(SourceEdit {
+          start,
+          end,
+          replacement: format!(
+            "{}: {}.{}",
+            ident.sym, self.record_name, ident.sym
+          ),
+        });
+      }
+      return;
+    }
+    prop.visit_children_with(self);
+  }
+
+  fn visit_assign_expr(&mut self, assign: &deno_ast::swc::ast::AssignExpr) {
+    assign.visit_children_with(self);
+    match &assign.left {
+      AssignTarget::Simple(SimpleAssignTarget::Ident(ident)) => {
+        self.note_injected_name(&ident.id);
+        self.replace_ident(&ident.id);
+      }
+      AssignTarget::Pat(pattern)
+        if self.assignment_target_pattern_has_rewritten_global(pattern) =>
+      {
+        self.unsupported_assignment_pattern = true;
+      }
+      _ => {}
+    }
+  }
+
+  fn visit_for_in_stmt(&mut self, statement: &deno_ast::swc::ast::ForInStmt) {
+    statement.visit_children_with(self);
+    self.rewrite_for_head(&statement.left);
+  }
+
+  fn visit_for_of_stmt(&mut self, statement: &deno_ast::swc::ast::ForOfStmt) {
+    statement.visit_children_with(self);
+    self.rewrite_for_head(&statement.left);
+  }
+
+  fn visit_with_stmt(&mut self, _with: &deno_ast::swc::ast::WithStmt) {
+    // An outer `with` Proxy could intercept the callback-owned random binding.
+    // Dynamic code is forced strict below, so rejecting this construct is both
+    // fail-closed and aligned with the emitted program V8 will validate.
+    self.contains_with = true;
+  }
+}
+
+enum DynamicRewrite {
+  Rewritten(String),
+  ParseError,
+  Refused,
+}
+
+fn byte_range(span: Span) -> Option<(usize, usize)> {
+  let start = usize::try_from(span.lo.0.checked_sub(1)?).ok()?;
+  let end = usize::try_from(span.hi.0.checked_sub(1)?).ok()?;
+  (start <= end).then_some((start, end))
+}
+
+fn function_constructor_body_start(program: &Program) -> Option<usize> {
+  let Program::Script(script) = program else {
+    return None;
+  };
+  let [Stmt::Expr(statement)] = script.body.as_slice() else {
+    return None;
+  };
+  let mut expr = &*statement.expr;
+  while let Expr::Paren(paren) = expr {
+    expr = &paren.expr;
+  }
+  let Expr::Fn(function) = expr else {
+    return None;
+  };
+  let body = function.function.body.as_ref()?;
+  let (start, _) = byte_range(body.span())?;
+  Some(start + 1)
+}
+
+fn apply_source_edits(
+  source: &str,
+  mut edits: Vec<SourceEdit>,
+  insertion: usize,
+  prologue: &str,
+) -> Option<String> {
+  edits.sort_by_key(|edit| (edit.start, edit.end));
+  for pair in edits.windows(2) {
+    if pair[0].end > pair[1].start {
+      return None;
+    }
+  }
+  if insertion > source.len() || !source.is_char_boundary(insertion) {
+    return None;
+  }
+  let extra = edits.iter().fold(prologue.len(), |total, edit| {
+    total.saturating_add(
+      edit.replacement.len().saturating_sub(edit.end - edit.start),
+    )
+  });
+  let mut rewritten = String::with_capacity(source.len().saturating_add(extra));
+  let mut cursor = 0;
+  let mut inserted = false;
+  for edit in edits {
+    if !inserted && insertion <= edit.start {
+      rewritten.push_str(&source[cursor..insertion]);
+      rewritten.push_str(prologue);
+      cursor = insertion;
+      inserted = true;
+    }
+    if edit.start < cursor
+      || edit.end > source.len()
+      || !source.is_char_boundary(edit.start)
+      || !source.is_char_boundary(edit.end)
+    {
+      return None;
+    }
+    rewritten.push_str(&source[cursor..edit.start]);
+    rewritten.push_str(&edit.replacement);
+    cursor = edit.end;
+  }
+  if !inserted {
+    rewritten.push_str(&source[cursor..insertion]);
+    rewritten.push_str(prologue);
+    cursor = insertion;
+  }
+  rewritten.push_str(&source[cursor..]);
+  Some(rewritten)
+}
+
+/// Parse with the same SWC scope analysis used by the module transform, then
+/// edit only parser-identified unresolved authority-bearing identifiers. The
+/// original Function-constructor parameter prefix stays byte-for-byte intact,
+/// preserving V8's native parameter/body injection boundary.
+// @ref LLP 0014#closing-the-dynamic-channels [implements]
+fn rewrite_dynamic_source(source: &str, alias_name: &str) -> DynamicRewrite {
+  let Ok(specifier) = Url::parse("oden-dynamic://source.js") else {
+    return DynamicRewrite::Refused;
+  };
+  let parsed = match deno_ast::parse_script(ParseParams {
+    specifier,
+    text: source.into(),
+    media_type: MediaType::JavaScript,
+    capture_tokens: false,
+    scope_analysis: true,
+    maybe_syntax: None,
+  }) {
+    Ok(parsed) => parsed,
+    Err(_) => return DynamicRewrite::ParseError,
+  };
+  let unresolved = parsed.unresolved_context();
+  let program = parsed.program();
+  let function_body_start = function_constructor_body_start(&program);
+  let insertion = function_body_start.unwrap_or(0);
+  let record_name = format!("{alias_name}_record");
+  let mut visitor = DynamicEndowmentEdits {
+    unresolved,
+    alias_name,
+    record_name: &record_name,
+    edits: Vec::new(),
+    shadows_injected_name: false,
+    contains_with: false,
+    unsupported_assignment_pattern: false,
+  };
+  program.visit_with(&mut visitor);
+  if visitor.shadows_injected_name
+    || visitor.contains_with
+    || visitor.unsupported_assignment_pattern
+  {
+    return DynamicRewrite::Refused;
+  }
+  if function_body_start.is_some()
+    && visitor.edits.iter().any(|edit| edit.start < insertion)
+  {
+    // Rewriting a default parameter would move V8's already-computed
+    // `parameters_end_pos` and weaken its native injection validation.
+    return DynamicRewrite::Refused;
+  }
+  // Keep the prologue on the existing first/body line. Dynamic sources have
+  // no source-map channel here, so preserving line count keeps later stack
+  // frame line numbers stable (only the first-line column is displaced).
+  let prologue = format!("\"use strict\";const {record_name}={alias_name}();");
+  apply_source_edits(source, visitor.edits, insertion, &prologue)
+    .map(DynamicRewrite::Rewritten)
+    .unwrap_or(DynamicRewrite::Refused)
+}
 
 #[derive(Debug)]
 struct PendingEval {
@@ -186,6 +549,86 @@ fn context_id(
   Some(value.to_rust_string_lossy(scope))
 }
 
+fn dynamic_endowments_enabled(
+  scope: &mut v8::PinScope,
+  context: v8::Local<v8::Context>,
+) -> bool {
+  context
+    .get_embedder_data(scope, ODEN_EVAL_ENDOWMENT_SLOT)
+    .is_some_and(|value| value.is_true())
+}
+
+/// Attribution-only contexts may preserve the original source when metadata
+/// setup fails. Once trusted bootstrap arms the endowment marker, every such
+/// failure must deny instead: allowing the original string would expose the
+/// realm's raw globals.
+fn allow_unmodified_source(compartment_active: bool) -> bool {
+  !compartment_active
+}
+
+pub(crate) fn enable_dynamic_endowments(scope: &mut v8::PinScope<'_, '_>) {
+  let context = scope.get_current_context();
+  let enabled = v8::Boolean::new(scope, true);
+  context.set_embedder_data(ODEN_EVAL_ENDOWMENT_SLOT, enabled.into());
+}
+
+fn context_alias_name(context_id: &str) -> Option<String> {
+  let identity = context_id.strip_prefix(EVAL_CONTEXT_PREFIX)?;
+  if identity.len() != 32
+    || !identity.bytes().all(|byte| byte.is_ascii_hexdigit())
+  {
+    return None;
+  }
+  Some(format!("__oden_dynamic_endow_{identity}"))
+}
+
+enum CompartmentAlias {
+  Off,
+  Ready(String),
+  Refused,
+}
+
+fn prepare_compartment_alias(
+  scope: &mut v8::PinScope,
+  context: v8::Local<v8::Context>,
+  context_id: &str,
+) -> CompartmentAlias {
+  if !dynamic_endowments_enabled(scope, context) {
+    return CompartmentAlias::Off;
+  }
+  let Some(alias_name) = context_alias_name(context_id) else {
+    return CompartmentAlias::Refused;
+  };
+  let Some(helper_key) = v8::String::new(scope, COMPARTMENT_HELPER) else {
+    return CompartmentAlias::Refused;
+  };
+  let global = context.global(scope);
+  let Some(helper) = global.get(scope, helper_key.into()) else {
+    return CompartmentAlias::Refused;
+  };
+  if !helper.is_function() {
+    return CompartmentAlias::Refused;
+  }
+  let Some(alias_key) = v8::String::new(scope, &alias_name) else {
+    return CompartmentAlias::Refused;
+  };
+  // Define directly instead of reading first: an inherited accessor for the
+  // unpredictable name must not run user code from inside V8's compile hook.
+  // Re-defining the same non-configurable data property is idempotent.
+  if global.define_own_property(
+    scope,
+    alias_key.into(),
+    helper,
+    v8::PropertyAttribute::READ_ONLY
+      | v8::PropertyAttribute::DONT_ENUM
+      | v8::PropertyAttribute::DONT_DELETE,
+  ) != Some(true)
+  {
+    return CompartmentAlias::Refused;
+  }
+  CompartmentAlias::Ready(alias_name)
+}
+
 fn remember_pending_eval(
   isolate_id: usize,
   context_id: String,
@@ -324,9 +767,10 @@ fn modify_code_generation<'s>(
 ) -> ModifyCodeGenerationFromStringsResult<'s> {
   let scope = pin!(unsafe { v8::CallbackScope::new(context) });
   let scope = &mut scope.init();
+  let compartment_active = dynamic_endowments_enabled(scope, context);
   let Some(context_id) = context_id(scope, context) else {
     return ModifyCodeGenerationFromStringsResult {
-      codegen_allowed: true,
+      codegen_allowed: allow_unmodified_source(compartment_active),
       modified_source: None,
     };
   };
@@ -338,7 +782,7 @@ fn modify_code_generation<'s>(
   let frames = crate::error::capture_op_stack_frames(scope, isolate);
   let Some(caller_locator) = live_caller_locator(&frames) else {
     return ModifyCodeGenerationFromStringsResult {
-      codegen_allowed: true,
+      codegen_allowed: allow_unmodified_source(compartment_active),
       modified_source: None,
     };
   };
@@ -352,12 +796,56 @@ fn modify_code_generation<'s>(
     };
   };
 
+  let source = match prepare_compartment_alias(scope, context, &context_id) {
+    CompartmentAlias::Off => source,
+    CompartmentAlias::Ready(alias_name) => {
+      let rust_source = source.to_rust_string_lossy(scope);
+      let Some(roundtrip_source) = v8::String::new(scope, &rust_source) else {
+        return ModifyCodeGenerationFromStringsResult {
+          codegen_allowed: false,
+          modified_source: None,
+        };
+      };
+      if !roundtrip_source.strict_equals(source.into()) {
+        // SWC consumes UTF-8 while V8 strings may contain lone UTF-16
+        // surrogates. Never silently change such source through lossy UTF-8.
+        return ModifyCodeGenerationFromStringsResult {
+          codegen_allowed: false,
+          modified_source: None,
+        };
+      }
+      match rewrite_dynamic_source(&rust_source, &alias_name) {
+        DynamicRewrite::Rewritten(rewritten) => {
+          let Some(rewritten) = v8::String::new(scope, &rewritten) else {
+            return ModifyCodeGenerationFromStringsResult {
+              codegen_allowed: false,
+              modified_source: None,
+            };
+          };
+          rewritten
+        }
+        DynamicRewrite::ParseError | DynamicRewrite::Refused => {
+          return ModifyCodeGenerationFromStringsResult {
+            codegen_allowed: false,
+            modified_source: None,
+          };
+        }
+      }
+    }
+    CompartmentAlias::Refused => {
+      return ModifyCodeGenerationFromStringsResult {
+        codegen_allowed: false,
+        modified_source: None,
+      };
+    }
+  };
+
   let isolate_id = crate::error::oden_isolate_key(isolate);
   let Some(source_url) =
     remember_pending_eval(isolate_id, context_id, caller_locator)
   else {
     return ModifyCodeGenerationFromStringsResult {
-      codegen_allowed: true,
+      codegen_allowed: allow_unmodified_source(compartment_active),
       modified_source: None,
     };
   };
@@ -368,7 +856,8 @@ fn modify_code_generation<'s>(
     forget_pending_eval(&source_url, isolate_id);
   }
   ModifyCodeGenerationFromStringsResult {
-    codegen_allowed: true,
+    codegen_allowed: modified_source.is_some()
+      || allow_unmodified_source(compartment_active),
     modified_source,
   }
 }
@@ -379,14 +868,14 @@ unsafe extern "C" fn code_generation_callback<'s>(
   source: v8::Local<'s, v8::Value>,
   _is_code_like: bool,
 ) -> ModifyCodeGenerationFromStringsResult<'s> {
-  // No Rust unwind may cross V8's C++ callback boundary. A panic leaves the
-  // source unmodified and thus unregistered/quarantined, while still allowing
-  // V8 to preserve ordinary JavaScript code-generation semantics.
+  // No Rust unwind may cross V8's C++ callback boundary. Denial is the only
+  // safe fallback: allowing the original string would bypass compartment
+  // rewriting when the panic happened on an armed endowment context.
   std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
     modify_code_generation(context, source)
   }))
   .unwrap_or(ModifyCodeGenerationFromStringsResult {
-    codegen_allowed: true,
+    codegen_allowed: false,
     modified_source: None,
   })
 }
@@ -408,14 +897,16 @@ pub(crate) fn maybe_enable_for_context(
   context: v8::Local<v8::Context>,
 ) {
   if crate::error::oden_capsec_armed() {
-    // V8 invokes the callback only when the context's unconditional fast path
-    // is disabled. The callback always returns allow; this is an attribution
-    // opt-in, not a code-generation policy change.
-    if let Some(context_id) = random_hex_identity("oden-eval-context:")
+    // Disable V8's unconditional fast path before allocating the context
+    // identity. If CSPRNG or V8 string allocation fails, a context that is
+    // subsequently marked for dynamic endowments must still reach the callback
+    // and fail closed on its missing identity. Marker-off contexts continue to
+    // allow their original source, preserving the attribution-only behavior.
+    context.set_allow_generation_from_strings(false);
+    if let Some(context_id) = random_hex_identity(EVAL_CONTEXT_PREFIX)
       && let Some(value) = v8::String::new(scope, &context_id)
     {
       context.set_embedder_data(ODEN_EVAL_CONTEXT_SLOT, value.into());
-      context.set_allow_generation_from_strings(false);
     }
   }
 }
@@ -423,6 +914,18 @@ pub(crate) fn maybe_enable_for_context(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  const TEST_ALIAS: &str =
+    "__oden_dynamic_endow_0123456789abcdef0123456789abcdef";
+
+  fn rewritten(source: &str) -> String {
+    let DynamicRewrite::Rewritten(source) =
+      rewrite_dynamic_source(source, TEST_ALIAS)
+    else {
+      panic!("source was not rewritten");
+    };
+    source
+  }
 
   fn pending_eval(context_id: &str) -> PendingEval {
     PendingEval {
@@ -451,6 +954,80 @@ mod tests {
       is_wasm: false,
       promise_index: None,
     }
+  }
+
+  #[test]
+  fn marked_metadata_or_allocation_failure_denies_original_source() {
+    assert!(!allow_unmodified_source(true));
+    assert!(allow_unmodified_source(false));
+  }
+
+  #[test]
+  fn dynamic_rewrite_is_scope_aware_and_preserves_eval_completion_shape() {
+    let output = rewritten(
+      "const local = 40; const object = { fetch, local }; eval('local'); local + 2",
+    );
+    assert!(output.starts_with(&format!(
+      "\"use strict\";const {TEST_ALIAS}_record={TEST_ALIAS}();"
+    )));
+    assert!(
+      output
+        .contains(&format!("{{ fetch: {TEST_ALIAS}_record.fetch, local }}"))
+    );
+    assert!(output.contains("eval('local')"));
+    assert!(output.ends_with("local + 2"));
+  }
+
+  #[test]
+  fn function_constructor_prefix_and_parameter_bindings_stay_native() {
+    let source =
+      "(function anonymous(fetch\n) {\nreturn [fetch, globalThis.fetch]\n})";
+    let output = rewritten(source);
+    let prefix = "(function anonymous(fetch\n) {";
+    assert!(output.starts_with(prefix));
+    assert!(output.contains("return [fetch,"));
+    assert!(output.contains(&format!("{TEST_ALIAS}_record.globalThis.fetch")));
+  }
+
+  #[test]
+  fn function_constructor_default_global_and_with_are_refused() {
+    let default_global =
+      "(function anonymous(value = fetch\n) {\nreturn value\n})";
+    assert!(matches!(
+      rewrite_dynamic_source(default_global, TEST_ALIAS),
+      DynamicRewrite::Refused
+    ));
+    assert!(matches!(
+      rewrite_dynamic_source("with ({}) { fetch }", TEST_ALIAS),
+      DynamicRewrite::Refused
+    ));
+  }
+
+  #[test]
+  fn dynamic_assignment_targets_cannot_mutate_the_raw_global() {
+    let output = rewritten("fetch = 1; for (globalThis of []) {};");
+    assert!(output.contains(&format!("{TEST_ALIAS}_record.fetch = 1")));
+    assert!(
+      output.contains(&format!("for ({TEST_ALIAS}_record.globalThis of [])"))
+    );
+    for source in [
+      "({ fetch } = value)",
+      "[fetch] = value",
+      "for ({ fetch } of values) {}",
+    ] {
+      assert!(matches!(
+        rewrite_dynamic_source(source, TEST_ALIAS),
+        DynamicRewrite::Refused
+      ));
+    }
+  }
+
+  #[test]
+  fn invalid_source_is_classified_as_a_parse_error() {
+    assert!(matches!(
+      rewrite_dynamic_source("function (", TEST_ALIAS),
+      DynamicRewrite::ParseError
+    ));
   }
 
   #[test]

@@ -22,14 +22,28 @@ console.log("global", JSON.stringify(blocked.globalPaths().map(result)));
 console.log("enumeration", JSON.stringify(blocked.enumeration()));
 console.log("reflective", result(blocked.reflective));
 console.log("eval", JSON.stringify(blocked.evalPaths().map(result)));
-console.log("function-residual", JSON.stringify(await blocked.functionResidual()));
-console.log("prototype-residual", JSON.stringify(await blocked.prototypeResidual()));
+console.log(
+  "evaluators",
+  JSON.stringify(await blocked.evaluatorDenials()),
+);
+console.log(
+  "eval-compat",
+  JSON.stringify(blocked.evaluatorCompatibility()),
+);
+console.log(
+  "dynamic-namespaces",
+  JSON.stringify(blocked.dynamicNamespaceDenials()),
+);
 console.log("strict-this", blocked.strictThis());
 console.log("node-esm", JSON.stringify(blocked.namespaces().map(result)));
 console.log("helper", result(blocked.helperPath));
 console.log("async", await blocked.asyncReach());
 console.log("local-binding", blocked.localBinding("local-value"));
 console.log("granted-esm", JSON.stringify(granted.reachability()));
+console.log(
+  "granted-evaluators",
+  JSON.stringify(await granted.evaluatorReachability()),
+);
 console.log("blocked-cjs", JSON.stringify(blockedCjs.probe()));
 console.log("granted-cjs", JSON.stringify(grantedCjs.probe()));
 console.log("cjs-top-this", blockedCjs.topThis);

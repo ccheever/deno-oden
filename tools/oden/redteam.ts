@@ -266,40 +266,26 @@ const CHECKLIST: HoleClass[] = [
   {
     category: "compartment-globals",
     attack: "3. direct or indirect eval reaches an unendowed global",
-    status: "residual",
+    status: "closed",
     tests: ["oden_capsec_compartment_globals"],
-    residual: {
-      ticket: "ENG-23968",
-      why:
-        "caller identity/op attribution is now closed, but package eval remains never-endowed; exposing exactly the caller's filtered global record is the separate LLP 0014 Slice-4 reachability task",
-    },
     note:
-      "sound over-deny only; this slice does not relabel eval-to-caller as complete",
+      "the V8 code-generation callback parses direct and indirect eval source and redirects unresolved authority globals through the exact caller's filtered record",
   },
   {
     category: "compartment-globals",
     attack: "4. Function constructor recovers unendowed fetch",
-    status: "residual",
+    status: "closed",
     tests: ["oden_capsec_compartment_globals", "oden_capsec_eval_quarantine"],
-    residual: {
-      ticket: "ENG-23968",
-      why:
-        "the raw constructor can still recover the reference; ENG-23783 now proves its eventual operation is attributed to and denied for the true caller, while endowment reachability remains open",
-    },
     note:
-      "caller-attributed op denial is preserved; complete reachability closure belongs to evaluator endowment taming",
+      "Function and new Function bodies resolve authority globals through the caller record while preserving the engine's parameter-prefix boundary",
   },
   {
     category: "compartment-globals",
     attack: "5. prototype-chain Function constructor recovers unendowed fetch",
-    status: "residual",
+    status: "closed",
     tests: ["oden_capsec_compartment_globals", "oden_capsec_eval_quarantine"],
-    residual: {
-      ticket: "ENG-23968",
-      why:
-        "frozen prototypes prevent mutation and dynamic code is caller-attributed, but the constructor family can still recover an unendowed reference",
-    },
-    note: "not claimed closed by the lexical rewrite",
+    note:
+      "the isolate callback covers ordinary, async, generator, and async-generator constructors reached directly or through prototype and Reflect walks",
   },
   {
     category: "compartment-globals",
@@ -312,18 +298,13 @@ const CHECKLIST: HoleClass[] = [
   {
     category: "compartment-globals",
     attack: "7. ext/node backdoor recovers the real global",
-    status: "residual",
+    status: "closed",
     tests: [
       "oden_capsec_compartment_globals",
       "oden_capsec_compilefn_forgery",
     ],
-    residual: {
-      ticket: "ENG-23968 / ENG-23779",
-      why:
-        "process is never-endowed and node:vm sourceURL/nonces remain quarantine, but generated-code global reachability still awaits evaluator endowment taming and hatch closure",
-    },
     note:
-      "the fixture distinguishes a closed namespace path from the honestly labeled generated-code residual",
+      "process is never-endowed and package node:vm script, compileFunction, and SourceTextModule creation are denied before they can create a fresh-context evaluator bypass",
   },
   {
     category: "compartment-globals",
@@ -543,8 +524,8 @@ function render(): string {
       "**GO** — every attack class in the inherited hole checklist is either " +
         "closed with a guarding fixture or a documented residual with an owning " +
         "ticket. No undocumented open holes. The remaining residuals are the " +
-        "default-denied inspector/WASI story, evaluator endowment reachability, " +
-        "and per-family resource owner-check wiring.",
+        "default-denied inspector/WASI story and per-family resource owner-check " +
+        "wiring.",
     );
   } else {
     out.push("**NO-GO** — open holes / missing fixtures:");

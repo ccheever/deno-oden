@@ -289,9 +289,9 @@ const OVERRIDES: Record<string, Classification> = {
   alert: { status: "never-endowed", reason: "interactive stdio surface" },
   confirm: { status: "never-endowed", reason: "interactive stdio surface" },
   eval: {
-    status: "never-endowed",
+    status: "always-endowed",
     reason:
-      "dynamic script identity is caller-bound; direct evaluator endowment reach stays fail-closed pending ENG-23968",
+      "the evaluator stays compatible and its source is parsed so unresolved authority globals resolve through the exact caller's filtered record",
   },
   process: {
     status: "never-endowed",
@@ -322,7 +322,7 @@ const OVERRIDES: Record<string, Classification> = {
   Function: {
     status: "always-endowed",
     reason:
-      "constructor value remains reachable; generated code is caller-attributed, while per-caller endowment inheritance is ENG-23968",
+      "all engine constructor families remain reachable, while their bodies resolve authority globals through the exact caller's filtered record",
   },
 };
 

@@ -2527,6 +2527,37 @@ pub fn oden_capsec_check_worker_create() -> Result<(), PermissionCheckError> {
   Ok(())
 }
 
+/// `node:vm` deliberately does not register caller-controlled script names as
+/// package identity. While compartment globals is active, a non-ambient
+/// principal must therefore not create a second generated-code route that
+/// bypasses the endowment-aware eval/Function callback. Root/runtime remain
+/// able to create quarantine-by-design vm scripts.
+// @ref LLP 0014#closing-the-dynamic-channels [implements]
+pub fn oden_capsec_check_vm_code_generation() -> Result<(), PermissionCheckError>
+{
+  if !oden_capsec_compartment_globals_on() {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  let principal = oden_capsec_principal();
+  if principal.is_ambient() {
+    return Ok(());
+  }
+  let label = principal.label();
+  let verdict = "DENY(node:vm quarantine under compartment globals)";
+  oden_capsec_audit_record(&label, "vm", "code-generation", "", verdict, None);
+  Err(PermissionCheckError::PermissionDenied(
+    PermissionDeniedError {
+      access: "node:vm code generation".to_string(),
+      name: "capsec",
+      custom_message: Some(format!(
+        "oden capsec: principal \"{label}\" cannot generate code through node:vm while compartment globals is active (vm scripts remain quarantine-by-design)"
+      )),
+      state: PermissionState::Denied,
+    },
+  ))
+}
+
 #[allow(
   clippy::disallowed_methods,
   reason = "Phase-0/1 capsec resolves the project root from an env var, falling back to cwd."

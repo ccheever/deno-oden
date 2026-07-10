@@ -68,6 +68,13 @@ pub use serde;
 pub use serde_json;
 pub use serde_v8;
 pub use serde_v8::ByteString;
+
+/// Mark the current context as having installed Oden's trusted dynamic-code
+/// endowment helper. Kept as a narrow public bridge so runtime bootstrap can
+/// arm the V8 callback only after the non-configurable helper exists.
+pub fn oden_enable_dynamic_endowments(scope: &mut v8::PinScope<'_, '_>) {
+  oden_eval::enable_dynamic_endowments(scope);
+}
 pub use serde_v8::DetachedBuffer;
 pub use serde_v8::JsBuffer;
 pub use serde_v8::StringOrBuffer;

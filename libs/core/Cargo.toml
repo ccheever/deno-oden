@@ -36,6 +36,7 @@ boxed_error.workspace = true
 bytes.workspace = true
 capacity_builder = "0.5.0"
 cooked-waker.workspace = true
+deno_ast.workspace = true
 deno_core_icudata = { workspace = true, optional = true }
 deno_error = { workspace = true, features = ["serde_json", "serde", "url", "tokio"] }
 deno_ops.workspace = true
@@ -69,7 +70,6 @@ windows-sys.workspace = true
 [dev-dependencies]
 bencher.workspace = true
 criterion.workspace = true
-deno_ast.workspace = true
 paste.workspace = true
 pretty_assertions.workspace = true
 rstest.workspace = true

@@ -41,7 +41,6 @@ const INTENTIONAL = new Set([
   "Worker",
   "alert",
   "confirm",
-  "eval",
   "process",
   "prompt",
 ]);

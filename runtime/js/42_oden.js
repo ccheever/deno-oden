@@ -75,29 +75,33 @@ aliases.self = true;
 // Rust policy's endowment descriptor contains it. The families that are not
 // yet in the shared v1 policy vocabulary remain fail-closed (never endowed).
 const gated = ObjectCreate(null);
-for (const name of [
-  "BroadcastChannel",
-  "EventSource",
-  "WebSocket",
-  "caches",
-  "fetch",
-  "localStorage",
-  "sessionStorage",
-]) gated[name] = true;
+for (
+  const name of [
+    "BroadcastChannel",
+    "EventSource",
+    "WebSocket",
+    "caches",
+    "fetch",
+    "localStorage",
+    "sessionStorage",
+  ]
+) gated[name] = true;
 
-// Namespace/escape-hatch globals never endowed to a package. Dynamic scripts
-// are caller-attributed by ENG-23783, while evaluator endowment inheritance is
-// the separate ENG-23968 reachability task; this list does not weaken it.
+// Namespace/escape-hatch globals never endowed to a package. `eval` is absent:
+// the trusted V8 callback now rewrites its source through this same caller-
+// derived record, so direct and indirect eval remain usable without recovering
+// the realm's raw globals.
 const never = ObjectCreate(null);
-for (const name of [
-  "Deno",
-  "Worker",
-  "alert",
-  "confirm",
-  "eval",
-  "process",
-  "prompt",
-]) never[name] = true;
+for (
+  const name of [
+    "Deno",
+    "Worker",
+    "alert",
+    "confirm",
+    "process",
+    "prompt",
+  ]
+) never[name] = true;
 
 function deniedGlobal(name) {
   return new ReferenceError(

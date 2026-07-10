@@ -1,6 +1,6 @@
 # Oden exhaustive ambient-global inventory (generated)
 
-Pin inventory: 219 ambient string-key globals. 201 always-endowed; 7 grant-derived; 7 never-endowed; 4 mediated views.
+Pin inventory: 219 ambient string-key globals. 202 always-endowed; 7 grant-derived; 6 never-endowed; 4 mediated views.
 
 | global | classification | per-entry rationale |
 | --- | --- | --- |
@@ -53,7 +53,7 @@ Pin inventory: 219 ambient string-key globals. 201 always-endowed; 7 grant-deriv
 | `Float32Array` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `Float64Array` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `FormData` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
-| `Function` | always-endowed | constructor value remains reachable; generated code is caller-attributed, while per-caller endowment inheritance is ENG-23968 |
+| `Function` | always-endowed | all engine constructor families remain reachable, while their bodies resolve authority globals through the exact caller's filtered record |
 | `GPU` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `GPUAdapter` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `GPUAdapterInfo` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
@@ -193,7 +193,7 @@ Pin inventory: 219 ambient string-key globals. 201 always-endowed; 7 grant-deriv
 | `encodeURI` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `encodeURIComponent` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
 | `escape` | always-endowed | inert/pure/local runtime surface with no separately grantable external authority in LLP 0010 |
-| `eval` | never-endowed | dynamic script identity is caller-bound; direct evaluator endowment reach stays fail-closed pending ENG-23968 |
+| `eval` | always-endowed | the evaluator stays compatible and its source is parsed so unresolved authority globals resolve through the exact caller's filtered record |
 | `fetch` | grant-derived | network:fetch derives reachability; resolved endpoint is still op-gated |
 | `global` | mediated-view | rewritten to the per-principal filtered global record, never the real global |
 | `globalThis` | mediated-view | rewritten to the per-principal filtered global record, never the real global |

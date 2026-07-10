@@ -1377,7 +1377,7 @@ fn indexed_property_deleter<'s>(
 }
 
 #[allow(clippy::too_many_arguments, reason = "op")]
-#[op2]
+#[op2(stack_trace)]
 pub fn op_vm_create_script<'a>(
   scope: &mut v8::PinScope<'a, '_>,
   source: v8::Local<'a, v8::String>,
@@ -1388,8 +1388,9 @@ pub fn op_vm_create_script<'a>(
   produce_cached_data: bool,
   parsing_context: Option<v8::Local<'a, v8::Object>>,
   import_module_dynamically_id: i32,
-) -> Option<CompileResult<'a>> {
-  ContextifyScript::create(
+) -> Result<Option<CompileResult<'a>>, deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_check_vm_code_generation()?;
+  Ok(ContextifyScript::create(
     scope,
     source,
     filename,
@@ -1399,7 +1400,7 @@ pub fn op_vm_create_script<'a>(
     produce_cached_data,
     parsing_context,
     import_module_dynamically_id,
-  )
+  ))
 }
 
 #[op2(reentrant)]
@@ -1485,7 +1486,7 @@ struct CompileResult<'a> {
 }
 
 #[allow(clippy::too_many_arguments, reason = "op")]
-#[op2]
+#[op2(stack_trace)]
 pub fn op_vm_compile_function<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   source: v8::Local<'s, v8::String>,
@@ -1498,7 +1499,8 @@ pub fn op_vm_compile_function<'s>(
   context_extensions: Option<v8::Local<'s, v8::Array>>,
   params: Option<v8::Local<'s, v8::Array>>,
   import_module_dynamically_id: i32,
-) -> Option<CompileResult<'s>> {
+) -> Result<Option<CompileResult<'s>>, deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_check_vm_code_generation()?;
   let context = if let Some(parsing_context) = parsing_context {
     let Some(context) =
       ContextifyContext::from_sandbox_obj(scope, parsing_context)
@@ -1506,7 +1508,7 @@ pub fn op_vm_compile_function<'s>(
       let message = v8::String::new(scope, "Invalid sandbox object").unwrap();
       let exception = v8::Exception::type_error(scope, message);
       scope.throw_exception(exception);
-      return None;
+      return Ok(None);
     };
     context.context(scope)
   } else {
@@ -1545,7 +1547,12 @@ pub fn op_vm_compile_function<'s>(
   {
     let mut exts = Vec::with_capacity(context_extensions.length() as _);
     for i in 0..context_extensions.length() {
-      let ext = context_extensions.get_index(scope, i)?.try_into().ok()?;
+      let Some(value) = context_extensions.get_index(scope, i) else {
+        return Ok(None);
+      };
+      let Ok(ext) = value.try_into() else {
+        return Ok(None);
+      };
       exts.push(ext);
     }
     exts
@@ -1556,7 +1563,12 @@ pub fn op_vm_compile_function<'s>(
   let params = if let Some(params) = params {
     let mut exts = Vec::with_capacity(params.length() as _);
     for i in 0..params.length() {
-      let ext = params.get_index(scope, i)?.try_into().ok()?;
+      let Some(value) = params.get_index(scope, i) else {
+        return Ok(None);
+      };
+      let Ok(ext) = value.try_into() else {
+        return Ok(None);
+      };
       exts.push(ext);
     }
     exts
@@ -1582,7 +1594,7 @@ pub fn op_vm_compile_function<'s>(
     if scope.has_caught() && !scope.has_terminated() {
       scope.rethrow();
     }
-    return None;
+    return Ok(None);
   };
 
   let cached_data = if produce_cached_data {
@@ -1591,7 +1603,7 @@ pub fn op_vm_compile_function<'s>(
     None
   };
 
-  Some(CompileResult {
+  Ok(Some(CompileResult {
     value: function.into(),
     cached_data: cached_data.as_ref().map(|c| {
       let backing_store =
@@ -1604,7 +1616,7 @@ pub fn op_vm_compile_function<'s>(
       .map(|c| c.rejected())
       .unwrap_or(false),
     cached_data_produced: cached_data.is_some(),
-  })
+  }))
 }
 
 #[op2]
@@ -1762,7 +1774,7 @@ fn ensure_external_import_meta_hook_registered(
   );
 }
 
-#[op2]
+#[op2(stack_trace)]
 #[cppgc]
 pub fn op_vm_module_create_source_text_module<'a>(
   scope: &mut v8::PinScope<'a, '_>,
@@ -1773,11 +1785,15 @@ pub fn op_vm_module_create_source_text_module<'a>(
   context_object: Option<v8::Local<'a, v8::Object>>,
   import_module_dynamically_id: i32,
   initialize_import_meta: Option<v8::Local<'a, v8::Function>>,
-) -> Option<ContextifyModule> {
+) -> Result<Option<ContextifyModule>, deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_check_vm_code_generation()?;
   ensure_external_import_meta_hook_registered(scope);
 
-  let (context, microtask_queue) =
-    resolve_module_context(scope, context_object)?;
+  let Some((context, microtask_queue)) =
+    resolve_module_context(scope, context_object)
+  else {
+    return Ok(None);
+  };
 
   let import_meta_callback =
     initialize_import_meta.map(|f| v8::Global::new(scope, f));
@@ -1785,7 +1801,9 @@ pub fn op_vm_module_create_source_text_module<'a>(
   let scope = &mut v8::ContextScope::new(scope, context);
   let host_defined_options =
     vm_host_defined_options(scope, import_module_dynamically_id);
-  let filename = v8::String::new(scope, &identifier)?;
+  let Some(filename) = v8::String::new(scope, &identifier) else {
+    return Ok(None);
+  };
   let origin = v8::ScriptOrigin::new(
     scope,
     filename.into(),
@@ -1807,9 +1825,11 @@ pub fn op_vm_module_create_source_text_module<'a>(
   let module = v8::script_compiler::compile_module(scope, &mut compile_source);
   if scope.has_caught() {
     scope.rethrow();
-    return None;
+    return Ok(None);
   }
-  let module = module?;
+  let Some(module) = module else {
+    return Ok(None);
+  };
 
   // Only track an import-meta entry when the user supplied an
   // `initializeImportMeta` callback. Without one there's nothing to do —
@@ -1822,7 +1842,7 @@ pub fn op_vm_module_create_source_text_module<'a>(
     identity_hash
   });
 
-  Some(ContextifyModule {
+  Ok(Some(ContextifyModule {
     module: v8::TracedReference::new(scope, module),
     context: v8::TracedReference::new(scope, context),
     microtask_queue,
@@ -1831,7 +1851,7 @@ pub fn op_vm_module_create_source_text_module<'a>(
     is_linked: Cell::new(false),
     synthetic_identity_hash: None,
     import_meta_identity_hash,
-  })
+  }))
 }
 
 /// Resolves the context for a new module: if `context_object` is provided,

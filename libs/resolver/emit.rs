@@ -589,7 +589,6 @@ const ODEN_REWRITTEN_GLOBALS: &[&str] = &[
   "alert",
   "caches",
   "confirm",
-  "eval",
   "fetch",
   "global",
   "globalThis",
