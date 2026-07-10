@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fmt;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -18,14 +19,17 @@ use std::string::ToString;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use base64::Engine as _;
 use capacity_builder::StringBuilder;
 use deno_path_util::normalize_path;
 use deno_path_util::url_to_file_path;
 use deno_terminal::colors;
 use deno_unsync::sync::AtomicFlag;
 use fqdn::FQDN;
+use hmac::Mac as _;
 use ipnet::IpNet;
 use once_cell::sync::Lazy;
+use parking_lot::Condvar;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -88,6 +92,251 @@ pub enum AuditSink {
 
 pub static AUDIT_SINK: OnceLock<AuditSink> = OnceLock::new();
 
+struct OdenControlSnapshot {
+  values: std::collections::HashMap<OsString, OsString>,
+  authenticated_audit: bool,
+  audit_key: Option<[u8; 32]>,
+  control_dirs: Vec<PathBuf>,
+}
+
+impl OdenControlSnapshot {
+  fn value_os(&self, name: &str) -> Option<OsString> {
+    self.values.get(OsStr::new(name)).cloned()
+  }
+}
+
+static ODEN_CONTROL_SNAPSHOT: OnceLock<OdenControlSnapshot> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy)]
+pub struct OdenCapturedControlFlags {
+  pub armed: bool,
+  pub forge_cped: bool,
+  pub forge_schedule: bool,
+}
+
+/// Capture all trusted `ODEN_CAPSEC_*` handoffs on the single-threaded CLI
+/// bootstrap path, then erase the namespace before V8, workers, or package
+/// subprocesses exist. The writer is forced here so the authenticated channel
+/// is pre-opened rather than resolved by pathname during an operation.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md#addendum-update-2026-07-09-later-authenticated-engine-evidence-closes-audit-forgery-eng-23985 [implements]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "single-threaded process bootstrap snapshots and erases the trusted capsec handoff before V8"
+)]
+pub fn oden_capsec_capture_control_env() -> OdenCapturedControlFlags {
+  let values = std::env::vars_os()
+    .filter(|(name, _)| name.to_string_lossy().starts_with("ODEN_CAPSEC_"))
+    .collect::<std::collections::HashMap<_, _>>();
+  let value = |name: &str| values.get(OsStr::new(name));
+  let audit_path = value("ODEN_CAPSEC_AUDIT")
+    .filter(|v| !v.is_empty())
+    .map(PathBuf::from);
+  let audit_key_path = audit_path
+    .as_ref()
+    .and_then(|path| path.parent())
+    .map(|parent| parent.join("audit.key"));
+  let temporary_policy_path = value("ODEN_CAPSEC_POLICY")
+    .filter(|path| !path.is_empty())
+    .map(PathBuf::from)
+    .filter(|policy| policy.file_name() == Some(OsStr::new("policy.json")))
+    .filter(|policy| {
+      let policy_parent = std::fs::canonicalize(policy)
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+      let audit_parent = audit_path
+        .as_ref()
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+      policy_parent.is_some() && policy_parent == audit_parent
+    });
+  let key_file_present = audit_key_path.as_ref().is_some_and(|path| {
+    std::fs::symlink_metadata(path)
+      .map(|_| true)
+      .unwrap_or_else(|error| error.kind() != std::io::ErrorKind::NotFound)
+  });
+  let env_key_present =
+    value("ODEN_CAPSEC_AUDIT_KEY").is_some_and(|v| !v.is_empty());
+  let authenticated_audit =
+    audit_path.is_some() && (key_file_present || env_key_present);
+  let audit_key = if key_file_present {
+    audit_key_path.as_ref().and_then(|path| {
+      let metadata = std::fs::symlink_metadata(path).ok()?;
+      if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != 32
+      {
+        return None;
+      }
+      <[u8; 32]>::try_from(std::fs::read(path).ok()?).ok()
+    })
+  } else if env_key_present {
+    value("ODEN_CAPSEC_AUDIT_KEY")
+      .and_then(|encoded| encoded.to_str())
+      .and_then(|encoded| {
+        base64::engine::general_purpose::STANDARD
+          .decode(encoded)
+          .ok()
+      })
+      .and_then(|decoded| <[u8; 32]>::try_from(decoded).ok())
+  } else {
+    None
+  };
+  let mut control_dirs = Vec::new();
+  if authenticated_audit {
+    for name in ["ODEN_CAPSEC_POLICY", "ODEN_CAPSEC_AUDIT"] {
+      let Some(path) = value(name).filter(|v| !v.is_empty()) else {
+        continue;
+      };
+      let path = PathBuf::from(path);
+      let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+      if let Some(parent) = canonical.parent()
+        && !control_dirs.iter().any(|existing| existing == parent)
+      {
+        control_dirs.push(parent.to_path_buf());
+      }
+    }
+  }
+  let explicitly_armed =
+    value("ODEN_CAPSEC_POLICY").is_some_and(|v| !v.is_empty());
+  let implicit_root = value("ODEN_CAPSEC_ROOT")
+    .filter(|v| !v.is_empty())
+    .map(PathBuf::from)
+    .or_else(|| std::env::current_dir().ok());
+  let implicitly_armed = implicit_root.is_some_and(|root| {
+    oden_policy_path_present(&root.join(".oden").join("policy.json"))
+  });
+  let flags = OdenCapturedControlFlags {
+    armed: explicitly_armed || implicitly_armed,
+    forge_cped: value("ODEN_CAPSEC_FORGE_CPED").is_some(),
+    forge_schedule: value("ODEN_CAPSEC_FORGE_SCHEDULE").is_some(),
+  };
+  let keys = values.keys().cloned().collect::<Vec<_>>();
+  let _ = ODEN_CONTROL_SNAPSHOT.set(OdenControlSnapshot {
+    values,
+    authenticated_audit,
+    audit_key,
+    control_dirs,
+  });
+  let mut handoff_failed = authenticated_audit && audit_key.is_none();
+  if authenticated_audit {
+    // Snapshot the immutable policy before removing its pathname. Package code
+    // must never share a readable key/policy handoff with the trusted engine.
+    let _ = oden_capsec_policy_file();
+    if let Some(path) = temporary_policy_path
+      && std::fs::remove_file(path).is_err()
+    {
+      handoff_failed = true;
+    }
+    if key_file_present
+      && audit_key_path
+        .as_ref()
+        .is_none_or(|path| std::fs::remove_file(path).is_err())
+    {
+      handoff_failed = true;
+    }
+  }
+  for key in keys {
+    // SAFETY: the Deno CLI calls this before it creates the V8 platform,
+    // Tokio runtime, workers, or any other threads.
+    unsafe { std::env::remove_var(key) };
+  }
+  Lazy::force(&ODEN_AUDIT_WRITER);
+  if handoff_failed {
+    oden_capsec_fatal_audit_failure();
+  }
+  flags
+}
+
+pub fn oden_capsec_control_var_os(name: &str) -> Option<OsString> {
+  if let Some(snapshot) = ODEN_CONTROL_SNAPSHOT.get() {
+    snapshot.value_os(name)
+  } else {
+    #[allow(
+      clippy::disallowed_methods,
+      reason = "embedded runtimes that do not use the CLI retain the legacy pre-bootstrap lookup"
+    )]
+    {
+      std::env::var_os(name)
+    }
+  }
+}
+
+fn oden_capsec_control_var(name: &str) -> Result<String, std::env::VarError> {
+  match oden_capsec_control_var_os(name) {
+    Some(value) => value.into_string().map_err(std::env::VarError::NotUnicode),
+    None => Err(std::env::VarError::NotPresent),
+  }
+}
+
+fn oden_capsec_authenticated_audit() -> bool {
+  ODEN_CONTROL_SNAPSHOT
+    .get()
+    .is_some_and(|snapshot| snapshot.authenticated_audit)
+}
+
+fn oden_capsec_audit_key() -> Option<[u8; 32]> {
+  ODEN_CONTROL_SNAPSHOT
+    .get()
+    .and_then(|snapshot| snapshot.audit_key)
+}
+
+fn oden_capsec_control_env_denied(target: &str) -> bool {
+  if !oden_capsec_authenticated_audit() {
+    return false;
+  }
+  let normalized;
+  let target = if cfg!(windows) {
+    normalized = target.to_ascii_uppercase();
+    normalized.as_str()
+  } else {
+    target
+  };
+  target == "*"
+    || target.starts_with("ODEN_CAPSEC_")
+    || target
+      .strip_suffix('*')
+      .is_some_and(|prefix| "ODEN_CAPSEC_".starts_with(prefix))
+}
+
+fn oden_capsec_control_path_denied(target: &str) -> bool {
+  let Some(snapshot) = ODEN_CONTROL_SNAPSHOT.get() else {
+    return false;
+  };
+  if !snapshot.authenticated_audit {
+    return false;
+  }
+  let normalized = PathBuf::from(oden_normalize_fs_target(target));
+  snapshot
+    .control_dirs
+    .iter()
+    .any(|dir| normalized.starts_with(dir))
+}
+
+fn oden_capsec_control_request_denied(req: &OdenRequest) -> bool {
+  match req.family {
+    OdenFamily::Env => oden_capsec_control_env_denied(&req.target),
+    OdenFamily::Fs => oden_capsec_control_path_denied(&req.target),
+    _ => false,
+  }
+}
+
+fn oden_capsec_control_denied_error(
+  family: OdenFamily,
+  action: &str,
+  target: &str,
+  api_name: &str,
+) -> PermissionCheckError {
+  PermissionCheckError::PermissionDenied(PermissionDeniedError {
+    access: format!("{api_name} access to {target:?}"),
+    name: "capsec",
+    custom_message: Some(format!(
+      "oden capsec: the authenticated control namespace is engine-owned and may not be accessed ({family_name}:{action}:{target})",
+      family_name = family.name(),
+    )),
+    state: PermissionState::Denied,
+  })
+}
+
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[error("{}", custom_message.as_ref().cloned().unwrap_or_else(|| format!("Requires {access}, {}", format_permission_error(.name))))]
 #[class("NotCapable")]
@@ -124,7 +373,6 @@ fn oden_capsec_decide(
     return Ok(());
   }
   oden_capsec_readiness_gate()?;
-  let policy = oden_capsec_policy();
   // Normalize fs targets to an absolute, lexically-folded path so a relative
   // op (`./data/x`) matches an fs grant scope (also resolved absolute) and a
   // `..` escape resolves out of its granted scope. Non-fs targets pass through.
@@ -138,6 +386,24 @@ fn oden_capsec_decide(
     action: action.to_string(),
     target: normalized_target,
   };
+  if oden_capsec_control_request_denied(&req) {
+    let principal = oden_capsec_principal();
+    oden_capsec_audit_record(
+      &principal.label(),
+      family.name(),
+      action,
+      &req.target,
+      "DENY(engine control namespace)",
+      None,
+    );
+    return Err(oden_capsec_control_denied_error(
+      family,
+      action,
+      target,
+      api_name.unwrap_or_else(|| family.name()),
+    ));
+  }
+  let policy = oden_capsec_policy();
 
   // Precedence row 3 (opt-in stack-intersection): if this capability class is
   // deputy-armed AND the live call chain plus the CPED scheduling principal
@@ -325,7 +591,9 @@ pub fn oden_capsec_armed() -> bool {
   reason = "structural arming probes the policy artifact (explicit ODEN_CAPSEC_POLICY handoff or <root>/.oden/policy.json); read once and cached."
 )]
 fn oden_capsec_armed_uncached() -> bool {
-  if std::env::var_os("ODEN_CAPSEC_POLICY").is_some_and(|v| !v.is_empty()) {
+  if oden_capsec_control_var_os("ODEN_CAPSEC_POLICY")
+    .is_some_and(|v| !v.is_empty())
+  {
     return true;
   }
   let root = oden_capsec_project_root();
@@ -405,10 +673,19 @@ pub fn oden_capsec_query_dynamic_permission(
     return None;
   }
   let principal = oden_capsec_principal();
+  let req = oden_dynamic_request(desc);
+  if req.as_ref().is_some_and(oden_capsec_control_request_denied) {
+    oden_capsec_dynamic_query_audit_record(
+      "query",
+      &principal,
+      req.as_ref(),
+      PermissionState::Denied,
+    );
+    return Some(PermissionState::Denied);
+  }
   if principal.is_ambient() {
     return None;
   }
-  let req = oden_dynamic_request(desc);
   let query = if oden_policy_invalid() {
     OdenDynamicQueryState::Denied
   } else {
@@ -436,10 +713,27 @@ pub fn oden_capsec_request_dynamic_permission(
     return None;
   }
   let principal = oden_capsec_principal();
+  let req = oden_dynamic_request(desc);
+  if req.as_ref().is_some_and(oden_capsec_control_request_denied) {
+    let result = OdenDynamicRequestResult {
+      state: OdenDynamicPermissionState::Denied,
+      code: OdenDynamicRequestCode::DenyCeiling,
+      decider: None,
+      session_grant: None,
+      ceiling: None,
+      memoized: false,
+    };
+    oden_capsec_dynamic_request_audit_record(
+      "request",
+      &principal,
+      req.as_ref(),
+      &result,
+    );
+    return Some(PermissionState::Denied);
+  }
   if principal.is_ambient() {
     return None;
   }
-  let req = oden_dynamic_request(desc);
   let policy = oden_capsec_policy();
   let result = if oden_policy_invalid() {
     OdenDynamicRequestResult {
@@ -520,9 +814,6 @@ pub fn oden_capsec_revoke_dynamic_permission(
     return None;
   }
   let principal = oden_capsec_principal();
-  if principal.is_ambient() {
-    return None;
-  }
   let Some(req) = oden_dynamic_request(desc) else {
     oden_capsec_dynamic_query_audit_record(
       "revoke",
@@ -532,6 +823,18 @@ pub fn oden_capsec_revoke_dynamic_permission(
     );
     return Some(PermissionState::Denied);
   };
+  if oden_capsec_control_request_denied(&req) {
+    oden_capsec_dynamic_query_audit_record(
+      "revoke",
+      &principal,
+      Some(&req),
+      PermissionState::Denied,
+    );
+    return Some(PermissionState::Denied);
+  }
+  if principal.is_ambient() {
+    return None;
+  }
   let state = match oden_capsec_policy().revoke_dynamic(&principal, &req) {
     OdenDynamicQueryState::Ambient => return None,
     OdenDynamicQueryState::Granted => PermissionState::Granted,
@@ -809,8 +1112,8 @@ fn oden_capsec_readiness() -> OdenReadiness {
   // stays live below.
   static POLICY_SOURCE: std::sync::LazyLock<Option<String>> =
     std::sync::LazyLock::new(|| {
-      if let Some(p) =
-        std::env::var_os("ODEN_CAPSEC_POLICY").filter(|v| !v.is_empty())
+      if let Some(p) = oden_capsec_control_var_os("ODEN_CAPSEC_POLICY")
+        .filter(|v| !v.is_empty())
       {
         Some(std::path::PathBuf::from(p).to_string_lossy().into_owned())
       } else {
@@ -852,7 +1155,7 @@ fn oden_capsec_readiness() -> OdenReadiness {
   reason = "capsec readiness hooks are env-driven; the spike's control surface."
 )]
 fn oden_capsec_env_flag(name: &str) -> bool {
-  std::env::var_os(name).is_some()
+  oden_capsec_control_var_os(name).is_some()
 }
 
 /// The lockdown posture (LLP 0001 Phase 3, ENG-23781): where the minimal
@@ -908,7 +1211,7 @@ impl OdenLockdownPosture {
 fn oden_capsec_lockdown_posture() -> OdenLockdownPosture {
   static POSTURE: std::sync::LazyLock<OdenLockdownPosture> =
     std::sync::LazyLock::new(|| {
-      match std::env::var_os("ODEN_CAPSEC_LOCKDOWN") {
+      match oden_capsec_control_var_os("ODEN_CAPSEC_LOCKDOWN") {
         // Same non-empty rule as the arming probe: an empty value is unset.
         Some(v) if !v.is_empty() => {
           let v = v.to_string_lossy().to_ascii_lowercase();
@@ -947,7 +1250,7 @@ pub fn oden_capsec_lockdown_on() -> bool {
 fn oden_capsec_compartment_globals_requested() -> bool {
   static REQUESTED: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| {
-      match std::env::var_os("ODEN_CAPSEC_COMPARTMENT_GLOBALS") {
+      match oden_capsec_control_var_os("ODEN_CAPSEC_COMPARTMENT_GLOBALS") {
         Some(v) if !v.is_empty() => !matches!(
           v.to_string_lossy().to_ascii_lowercase().as_str(),
           "0" | "false" | "off"
@@ -1117,21 +1420,35 @@ fn oden_capsec_readiness_gate() -> Result<(), PermissionCheckError> {
 )]
 struct OdenAuditWriter {
   enabled: bool,
+  authenticated: bool,
   file: Option<std::fs::File>,
+  key: Option<[u8; 32]>,
+  previous_mac: [u8; 32],
+  sequence: u64,
+  terminal_written: bool,
   bytes: usize,
   records: usize,
   max_bytes: usize,
   max_records: usize,
   incomplete: bool,
-  seen: std::collections::HashSet<u64>,
+  seen: std::collections::HashSet<String>,
 }
 
+#[allow(
+  clippy::disallowed_methods,
+  reason = "the engine-owned audit channel is opened once during pre-V8 bootstrap and retained for the process lifetime"
+)]
 impl OdenAuditWriter {
   fn new() -> Self {
-    let Some(path) = std::env::var_os("ODEN_CAPSEC_AUDIT") else {
+    let Some(path) = oden_capsec_control_var_os("ODEN_CAPSEC_AUDIT") else {
       return Self {
         enabled: false,
+        authenticated: false,
         file: None,
+        key: None,
+        previous_mac: [0; 32],
+        sequence: 0,
+        terminal_written: false,
         bytes: 0,
         records: 0,
         max_bytes: 0,
@@ -1140,25 +1457,53 @@ impl OdenAuditWriter {
         seen: std::collections::HashSet::new(),
       };
     };
-    let max_bytes = std::env::var("ODEN_CAPSEC_AUDIT_MAX_BYTES")
+    let max_bytes = oden_capsec_control_var("ODEN_CAPSEC_AUDIT_MAX_BYTES")
       .ok()
       .and_then(|value| value.parse().ok())
       .filter(|value| *value > 0)
       .unwrap_or(1024 * 1024);
-    let max_records = std::env::var("ODEN_CAPSEC_AUDIT_MAX_RECORDS")
+    let max_records = oden_capsec_control_var("ODEN_CAPSEC_AUDIT_MAX_RECORDS")
       .ok()
       .and_then(|value| value.parse().ok())
       .filter(|value| *value > 0)
       .unwrap_or(10_000);
-    let file = std::fs::OpenOptions::new()
-      .create(true)
-      .append(true)
-      .open(path)
-      .ok();
+    let authenticated = oden_capsec_authenticated_audit();
+    let key = if authenticated {
+      oden_capsec_audit_key()
+    } else {
+      None
+    };
+    let path = PathBuf::from(path);
+    let file = if authenticated {
+      // The parent pre-creates an empty regular file and retains its identity.
+      // Refuse a symlink/non-file/non-empty handoff before opening by path.
+      let valid =
+        std::fs::symlink_metadata(&path)
+          .ok()
+          .is_some_and(|metadata| {
+            metadata.file_type().is_file()
+              && !metadata.file_type().is_symlink()
+              && metadata.len() == 0
+          });
+      valid
+        .then(|| std::fs::OpenOptions::new().append(true).open(&path).ok())
+        .flatten()
+    } else {
+      std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()
+    };
     Self {
       enabled: true,
-      incomplete: file.is_none(),
+      authenticated,
+      incomplete: file.is_none() || (authenticated && key.is_none()),
       file,
+      key,
+      previous_mac: [0; 32],
+      sequence: 0,
+      terminal_written: false,
       bytes: 0,
       records: 0,
       max_bytes,
@@ -1177,31 +1522,78 @@ impl OdenAuditWriter {
     // The policy conversation is site-insensitive and suggestions are deduped
     // by resolved row. Repeated hot-loop operations therefore pay one trusted
     // write, while this hash set remains bounded by max_records.
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    line.hash(&mut hasher);
-    if !self.seen.insert(hasher.finish()) {
+    if !self.seen.insert(line.to_string()) {
       return true;
     }
-    // Reserve enough space for the one authenticated overflow marker.
-    const OVERFLOW_RESERVE: usize = 192;
+    let output = if self.authenticated {
+      let Some((framed, mac, sequence)) =
+        self.authenticated_line("record", line.as_bytes())
+      else {
+        return self.mark_incomplete("authentication-failure");
+      };
+      (framed, Some((mac, sequence)))
+    } else {
+      (line.to_string(), None)
+    };
+    // Reserve enough space for one authenticated incomplete record. A failed
+    // stream deliberately never receives a terminal frame.
+    const INCOMPLETE_RESERVE: usize = 512;
     if self.records >= self.max_records
-      || self.bytes + line.len() + 1 + OVERFLOW_RESERVE > self.max_bytes
+      || self.bytes + output.0.len() + 1 + INCOMPLETE_RESERVE > self.max_bytes
     {
       return self.mark_incomplete("quota-overflow");
     }
-    let Some(file) = self.file.as_mut() else {
-      self.incomplete = true;
-      return false;
-    };
-    if file.write_all(line.as_bytes()).is_err()
-      || file.write_all(b"\n").is_err()
-    {
+    if !self.write_line(&output.0) {
       self.incomplete = true;
       return false;
     }
-    self.bytes += line.len() + 1;
+    if let Some((mac, sequence)) = output.1 {
+      self.previous_mac = mac;
+      self.sequence = sequence;
+    }
+    self.bytes += output.0.len() + 1;
     self.records += 1;
     true
+  }
+
+  fn authenticated_line(
+    &self,
+    kind: &str,
+    payload: &[u8],
+  ) -> Option<(String, [u8; 32], u64)> {
+    let key = self.key?;
+    let sequence = self.sequence.checked_add(1)?;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).ok()?;
+    mac.update(b"oden-capsec-audit-v1\0");
+    mac.update(kind.as_bytes());
+    mac.update(&[0]);
+    mac.update(&sequence.to_be_bytes());
+    mac.update(&self.previous_mac);
+    mac.update(payload);
+    let digest = mac.finalize().into_bytes();
+    let mut digest_bytes = [0_u8; 32];
+    digest_bytes.copy_from_slice(&digest);
+    let frame = serde_json::json!({
+      "v": 1,
+      "kind": kind,
+      "seq": sequence,
+      "prev": oden_audit_hex(&self.previous_mac),
+      "payload": base64::engine::general_purpose::STANDARD.encode(payload),
+      "mac": oden_audit_hex(&digest_bytes),
+    });
+    serde_json::to_string(&frame)
+      .ok()
+      .map(|line| (line, digest_bytes, sequence))
+  }
+
+  fn write_line(&mut self, line: &str) -> bool {
+    let Some(file) = self.file.as_mut() else {
+      return false;
+    };
+    let mut bytes = Vec::with_capacity(line.len() + 1);
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.push(b'\n');
+    file.write_all(&bytes).is_ok()
   }
 
   fn mark_incomplete(&mut self, reason: &str) -> bool {
@@ -1210,19 +1602,165 @@ impl OdenAuditWriter {
       "event": "audit-incomplete",
       "reason": reason,
     });
-    if let (Some(file), Ok(line)) =
-      (self.file.as_mut(), serde_json::to_string(&marker))
-    {
-      let _ = file.write_all(line.as_bytes());
-      let _ = file.write_all(b"\n");
+    if let Ok(payload) = serde_json::to_string(&marker) {
+      if self.authenticated {
+        if let Some((line, mac, sequence)) =
+          self.authenticated_line("record", payload.as_bytes())
+          && self.bytes + line.len() < self.max_bytes
+          && self.write_line(&line)
+        {
+          self.previous_mac = mac;
+          self.sequence = sequence;
+          self.bytes += line.len() + 1;
+        }
+      } else {
+        let _ = self.write_line(&payload);
+      }
     }
     self.incomplete = true;
     false
   }
+
+  fn finish(&mut self) -> bool {
+    if !self.enabled || !self.authenticated || self.terminal_written {
+      return true;
+    }
+    if self.incomplete {
+      return false;
+    }
+    let Some((line, mac, sequence)) = self.authenticated_line("terminal", &[])
+    else {
+      return self.mark_incomplete("authentication-failure");
+    };
+    if self.bytes + line.len() + 1 > self.max_bytes || !self.write_line(&line) {
+      self.incomplete = true;
+      return false;
+    }
+    self.previous_mac = mac;
+    self.sequence = sequence;
+    self.terminal_written = true;
+    self.bytes += line.len() + 1;
+    true
+  }
+}
+
+fn oden_audit_hex(bytes: &[u8; 32]) -> String {
+  use std::fmt::Write as _;
+  let mut out = String::with_capacity(64);
+  for byte in bytes {
+    let _ = write!(out, "{byte:02x}");
+  }
+  out
 }
 
 static ODEN_AUDIT_WRITER: Lazy<Mutex<OdenAuditWriter>> =
   Lazy::new(|| Mutex::new(OdenAuditWriter::new()));
+
+static ODEN_CAPSEC_ACTIVE_WORKERS: std::sync::atomic::AtomicUsize =
+  std::sync::atomic::AtomicUsize::new(0);
+static ODEN_CAPSEC_AUDIT_FINALIZING: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+static ODEN_CAPSEC_WORKER_DRAIN: Lazy<(Mutex<()>, Condvar)> =
+  Lazy::new(|| (Mutex::new(()), Condvar::new()));
+
+/// Process-lifetime token held by each engine worker thread. The authenticated
+/// terminal frame is not written until every token has drained.
+pub struct OdenCapsecAuditWorkerGuard {
+  tracked: bool,
+}
+
+pub fn oden_capsec_track_audit_worker() -> OdenCapsecAuditWorkerGuard {
+  let tracked = oden_capsec_authenticated_audit();
+  if tracked {
+    let _guard = ODEN_CAPSEC_WORKER_DRAIN.0.lock();
+    if ODEN_CAPSEC_AUDIT_FINALIZING.load(std::sync::atomic::Ordering::SeqCst) {
+      oden_capsec_fatal_audit_failure();
+    }
+    ODEN_CAPSEC_ACTIVE_WORKERS
+      .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+  }
+  OdenCapsecAuditWorkerGuard { tracked }
+}
+
+impl Drop for OdenCapsecAuditWorkerGuard {
+  fn drop(&mut self) {
+    if self.tracked {
+      // Pair the transition and notification with the waiter's mutex so a
+      // last-worker notification cannot race between its predicate check and
+      // the condvar wait.
+      let _guard = ODEN_CAPSEC_WORKER_DRAIN.0.lock();
+      if ODEN_CAPSEC_ACTIVE_WORKERS
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+        == 1
+      {
+        ODEN_CAPSEC_WORKER_DRAIN.1.notify_all();
+      }
+    }
+  }
+}
+
+/// Reserved process status for an engine audit-completeness failure. This is a
+/// tool/runtime failure, never the target program's requested exit status.
+pub const ODEN_CAPSEC_AUDIT_FAILURE_EXIT_CODE: i32 = 74;
+
+static ODEN_CAPSEC_AUDIT_FAILURE_LATCH: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+/// Process-wide completeness state for embedders and the authenticated parent
+/// channel. JavaScript cannot access or reset this engine-owned latch.
+pub fn oden_capsec_audit_failure_latched() -> bool {
+  ODEN_CAPSEC_AUDIT_FAILURE_LATCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cold]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "audit evidence loss is a process-wide security failure; ordinary JS exceptions and Deno.exit must not catch or override it"
+)]
+fn oden_capsec_fatal_audit_failure() -> ! {
+  let first = !ODEN_CAPSEC_AUDIT_FAILURE_LATCH
+    .swap(true, std::sync::atomic::Ordering::SeqCst);
+  if first {
+    // Keep this diagnostic stable for humans, but never authenticate it by
+    // text: target stderr is byte-faithful application data. The reserved exit
+    // and ENG-23985's authenticated parent channel carry machine semantics.
+    let _ = std::io::stderr().write_all(
+      b"oden capsec: fatal audit evidence failure (OD-CAP-AUDIT-INCOMPLETE); exiting with engine status 74\n",
+    );
+  }
+  std::process::exit(ODEN_CAPSEC_AUDIT_FAILURE_EXIT_CODE)
+}
+
+/// Seal the authenticated evidence stream immediately before process exit.
+/// A terminal frame proves that all tracked workers drained and every record
+/// reached the single bounded writer.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md#addendum-update-2026-07-09-later-authenticated-engine-evidence-closes-audit-forgery-eng-23985 [implements]
+pub fn oden_capsec_finalize_audit() {
+  if !oden_capsec_authenticated_audit() {
+    return;
+  }
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+  let mut guard = ODEN_CAPSEC_WORKER_DRAIN.0.lock();
+  ODEN_CAPSEC_AUDIT_FINALIZING.store(true, std::sync::atomic::Ordering::SeqCst);
+  while ODEN_CAPSEC_ACTIVE_WORKERS.load(std::sync::atomic::Ordering::SeqCst) > 0
+  {
+    let now = std::time::Instant::now();
+    if now >= deadline {
+      drop(guard);
+      ODEN_AUDIT_WRITER
+        .lock()
+        .mark_incomplete("worker-drain-timeout");
+      oden_capsec_fatal_audit_failure();
+    }
+    ODEN_CAPSEC_WORKER_DRAIN
+      .1
+      .wait_for(&mut guard, deadline.saturating_duration_since(now));
+  }
+  drop(guard);
+  if !ODEN_AUDIT_WRITER.lock().finish() {
+    oden_capsec_fatal_audit_failure();
+  }
+}
 
 fn oden_capsec_audit_record(
   principal: &str,
@@ -1257,12 +1795,18 @@ fn oden_capsec_audit_record(
 }
 
 fn oden_capsec_write_audit_record(rec: &serde_json::Value) -> bool {
-  if let Ok(line) = serde_json::to_string(&rec) {
-    return ODEN_AUDIT_WRITER.lock().append(&line);
+  let complete = if let Ok(line) = serde_json::to_string(&rec) {
+    ODEN_AUDIT_WRITER.lock().append(&line)
+  } else {
+    ODEN_AUDIT_WRITER
+      .lock()
+      .mark_incomplete("serialization-failure")
+  };
+  if !complete {
+    // @ref llp/0001-adding-capability-security-to-deno.plan.md#addendum-update-2026-07-09-later-bounded-authenticated-audit-and-byte-faithful-engine-io-eng-239372393823939 [implements] — evidence loss is process-fatal even when a caller ignores the return or catches the permission error
+    oden_capsec_fatal_audit_failure();
   }
-  ODEN_AUDIT_WRITER
-    .lock()
-    .mark_incomplete("serialization-failure")
+  true
 }
 
 fn oden_capsec_audit_incomplete_error() -> PermissionCheckError {
@@ -1860,11 +2404,38 @@ pub fn oden_capsec_gate_import(
   if !oden_capsec_active() {
     return Ok(());
   }
+  let principal = oden_principal_index::resolve_locator(referrer.as_str());
+  if specifier.scheme() == "file"
+    && url_to_file_path(specifier).ok().is_some_and(|path| {
+      oden_capsec_control_path_denied(&path.to_string_lossy())
+    })
+  {
+    oden_capsec_readiness_gate()?;
+    let label = principal.label();
+    let target = specifier.as_str();
+    oden_capsec_audit_record(
+      &label,
+      "import",
+      "file",
+      target,
+      "DENY(engine control namespace)",
+      None,
+    );
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("import of {target:?}"),
+        name: "capsec",
+        custom_message: Some(format!(
+          "oden capsec: principal \"{label}\" may not import the engine-owned authenticated control namespace"
+        )),
+        state: PermissionState::Denied,
+      },
+    ));
+  }
   let scheme = specifier.scheme();
   if !matches!(scheme, "data" | "blob" | "http" | "https") {
     return Ok(());
   }
-  let principal = oden_principal_index::resolve_locator(referrer.as_str());
   // Ambient referrers (root/runtime) may import freely. A non-ambient referrer
   // — a package, or the quarantine/no-user sentinels — is gated.
   if principal.is_ambient() {
@@ -1952,7 +2523,7 @@ pub fn oden_capsec_check_worker_create() -> Result<(), PermissionCheckError> {
 /// what the OS will actually open.
 fn oden_capsec_project_root() -> &'static str {
   static ROOT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    std::env::var("ODEN_CAPSEC_ROOT").unwrap_or_else(|_| {
+    oden_capsec_control_var("ODEN_CAPSEC_ROOT").unwrap_or_else(|_| {
       std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
@@ -2049,7 +2620,7 @@ fn oden_capsec_policy_file_uncached() -> Option<OdenPolicyFile> {
   // deno.json + import-site grants) from a temp file, without writing into the
   // project tree. Shares the env name with the userland layer (LLP 0012). Falls
   // back to <root>/.oden/policy.json, the committed artifact.
-  let path = match std::env::var_os("ODEN_CAPSEC_POLICY") {
+  let path = match oden_capsec_control_var_os("ODEN_CAPSEC_POLICY") {
     // Same non-empty rule as the arming probe, so the two cannot disagree.
     Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
     _ => {
@@ -2351,7 +2922,7 @@ fn oden_capsec_policy() -> &'static OdenPolicy {
           if !selector.is_empty() {
             policy.ceiling(
               selector,
-              &oden_resolve_grant_scopes(authority, &root),
+              &oden_resolve_grant_scopes(authority, root),
               disposition,
             );
           }
@@ -2529,7 +3100,7 @@ fn oden_capsec_deputy_classes() -> Vec<String> {
   let mut classes: Vec<String> = oden_capsec_policy_file()
     .map(|f| f.deputy_classes.clone())
     .unwrap_or_default();
-  if let Ok(env) = std::env::var("ODEN_CAPSEC_DEPUTY_CLASSES") {
+  if let Ok(env) = oden_capsec_control_var("ODEN_CAPSEC_DEPUTY_CLASSES") {
     for c in env.split(',') {
       let c = c.trim();
       if !c.is_empty() {
@@ -8196,6 +8767,78 @@ mod tests {
   use sys_traits::EnvCurrentDir;
 
   use super::*;
+
+  #[test]
+  fn authenticated_audit_writer_emits_exact_chain_and_terminal() {
+    let path = std::env::temp_dir().join(format!(
+      "oden-audit-writer-{}-{}.ndjson",
+      std::process::id(),
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+    ));
+    let file = std::fs::OpenOptions::new()
+      .create_new(true)
+      .append(true)
+      .open(&path)
+      .unwrap();
+    let key = [7_u8; 32];
+    let mut writer = OdenAuditWriter {
+      enabled: true,
+      authenticated: true,
+      file: Some(file),
+      key: Some(key),
+      previous_mac: [0; 32],
+      sequence: 0,
+      terminal_written: false,
+      bytes: 0,
+      records: 0,
+      max_bytes: 1024 * 1024,
+      max_records: 10,
+      incomplete: false,
+      seen: Default::default(),
+    };
+    let payload = r#"{"v":1,"decision":"deny"}"#;
+    assert!(writer.append(payload));
+    assert!(writer.finish());
+    drop(writer);
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    let frames = text
+      .lines()
+      .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+      .collect::<Vec<_>>();
+    assert_eq!(frames.len(), 2);
+
+    let mut previous = [0_u8; 32];
+    for (index, (frame, (kind, expected_payload))) in frames
+      .iter()
+      .zip([("record", payload.as_bytes()), ("terminal", &[][..])])
+      .enumerate()
+    {
+      let sequence = (index + 1) as u64;
+      assert_eq!(frame["v"], 1);
+      assert_eq!(frame["kind"], kind);
+      assert_eq!(frame["seq"], sequence);
+      assert_eq!(frame["prev"], oden_audit_hex(&previous));
+      assert_eq!(
+        frame["payload"],
+        base64::engine::general_purpose::STANDARD.encode(expected_payload)
+      );
+      let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).unwrap();
+      mac.update(b"oden-capsec-audit-v1\0");
+      mac.update(kind.as_bytes());
+      mac.update(&[0]);
+      mac.update(&sequence.to_be_bytes());
+      mac.update(&previous);
+      mac.update(expected_payload);
+      let digest = mac.finalize().into_bytes();
+      previous.copy_from_slice(&digest);
+      assert_eq!(frame["mac"], oden_audit_hex(&previous));
+    }
+    std::fs::remove_file(path).unwrap();
+  }
 
   #[test]
   fn compartment_keys_do_not_alias_physical_package_instances() {

@@ -340,9 +340,12 @@ fn op_create_worker(
   };
   let cpu_thread_handle = Arc::new(AtomicU64::new(0));
   let cpu_thread_handle_writer = cpu_thread_handle.clone();
+  let oden_audit_worker_guard =
+    deno_permissions::oden_capsec_track_audit_worker();
 
   // Spawn it
   thread_builder.spawn(move || {
+    let _oden_audit_worker_guard = oden_audit_worker_guard;
     // Capture the OS thread handle for CPU usage queries from the host.
     cpu_thread_handle_writer
       .store(capture_current_thread_handle(), Ordering::Release);

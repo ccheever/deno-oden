@@ -188,7 +188,9 @@ pub fn op_oden_capsec_flags() -> u32 {
   if deno_permissions::oden_capsec_armed() {
     flags |= 1;
   }
-  if std::env::var_os("ODEN_CAPSEC_SEAL_SELFTEST").is_some() {
+  if deno_permissions::oden_capsec_control_var_os("ODEN_CAPSEC_SEAL_SELFTEST")
+    .is_some()
+  {
     flags |= 2;
   }
   // Bit 2 (value 4) = minimal lockdown (freeze the primordial intrinsics +

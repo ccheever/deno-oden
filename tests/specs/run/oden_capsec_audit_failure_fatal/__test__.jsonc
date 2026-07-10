@@ -1,0 +1,80 @@
+{
+  // Audit completeness is an engine-owned process invariant. Every script
+  // tries to catch the affected API and print an "after" line; neither is
+  // reachable after sink failure. Status 74 is reserved for this tool failure.
+  "tempDir": true,
+  "tests": {
+    "caught_ordinary_permission_cannot_survive_unavailable_sink": {
+      "args": "run --allow-env ordinary.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "control/capsec.json",
+        "ODEN_CAPSEC_AUDIT": "control/unavailable",
+        "ODEN_CAPSEC_AUDIT_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "SECRET": "hidden"
+      },
+      "output": "ordinary.out",
+      "exitCode": 74
+    },
+    "dynamic_query_cannot_ignore_unavailable_sink": {
+      "args": "run query.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "control/capsec.json",
+        "ODEN_CAPSEC_AUDIT": "control/unavailable",
+        "ODEN_CAPSEC_AUDIT_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "output": "query.out",
+      "exitCode": 74
+    },
+    "dynamic_request_cannot_ignore_unavailable_sink": {
+      "args": "run request.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "control/capsec.json",
+        "ODEN_CAPSEC_AUDIT": "control/unavailable",
+        "ODEN_CAPSEC_AUDIT_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "output": "request.out",
+      "exitCode": 74
+    },
+    "handle_path_cannot_ignore_unavailable_sink": {
+      "args": "run handle.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "control/capsec.json",
+        "ODEN_CAPSEC_AUDIT": "control/unavailable",
+        "ODEN_CAPSEC_AUDIT_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "output": "handle.out",
+      "exitCode": 74
+    },
+    "import_path_cannot_ignore_unavailable_sink": {
+      "args": "run import.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "control/capsec.json",
+        "ODEN_CAPSEC_AUDIT": "control/unavailable",
+        "ODEN_CAPSEC_AUDIT_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "output": "import.out",
+      "exitCode": 74
+    },
+    "worker_path_cannot_ignore_unavailable_sink": {
+      "args": "run --allow-read worker.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "control/capsec.json",
+        "ODEN_CAPSEC_AUDIT": "control/unavailable",
+        "ODEN_CAPSEC_AUDIT_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "output": "worker.out",
+      "exitCode": 74
+    },
+    "resource_owner_path_cannot_ignore_quota_failure": {
+      "args": "run --allow-read resource.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "control/capsec.json",
+        "ODEN_CAPSEC_AUDIT": "control/resource-audit.ndjson",
+        "ODEN_CAPSEC_AUDIT_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "ODEN_CAPSEC_AUDIT_MAX_RECORDS": "1"
+      },
+      "output": "resource.out",
+      "exitCode": 74
+    }
+  }
+}

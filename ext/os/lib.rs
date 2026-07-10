@@ -43,6 +43,7 @@ impl ExitCode {
 
 pub fn exit(code: i32) -> ! {
   deno_signals::run_exit();
+  deno_permissions::oden_capsec_finalize_audit();
   #[allow(
     clippy::disallowed_methods,
     reason = "exit is the intended behavior"

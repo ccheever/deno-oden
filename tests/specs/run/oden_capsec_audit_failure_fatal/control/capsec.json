@@ -1,0 +1,13 @@
+{
+  "mode": "enforce",
+  "grants": {
+    "handle-dep": "fs:read:./shared",
+    "resource-dep": "fs:read:./watchdir"
+  },
+  "ceilings": {
+    "evil-dep": {
+      "authority": "env:*:DYNAMIC",
+      "on_request": "auto"
+    }
+  }
+}

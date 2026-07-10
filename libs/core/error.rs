@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use boxed_error::Boxed;
 use deno_error::JsError;
@@ -722,7 +723,7 @@ pub(crate) fn oden_dynamic_script_locator_count(isolate_id: usize) -> usize {
 /// once per process like the arming probes.
 #[allow(
   clippy::disallowed_methods,
-  reason = "diagnostic environment probe is read once and cached"
+  reason = "the display-only trace flag is a process bootstrap setting cached once"
 )]
 pub fn oden_trace_display_enabled() -> bool {
   static ENABLED: LazyLock<bool> = LazyLock::new(|| {
@@ -770,6 +771,31 @@ pub(crate) fn oden_capsec_armed() -> bool {
   *ARMED
 }
 
+#[derive(Clone, Copy)]
+struct OdenCapturedControlFlags {
+  armed: bool,
+  forge_cped: bool,
+  forge_schedule: bool,
+}
+
+static ODEN_CAPTURED_CONTROL_FLAGS: OnceLock<OdenCapturedControlFlags> =
+  OnceLock::new();
+
+/// The CLI calls this after capturing and erasing `ODEN_CAPSEC_*`, before V8
+/// creates an isolate. deno_core otherwise retains its legacy env probe for
+/// embedders that do not use the Deno CLI bootstrap.
+pub fn oden_capsec_capture_control_flags(
+  armed: bool,
+  forge_cped: bool,
+  forge_schedule: bool,
+) {
+  let _ = ODEN_CAPTURED_CONTROL_FLAGS.set(OdenCapturedControlFlags {
+    armed,
+    forge_cped,
+    forge_schedule,
+  });
+}
+
 // Structural arming: the policy artifact's presence arms — an explicit
 // `ODEN_CAPSEC_POLICY` handoff or `<root>/.oden/policy.json` (root =
 // `ODEN_CAPSEC_ROOT` else cwd). Kept in sync with
@@ -780,6 +806,9 @@ pub(crate) fn oden_capsec_armed() -> bool {
   reason = "structural arming probes the policy artifact; read once and cached."
 )]
 fn oden_capsec_armed_uncached() -> bool {
+  if let Some(flags) = ODEN_CAPTURED_CONTROL_FLAGS.get() {
+    return flags.armed;
+  }
   if std::env::var_os("ODEN_CAPSEC_POLICY").is_some_and(|v| !v.is_empty()) {
     return true;
   }
@@ -852,11 +881,11 @@ fn oden_cped_resolve(token: u64) -> Option<String> {
   reason = "capsec red-team forge hook is an env-gated test control surface."
 )]
 fn oden_cped_forge_offset() -> u64 {
-  if std::env::var_os("ODEN_CAPSEC_FORGE_CPED").is_some() {
-    1_000_000_000
-  } else {
-    0
-  }
+  let enabled = ODEN_CAPTURED_CONTROL_FLAGS
+    .get()
+    .map(|flags| flags.forge_cped)
+    .unwrap_or_else(|| std::env::var_os("ODEN_CAPSEC_FORGE_CPED").is_some());
+  if enabled { 1_000_000_000 } else { 0 }
 }
 
 #[allow(
@@ -864,11 +893,13 @@ fn oden_cped_forge_offset() -> u64 {
   reason = "capsec red-team forge hook is an env-gated test control surface."
 )]
 fn oden_schedule_forge_offset() -> u64 {
-  if std::env::var_os("ODEN_CAPSEC_FORGE_SCHEDULE").is_some() {
-    1_000_000_000
-  } else {
-    0
-  }
+  let enabled = ODEN_CAPTURED_CONTROL_FLAGS
+    .get()
+    .map(|flags| flags.forge_schedule)
+    .unwrap_or_else(|| {
+      std::env::var_os("ODEN_CAPSEC_FORGE_SCHEDULE").is_some()
+    });
+  if enabled { 1_000_000_000 } else { 0 }
 }
 
 fn oden_cped_slot_symbol<'s>(

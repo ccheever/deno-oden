@@ -776,6 +776,13 @@ pub(crate) fn boot_phase(label: &str) {
 
 pub fn main() {
   boot_phase("main start");
+  let oden_control =
+    deno_runtime::deno_permissions::oden_capsec_capture_control_env();
+  deno_core::error::oden_capsec_capture_control_flags(
+    oden_control.armed,
+    oden_control.forge_cped,
+    oden_control.forge_schedule,
+  );
   // Keep the lower-level emitter independent of `deno_runtime`: the CLI owns
   // the one-way registration from loader locator to the policy-derived
   // endowment fingerprint. With compartment globals off, the provider returns
