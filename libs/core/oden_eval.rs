@@ -530,6 +530,7 @@ mod tests {
   #[test]
   fn isolate_cleanup_reclaims_pending_and_dynamic_locators() {
     let isolate_id = usize::MAX - 101;
+    let static_script_id = usize::MAX - 102;
     let mut pending = PendingEvalRegistry::default();
     pending.insert(
       isolate_id,
@@ -545,12 +546,20 @@ mod tests {
       1,
       "file:///root/app.js",
     );
+    crate::error::oden_register_script_locator_by_key(
+      isolate_id,
+      static_script_id,
+      "file:///root/static.js",
+    );
     assert_eq!(
       crate::error::oden_dynamic_script_locator_count(isolate_id),
       1
     );
     crate::error::oden_clear_script_locators(isolate_id);
     assert!(crate::error::oden_script_locator(isolate_id, 1).is_none());
+    assert!(
+      crate::error::oden_script_locator(isolate_id, static_script_id).is_none()
+    );
   }
 
   #[test]
