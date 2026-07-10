@@ -10,7 +10,9 @@ function rootOpSample(iterations) {
 }
 
 for (let i = 0; i < 3; i++) rootOpSample(4_000);
-const baseline = Math.min(...Array.from({ length: 5 }, () => rootOpSample(4_000)));
+const baseline = Math.min(
+  ...Array.from({ length: 5 }, () => rootOpSample(4_000)),
+);
 
 leavePending();
 console.log("out-of-order-attribution:", executeOutOfOrder(5_000));
