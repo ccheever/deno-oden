@@ -86,7 +86,7 @@ allowed only at the two audited typed helpers named by the generator.
 | listen | check_net_resolved | net_listen_udp() | ext/net/ops.rs:736 | explicit |
 | connect | check_net_vsock | op_net_connect_vsock() | ext/net/ops.rs:836 | explicit |
 | listen | check_net_vsock | op_net_listen_vsock() | ext/net/ops.rs:890 | explicit |
-| fetch | check_net | op_dns_resolve() | ext/net/ops.rs:1131 | explicit |
+| fetch | check_net | op_dns_resolve() | ext/net/ops.rs:1137 | explicit |
 | listen | check_net | op_quic_endpoint_create() | ext/net/quic.rs:263 | explicit |
 | connect | check_net | op_quic_endpoint_connect() | ext/net/quic.rs:570 | explicit |
 | connect | check_net_resolved | op_quic_endpoint_connect() | ext/net/quic.rs:582 | explicit |
@@ -236,7 +236,7 @@ consume a resource authorized by the operation named in the note.
 - ext/kv/lib.rs:460
 - ext/kv/lib.rs:493
 - ext/net/ops.rs:1001
-- ext/net/ops.rs:1670
+- ext/net/ops.rs:1688
 - ext/net/ops.rs:242
 - ext/net/ops.rs:659
 - ext/net/ops.rs:715
