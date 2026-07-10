@@ -1175,10 +1175,10 @@ pub fn format_primitive<'s>(
         out_parts.push(style!(scope, quoted, "string")?);
       }
       let joiner = format!(" +\n{}", " ".repeat(ctx.indentation_lvl + 2));
-      return Ok(out_parts.join(&joiner) + &trailer);
+      return Ok(out_parts.join(&joiner) + trailer.as_str());
     }
     let quoted = quote::quote_string(&s, &ctx.quotes, ctx.escape_sequences);
-    return Ok(style!(scope, quoted, "string")? + &trailer);
+    return Ok(style!(scope, quoted, "string")? + trailer.as_str());
   }
   if value.is_number() {
     let s = number_display(scope, value);
