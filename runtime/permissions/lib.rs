@@ -8769,6 +8769,10 @@ mod tests {
   use super::*;
 
   #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the isolated writer unit test uses a unique host temp file and cleans it synchronously"
+  )]
   fn authenticated_audit_writer_emits_exact_chain_and_terminal() {
     let path = std::env::temp_dir().join(format!(
       "oden-audit-writer-{}-{}.ndjson",
