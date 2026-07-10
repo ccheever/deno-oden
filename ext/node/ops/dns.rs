@@ -12,6 +12,7 @@ use deno_core::op2;
 use deno_core::unsync::spawn_blocking;
 use deno_error::JsError;
 use deno_net::ops::NetPermToken;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
 use socket2::SockAddr;
@@ -67,7 +68,11 @@ pub async fn op_node_getaddrinfo(
   {
     let mut state_ = state.borrow_mut();
     let permissions = state_.borrow_mut::<PermissionsContainer>();
-    permissions.check_net(&(hostname.as_str(), port), "node:dns.lookup()")?;
+    permissions.check_net(
+      NetPermissionAction::Fetch,
+      &(hostname.as_str(), port),
+      "node:dns.lookup()",
+    )?;
   }
 
   let hostname_clone = hostname.clone();
@@ -266,8 +271,11 @@ pub async fn op_node_getnameinfo(
   {
     let mut state_ = state.borrow_mut();
     let permissions = state_.borrow_mut::<PermissionsContainer>();
-    permissions
-      .check_net(&(ip.as_str(), Some(port)), "node:dns.lookupService()")?;
+    permissions.check_net(
+      NetPermissionAction::Fetch,
+      &(ip.as_str(), Some(port)),
+      "node:dns.lookupService()",
+    )?;
   }
 
   let ip_addr: IpAddr = ip.parse()?;

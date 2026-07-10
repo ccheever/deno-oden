@@ -30,6 +30,7 @@ use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::op2;
 use deno_permissions::CheckedPath;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::OpenAccessKind;
 use deno_permissions::PermissionsContainer;
 use serde::Deserialize;
@@ -147,6 +148,7 @@ pub async fn op_net_connect_unix(
     let mut state = state.borrow_mut();
     check_unix_socket_path(
       state.borrow_mut::<PermissionsContainer>(),
+      NetPermissionAction::Connect,
       Cow::Owned(PathBuf::from(address_path)),
       OpenAccessKind::ReadWriteNoFollow,
       Some("Deno.connect()"),
@@ -196,6 +198,7 @@ pub async fn op_net_send_unixpacket(
     let mut s = state.borrow_mut();
     check_unix_socket_path(
       s.borrow_mut::<PermissionsContainer>(),
+      NetPermissionAction::Connect,
       Cow::Owned(PathBuf::from(address_path)),
       OpenAccessKind::WriteNoFollow,
       Some("Deno.DatagramConn.send()"),
@@ -226,6 +229,7 @@ pub fn op_net_listen_unix(
   let api_call_expr = format!("{}()", api_name);
   let address_path = check_unix_socket_path(
     permissions,
+    NetPermissionAction::Listen,
     Cow::Borrowed(Path::new(address_path)),
     OpenAccessKind::ReadWriteNoFollow,
     Some(&api_call_expr),
@@ -250,6 +254,7 @@ pub fn net_listen_unixpacket(
       let permissions = state.borrow_mut::<PermissionsContainer>();
       let address_path = check_unix_socket_path(
         permissions,
+        NetPermissionAction::Listen,
         Cow::Borrowed(Path::new(address_path)),
         OpenAccessKind::ReadWriteNoFollow,
         Some("Deno.listenDatagram()"),
@@ -356,6 +361,7 @@ async fn send_to_unix_datagram(
 
 fn check_unix_socket_path<'a>(
   permissions: &mut PermissionsContainer,
+  action: NetPermissionAction,
   path: Cow<'a, Path>,
   access_kind: OpenAccessKind,
   api_name: Option<&str>,
@@ -373,7 +379,7 @@ fn check_unix_socket_path<'a>(
   // `--allow-read=/var/run/docker.sock` could connect to local IPC services
   // (Docker, dbus, podman, etc.) with no `--allow-net` grant.
   permissions
-    .check_net_unix_socket(&checked, api_name)
+    .check_net_unix_socket(action, &checked, api_name)
     .map_err(NetError::Permission)?;
   Ok(checked)
 }

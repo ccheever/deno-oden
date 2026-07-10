@@ -19,6 +19,7 @@ use deno_inspector_server::InspectPublishUid;
 use deno_inspector_server::InspectorServerUrl;
 use deno_inspector_server::create_inspector_server;
 use deno_inspector_server::stop_inspector_server;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
 
 #[op2(fast)]
@@ -97,9 +98,11 @@ pub fn op_inspector_open(
   let port = port.unwrap_or(DEFAULT_PORT);
   let addr = SocketAddr::new(host_ip, port);
 
-  state
-    .borrow_mut::<PermissionsContainer>()
-    .check_net(&(host_ip.to_string(), Some(port)), "inspector.open")?;
+  state.borrow_mut::<PermissionsContainer>().check_net(
+    NetPermissionAction::Listen,
+    &(host_ip.to_string(), Some(port)),
+    "inspector.open",
+  )?;
 
   let server =
     create_inspector_server(addr, "deno", InspectPublishUid::default())?;

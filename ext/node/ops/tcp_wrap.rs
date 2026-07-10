@@ -23,6 +23,7 @@ use deno_core::uv_compat::UvStream;
 use deno_core::uv_compat::UvTcp;
 use deno_core::v8;
 use deno_net::io::TcpStreamResource;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
 use socket2::SockAddr as Socket2SockAddr;
 
@@ -31,6 +32,7 @@ use crate::ops::handle_wrap::Handle;
 use crate::ops::handle_wrap::HandleWrap;
 use crate::ops::handle_wrap::OwnedPtr;
 use crate::ops::handle_wrap::ProviderType;
+use crate::ops::http::NodeHttpNetToken;
 use crate::ops::stream_wrap::LibUvStreamWrap;
 use crate::ops::stream_wrap::clone_context_from_uv_loop;
 
@@ -177,6 +179,8 @@ pub struct TCPWrap {
   /// permissions against the original hostname, but only for an address
   /// that is among the token's resolved IPs.
   net_perm_token: RefCell<Option<deno_net::ops::NetPermToken>>,
+  /// Opaque endpoint-bound proof installed only by the built-in HTTP agent.
+  oden_http_net_token: RefCell<Option<NodeHttpNetToken>>,
 }
 
 // SAFETY: TCPWrap is a cppgc-managed object; the GC traces it via the base field.
@@ -235,6 +239,7 @@ impl TCPWrap {
         handle: Cell::new(Some(tcp)),
         socket_type: Cell::new(socket_type),
         net_perm_token: RefCell::new(None),
+        oden_http_net_token: RefCell::new(None),
       }
     } else {
       // Error path - create with null handle
@@ -264,6 +269,7 @@ impl TCPWrap {
         handle: Cell::new(None),
         socket_type: Cell::new(socket_type),
         net_perm_token: RefCell::new(None),
+        oden_http_net_token: RefCell::new(None),
       }
     }
   }
@@ -314,6 +320,15 @@ impl TCPWrap {
     }
   }
 
+  fn oden_http_api_name(&self, hostname: &str, port: u16) -> Option<String> {
+    self
+      .oden_http_net_token
+      .borrow()
+      .as_ref()
+      .and_then(|token| token.tcp_api_name(hostname, port))
+      .map(str::to_string)
+  }
+
   fn bind_inner(
     &self,
     state: &mut OpState,
@@ -321,9 +336,11 @@ impl TCPWrap {
     port: i32,
     flags: u32,
   ) -> Result<i32, deno_permissions::PermissionCheckError> {
-    state
-      .borrow_mut::<PermissionsContainer>()
-      .check_net(&(address, Some(port as u16)), "node:net.listen()")?;
+    state.borrow_mut::<PermissionsContainer>().check_net(
+      NetPermissionAction::Listen,
+      &(address, Some(port as u16)),
+      "node:net.listen()",
+    )?;
 
     let addr_str = format!("{}:{}", address, port);
     let socket_addr = match addr_str.to_socket_addrs() {
@@ -544,9 +561,11 @@ impl TCPWrap {
     #[smi] port: i32,
     #[smi] flags: u32,
   ) -> Result<i32, deno_permissions::PermissionCheckError> {
-    state
-      .borrow_mut::<PermissionsContainer>()
-      .check_net(&(address, Some(port as u16)), "node:net.listen()")?;
+    state.borrow_mut::<PermissionsContainer>().check_net(
+      NetPermissionAction::Listen,
+      &(address, Some(port as u16)),
+      "node:net.listen()",
+    )?;
 
     let addr_str = format!("{}:{}", address, port);
     let socket_addr = match addr_str.to_socket_addrs() {
@@ -681,6 +700,12 @@ impl TCPWrap {
     });
   }
 
+  /// Install the unforgeable built-in-HTTP marker before DNS/connect defers.
+  #[nofast]
+  fn set_oden_http_net_token(&self, #[cppgc] token: &NodeHttpNetToken) {
+    *self.oden_http_net_token.borrow_mut() = Some(token.clone());
+  }
+
   /// Connect to an address. Takes (req, address, port) where req is a
   /// TCPConnectWrap with oncomplete callback, matching Node.js API.
   #[nofast]
@@ -696,10 +721,20 @@ impl TCPWrap {
     // the original hostname instead of the resolved IP address, but only
     // when `address` is one of the token's resolved IPs.
     let check_host = self.net_perm_check_host(address);
-    state.borrow_mut::<PermissionsContainer>().check_net(
-      &(check_host.as_str(), Some(port as u16)),
-      "node:net.connect()",
-    )?;
+    let http_api_name = self.oden_http_api_name(&check_host, port as u16);
+    if let Some(api_name) = &http_api_name {
+      state.borrow_mut::<PermissionsContainer>().check_net(
+        NetPermissionAction::Fetch,
+        &(check_host.as_str(), Some(port as u16)),
+        api_name,
+      )?;
+    } else {
+      state.borrow_mut::<PermissionsContainer>().check_net(
+        NetPermissionAction::Connect,
+        &(check_host.as_str(), Some(port as u16)),
+        "node:net.connect()",
+      )?;
+    }
 
     let addr_str = format!("{}:{}", address, port);
     let socket_addr = match addr_str.to_socket_addrs() {
@@ -713,13 +748,25 @@ impl TCPWrap {
     // Post-resolution deny check: verify the resolved IP is not denied.
     // This prevents numeric hostname aliases (e.g. 2130706433, 0x7f000001)
     // from bypassing --deny-net rules that target the resolved IP.
-    state
-      .borrow_mut::<PermissionsContainer>()
-      .check_net_resolved(
-        &socket_addr.ip(),
-        socket_addr.port(),
-        "node:net.connect()",
-      )?;
+    if let Some(api_name) = &http_api_name {
+      state
+        .borrow_mut::<PermissionsContainer>()
+        .check_net_resolved(
+          NetPermissionAction::Fetch,
+          &socket_addr.ip(),
+          socket_addr.port(),
+          api_name,
+        )?;
+    } else {
+      state
+        .borrow_mut::<PermissionsContainer>()
+        .check_net_resolved(
+          NetPermissionAction::Connect,
+          &socket_addr.ip(),
+          socket_addr.port(),
+          "node:net.connect()",
+        )?;
+    }
 
     let tcp = self.tcp_ptr();
     if tcp.is_null() {
@@ -764,10 +811,20 @@ impl TCPWrap {
     scope: &mut v8::PinScope,
   ) -> Result<i32, deno_permissions::PermissionCheckError> {
     let check_host = self.net_perm_check_host(address);
-    state.borrow_mut::<PermissionsContainer>().check_net(
-      &(check_host.as_str(), Some(port as u16)),
-      "node:net.connect()",
-    )?;
+    let http_api_name = self.oden_http_api_name(&check_host, port as u16);
+    if let Some(api_name) = &http_api_name {
+      state.borrow_mut::<PermissionsContainer>().check_net(
+        NetPermissionAction::Fetch,
+        &(check_host.as_str(), Some(port as u16)),
+        api_name,
+      )?;
+    } else {
+      state.borrow_mut::<PermissionsContainer>().check_net(
+        NetPermissionAction::Connect,
+        &(check_host.as_str(), Some(port as u16)),
+        "node:net.connect()",
+      )?;
+    }
 
     let addr_str = format!("{}:{}", address, port);
     let socket_addr = match addr_str.to_socket_addrs() {
@@ -779,13 +836,25 @@ impl TCPWrap {
     };
 
     // Post-resolution deny check for connect6 as well.
-    state
-      .borrow_mut::<PermissionsContainer>()
-      .check_net_resolved(
-        &socket_addr.ip(),
-        socket_addr.port(),
-        "node:net.connect()",
-      )?;
+    if let Some(api_name) = &http_api_name {
+      state
+        .borrow_mut::<PermissionsContainer>()
+        .check_net_resolved(
+          NetPermissionAction::Fetch,
+          &socket_addr.ip(),
+          socket_addr.port(),
+          api_name,
+        )?;
+    } else {
+      state
+        .borrow_mut::<PermissionsContainer>()
+        .check_net_resolved(
+          NetPermissionAction::Connect,
+          &socket_addr.ip(),
+          socket_addr.port(),
+          "node:net.connect()",
+        )?;
+    }
 
     let tcp = self.tcp_ptr();
     if tcp.is_null() {

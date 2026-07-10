@@ -1,6 +1,6 @@
 # Oden red-team soundness gate (generated)
 
-Phase-2 exit gate. 38 attack classes CLOSED with a guarding spec test; 6 DOCUMENTED RESIDUALS. Zero undocumented open holes.
+Phase-2 exit gate. 39 attack classes CLOSED with a guarding spec test; 6 DOCUMENTED RESIDUALS. Zero undocumented open holes.
 
 ## Closed (guarded by a spec fixture)
 
@@ -24,6 +24,7 @@ Phase-2 exit gate. 38 attack classes CLOSED with a guarding spec test; 6 DOCUMEN
 | config-env | ungated env value / policy widening under audit/enforce | oden_capsec_policy_file, oden_capsec_audit_log | one gated env path; policy parsed once per startup from the committed source; audit records every mediated op |
 | generation | silent policy drift / expansion of authority | oden_capsec_policy_gen | the generated artifact is byte-reproducible; --check classes expansions (high-severity) apart from shrinkages and fails on drift |
 | generation | deny-ceiling bypass through an op-body fast path (fast-skip-with-denies) | oden_capsec_ceiling | the layer-1-compiled ceiling denies hold under --allow-all through direct ops and the node: require path |
+| network-action-confusion | a fetch/connect/listen grant is reused by another protocol-class action | oden_capsec_network_actions | the typed action is selected at each resource-creating operation and the full positive/negative matrix covers Deno, Node, Unix, vsock, QUIC, WebSocket, and WebTransport; the syntax-aware call manifest rejects unclassified checks |
 | lockdown | a dependency patches a shared intrinsic a check relies on | oden_capsec_lockdown | the freeze walk + Error taming make the primordials non-writable; enforce defaults lockdown ON (ODEN_CAPSEC_LOCKDOWN=0 is the named override), audit/permissive stay opt-in per the compat-corpus NO-GO (ENG-23880); the ext/node lazy-write repairs and prepareStackTrace shim landed with ENG-23781 |
 | compartment-globals | 1. direct free identifier reaches unendowed fetch | oden_capsec_compartment_globals | the ESM/CJS scope-aware rewrite redirects the unresolved identifier to a throwing per-principal record; local parameters named fetch remain untouched |
 | compartment-globals | 2. globalThis/global/self computed member reaches unendowed fetch | oden_capsec_compartment_globals | global aliases resolve to the filtered per-principal Proxy, including computed property access |

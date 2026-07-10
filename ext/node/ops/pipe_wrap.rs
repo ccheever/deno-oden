@@ -21,6 +21,7 @@ use deno_core::uv_compat::UvConnect;
 use deno_core::uv_compat::UvLoop;
 use deno_core::uv_compat::UvStream;
 use deno_core::v8;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
 
 use crate::ops::handle_wrap::AsyncWrap;
@@ -28,6 +29,7 @@ use crate::ops::handle_wrap::Handle;
 use crate::ops::handle_wrap::HandleWrap;
 use crate::ops::handle_wrap::OwnedPtr;
 use crate::ops::handle_wrap::ProviderType;
+use crate::ops::http::NodeHttpNetToken;
 use crate::ops::stream_wrap::LibUvStreamWrap;
 use crate::ops::stream_wrap::clone_context_from_uv_loop;
 
@@ -172,6 +174,7 @@ pub struct PipeWrap {
   handle: Option<OwnedPtr<UvPipe>>,
   #[allow(dead_code, reason = "stored for parity with TCPWrap::socket_type")]
   pipe_type: Cell<PipeType>,
+  oden_http_net_token: RefCell<Option<NodeHttpNetToken>>,
 }
 
 // SAFETY: PipeWrap is a cppgc-managed object; the GC traces it via the base field.
@@ -226,6 +229,7 @@ impl PipeWrap {
       base,
       handle: Some(pipe),
       pipe_type: Cell::new(pipe_type),
+      oden_http_net_token: RefCell::new(None),
     }
   }
 
@@ -240,6 +244,15 @@ impl PipeWrap {
   /// to the pipe stream for encrypted I/O.
   pub fn stream_ptr(&self) -> *mut uv_compat::uv_stream_t {
     self.base.stream_ptr()
+  }
+
+  fn oden_http_api_name(&self, path: &str) -> Option<String> {
+    self
+      .oden_http_net_token
+      .borrow()
+      .as_ref()
+      .and_then(|token| token.unix_api_name(path))
+      .map(str::to_string)
   }
 }
 
@@ -281,6 +294,11 @@ impl PipeWrap {
     {
       -1
     }
+  }
+
+  #[nofast]
+  fn set_oden_http_net_token(&self, #[cppgc] token: &NodeHttpNetToken) {
+    *self.oden_http_net_token.borrow_mut() = Some(token.clone());
   }
 
   #[fast]
@@ -357,9 +375,16 @@ impl PipeWrap {
     // `connect()` above and `Deno.listen({ transport: "unix" })`. Checking
     // here (rather than only in `listen()`) ensures the path is never bound,
     // chmod'd, or unlinked by permission-less code.
-    state.borrow_mut::<PermissionsContainer>().check_open(
+    let permissions = state.borrow_mut::<PermissionsContainer>();
+    let checked = permissions.check_open(
       std::borrow::Cow::Borrowed(std::path::Path::new(path)),
       deno_permissions::OpenAccessKind::ReadWriteNoFollow,
+      Some("node:net.Server.listen()"),
+    )?;
+    #[cfg(unix)]
+    permissions.check_net_unix_socket(
+      NetPermissionAction::Listen,
+      &checked,
       Some("node:net.Server.listen()"),
     )?;
 
@@ -384,9 +409,16 @@ impl PipeWrap {
     // Permission check: verify the bind path is allowed.
     // SAFETY: pipe is valid (null-checked above).
     if let Some(path) = unsafe { &*pipe }.bind_path() {
-      state.borrow_mut::<PermissionsContainer>().check_open(
+      let permissions = state.borrow_mut::<PermissionsContainer>();
+      let checked = permissions.check_open(
         std::borrow::Cow::Borrowed(std::path::Path::new(path)),
         deno_permissions::OpenAccessKind::ReadWriteNoFollow,
+        Some("node:net.Server.listen()"),
+      )?;
+      #[cfg(unix)]
+      permissions.check_net_unix_socket(
+        NetPermissionAction::Listen,
+        &checked,
         Some("node:net.Server.listen()"),
       )?;
     }
@@ -417,11 +449,26 @@ impl PipeWrap {
     #[string] path: &str,
     scope: &mut v8::PinScope,
   ) -> Result<i32, deno_permissions::PermissionCheckError> {
-    state.borrow_mut::<PermissionsContainer>().check_open(
+    let permissions = state.borrow_mut::<PermissionsContainer>();
+    let checked = permissions.check_open(
       std::borrow::Cow::Borrowed(std::path::Path::new(path)),
       deno_permissions::OpenAccessKind::ReadWriteNoFollow,
       Some("node:net.createConnection()"),
     )?;
+    #[cfg(unix)]
+    if let Some(api_name) = self.oden_http_api_name(path) {
+      permissions.check_net_unix_socket(
+        NetPermissionAction::Fetch,
+        &checked,
+        Some(&api_name),
+      )?;
+    } else {
+      permissions.check_net_unix_socket(
+        NetPermissionAction::Connect,
+        &checked,
+        Some("node:net.createConnection()"),
+      )?;
+    }
 
     let pipe = self.pipe_ptr();
     if pipe.is_null() {
