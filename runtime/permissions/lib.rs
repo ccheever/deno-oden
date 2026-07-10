@@ -416,14 +416,16 @@ pub fn oden_capsec_init_control_plane() -> bool {
   let _ = oden_capsec_project_root();
   let _ = oden_capsec_policy_file();
   let _ = oden_capsec_policy_source();
-  let _ = oden_capsec_audit_channel();
+  if oden_capsec_audit_channel().lock().authenticated_failure() {
+    oden_capsec_fatal_audit_failure();
+  }
   if let Some(policy) = explicit_policy
     && let Some(control_root) =
       oden_capsec_audit_channel().lock().control_root()
-    && let Err(reason) =
+    && let Err(_reason) =
       oden_capsec_consume_parent_policy(&policy, &control_root)
   {
-    panic!("oden capsec: cannot consume private policy handoff: {reason}");
+    oden_capsec_fatal_audit_failure();
   }
   // SAFETY: the CLI calls this during single-threaded bootstrap, before V8 or
   // user workers start. These values have already been copied into Rust-owned
@@ -1450,10 +1452,43 @@ fn oden_capsec_audit_record(
   reason = "the capsec audit sink path is supplied through the bootstrap environment and opened append-only"
 )]
 fn oden_capsec_write_audit_record(rec: &serde_json::Value) {
-  let Ok(payload) = serde_json::to_vec(rec) else {
-    return;
+  let failed = match serde_json::to_vec(rec) {
+    Ok(payload) => !oden_capsec_audit_channel().lock().write_record(&payload),
+    Err(_) => oden_capsec_audit_channel().lock().authenticated_failure(),
   };
-  oden_capsec_audit_channel().lock().write_record(&payload);
+  if failed {
+    // Evidence loss is process-fatal even when package code catches the
+    // permission error or the call path historically ignored audit failures.
+    // @ref LLP 0004#the-event-stream [constrained-by] — authenticated child evidence must never become a partial clean stream
+    oden_capsec_fatal_audit_failure();
+  }
+}
+
+/// Reserved process status for an authenticated audit-completeness failure.
+/// This is an engine/tool failure, never the target program's requested code.
+pub const ODEN_CAPSEC_AUDIT_FAILURE_EXIT_CODE: i32 = 74;
+
+static ODEN_CAPSEC_AUDIT_FAILURE_LATCH: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+pub fn oden_capsec_audit_failure_latched() -> bool {
+  ODEN_CAPSEC_AUDIT_FAILURE_LATCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cold]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "authenticated evidence loss is a process-wide security failure that JavaScript must not catch or override"
+)]
+fn oden_capsec_fatal_audit_failure() -> ! {
+  let first = !ODEN_CAPSEC_AUDIT_FAILURE_LATCH
+    .swap(true, std::sync::atomic::Ordering::SeqCst);
+  if first {
+    let _ = std::io::stderr().write_all(
+      b"oden capsec: fatal audit evidence failure (OD-CAP-AUDIT-INCOMPLETE); exiting with engine status 74\n",
+    );
+  }
+  std::process::exit(ODEN_CAPSEC_AUDIT_FAILURE_EXIT_CODE)
 }
 
 const ODEN_AUDIT_DOMAIN: &[u8] = b"oden-capsec-audit-v1\0";
@@ -1476,7 +1511,7 @@ enum OdenAuditChannel {
   Disabled,
   Legacy(std::fs::File),
   Authenticated(OdenAuthenticatedAudit),
-  Broken,
+  Broken { authenticated: bool },
 }
 
 impl OdenAuditChannel {
@@ -1490,7 +1525,9 @@ impl OdenAuditChannel {
     };
     let path = PathBuf::from(path);
     let Some(control_root) = path.parent() else {
-      return Self::Broken;
+      return Self::Broken {
+        authenticated: false,
+      };
     };
     let key_path = control_root.join("audit.key");
     let key_metadata = std::fs::symlink_metadata(&key_path);
@@ -1504,15 +1541,25 @@ impl OdenAuditChannel {
         let removed = std::fs::remove_file(&key_path);
         match (key, removed) {
           (Ok(key), Ok(())) if key.len() == 32 => Some(key),
-          _ => return Self::Broken,
+          _ => {
+            return Self::Broken {
+              authenticated: true,
+            };
+          }
         }
       }
       Ok(_) => {
         let _ = std::fs::remove_file(&key_path);
-        return Self::Broken;
+        return Self::Broken {
+          authenticated: true,
+        };
       }
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-      Err(_) => return Self::Broken,
+      Err(_) => {
+        return Self::Broken {
+          authenticated: true,
+        };
+      }
     };
     let mut options = std::fs::OpenOptions::new();
     options.append(true);
@@ -1520,19 +1567,27 @@ impl OdenAuditChannel {
       options.create(true);
     }
     let Ok(file) = options.open(&path) else {
-      return Self::Broken;
+      return Self::Broken {
+        authenticated: key.is_some(),
+      };
     };
     let Some(key) = key else {
       return Self::Legacy(file);
     };
     let Ok(control_root) = std::fs::canonicalize(control_root) else {
-      return Self::Broken;
+      return Self::Broken {
+        authenticated: true,
+      };
     };
     let Ok(metadata) = file.metadata() else {
-      return Self::Broken;
+      return Self::Broken {
+        authenticated: true,
+      };
     };
     if !metadata.is_file() || metadata.len() != 0 {
-      return Self::Broken;
+      return Self::Broken {
+        authenticated: true,
+      };
     }
     Self::Authenticated(OdenAuthenticatedAudit {
       file,
@@ -1546,19 +1601,27 @@ impl OdenAuditChannel {
     })
   }
 
-  fn write_record(&mut self, payload: &[u8]) {
+  /// Write one row, returning false only when an authenticated handoff can no
+  /// longer produce complete evidence. Legacy audit compatibility remains
+  /// best-effort and never acquires authenticated-channel semantics.
+  fn write_record(&mut self, payload: &[u8]) -> bool {
     match self {
       Self::Legacy(file) => {
         let _ = file.write_all(payload).and_then(|_| file.write_all(b"\n"));
+        true
       }
-      Self::Authenticated(channel) => {
-        channel.write_frame("record", payload);
-      }
-      Self::Disabled | Self::Broken => {}
+      Self::Authenticated(channel) => channel.write_frame("record", payload),
+      Self::Disabled
+      | Self::Broken {
+        authenticated: false,
+      } => true,
+      Self::Broken {
+        authenticated: true,
+      } => false,
     }
   }
 
-  fn finish(&mut self) {
+  fn finish(&mut self) -> bool {
     if let Self::Authenticated(channel) = self
       && !channel.terminal
     {
@@ -1567,18 +1630,38 @@ impl OdenAuditChannel {
         channel.failed = true;
       }
     }
+    match self {
+      Self::Authenticated(channel) => channel.terminal && !channel.failed,
+      Self::Broken {
+        authenticated: true,
+      } => false,
+      Self::Disabled
+      | Self::Legacy(_)
+      | Self::Broken {
+        authenticated: false,
+      } => true,
+    }
   }
 
-  fn fail(&mut self) {
+  fn fail(&mut self) -> bool {
     if let Self::Authenticated(channel) = self {
       channel.failed = true;
+    }
+    !self.authenticated_failure()
+  }
+
+  fn authenticated_failure(&self) -> bool {
+    match self {
+      Self::Authenticated(channel) => channel.failed,
+      Self::Broken { authenticated } => *authenticated,
+      Self::Disabled | Self::Legacy(_) => false,
     }
   }
 
   fn control_root(&self) -> Option<PathBuf> {
     match self {
       Self::Authenticated(channel) => Some(channel.control_root.clone()),
-      _ => None,
+      Self::Disabled | Self::Legacy(_) | Self::Broken { .. } => None,
     }
   }
 }
@@ -1760,24 +1843,26 @@ pub fn oden_capsec_worker_guard() -> OdenCapsecWorkerGuard {
 /// worker. Missing this marker (panic, signal, kill, write failure) is itself a
 /// parent-visible tool failure, never a clean capability verdict.
 pub fn oden_capsec_finish_audit_channel() {
-  oden_capsec_finish_audit_channel_with(
+  if !oden_capsec_finish_audit_channel_with(
     oden_capsec_worker_tracker(),
     oden_capsec_audit_channel(),
     ODEN_AUDIT_WORKER_DRAIN_TIMEOUT,
-  );
+  ) {
+    oden_capsec_fatal_audit_failure();
+  }
 }
 
 fn oden_capsec_finish_audit_channel_with(
   tracker: &OdenCapsecWorkerTracker,
   channel: &Mutex<OdenAuditChannel>,
   timeout: std::time::Duration,
-) {
+) -> bool {
   if tracker.wait_until_drained(timeout) {
-    channel.lock().finish();
+    channel.lock().finish()
   } else {
     // No terminal means the parent rejects the entire run. Never certify a
     // prefix while a detached worker may still append a security decision.
-    channel.lock().fail();
+    channel.lock().fail()
   }
 }
 
@@ -8701,7 +8786,7 @@ mod tests {
       .append(true)
       .open(&path)
       .unwrap();
-    let mut audit = OdenAuthenticatedAudit {
+    let audit = OdenAuthenticatedAudit {
       file,
       key: vec![7; 32],
       sequence: 0,
@@ -8712,14 +8797,19 @@ mod tests {
       control_root: dir.clone(),
     };
     let payload = vec![b'x'; 4096];
-    while audit.write_frame("record", &payload) {}
+    let mut channel = OdenAuditChannel::Authenticated(audit);
+    while channel.write_record(&payload) {}
+    assert!(channel.authenticated_failure());
+    assert!(!channel.finish());
+    let OdenAuditChannel::Authenticated(audit) = &channel else {
+      unreachable!();
+    };
     assert!(audit.failed);
     assert!(audit.bytes_written <= ODEN_AUDIT_WRITE_CAP);
     assert!(
       std::fs::metadata(&path).unwrap().len() <= ODEN_AUDIT_WRITE_CAP as u64
     );
-    assert!(!audit.write_frame("terminal", &[]));
-    drop(audit);
+    drop(channel);
     std::fs::remove_dir_all(dir).unwrap();
   }
 
@@ -8777,6 +8867,35 @@ mod tests {
   }
 
   #[test]
+  fn authenticated_channel_failures_require_fatal_finalization() {
+    let mut broken = OdenAuditChannel::Broken {
+      authenticated: true,
+    };
+    assert!(!broken.write_record(br#"{"principal":"lost"}"#));
+    assert!(broken.authenticated_failure());
+    assert!(!broken.finish());
+
+    let mut legacy_failure = OdenAuditChannel::Broken {
+      authenticated: false,
+    };
+    assert!(legacy_failure.write_record(br#"{"principal":"legacy"}"#));
+    assert!(!legacy_failure.authenticated_failure());
+    assert!(legacy_failure.finish());
+
+    let tracker = OdenCapsecWorkerTracker::new();
+    tracker.started();
+    let channel = Mutex::new(OdenAuditChannel::Broken {
+      authenticated: true,
+    });
+    assert!(!oden_capsec_finish_audit_channel_with(
+      &tracker,
+      &channel,
+      std::time::Duration::ZERO,
+    ));
+    tracker.finished();
+  }
+
+  #[test]
   #[allow(
     clippy::disallowed_methods,
     reason = "isolated lifecycle test constructs and reads an authenticated audit file directly"
@@ -8818,11 +8937,11 @@ mod tests {
       worker_tracker.finished();
     });
 
-    oden_capsec_finish_audit_channel_with(
+    assert!(oden_capsec_finish_audit_channel_with(
       &tracker,
       &channel,
       std::time::Duration::from_secs(1),
-    );
+    ));
     thread.join().unwrap();
     let lines = std::fs::read_to_string(&path).unwrap();
     let frames = lines
