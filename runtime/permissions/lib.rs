@@ -1899,16 +1899,124 @@ fn oden_capsec_dynamic_query_audit_record(
 }
 
 // --- Resource ownership (LLP 0001 Native resource ownership, ENG-23776) ------
-// A rid is a small guessable integer; owner metadata makes guessing worthless.
-// A package that opens an owner-checked resource is recorded as its owner; a
-// different package using that rid denies under enforce (audits under audit).
-// The minimal transfer primitive re-owns a rid for a sanctioned cross-package
-// handoff, audited. Family classification lives in
-// `tools/oden/resource_families.ts`; this is the mechanism the checked families
-// call. @ref llp/0001-adding-capability-security-to-deno.plan.md
-static ODEN_RESOURCE_OWNERS: Lazy<
-  Mutex<std::collections::HashMap<u32, String>>,
-> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+// ResourceIds are table-local small integers: two workers can both own rid 3.
+// Owner metadata therefore travels with the concrete resource rather than in a
+// process-global rid map. Dropping the resource drops its metadata; lookup,
+// use, and sanctioned transfer must first resolve the resource from the current
+// OpState's table and then consult this Rust-only token.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md
+pub struct OdenResourceOwner {
+  owner: Mutex<Option<String>>,
+}
+
+impl OdenResourceOwner {
+  /// Capture the acting package for a resource about to be inserted into the
+  /// current OpState's resource table. Ambient and unarmed resources remain
+  /// unowned; a package cannot use an unowned owner-checked resource by merely
+  /// guessing its table-local rid.
+  pub fn capture() -> Self {
+    let owner = if oden_capsec_active() {
+      let principal = oden_capsec_principal();
+      (!principal.is_ambient() && !matches!(principal, OdenPrincipal::NoUser))
+        .then(|| principal.label())
+    } else {
+      None
+    };
+    Self {
+      owner: Mutex::new(owner),
+    }
+  }
+
+  /// Audit an owner stamp after the resource table has assigned its local rid.
+  pub fn record_open(&self, rid: u32, family: &str) {
+    if !oden_capsec_active() {
+      return;
+    }
+    let Some(label) = self.owner.lock().clone() else {
+      return;
+    };
+    oden_capsec_audit_record(
+      &label,
+      family,
+      "own",
+      &rid.to_string(),
+      "allow(owner)",
+      None,
+    );
+  }
+
+  /// Check use of the concrete resource that owns this token. The caller must
+  /// obtain the token from the current OpState's resource-table object, never
+  /// by looking up the numeric rid in process-global state.
+  pub fn check(
+    &self,
+    rid: u32,
+    family: &str,
+  ) -> Result<(), PermissionCheckError> {
+    if !oden_capsec_active() {
+      return Ok(());
+    }
+    let principal = oden_capsec_principal();
+    if principal.is_ambient() {
+      return Ok(());
+    }
+    let label = principal.label();
+    let owner = self.owner.lock().clone();
+    let owner_label = owner.as_deref().unwrap_or("(untracked)");
+    let mode = oden_capsec_mode(oden_capsec_policy_file());
+    let decision = oden_resource_use_decision(&label, owner.as_deref(), mode);
+    if matches!(decision, OdenDecision::Allow)
+      && owner.as_deref() == Some(label.as_str())
+    {
+      return Ok(());
+    }
+    let verdict = match decision {
+      OdenDecision::Deny => "DENY(cross-principal rid)",
+      _ => "audit(record)",
+    };
+    if !matches!(decision, OdenDecision::Allow) {
+      oden_capsec_audit_record(
+        &label,
+        family,
+        "use",
+        &rid.to_string(),
+        verdict,
+        None,
+      );
+    }
+    if matches!(decision, OdenDecision::Deny) {
+      return Err(oden_resource_owner_error(&label, owner_label, rid, family));
+    }
+    Ok(())
+  }
+
+  fn transfer_for(
+    &self,
+    caller: &str,
+    to_selector: &str,
+    mode: OdenMode,
+  ) -> (OdenDecision, Option<String>) {
+    let mut owner = self.owner.lock();
+    let decision = oden_resource_use_decision(caller, owner.as_deref(), mode);
+    let from = owner.clone();
+    if !matches!(decision, OdenDecision::Deny) {
+      *owner = Some(to_selector.to_string());
+    }
+    (decision, from)
+  }
+
+  #[cfg(test)]
+  fn for_test(owner: Option<&str>) -> Self {
+    Self {
+      owner: Mutex::new(owner.map(str::to_string)),
+    }
+  }
+
+  #[cfg(test)]
+  fn owner_for_test(&self) -> Option<String> {
+    self.owner.lock().clone()
+  }
+}
 
 // Pure decision core, unit-testable without the op-dispatch stack: given the
 // acting principal's label, the rid's recorded owner (if any), and the mode,
@@ -1934,109 +2042,62 @@ fn oden_resource_use_decision(
   }
 }
 
-/// Stamp the acting package as the owner of a freshly-opened owner-checked
-/// resource. Ambient (root/runtime) resources are not owner-scoped. Inert unless
-/// capsec is armed.
-pub fn oden_capsec_own_resource(rid: u32, family: &str) {
-  if !oden_capsec_active() {
-    return;
-  }
-  let principal = oden_capsec_principal();
-  if principal.is_ambient() || matches!(principal, OdenPrincipal::NoUser) {
-    return;
-  }
-  let label = principal.label();
-  ODEN_RESOURCE_OWNERS.lock().insert(rid, label.clone());
-  oden_capsec_audit_record(
-    &label,
-    family,
-    "own",
-    &rid.to_string(),
-    "allow(owner)",
-    None,
-  );
-}
-
-/// Check that the acting principal may use `rid`. A cross-principal use of a
-/// guessed/handed rid denies under enforce (audits otherwise). Root/runtime may
-/// use any resource. Inert unless capsec is armed.
-pub fn oden_capsec_check_resource_owner(
+fn oden_resource_owner_error(
+  label: &str,
+  owner_label: &str,
   rid: u32,
   family: &str,
+) -> PermissionCheckError {
+  PermissionCheckError::PermissionDenied(PermissionDeniedError {
+    access: format!("use of {family} resource {rid}"),
+    name: "capsec",
+    custom_message: Some(format!(
+      "oden capsec: principal \"{label}\" may not use {family} resource {rid} \
+       owned by \"{owner_label}\" (cross-principal rid)"
+    )),
+    state: PermissionState::Denied,
+  })
+}
+
+/// The minimal transfer primitive: re-own the concrete resource token to
+/// `to_selector` for a sanctioned cross-package handoff. Callers must retrieve
+/// `owner` from the current resource-table object before invoking this helper.
+/// A package may transfer only what it owns; ambient root/runtime may transfer
+/// an unowned resource deliberately. After transfer the prior owner may not use
+/// the resource.
+pub fn oden_capsec_transfer_resource(
+  owner: &OdenResourceOwner,
+  rid: u32,
+  family: &str,
+  to_selector: &str,
 ) -> Result<(), PermissionCheckError> {
   if !oden_capsec_active() {
     return Ok(());
   }
   let principal = oden_capsec_principal();
-  if principal.is_ambient() {
-    return Ok(());
-  }
-  let label = principal.label();
-  let owner = ODEN_RESOURCE_OWNERS.lock().get(&rid).cloned();
+  let caller = principal.label();
   let mode = oden_capsec_mode(oden_capsec_policy_file());
-  let decision = oden_resource_use_decision(&label, owner.as_deref(), mode);
-  if matches!(decision, OdenDecision::Allow)
-    && owner.as_deref() == Some(label.as_str())
-  {
-    return Ok(()); // caller owns it; no audit noise
-  }
-  let owner_label = owner.as_deref().unwrap_or("(untracked)");
-  let verdict = match decision {
-    OdenDecision::Deny => "DENY(cross-principal rid)",
-    _ => "audit(record)",
+  let (decision, from) = if principal.is_ambient() {
+    let mut current = owner.owner.lock();
+    let from = current.clone();
+    *current = Some(to_selector.to_string());
+    (OdenDecision::Allow, from)
+  } else {
+    owner.transfer_for(&caller, to_selector, mode)
   };
-  if !matches!(decision, OdenDecision::Allow) {
-    eprintln!(
-      "[oden-capsec] {family}:use rid={rid} caller={label} owner={owner_label} -> {verdict}"
-    );
-    oden_capsec_audit_record(
-      &label,
-      family,
-      "use",
-      &rid.to_string(),
-      verdict,
-      None,
-    );
-  }
+  let from_label = from.as_deref().unwrap_or("(untracked)");
   if matches!(decision, OdenDecision::Deny) {
-    return Err(PermissionCheckError::PermissionDenied(
-      PermissionDeniedError {
-        access: format!("use of {family} resource {rid}"),
-        name: "capsec",
-        custom_message: Some(format!(
-          "oden capsec: principal \"{label}\" may not use {family} resource {rid} \
-           owned by \"{owner_label}\" (cross-principal rid)"
-        )),
-        state: PermissionState::Denied,
-      },
-    ));
+    return Err(oden_resource_owner_error(&caller, from_label, rid, family));
   }
-  Ok(())
-}
-
-/// The minimal transfer primitive: re-own `rid` to `to_selector` for a
-/// sanctioned cross-package handoff, audited. After the transfer the recipient
-/// may use the rid and the prior owner may not.
-pub fn oden_capsec_transfer_resource(rid: u32, to_selector: &str) {
-  if !oden_capsec_active() {
-    return;
-  }
-  let from = ODEN_RESOURCE_OWNERS
-    .lock()
-    .get(&rid)
-    .cloned()
-    .unwrap_or_else(|| "(untracked)".to_string());
-  ODEN_RESOURCE_OWNERS
-    .lock()
-    .insert(rid, to_selector.to_string());
   oden_capsec_audit_record(
     to_selector,
-    "resource",
+    family,
     "transfer",
     &rid.to_string(),
-    &format!("allow(transfer from {from})"),
+    &format!("allow(transfer from {from_label})"),
     None,
   );
+  Ok(())
 }
 
 // --- Authority-flow handles / attenuators (LLP 0001 §Delegation and handles,
@@ -8989,30 +9050,65 @@ mod tests {
   }
 
   #[test]
-  fn transfer_primitive_re_owns_the_rid() {
-    // The transfer primitive re-owns a rid for a sanctioned handoff: after it,
-    // the recipient owns the rid (owner decision flips) and the prior owner does
-    // not. Exercised against the registry directly (the op-facing wrappers add
-    // the armed/principal/audit layer).
-    let rid = 4242u32;
-    ODEN_RESOURCE_OWNERS.lock().insert(rid, "dep-a".to_string());
-    let owner = ODEN_RESOURCE_OWNERS.lock().get(&rid).cloned();
+  fn resource_owner_tokens_do_not_alias_worker_local_rids() {
+    // Two workers may both allocate rid 3. The concrete resource tokens retain
+    // independent owners, so opening in worker B cannot overwrite worker A.
+    let worker_a = OdenResourceOwner::for_test(Some("dep-a"));
+    let worker_b = OdenResourceOwner::for_test(Some("dep-b"));
     assert_eq!(
-      oden_resource_use_decision("dep-b", owner.as_deref(), OdenMode::Enforce),
-      OdenDecision::Deny
-    );
-    // Transfer to dep-b.
-    ODEN_RESOURCE_OWNERS.lock().insert(rid, "dep-b".to_string());
-    let owner = ODEN_RESOURCE_OWNERS.lock().get(&rid).cloned();
-    assert_eq!(
-      oden_resource_use_decision("dep-b", owner.as_deref(), OdenMode::Enforce),
+      oden_resource_use_decision(
+        "dep-a",
+        worker_a.owner_for_test().as_deref(),
+        OdenMode::Enforce
+      ),
       OdenDecision::Allow
     );
     assert_eq!(
-      oden_resource_use_decision("dep-a", owner.as_deref(), OdenMode::Enforce),
+      oden_resource_use_decision(
+        "dep-b",
+        worker_b.owner_for_test().as_deref(),
+        OdenMode::Enforce
+      ),
+      OdenDecision::Allow
+    );
+    assert_eq!(
+      oden_resource_use_decision(
+        "dep-b",
+        worker_a.owner_for_test().as_deref(),
+        OdenMode::Enforce
+      ),
       OdenDecision::Deny
     );
-    ODEN_RESOURCE_OWNERS.lock().remove(&rid);
+
+    // Dropping one resource also drops its owner metadata; no stale rid key can
+    // survive and affect the other worker's same-numbered resource.
+    drop(worker_a);
+    assert_eq!(worker_b.owner_for_test().as_deref(), Some("dep-b"));
+  }
+
+  #[test]
+  fn transfer_primitive_reowns_only_the_concrete_owner_token() {
+    let owner = OdenResourceOwner::for_test(Some("dep-a"));
+    let unrelated_same_rid = OdenResourceOwner::for_test(Some("dep-c"));
+
+    // A non-owner cannot steal the resource through the sanctioned transfer.
+    assert_eq!(
+      owner.transfer_for("dep-b", "dep-b", OdenMode::Enforce).0,
+      OdenDecision::Deny
+    );
+    assert_eq!(owner.owner_for_test().as_deref(), Some("dep-a"));
+
+    // Its owner can transfer it. Only this concrete token changes; another
+    // worker's same-numbered resource is unaffected.
+    assert_eq!(
+      owner.transfer_for("dep-a", "dep-b", OdenMode::Enforce).0,
+      OdenDecision::Allow
+    );
+    assert_eq!(owner.owner_for_test().as_deref(), Some("dep-b"));
+    assert_eq!(
+      unrelated_same_rid.owner_for_test().as_deref(),
+      Some("dep-c")
+    );
   }
   use crate::prompter::set_prompter;
 
