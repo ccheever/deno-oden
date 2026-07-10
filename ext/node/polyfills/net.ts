@@ -171,12 +171,29 @@ const {
   ObjectSetPrototypeOf,
   Promise,
   PromiseWithResolvers,
+  ReflectDeleteProperty,
   ReflectHas,
   SafeArrayIterator,
+  SafeWeakMap,
   StringPrototypeCharCodeAt,
   Symbol,
   SymbolAsyncDispose,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet,
 } = primordials;
+
+// Opaque HTTP-operation tokens never live on the public Socket. The built-in
+// HTTP/HTTPS agents put one on a fresh internal options object; connect moves
+// it immediately into this sealed WeakMap and installs it on each native
+// handle, including Happy-Eyeballs retries.
+const odenHttpNetTokens = new SafeWeakMap();
+
+function installOdenHttpNetToken(socket, handle) {
+  const token = WeakMapPrototypeGet(odenHttpNetTokens, socket);
+  if (token && handle?.setOdenHttpNetToken) {
+    handle.setOdenHttpNetToken(token);
+  }
+}
 
 let debug = debuglog("net", (fn) => {
   debug = fn;
@@ -1624,6 +1641,15 @@ Socket.prototype.connect = function (...args) {
   const options = normalized[0];
   const cb = normalized[1];
 
+  if (ObjectHasOwn(options, "__odenHttpNetToken")) {
+    WeakMapPrototypeSet(
+      odenHttpNetTokens,
+      this,
+      options.__odenHttpNetToken,
+    );
+    ReflectDeleteProperty(options, "__odenHttpNetToken");
+  }
+
   if (options.port === undefined && options.path == null) {
     throw new ERR_MISSING_ARGS(["options", "port", "path"]);
   }
@@ -1655,6 +1681,8 @@ Socket.prototype.connect = function (...args) {
 
     _initSocketHandle(this);
   }
+
+  installOdenHttpNetToken(this, this._handle);
 
   // Capture the async context now, while we are still running synchronously
   // inside the caller's context. The DNS lookup that precedes the actual
@@ -2260,6 +2288,8 @@ Socket.prototype[kReinitializeHandle] = function (handle) {
 
   this._handle = handle;
   this._handle[ownerSymbol] = this;
+
+  installOdenHttpNetToken(this, this._handle);
 
   _initSocketHandle(this);
 };

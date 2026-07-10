@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 
 use bytes::Bytes;
+use deno_permissions::NetPermissionAction;
 use deno_permissions::Permissions;
 use deno_permissions::PermissionsContainer;
 use deno_permissions::PermissionsOptions;
@@ -168,6 +169,7 @@ async fn run_test_client_with_resolver(
       pool_idle_timeout: None,
       dns_resolver: resolver,
       permissions: None,
+      net_action: NetPermissionAction::Fetch,
       http1: true,
       http2: true,
       local_address: None,
@@ -262,6 +264,7 @@ async fn test_http_proxy_denies_destination_resolving_to_denied_ip() {
       pool_idle_timeout: None,
       dns_resolver: resolver,
       permissions: Some(deny_net_permissions(&[denied_ip])),
+      net_action: NetPermissionAction::Fetch,
       http1: true,
       http2: true,
       local_address: None,
@@ -601,6 +604,7 @@ fn create_http_test_client() -> crate::Client {
       local_address: None,
       client_builder_hook: None,
       permissions: None,
+      net_action: NetPermissionAction::Fetch,
     },
   )
   .unwrap()

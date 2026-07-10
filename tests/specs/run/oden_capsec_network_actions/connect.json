@@ -1,0 +1,6 @@
+{
+  "mode": "enforce",
+  "grants": {
+    "network-probe": "network:connect:*,fs:read:./,fs:write:./"
+  }
+}
