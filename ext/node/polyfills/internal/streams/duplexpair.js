@@ -13,6 +13,7 @@ const { addReadableListener, pushReadableChunk } = core.loadExtScript(
 const {
   captureDeliveryCallback,
   linkStreamUseGuard,
+  markStreamCleanupDeliveryCallback,
   markStreamTrustedDeliveryCallback,
   preflightStreamDelivery,
   registerStreamDeliveryPreflight,
@@ -54,6 +55,7 @@ class DuplexSide extends Duplex {
     this.#otherSide = null;
     markStreamTrustedDeliveryCallback(this, DuplexSide.prototype._write);
     markStreamTrustedDeliveryCallback(this, DuplexSide.prototype._final);
+    markStreamCleanupDeliveryCallback(this, DuplexSide.prototype._final);
     registerStreamDeliveryPreflight(this, () => {
       if (this.#otherSide !== null) {
         preflightStreamDelivery(this.#otherSide);
@@ -101,7 +103,6 @@ class DuplexSide extends Duplex {
   }
 
   _final(callback) {
-    runStreamUseGuard(this);
     addReadableListener(this.#otherSide, "end", callback);
     pushReadableChunk(this.#otherSide, null);
   }

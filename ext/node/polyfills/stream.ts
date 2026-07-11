@@ -71,6 +71,7 @@ import Transform from "node:_stream_transform";
 import PassThrough from "node:_stream_passthrough";
 import duplexPair from "ext:deno_node/internal/streams/duplexpair.js";
 const {
+  createAdmittedReadableAsyncIterator,
   getReadableUseGuard,
   setReadableUseGuard,
 } = core.loadExtScript("ext:deno_node/internal/streams/readable.js");
@@ -123,6 +124,10 @@ for (let i = 0; i < promiseKeys.length; i++) {
   function fn(...args) {
     if (new.target) {
       throw new ERR_ILLEGAL_CONSTRUCTOR();
+    }
+    if (key === "toArray" && getReadableUseGuard(this) !== undefined) {
+      const iterator = createAdmittedReadableAsyncIterator(this);
+      return ReflectApply(op, this, [args[0], iterator]);
     }
     return ReflectApply(op, this, args);
   }

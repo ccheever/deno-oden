@@ -60,6 +60,7 @@ const {
   PromiseReject,
   PromiseResolve,
   Symbol,
+  SymbolAsyncIterator,
 } = primordials;
 
 const kEmpty = Symbol("kEmpty");
@@ -422,7 +423,7 @@ async function reduce(reducer, initialValue, options) {
   return initialValue;
 }
 
-async function toArray(options) {
+async function toArray(options, operationIterator = undefined) {
   if (options != null) {
     validateObject(options, "options");
   }
@@ -431,7 +432,12 @@ async function toArray(options) {
   }
 
   const result = [];
-  for await (const val of this) {
+  const source = operationIterator === undefined ? this : {
+    [SymbolAsyncIterator]() {
+      return operationIterator;
+    },
+  };
+  for await (const val of source) {
     if (options?.signal?.aborted) {
       throw new AbortError(undefined, { cause: options.signal.reason });
     }

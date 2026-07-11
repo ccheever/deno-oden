@@ -81,6 +81,7 @@ const {
   captureCurrentDeliveryCallback,
   captureDeliveryCallback,
   captureTrustedDeliveryCallback,
+  createStreamUseAdmission,
   getStreamUseGuard,
   linkStreamUseGuard,
   markTrustedDeliveryCallback,
@@ -93,6 +94,7 @@ const {
   runCapturedCallback,
   runCapturedDelivery,
   runStreamUseGuard,
+  runWithStreamUseAdmission,
   setStreamUseGuard,
   wrapIterableDelivery,
 } = core.loadExtScript(
@@ -310,6 +312,10 @@ const readableHighWaterMarkValues = new SafeWeakMap();
 // construction-time state and captured implementation. The override is
 // closure-private and exists only for that exact terminal transition.
 const protectedReadableOperationStates = new SafeWeakMap();
+// Promise-returning operators use a separately scoped, caller-authorized
+// admission. Keeping the two override classes distinct prevents cleanup from
+// inheriting an application read admission (or vice versa).
+const admittedReadableOperationStates = new SafeWeakMap();
 
 function registerReadableState(stream, state) {
   const registered = WeakMapPrototypeGet(originalReadableStates, stream);
@@ -468,6 +474,19 @@ function addReadableListener(stream, type, listener) {
 
 function createReadableAsyncIterator(stream) {
   return FunctionPrototypeCall(ReadablePublicAsyncIterator, stream);
+}
+
+// Promise-returning stream operators begin under the public caller but resume
+// their internal async iterator from loader-only frames. Authorize that
+// closure-private iterator while the caller is live; never attach this
+// admission to an iterator returned to user code.
+function createAdmittedReadableAsyncIterator(stream, options) {
+  const admission = createStreamUseAdmission(stream);
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  if (state === undefined) {
+    throw new Error("admitted Readable is missing registered state");
+  }
+  return streamToAsyncIterator(stream, options, { admission, state });
 }
 
 function getReadableUseGuard(source) {
@@ -1324,14 +1343,27 @@ Readable.prototype.read = function (n) {
     protectedReadableOperationStates,
     this,
   );
+  const admittedState = WeakMapPrototypeGet(
+    admittedReadableOperationStates,
+    this,
+  );
+  if (protectedState !== undefined && admittedState !== undefined) {
+    throw new Error("conflicting protected Readable operation admissions");
+  }
   // Consume the single exact-call admission before any user callback can run.
   // A reentrant public read must perform its own live authorization.
   if (protectedState !== undefined) {
     WeakMapPrototypeDelete(protectedReadableOperationStates, this);
   }
+  if (admittedState !== undefined) {
+    WeakMapPrototypeDelete(admittedReadableOperationStates, this);
+  }
   // Closure-owned native EOF cleanup is always allowed. Positive delivery was
-  // already authorized before the protected operation state is installed.
-  if (protectedState === undefined) runReadableUseGuard(this);
+  // already authorized before its operation state is installed. Operator
+  // reads are covered by their still-active, constituent-bound admission.
+  if (protectedState === undefined && admittedState === undefined) {
+    runReadableUseGuard(this);
+  }
   debug("read", n);
   // Same as parseInt(undefined, 10), however V8 7.3 performance regressed
   // in this scenario, so we are doing it manually.
@@ -1340,7 +1372,7 @@ Readable.prototype.read = function (n) {
   } else if (!NumberIsInteger(n)) {
     n = NumberParseInt(n, 10);
   }
-  const state = protectedState ?? readableStateForStream(this);
+  const state = protectedState ?? admittedState ?? readableStateForStream(this);
   const nOrig = n;
 
   // If we're asking for more than the current hwm, then raise the hwm.
@@ -1562,6 +1594,33 @@ function readProtectedReadableZero(stream) {
   }
 }
 
+function readAdmittedReadableChunk(
+  stream,
+  state,
+  admission,
+  size = undefined,
+) {
+  const registeredState = WeakMapPrototypeGet(originalReadableStates, stream);
+  if (registeredState === undefined || registeredState !== state) {
+    throw new Error("admitted Readable state identity changed");
+  }
+  if (
+    WeakMapPrototypeGet(admittedReadableOperationStates, stream) !== undefined
+  ) {
+    throw new Error("nested admitted Readable operation");
+  }
+  WeakMapPrototypeSet(admittedReadableOperationStates, stream, state);
+  try {
+    return runWithStreamUseAdmission(
+      stream,
+      admission,
+      () => FunctionPrototypeCall(ReadablePrototypeRead, stream, size),
+    );
+  } finally {
+    WeakMapPrototypeDelete(admittedReadableOperationStates, stream);
+  }
+}
+
 function onEofChunk(stream, state) {
   debug("onEofChunk");
   if ((state[kState] & kEnded) !== 0) return;
@@ -1719,6 +1778,7 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
   const state = readableStateForStream(this);
   const destWrite = dest.write;
   const {
+    endProtectedWritableCleanup,
     isRegisteredWritable,
     isWritablePublicEnd,
     isWritablePublicWrite,
@@ -1781,15 +1841,11 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
     dest !== process.stdout &&
     dest !== process.stderr;
   const destEnd = doEnd ? dest.end : undefined;
-  if (
-    doEnd && isWritablePublicEnd(destEnd) && !isRegisteredWritable(dest)
-  ) {
+  if (doEnd && isWritablePublicEnd(destEnd) && !isRegisteredWritable(dest)) {
     throw new ERR_INVALID_ARG_TYPE("dest", "Writable", dest);
   }
-  const capturedDestEnd = !doEnd
+  const capturedDestEnd = !doEnd || isWritablePublicEnd(destEnd)
     ? undefined
-    : isWritablePublicEnd(destEnd)
-    ? captureTrustedDeliveryCallback(destEnd)
     : captureDeliveryCallback(destEnd);
 
   const endFn = doEnd ? onend : unpipe;
@@ -1812,7 +1868,8 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
 
   function onend() {
     debug("onend");
-    runCapturedDelivery(dest, capturedDestEnd, dest, []);
+    if (capturedDestEnd === undefined) endProtectedWritableCleanup(dest);
+    else runCapturedDelivery(dest, capturedDestEnd, dest, []);
   }
 
   let ondrain;
@@ -2323,18 +2380,18 @@ Readable.prototype.iterator = function (options) {
   return streamToAsyncIterator(this, options);
 };
 
-function streamToAsyncIterator(stream, options) {
+function streamToAsyncIterator(stream, options, admittedOperation) {
   if (typeof stream.read !== "function") {
     stream = Readable.wrap(stream, { objectMode: true });
   }
 
-  const iter = createAsyncIterator(stream, options);
+  const iter = createAsyncIterator(stream, options, admittedOperation);
   iter.stream = stream;
   linkStreamUseGuard(stream, iter);
   return iter;
 }
 
-async function* createAsyncIterator(stream, options) {
+async function* createAsyncIterator(stream, options, admittedOperation) {
   let callback = nop;
 
   function next(resolve) {
@@ -2357,7 +2414,15 @@ async function* createAsyncIterator(stream, options) {
 
   try {
     while (true) {
-      const chunk = stream.destroyed ? null : stream.read();
+      const chunk = stream.destroyed
+        ? null
+        : admittedOperation === undefined
+        ? stream.read()
+        : readAdmittedReadableChunk(
+          stream,
+          admittedOperation.state,
+          admittedOperation.admission,
+        );
       if (chunk !== null) {
         yield chunk;
       } else if (error) {
@@ -2810,6 +2875,7 @@ Readable.wrap = function (src, options) {
 
 return {
   addReadableListener,
+  createAdmittedReadableAsyncIterator,
   createReadableAsyncIterator,
   default: Readable,
   destroyReadableStream,

@@ -309,13 +309,25 @@ function protectedWritableEnd(stream, chunk, encoding, callback) {
   );
 }
 
-// Terminal half-close carries no new application bytes and remains available
-// after revocation. Consume the bypass at exact method entry so reentrant
-// package calls cannot inherit it.
+// An EOF half-close carries no application bytes. Keep its bypass private and
+// consume it at exact end() entry so reentrant package calls cannot inherit it.
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
 function endProtectedWritableCleanup(stream) {
   if (!isRegisteredWritable(stream)) {
     throw new Error("protected Writable is missing registered state");
+  }
+  if (getStreamUseGuard(stream) !== undefined) {
+    const state = writableStateForStream(stream);
+    const guarded = getGuardedWritableState(state);
+    // Cleanup must never flush a queued write or invoke an application final
+    // hook. An authorized operation may still call public end() normally.
+    if (
+      state.length !== 0 ||
+      guarded !== undefined && guarded.final !== null &&
+        !guarded.finalCleanupSafe
+    ) {
+      return false;
+    }
   }
   WeakMapPrototypeSet(protectedWritableCleanupEnds, stream, true);
   try {
@@ -1196,8 +1208,10 @@ function writeOrBuffer(
       state.writecb = callback;
     }
     state[kState] |= kWriting | kSync | kExpectWriteCb;
-    invokeWritableAdmission(
-      admission,
+    // The immediate path is still on the admitting call stack. Preserve that
+    // live actor instead of replacing it with a detached-continuation stamp;
+    // buffered paths below restore their stored admission explicitly.
+    invokeWritableImplementation(
       stream,
       state,
       false,
