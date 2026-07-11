@@ -219,6 +219,11 @@ function isWritableActive(stream) {
     (state[kState] & (kEnding | kEnded | kDestroyed | kErrored)) === 0;
 }
 
+function isWritableEnabled(stream) {
+  const state = WeakMapPrototypeGet(originalWritableStates, stream);
+  return state !== undefined && writableStateEnabled(state);
+}
+
 function isWritableEnded(stream) {
   const state = WeakMapPrototypeGet(originalWritableStates, stream);
   return state === undefined || (state[kState] & kEnding) !== 0;
@@ -1926,6 +1931,7 @@ return {
   isRegisteredWritable,
   isWritableActive,
   isWritableDestroyed,
+  isWritableEnabled,
   isWritableEnded,
   isWritablePublicEnd,
   isWritablePublicUncork,

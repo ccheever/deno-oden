@@ -353,6 +353,11 @@ function isReadableActive(stream) {
       0;
 }
 
+function isReadableEnabled(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  return state !== undefined && readableStateEnabled(state);
+}
+
 function readableObjectMode(stream) {
   const state = WeakMapPrototypeGet(originalReadableStates, stream);
   return state !== undefined && (state[kState] & kObjectMode) !== 0;
@@ -2885,6 +2890,7 @@ return {
   isRegisteredReadable,
   isReadableActive,
   isReadableDestroyed,
+  isReadableEnabled,
   isProtectedReadableDestroyed,
   isProtectedReadableEndEmitted,
   isReadablePublicLifecycleMethod,
