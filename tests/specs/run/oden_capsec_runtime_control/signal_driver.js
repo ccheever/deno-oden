@@ -23,7 +23,9 @@ async function probe(policy, programmatic = false) {
     if (chunk.done) break;
     stdout += decoder.decode(chunk.value, { stream: true });
   }
-  if (!stdout.includes("READY\n")) throw new Error("child exited before readiness");
+  if (!stdout.includes("READY\n")) {
+    throw new Error("child exited before readiness");
+  }
   if (!programmatic) Deno.kill(child.pid, "SIGUSR1");
   while (true) {
     const chunk = await reader.read();

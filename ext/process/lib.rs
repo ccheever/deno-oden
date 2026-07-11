@@ -307,6 +307,8 @@ pub struct SpawnArgs {
   cwd: Option<String>,
   clear_env: bool,
   env: Vec<(String, String)>,
+  #[serde(default)]
+  env_remove: Vec<String>,
   #[cfg(unix)]
   gid: Option<u32>,
   #[cfg(unix)]
@@ -621,6 +623,7 @@ fn create_command(
     &args.cmd,
     args.cwd.as_deref(),
     &args.env,
+    &args.env_remove,
     args.clear_env,
     state,
     api_name,
@@ -1189,17 +1192,23 @@ fn compute_run_cmd_and_check_permissions(
   arg_cmd: &str,
   arg_cwd: Option<&str>,
   arg_envs: &[(String, String)],
+  arg_env_remove: &[String],
   arg_clear_env: bool,
   state: &mut OpState,
   api_name: &str,
   allow_cwd_inherit: bool,
 ) -> Result<(PathBuf, RunEnv), ProcessError> {
-  let run_env =
-    compute_run_env(arg_cwd, arg_envs, arg_clear_env, allow_cwd_inherit)
-      .map_err(|e| ProcessError::SpawnFailed {
-        command: arg_cmd.to_string(),
-        error: Box::new(e),
-      })?;
+  let run_env = compute_run_env(
+    arg_cwd,
+    arg_envs,
+    arg_env_remove,
+    arg_clear_env,
+    allow_cwd_inherit,
+  )
+  .map_err(|e| ProcessError::SpawnFailed {
+    command: arg_cmd.to_string(),
+    error: Box::new(e),
+  })?;
   let cmd =
     resolve_cmd(arg_cmd, &run_env).map_err(|e| ProcessError::SpawnFailed {
       command: arg_cmd.to_string(),
@@ -1295,6 +1304,7 @@ struct RunEnv {
 fn compute_run_env(
   arg_cwd: Option<&str>,
   arg_envs: &[(String, String)],
+  arg_env_remove: &[String],
   arg_clear_env: bool,
   allow_cwd_inherit: bool,
 ) -> Result<RunEnv, ProcessError> {
@@ -1322,17 +1332,32 @@ fn compute_run_env(
       Err(e) => return Err(ProcessError::FailedResolvingCwd(e)),
     },
   };
+  // @ref LLP 0015#audit-records [implements]
+  // Child inheritance is native plumbing rather than package-visible
+  // enumeration, but it must never forward Oden's reserved control plane.
+  let capsec_armed = deno_permissions::oden_capsec_armed();
+  let is_control_name = |key: &str| {
+    capsec_armed && deno_permissions::oden_capsec_is_control_env_name(key)
+  };
   let envs = if arg_clear_env {
     arg_envs
       .iter()
+      .filter(|(key, _)| !is_control_name(key))
       .map(|(k, v)| (EnvVarKey::from_str(k), OsString::from(v)))
       .collect()
   } else {
     let mut envs = std::env::vars_os()
+      .filter(|(key, _)| key.to_str().is_none_or(|key| !is_control_name(key)))
       .map(|(k, v)| (EnvVarKey::new(k), v))
       .collect::<HashMap<_, _>>();
     for (key, value) in arg_envs {
+      if is_control_name(key) {
+        continue;
+      }
       envs.insert(EnvVarKey::from_str(key), OsString::from(value));
+    }
+    for key in arg_env_remove {
+      envs.remove(&EnvVarKey::from_str(key));
     }
     envs
   };
@@ -1989,6 +2014,7 @@ mod deprecated {
       cmd,
       run_args.cwd.as_deref(),
       &run_args.env,
+      &[],
       /* clear env */ false,
       state,
       "Deno.run()",

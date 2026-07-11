@@ -689,9 +689,7 @@ pub async fn op_fetch_send(
               .map(|port| std::net::SocketAddr::new(ip, port))
           })
         })
-        .and_then(
-          deno_permissions::oden_capsec_protected_inspector_stream_tag,
-        )
+        .and_then(deno_permissions::oden_capsec_protected_inspector_stream_tag)
     });
   let url = request.url.into();
   let mut res_headers = Vec::new();

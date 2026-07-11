@@ -285,7 +285,7 @@ function onSigwinch() {
 }
 
 function guardSigwinch(action) {
-  // @ref LLP 0019#system-and-process-mutation [implements]
+  // @ref LLP 0019#system-information-and-process-mutation [implements]
   op_oden_guard_deny_only_surface(
     "process",
     "signal",

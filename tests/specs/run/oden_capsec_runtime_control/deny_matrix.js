@@ -17,7 +17,10 @@ let processSignalCount = 0;
 const rootProcessSignalListener = () => processSignalCount++;
 const rootResizeListener = () => {};
 Deno.addSignalListener("SIGUSR2", existingRootListener);
-const rootChild = spawn(Deno.execPath(), ["eval", "setTimeout(() => {}, 10_000)"]);
+const rootChild = spawn(Deno.execPath(), [
+  "eval",
+  "setTimeout(() => {}, 10_000)",
+]);
 process.on("uncaughtException", rootExceptionListener);
 process.on("SIGUSR2", rootProcessSignalListener);
 
@@ -48,6 +51,8 @@ try {
   rootTracing.enable();
   const rootGcProfiler = new v8.GCProfiler();
   rootGcProfiler.start();
+  const rootGcProfilerDispose = new v8.GCProfiler();
+  rootGcProfilerDispose.start();
   const rootFatalException = process._fatalException;
   const rootStdoutIsTTY = process.stdout.isTTY === true;
   if (rootStdoutIsTTY) process.stdout.on("resize", rootResizeListener);
@@ -66,6 +71,7 @@ try {
     rootBindingDescriptorValue,
     rootTracing,
     rootGcProfiler,
+    rootGcProfilerDispose,
     rootFatalException,
     rootExceptionListener,
     rootProcessSignalListener,
@@ -89,17 +95,15 @@ try {
       asyncHookInitCount > initCountBeforeCheck
     ? "DENIED"
     : "LEAKED";
-  const bindingIntact =
-    result.bindingPassedRead === "DENIED" &&
+  const bindingIntact = result.bindingPassedRead === "DENIED" &&
     result.bindingPassedNestedRead === "DENIED" &&
-      result.bindingPassedNestedWrite === "DENIED" &&
-      result.bindingDescriptorPassedRead === "DENIED" &&
-      result.bindingDescriptorPassedWrite === "DENIED" &&
-      rootBindingFields[0] === bindingFieldBefore;
+    result.bindingPassedNestedWrite === "DENIED" &&
+    result.bindingDescriptorPassedRead === "DENIED" &&
+    result.bindingDescriptorPassedWrite === "DENIED" &&
+    rootBindingFields[0] === bindingFieldBefore;
   rootHook.disable();
   rootChannel.publish({ root: true });
-  result.diagnosticsUnchanged =
-      result.diagnosticsPublishLaunder === "DENIED" &&
+  result.diagnosticsUnchanged = result.diagnosticsPublishLaunder === "DENIED" &&
       result.diagnosticsRunStoresLaunder === "DENIED" &&
       result.diagnosticsBackingRead === "ALLOWED" &&
       result.diagnosticsBackingWrite === "ALLOWED" &&
@@ -108,25 +112,27 @@ try {
     ? "DENIED"
     : "LEAKED";
   result.internalDiagnosticsPublish =
-      result.internalDiagnosticsPublish === "ALLOWED" && internalPublishes > 0
-    ? "ALLOWED"
-    : "BROKEN";
+    result.internalDiagnosticsPublish === "ALLOWED" && internalPublishes > 0
+      ? "ALLOWED"
+      : "BROKEN";
   result.bindingUnchanged = bindingIntact ? "DENIED" : "LEAKED";
-  result.traceDisableLaunder =
-      result.traceDisableLaunder === "DENIED" &&
+  result.traceDisableLaunder = result.traceDisableLaunder === "DENIED" &&
       result.traceReflectMutation === "ALLOWED" &&
       Reflect.ownKeys(rootTracing).length === 0 && rootTracing.enabled
     ? "DENIED"
     : "LEAKED";
   rootTracing.disable();
-  result.gcProfilerUnchanged =
-      result.gcProfilerReflectMutation === "ALLOWED" &&
-      Reflect.ownKeys(rootGcProfiler).length === 0
+  const rootGcStopReport = rootGcProfiler.stop();
+  const rootGcDisposeReport = rootGcProfilerDispose.stop();
+  result.gcProfilerUnchanged = result.gcProfilerReflectMutation === "ALLOWED" &&
+      result.gcProfilerStopLaunder === "DENIED" &&
+      result.gcProfilerDisposeLaunder === "DENIED" &&
+      Reflect.ownKeys(rootGcProfiler).length === 0 &&
+      Reflect.ownKeys(rootGcProfilerDispose).length === 0 &&
+      rootGcStopReport !== undefined && rootGcDisposeReport !== undefined
     ? "DENIED"
     : "LEAKED";
-  rootGcProfiler.stop();
-  result.inspectorConsoleSealed =
-      result.inspectorConsoleGet === "DENIED" &&
+  result.inspectorConsoleSealed = result.inspectorConsoleGet === "DENIED" &&
       result.inspectorConsoleDescriptor === "DENIED" &&
       result.inspectorConsoleOwnKeys === "DENIED" &&
       result.inspectorConsoleSet === "DENIED" &&
@@ -141,8 +147,7 @@ try {
     new Error("root state-integrity check"),
     "uncaughtException",
   );
-  result.processExceptionUnchanged =
-      result.processExceptionOn === "DENIED" &&
+  result.processExceptionUnchanged = result.processExceptionOn === "DENIED" &&
       result.processExceptionOnce === "DENIED" &&
       result.processExceptionPrepend === "DENIED" &&
       result.processExceptionRemove === "DENIED" &&
@@ -158,8 +163,7 @@ try {
       exceptionCount === 1
     ? "DENIED"
     : "LEAKED";
-  result.processSignalUnchanged =
-      result.processSignalOn === "DENIED" &&
+  result.processSignalUnchanged = result.processSignalOn === "DENIED" &&
       result.processSignalPrepend === "DENIED" &&
       result.processSignalRemove === "DENIED" &&
       result.processSignalRemoveAll === "DENIED" &&
@@ -172,8 +176,7 @@ try {
       processSignalCount === 1
     ? "DENIED"
     : "LEAKED";
-  result.processMetaUnchanged =
-      result.processMetaOn === "DENIED" &&
+  result.processMetaUnchanged = result.processMetaOn === "DENIED" &&
       result.processMetaEmit === "DENIED" &&
       result.processMetaEventsRead === "DENIED" &&
       result.processMetaEventsDescriptor === "DENIED" &&

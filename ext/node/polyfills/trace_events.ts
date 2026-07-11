@@ -2,7 +2,11 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { op_oden_guard_deny_only_surface } = core.ops;
+const {
+  op_fs_cwd,
+  op_oden_guard_deny_only_surface,
+  op_oden_record_root_ambient_effect,
+} = core.ops;
 const {
   ArrayFrom,
   ArrayIsArray,
@@ -74,6 +78,19 @@ function isMainThreadProc() {
 
 function workerSliceFilename(pid, tid) {
   return `.deno_trace_events_${pid}_t${tid}.json`;
+}
+
+let _pathExports = null;
+function traceOutputPath() {
+  if (_pathExports === null) {
+    _pathExports = core.loadExtScript("ext:deno_node/path/mod.ts");
+  }
+  const p = getProc();
+  const pid = p ? p.pid : 0;
+  const filename = isMainThreadProc()
+    ? "node_trace.*.log"
+    : workerSliceFilename(pid, getThreadId());
+  return _pathExports.resolve(op_fs_cwd(), filename);
 }
 
 const kMaxTracingCount = 10;
@@ -150,6 +167,12 @@ class Tracing {
     );
     const state = tracingStates.get(this);
     if (!state.enabled) {
+      op_oden_record_root_ambient_effect(
+        "fs",
+        "write",
+        traceOutputPath(),
+        "node:trace_events.Tracing.enable",
+      );
       state.enabled = true;
       for (const category of new SafeArrayIterator(state.categories)) {
         incrementCategory(category);

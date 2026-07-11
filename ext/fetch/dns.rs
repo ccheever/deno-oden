@@ -15,9 +15,9 @@ use deno_permissions::PermissionsContainer;
 use hickory_resolver::TokioResolver;
 use http::Uri;
 use http::uri::Scheme;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::connect::Connected;
 use hyper_util::client::legacy::connect::Connection;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::connect::dns::GaiResolver;
 use hyper_util::client::legacy::connect::dns::Name;
 use hyper_util::rt::TokioIo;
@@ -313,8 +313,11 @@ fn check_resolved(
   permissions
     .clone()
     .check_net_resolved(action, ip, port, "fetch()")
-    .map_err(|e| {
-      io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()).into()
+    .map_err(|e| -> BoxError {
+      Box::new(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        e.to_string(),
+      ))
     })?;
   Ok(
     deno_permissions::oden_capsec_protected_inspector_stream_tag(
@@ -383,13 +386,11 @@ impl Service<Uri> for PermissionedHttpConnector {
     Box::pin(async move {
       let Some(permissions) = &this.permissions else {
         let mut connector = this.http_connector(this.resolver.clone());
-        let connection = connector.call(uri).await.map_err(Into::into)?;
-        return wrap_connection(
-          connection,
-          None,
-          this.net_action,
-          &[],
-        );
+        let connection = connector
+          .call(uri)
+          .await
+          .map_err(|e| -> BoxError { Box::new(e) })?;
+        return wrap_connection(connection, None, this.net_action, &[]);
       };
 
       let Some((bare_host, port)) = bare_host_and_port(&uri) else {
@@ -406,7 +407,10 @@ impl Service<Uri> for PermissionedHttpConnector {
             .into_iter()
             .collect::<Vec<_>>();
         let mut connector = this.http_connector(this.resolver.clone());
-        let connection = connector.call(uri).await.map_err(Into::into)?;
+        let connection = connector
+          .call(uri)
+          .await
+          .map_err(|e| -> BoxError { Box::new(e) })?;
         return wrap_connection(
           connection,
           Some(permissions),
@@ -436,7 +440,10 @@ impl Service<Uri> for PermissionedHttpConnector {
 
       let mut connector =
         this.http_connector(Resolver::custom(Arc::new(PreResolved(addrs))));
-      let connection = connector.call(uri).await.map_err(Into::into)?;
+      let connection = connector
+        .call(uri)
+        .await
+        .map_err(|e| -> BoxError { Box::new(e) })?;
       wrap_connection(
         connection,
         Some(permissions),

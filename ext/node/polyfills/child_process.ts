@@ -7,6 +7,7 @@
 const { core, internals, primordials } = __bootstrap;
 const {
   op_bootstrap_unstable_args,
+  op_get_env_no_permission_check,
   op_node_child_ipc_pipe,
   op_node_translate_cli_args,
 } = core.ops;
@@ -14,6 +15,7 @@ const {
 const {
   ChildProcess,
   ChildProcessOptions,
+  kInheritEnv,
   normalizeSpawnArguments,
   setupChannel,
   stdioStringToArray,
@@ -134,6 +136,16 @@ function fork(
     options = { __proto__: null, ...arguments[pos++] } as typeof options;
   }
 
+  const inheritEnv = !options.env;
+  const ensureForkEnv = () => {
+    if (!options.env) {
+      options.env = { __proto__: null };
+      // deno-lint-ignore no-explicit-any
+      (options as any)[kInheritEnv] = true;
+    }
+    return options.env;
+  };
+
   // Validate null bytes in args
   for (let i = 0; i < args.length; i++) {
     if (typeof args[i] === "string") {
@@ -199,10 +211,7 @@ function fork(
     // Tell the child which embedded module to run via an internal env var; the
     // standalone runtime resolves it against the entrypoint's directory inside
     // the compile VFS and runs it as the main module (see cli/rt/run.rs).
-    options.env = {
-      ...(options.env ?? lazyProcess().default.env),
-      [INTERNAL_CHILD_ENTRYPOINT_ENV_VAR]: modulePath,
-    };
+    ensureForkEnv()[INTERNAL_CHILD_ENTRYPOINT_ENV_VAR] = modulePath;
   } else {
     // Use the Rust parser to translate Node.js CLI args to Deno args
     // The parser handles Deno-style args (e.g., from vitest) by passing them through unchanged
@@ -239,36 +248,29 @@ function fork(
     // Handle NODE_OPTIONS if the parser returned any
     if (result.nodeOptions.length > 0) {
       const nodeOptionsStr = ArrayPrototypeJoin(result.nodeOptions, " ");
-      if (options.env) {
-        options.env.NODE_OPTIONS = options.env.NODE_OPTIONS
-          ? options.env.NODE_OPTIONS + " " + nodeOptionsStr
-          : nodeOptionsStr;
-      } else {
-        options.env = {
-          ...lazyProcess().default.env,
-          NODE_OPTIONS: nodeOptionsStr,
-        };
-      }
+      const env = ensureForkEnv();
+      const existing = env.NODE_OPTIONS ||
+        (inheritEnv
+          ? op_get_env_no_permission_check("NODE_OPTIONS")
+          : undefined);
+      env.NODE_OPTIONS = existing
+        ? existing + " " + nodeOptionsStr
+        : nodeOptionsStr;
     }
     if (result.caStores?.length) {
-      options.env = {
-        ...(options.env ?? lazyProcess().default.env),
-        DENO_TLS_CA_STORE: ArrayPrototypeJoin(result.caStores, ","),
-      };
+      ensureForkEnv().DENO_TLS_CA_STORE = ArrayPrototypeJoin(
+        result.caStores,
+        ",",
+      );
     }
     if (result.useOpensslCa) {
-      options.env = {
-        ...(options.env ?? lazyProcess().default.env),
-        DENO_NODE_USE_OPENSSL_CA: "1",
-      };
+      ensureForkEnv().DENO_NODE_USE_OPENSSL_CA = "1";
     } else if (options.env?.DENO_NODE_USE_OPENSSL_CA) {
       delete options.env.DENO_NODE_USE_OPENSSL_CA;
     }
     if (result.traceEventCategories) {
-      options.env = {
-        ...(options.env ?? lazyProcess().default.env),
-        DENO_NODE_TRACE_EVENT_CATEGORIES: result.traceEventCategories,
-      };
+      ensureForkEnv().DENO_NODE_TRACE_EVENT_CATEGORIES =
+        result.traceEventCategories;
     }
   }
 

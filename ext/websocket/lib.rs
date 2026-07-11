@@ -298,9 +298,7 @@ async fn handshake_http1(
       connection_extensions
         .remove::<HttpInfo>()
         .map(|info| info.remote_addr())
-        .and_then(
-          deno_permissions::oden_capsec_protected_inspector_stream_tag,
-        )
+        .and_then(deno_permissions::oden_capsec_protected_inspector_stream_tag)
     });
 
   let is_proxied = connection.connected().is_proxied();
@@ -373,9 +371,7 @@ async fn handshake_http2(
       connection_extensions
         .remove::<HttpInfo>()
         .map(|info| info.remote_addr())
-        .and_then(
-          deno_permissions::oden_capsec_protected_inspector_stream_tag,
-        )
+        .and_then(deno_permissions::oden_capsec_protected_inspector_stream_tag)
     });
   if !connection.connected().is_negotiated_h2() {
     return Err(HandshakeError::NoH2Alpn);
@@ -509,17 +505,19 @@ pub async fn op_ws_create(
   #[smi] client_rid: Option<u32>,
 ) -> Result<CreateResponse, WebsocketError> {
   let parsed_url = url::Url::parse(&url).map_err(WebsocketError::Url)?;
-  let url_network_peer = parsed_url.host().and_then(|host| {
-    let ip = match host {
-      url::Host::Ipv4(ip) => std::net::IpAddr::V4(ip),
-      url::Host::Ipv6(ip) => std::net::IpAddr::V6(ip),
-      url::Host::Domain(_) => return None,
-    };
-    parsed_url
-      .port_or_known_default()
-      .map(|port| std::net::SocketAddr::new(ip, port))
-  })
-  .and_then(deno_permissions::oden_capsec_protected_inspector_stream_tag);
+  let url_network_peer = parsed_url
+    .host()
+    .and_then(|host| {
+      let ip = match host {
+        url::Host::Ipv4(ip) => std::net::IpAddr::V4(ip),
+        url::Host::Ipv6(ip) => std::net::IpAddr::V6(ip),
+        url::Host::Domain(_) => return None,
+      };
+      parsed_url
+        .port_or_known_default()
+        .map(|port| std::net::SocketAddr::new(ip, port))
+    })
+    .and_then(deno_permissions::oden_capsec_protected_inspector_stream_tag);
   let (client, allow_host) = {
     let mut s = state.borrow_mut();
     s.borrow_mut::<PermissionsContainer>()

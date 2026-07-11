@@ -11,7 +11,13 @@
         "audit": { "POLICY": "capsec_audit.json" },
         "permissive": { "POLICY": "capsec_permissive.json" }
       },
-      "envs": { "ODEN_CAPSEC_POLICY": "${POLICY}" },
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "${POLICY}",
+        "ODEN_CHILD_SAFE_SENTINEL": "safe",
+        "ODEN_CAPSEC_CHILD_SENTINEL": "must-not-leak",
+        "NODE_OPTIONS": "--trace-warnings",
+        "DENO_NODE_USE_OPENSSL_CA": "1"
+      },
       "output": "deny_matrix.out",
       "exitCode": 0
     },

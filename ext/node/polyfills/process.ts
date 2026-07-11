@@ -22,7 +22,6 @@ import {
   op_inspector_enabled,
   op_inspector_port,
   op_node_load_env_file,
-  op_oden_guard_deny_only_surface,
   op_node_process_constrained_memory,
   op_node_process_kill,
   op_node_process_resource_usage,
@@ -31,6 +30,7 @@ import {
   op_node_process_seteuid,
   op_node_process_setgid,
   op_node_process_setuid,
+  op_oden_guard_deny_only_surface,
   op_process_abort,
   op_stream_base_register_state,
 } from "ext:core/ops";

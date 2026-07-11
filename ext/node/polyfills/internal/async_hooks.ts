@@ -491,8 +491,8 @@ class AsyncHook {
     hook_fields[kTotals] += hook_fields[kBefore] += +!!state.before;
     hook_fields[kTotals] += hook_fields[kAfter] += +!!state.after;
     hook_fields[kTotals] += hook_fields[kDestroy] += +!!state.destroy;
-    hook_fields[kTotals] += hook_fields[kPromiseResolve] +=
-      +!!state.promiseResolve;
+    hook_fields[kTotals] += hook_fields[kPromiseResolve] += +!!state
+      .promiseResolve;
     ArrayPrototypePush(hooks_array, this);
 
     if (prev_kTotals === 0 && hook_fields[kTotals] > 0) {
@@ -531,8 +531,8 @@ class AsyncHook {
     hook_fields[kTotals] += hook_fields[kBefore] -= +!!state.before;
     hook_fields[kTotals] += hook_fields[kAfter] -= +!!state.after;
     hook_fields[kTotals] += hook_fields[kDestroy] -= +!!state.destroy;
-    hook_fields[kTotals] += hook_fields[kPromiseResolve] -=
-      +!!state.promiseResolve;
+    hook_fields[kTotals] += hook_fields[kPromiseResolve] -= +!!state
+      .promiseResolve;
     ArrayPrototypeSplice(hooks_array, index, 1);
 
     if (prev_kTotals > 0 && hook_fields[kTotals] === 0) {

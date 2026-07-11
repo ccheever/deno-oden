@@ -616,19 +616,54 @@ pub fn oden_capsec_check_inspector_network_effect(
   let hostname = Host::parse_for_query(host)?;
   let descriptor = NetDescriptor(hostname, Some(port.into()));
   let target = descriptor.display_name().into_owned();
-  for principal in
-    OdenPolicy::constrained_principals(&oden_capsec_principal_set())
-  {
-    oden_capsec_decide_inner(
-      OdenFamily::Network,
+  let req = OdenRequest {
+    family: OdenFamily::Network,
+    action: action.as_str().to_string(),
+    target: target.clone(),
+  };
+  let constrained =
+    OdenPolicy::constrained_principals(&oden_capsec_principal_set());
+  let allowed = constrained.is_empty()
+    || constrained
+      .iter()
+      .all(|principal| oden_capsec_policy().static_grants(principal, &req));
+  let labels = if constrained.is_empty() {
+    vec!["root/runtime".to_string()]
+  } else {
+    constrained
+      .iter()
+      .map(OdenPrincipal::label)
+      .collect::<Vec<_>>()
+  };
+  let suggestion = format!("network:{}:{host}", action.as_str());
+  for label in &labels {
+    oden_capsec_audit_record(
+      label,
+      "network",
       action.as_str(),
       &target,
-      Some(api_name),
-      false,
-      Some(principal),
-    )?;
+      if allowed {
+        "allow(inspector conjunctive static network row)"
+      } else {
+        "DENY(inspector conjunctive static network row required)"
+      },
+      (!allowed).then_some(suggestion.as_str()),
+    );
   }
-  Ok(())
+  if allowed {
+    Ok(())
+  } else {
+    Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("{api_name} access to {target:?}"),
+        name: "capsec",
+        custom_message: Some(format!(
+          "oden capsec: inspector transport at {target:?} requires an exact static {suggestion} row"
+        )),
+        state: PermissionState::Denied,
+      },
+    ))
+  }
 }
 
 /// Runtime-control listener activation is a conjunctive edge: the exact root

@@ -1,6 +1,7 @@
 import inspector from "node:inspector";
 import net from "node:net";
 import { createRequire } from "node:module";
+import { Readable } from "node:stream";
 
 const port = Number(Deno.args[0]);
 const wsUrl = inspector.url();
@@ -11,6 +12,15 @@ const dnsWsUrl = wsUrl.replace("127.0.0.1", "localhost");
 const require = createRequire(import.meta.url);
 const endpointProbe = require("endpoint-denied");
 
+async function openNodeInspectorResponse() {
+  const socket = await new Promise((resolve, reject) => {
+    const candidate = net.connect(port, "localhost", () => resolve(candidate));
+    candidate.once("error", reject);
+  });
+  socket.write("GET /json/list HTTP/1.1\r\nHost: localhost\r\n\r\n");
+  return socket;
+}
+
 const denoConn = await Deno.connect({ hostname: "127.0.0.1", port });
 const nodeSocket = await new Promise((resolve, reject) => {
   const socket = net.connect(port, "127.0.0.1", () => resolve(socket));
@@ -18,36 +28,60 @@ const nodeSocket = await new Promise((resolve, reject) => {
 });
 const rootResponse = await fetch(httpUrl);
 const rootDnsResponse = await fetch(dnsHttpUrl);
+const readerResponse = await fetch(httpUrl);
+const byobResponse = await fetch(httpUrl);
+const cloneResponse = await fetch(httpUrl);
+const teeResponse = await fetch(httpUrl);
+const iteratorResponse = await fetch(httpUrl);
+const pipeToResponse = await fetch(httpUrl);
+const pipeThroughResponse = await fetch(httpUrl);
+const transferResponse = await fetch(httpUrl);
+const webToNodeResponse = await fetch(httpUrl);
+const webToNodeStream = Readable.fromWeb(webToNodeResponse.body);
 const rootWebSocket = await new Promise((resolve, reject) => {
   const socket = new WebSocket(wsUrl);
   socket.addEventListener("open", () => resolve(socket), { once: true });
-  socket.addEventListener("error", () => reject(new Error("root websocket failed")), {
-    once: true,
-  });
+  socket.addEventListener(
+    "error",
+    () => reject(new Error("root websocket failed")),
+    {
+      once: true,
+    },
+  );
 });
 const rootDnsWebSocket = await new Promise((resolve, reject) => {
   const socket = new WebSocket(dnsWsUrl);
   socket.addEventListener("open", () => resolve(socket), { once: true });
-  socket.addEventListener("error", () => reject(new Error("root DNS websocket failed")), {
-    once: true,
-  });
+  socket.addEventListener(
+    "error",
+    () => reject(new Error("root DNS websocket failed")),
+    {
+      once: true,
+    },
+  );
 });
 
 const readDenoConn = await Deno.connect({ hostname: "127.0.0.1", port });
 await readDenoConn.write(
-  new TextEncoder().encode("GET /json/list HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+  new TextEncoder().encode(
+    "GET /json/list HTTP/1.1\r\nHost: localhost\r\n\r\n",
+  ),
 );
-const readNodeSocket = await new Promise((resolve, reject) => {
-  const socket = net.connect(port, "localhost", () => resolve(socket));
-  socket.once("error", reject);
-});
-readNodeSocket.write("GET /json/list HTTP/1.1\r\nHost: localhost\r\n\r\n");
+const readNodeSocket = await openNodeInspectorResponse();
+const iteratorNodeSocket = await openNodeInspectorResponse();
+const pipeNodeSocket = await openNodeInspectorResponse();
+const nodeToWebSocket = await openNodeInspectorResponse();
+const nodeToWebStream = Readable.toWeb(nodeToWebSocket);
 const readWebSocket = await new Promise((resolve, reject) => {
   const socket = new WebSocket(dnsWsUrl);
   socket.addEventListener("open", () => resolve(socket), { once: true });
-  socket.addEventListener("error", () => reject(new Error("root read websocket failed")), {
-    once: true,
-  });
+  socket.addEventListener(
+    "error",
+    () => reject(new Error("root read websocket failed")),
+    {
+      once: true,
+    },
+  );
 });
 readWebSocket.send(JSON.stringify({
   id: 42,
@@ -65,6 +99,18 @@ try {
     readDenoConn,
     readNodeSocket,
     readWebSocket,
+    readerResponse,
+    byobResponse,
+    cloneResponse,
+    teeResponse,
+    iteratorResponse,
+    pipeToResponse,
+    pipeThroughResponse,
+    transferResponse,
+    iteratorNodeSocket,
+    pipeNodeSocket,
+    nodeToWebStream,
+    webToNodeStream,
     rootResponse,
     rootDnsResponse,
     rootWebSocket,
@@ -82,6 +128,10 @@ try {
   readDenoConn.close();
   nodeSocket.destroy();
   readNodeSocket.destroy();
+  iteratorNodeSocket.destroy();
+  pipeNodeSocket.destroy();
+  nodeToWebSocket.destroy();
+  webToNodeStream.destroy();
   rootWebSocket.close();
   rootDnsWebSocket.close();
   readWebSocket.close();

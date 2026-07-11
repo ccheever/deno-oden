@@ -48,6 +48,7 @@ const {
 } = primordials;
 const { isTypedArray } = core;
 const {
+  op_get_env_no_permission_check,
   op_node_in_npm_package,
   op_node_ipc_buffer_constructor,
   op_node_ipc_read_advanced,
@@ -149,6 +150,9 @@ const {
   nodeSpawnChild,
   nodeSpawnSyncChild,
 } = core.loadExtScript("ext:deno_process/40_process.js");
+// Private marker for an internal environment overlay that must be applied on
+// top of native inheritance rather than interpreted as a user replacement.
+const kInheritEnv = Symbol("kInheritEnv");
 
 // Precompiled regular expressions (captured as SafeRegExp so the prototype
 // can't be tampered with at runtime).
@@ -380,6 +384,7 @@ class ChildProcess extends EventEmitter {
       windowsHide = true,
       detached,
       envPairs,
+      clearEnv = true,
       uid,
       gid,
     } = options;
@@ -423,10 +428,12 @@ class ChildProcess extends EventEmitter {
       command,
       ArrayPrototypeSlice(args, 1),
       env,
+      !clearEnv,
     );
     const cmd = builtCommand[0];
     const cmdArgs = builtCommand[1];
     const includeNpmProcessState = builtCommand[2];
+    const envRemove = builtCommand[3];
 
     this.spawnfile = cmd;
     this.spawnargs = [cmd, ...new SafeArrayIterator(cmdArgs)];
@@ -466,9 +473,10 @@ class ChildProcess extends EventEmitter {
     try {
       this.#process = nodeSpawnChild(cmd, {
         args: cmdArgs,
-        clearEnv: true,
+        clearEnv,
         cwd,
         env,
+        envRemove,
         stdin: toDenoStdio(stdin),
         stdout: toDenoStdio(stdout),
         stderr: toDenoStdio(stderr),
@@ -1046,12 +1054,13 @@ function copyProcessEnvToEnv(
   name,
   optionEnv,
 ) {
+  const inheritedValue = op_get_env_no_permission_check(name);
   if (
-    Deno.env.get(name) &&
+    inheritedValue &&
     (!optionEnv ||
       !ObjectHasOwn(optionEnv, name))
   ) {
-    env[name] = Deno.env.get(name);
+    env[name] = inheritedValue;
   }
 }
 
@@ -1365,12 +1374,20 @@ function normalizeSpawnArguments(
     ArrayPrototypeUnshift(args, file);
   }
 
-  const env = options.env || Deno.env.toObject();
+  // @ref LLP 0010#process--subprocesses-and-process-state [implements]
+  // With no explicit `env`, let the native spawn inherit the environment.
+  // Enumerating it through `Deno.env.toObject()` would expose a read surface
+  // to the caller even though Node only needs to pass the values to the owned
+  // child. An explicit `env` still replaces the inherited environment.
+  const clearEnv = !!options.env && options[kInheritEnv] !== true;
+  const env = options.env || { __proto__: null };
   const envPairs = [];
 
   // process.env.NODE_V8_COVERAGE always propagates, making it possible to
   // collect coverage for programs that spawn with white-listed environment.
-  copyProcessEnvToEnv(env, "NODE_V8_COVERAGE", options.env);
+  if (clearEnv) {
+    copyProcessEnvToEnv(env, "NODE_V8_COVERAGE", options.env);
+  }
 
   /** TODO: add `isZOS` condition */
 
@@ -1412,6 +1429,7 @@ function normalizeSpawnArguments(
     // Make a shallow copy so we don't clobber the user's options object.
     __proto__: null,
     ...options,
+    clearEnv,
     args,
     cwd,
     // deno-lint-ignore prefer-primordials
@@ -1697,8 +1715,10 @@ function buildCommand(
   file,
   args,
   env,
+  inheritEnv,
 ) {
   let includeNpmProcessState = false;
+  const envRemove = [];
   if (file === Deno.execPath() && !Deno.build.standalone) {
     // Ensure all args are strings (Node allows numbers in args array)
     args = ArrayPrototypeMap(args, (arg) => String(arg));
@@ -1726,6 +1746,9 @@ function buildCommand(
       env.DENO_NODE_USE_OPENSSL_CA = "1";
     } else {
       delete env.DENO_NODE_USE_OPENSSL_CA;
+      if (inheritEnv) {
+        ArrayPrototypePush(envRemove, "DENO_NODE_USE_OPENSSL_CA");
+      }
     }
     if (result.traceEventCategories) {
       env.DENO_NODE_TRACE_EVENT_CATEGORIES = result.traceEventCategories;
@@ -1734,8 +1757,12 @@ function buildCommand(
     // Update NODE_OPTIONS if needed
     if (result.nodeOptions.length > 0) {
       const options = ArrayPrototypeJoin(result.nodeOptions, " ");
-      if (env.NODE_OPTIONS) {
-        env.NODE_OPTIONS += " " + options;
+      const existing = env.NODE_OPTIONS ||
+        (inheritEnv
+          ? op_get_env_no_permission_check("NODE_OPTIONS")
+          : undefined);
+      if (existing) {
+        env.NODE_OPTIONS = existing + " " + options;
       } else {
         env.NODE_OPTIONS = options;
       }
@@ -1807,7 +1834,7 @@ function buildCommand(
     }
   }
 
-  return [file, args, includeNpmProcessState];
+  return [file, args, includeNpmProcessState, envRemove];
 }
 
 function restorePrototype(obj) {
@@ -1891,7 +1918,8 @@ function spawnSync(
   options,
 ) {
   const {
-    env = Deno.env.toObject(),
+    env = { __proto__: null },
+    clearEnv = false,
     input,
     stdio = ["pipe", "pipe", "pipe"],
     cwd,
@@ -1960,10 +1988,12 @@ function spawnSync(
     command,
     argsToProcess,
     env,
+    !clearEnv,
   );
   command = builtCommand[0];
   args = builtCommand[1];
   includeNpmProcessState = builtCommand[2];
+  const envRemove = builtCommand[3];
   const input_ = normalizeInput(input);
 
   const result = {};
@@ -1979,7 +2009,8 @@ function spawnSync(
       stdin: stdin_ == "inherit" ? "inherit" : "null",
       uid,
       gid,
-      clearEnv: false,
+      clearEnv,
+      envRemove,
       extraStdio: extraStdioNormalized,
       windowsRawArguments: windowsVerbatimArguments,
       windowsHide,
@@ -2962,6 +2993,7 @@ function setupChannel(
 
 return {
   ChildProcess,
+  kInheritEnv,
   mapValues,
   stdioStringToArray,
   getValidStdio,

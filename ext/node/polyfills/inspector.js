@@ -15,7 +15,6 @@ const {
   op_inspector_open,
   op_inspector_url,
   op_inspector_wait,
-  op_oden_guard_deny_only_surface,
 } = core.ops;
 const lazyProcess = core.createLazyLoader("node:process");
 const lazyWorkerThreads = core.createLazyLoader("node:worker_threads");
@@ -69,9 +68,6 @@ const {
   JSONStringify,
   SafeMap,
   SafeMapIterator,
-  Proxy,
-  ReflectApply,
-  ReflectGet,
   StringPrototypeStartsWith,
   StringPrototypeToLowerCase,
   TypeError,
@@ -348,13 +344,8 @@ const inspectorConsoleTarget = op_get_extras_binding_object().console;
 const inspectorConsoleFacadeTarget = ObjectCreate(null);
 const inspectorConsoleMethods = new SafeMap();
 
-function guardInspectorConsole(property, action) {
-  op_oden_guard_deny_only_surface(
-    "runtime",
-    "inspect",
-    `node:inspector.console.${String(property)}`,
-    `node:inspector.console.${action}`,
-  );
+function guardInspectorConsole() {
+  op_inspector_enabled();
 }
 
 for (
