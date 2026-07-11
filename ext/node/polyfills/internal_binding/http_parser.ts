@@ -285,7 +285,7 @@ HTTPParser.prototype.getCurrentBuffer = function (this: any) {
 // consume/unconsume - server optimization: data flows directly from the
 // TCP handle to the parser, bypassing the JS readable stream layer.
 HTTPParser.prototype.consume = function (this: any, handle: any) {
-  this._native.consume(this, handle);
+  return this._native.consume(this, handle);
 };
 
 HTTPParser.prototype.unconsume = function (this: any) {

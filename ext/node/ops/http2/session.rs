@@ -2770,7 +2770,18 @@ impl Http2Session {
   }
 
   #[fast]
-  fn consume_stream(&self, #[cppgc] tcp: &crate::ops::tcp_wrap::TCPWrap) {
+  fn consume_stream(
+    &self,
+    #[cppgc] tcp: &crate::ops::tcp_wrap::TCPWrap,
+  ) -> i32 {
+    // This ownership-transfer fast path installs h2_read_cb directly and
+    // bypasses LibUvStreamWrap's authenticated onread adapter. Protected
+    // inspector peers categorically reject it before detach(), stream.data
+    // mutation, or uv_read_start.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    if tcp.protected_network_peer().is_some() {
+      return deno_core::uv_compat::UV_EACCES;
+    }
     // SAFETY: self.inner was allocated by Box::into_raw and is valid
     let session = unsafe { &mut *self.inner };
     // Take ownership of the underlying TCP handle away from the `TCPWrap`. The
@@ -2782,7 +2793,7 @@ impl Http2Session {
     if stream.is_null() {
       // The TCP handle was never allocated or was already detached; nothing to
       // consume.
-      return;
+      return deno_core::uv_compat::UV_EBADF;
     }
 
     // Save the original stream.data (LibUvStreamWrap's StreamHandleData)
@@ -2815,7 +2826,7 @@ impl Http2Session {
         Some(h2_read_cb),
       )
     };
-    let _ = ret;
+    ret
   }
 
   #[fast]

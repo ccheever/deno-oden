@@ -335,6 +335,9 @@ impl PipeWrap {
 
   #[fast]
   fn open(&self, state: &mut OpState, #[smi] fd: i32) -> i32 {
+    if super::tcp_wrap::raw_inet_socket_adoption_is_forbidden(fd) {
+      return uv_compat::UV_EACCES;
+    }
     // See `FdTable::begin_uv_adopt` for the duplicate-fd policy (stdio and
     // inherited extra stdio fds may be adopted; other tracked fds are
     // rejected).

@@ -25,6 +25,10 @@ pub(crate) struct ReadCallbackKey {
 pub(crate) struct ReadCallbackState {
   pub isolate: v8::UnsafeRawIsolatePtr,
   pub onread: Option<v8::Global<v8::Function>>,
+  /// Callback-scoped CPED captured when a protected stream starts. Restoring
+  /// it around the trusted adapter call keeps the registering actor in the
+  /// application-byte delivery decision.
+  pub delivery_context: Option<v8::Global<v8::Value>>,
   pub stream_base_state: Option<v8::Global<v8::Int32Array>>,
   pub handle: Option<v8::Global<v8::Object>>,
   pub bytes_read: Rc<Cell<u64>>,
@@ -35,6 +39,7 @@ pub(crate) struct ReadCallbackState {
 pub(crate) struct ReadCallbackSnapshot {
   pub isolate: v8::UnsafeRawIsolatePtr,
   pub onread: Option<v8::Global<v8::Function>>,
+  pub delivery_context: Option<v8::Global<v8::Value>>,
   pub stream_base_state: Option<v8::Global<v8::Int32Array>>,
   pub handle: Option<v8::Global<v8::Object>>,
   pub bytes_read: Rc<Cell<u64>>,
@@ -46,6 +51,7 @@ impl ReadCallbackState {
     ReadCallbackSnapshot {
       isolate: self.isolate,
       onread: self.onread.clone(),
+      delivery_context: self.delivery_context.clone(),
       stream_base_state: self.stream_base_state.clone(),
       handle: self.handle.clone(),
       bytes_read: self.bytes_read.clone(),

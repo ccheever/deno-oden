@@ -452,6 +452,7 @@ deno_core::extension!(deno_node,
     ops::udp::op_node_udp_fd_for_ipc,
     ops::udp::op_node_udp_open,
     ops::stream_wrap::op_stream_base_register_state,
+    ops::stream_wrap::op_stream_base_register_protected_onread,
     ops::tty_wrap::op_tty_check_fd_permission,
   ],
   objects = [

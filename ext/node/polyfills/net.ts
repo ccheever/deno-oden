@@ -24,13 +24,17 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { op_oden_check_protected_inspector_stream_use } = core.ops;
 
 const { BlockList, SocketAddress } = core.loadExtScript(
   "ext:deno_node/internal/blocklist.mjs",
 );
 
-const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
+const {
+  EventEmitter,
+  protectedEventEmitterEmit: protectedSocketEmit,
+  protectedEventEmitterOff: protectedSocketOff,
+  protectedEventEmitterOnce: protectedSocketOnce,
+} = core.loadExtScript("ext:deno_node/_events.mjs");
 const {
   isIP,
   isIPv4,
@@ -42,7 +46,28 @@ const {
   normalizedArgsSymbol,
 } = core.loadExtScript("ext:deno_node/internal/net.ts");
 const { Duplex } = core.createLazyLoader("node:stream")();
-const { setReadableUseGuard } = core.loadExtScript(
+const protectedSocketDestroy = Duplex.prototype.destroy;
+const protectedSocketPublicWrite = Duplex.prototype.write;
+const protectedSocketPublicUncork = Duplex.prototype.uncork;
+let protectedSocketReadImpl;
+let protectedSocketDestroyImpl;
+let protectedSocketWriteGenericImpl;
+let protectedSocketWriteImpl;
+let protectedSocketWritevImpl;
+let protectedSocketFinalImpl;
+let protectedSocketEndImpl;
+let protectedSocketAfterAsyncWriteImpl;
+let protectedSocketReinitializeHandle;
+const {
+  getProtectedReadableState,
+  hasProtectedReadableDecoder,
+  isProtectedReadableDestroyed,
+  isProtectedReadableEndEmitted,
+  pushProtectedReadableChunk,
+  readProtectedReadableZero,
+  setReadableUseGuard,
+  shouldStartProtectedReadable,
+} = core.loadExtScript(
   "ext:deno_node/internal/streams/readable.js",
 );
 const {
@@ -83,6 +108,7 @@ const {
   kHandle,
   kUpdateTimer,
   onStreamRead,
+  registerProtectedStreamBinding,
   setStreamTimeout,
   writeGeneric,
   writevGeneric,
@@ -103,6 +129,46 @@ const {
   TCP,
   TCPConnectWrap,
 } = core.loadExtScript("ext:deno_node/internal_binding/tcp_wrap.ts");
+const nativeProtectedInspectorPeer = TCP.prototype.protectedInspectorPeer;
+const nativeProtectedBind = TCP.prototype.bind;
+const nativeProtectedBind6 = TCP.prototype.bind6;
+const nativeProtectedCheckUse = TCP.prototype.checkProtectedInspectorUse;
+const nativeProtectedClose = TCP.prototype.close;
+const nativeProtectedConnect = TCP.prototype.connect;
+const nativeProtectedConnect6 = TCP.prototype.connect6;
+const nativeProtectedGetsockname = TCP.prototype.getsockname;
+const nativeProtectedReadStart = TCP.prototype.readStart;
+const nativeProtectedReadStop = TCP.prototype.readStop;
+const nativeProtectedShutdown = TCP.prototype.shutdown;
+const nativeProtectedSetKeepAlive = TCP.prototype.setKeepAlive;
+const nativeProtectedSetNoDelay = TCP.prototype.setNoDelay;
+const nativeProtectedSetNetPermToken = TCP.prototype.setNetPermToken;
+const nativeProtectedSetOdenHttpNetToken = TCP.prototype.setOdenHttpNetToken;
+const nativeProtectedWriteBuffer = TCP.prototype.writeBuffer;
+const nativeProtectedWritev = TCP.prototype.writev;
+const nativeProtectedWriteUtf8String = TCP.prototype.writeUtf8String;
+const nativeProtectedWriteAsciiString = TCP.prototype.writeAsciiString;
+const nativeProtectedWriteLatin1String = TCP.prototype.writeLatin1String;
+const nativeProtectedWriteUcs2String = TCP.prototype.writeUcs2String;
+
+function getNativeProtectedInspectorPeer(handle) {
+  try {
+    return FunctionPrototypeCall(nativeProtectedInspectorPeer, handle);
+  } catch {
+    return undefined;
+  }
+}
+
+function checkNativeProtectedInspectorUse(handle, apiName) {
+  const result = FunctionPrototypeCall(
+    nativeProtectedCheckUse,
+    handle,
+    apiName,
+  );
+  if (result !== 0) {
+    throw errnoException(MapPrototypeGet(codeMap, "EACCES"), apiName);
+  }
+}
 const {
   constants: PipeConstants,
   Pipe,
@@ -165,6 +231,7 @@ const {
   Boolean,
   FunctionPrototypeBind,
   FunctionPrototypeCall,
+  MapPrototypeGet,
   MathMax,
   Number,
   NumberIsNaN,
@@ -182,6 +249,7 @@ const {
   StringPrototypeCharCodeAt,
   Symbol,
   SymbolAsyncDispose,
+  WeakMapPrototypeDelete,
   WeakMapPrototypeGet,
   WeakMapPrototypeSet,
 } = primordials;
@@ -191,11 +259,61 @@ const {
 // it immediately into this sealed WeakMap and installs it on each native
 // handle, including Happy-Eyeballs retries.
 const odenHttpNetTokens = new SafeWeakMap();
+// Native client handles are bound to their construction-time Socket before
+// `connect()` returns it to user code. Protected connect completion must not
+// rediscover this identity through the reflectable ownerSymbol.
+const canonicalSocketOwners = new SafeWeakMap();
+const canonicalSocketHandles = new SafeWeakMap();
+const canonicalSocketAsyncContexts = new SafeWeakMap();
+const canonicalHandleAsyncContexts = new SafeWeakMap();
+// Once a connection is tagged, native reads for its canonical Socket stay on
+// the exact handle even if package code later mutates reflectable kHandle.
+const protectedSocketHandles = new SafeWeakMap();
+const protectedSocketOnreadOptions = new SafeWeakMap();
+const protectedSocketPreclosed = new SafeWeakMap();
+const canceledConnectRequests = new SafeWeakMap();
+const pendingSocketWrites = new SafeWeakMap();
+
+function defineImmutableRequestProperty(req, key, value) {
+  ObjectDefineProperty(req, key, {
+    __proto__: null,
+    configurable: false,
+    enumerable: true,
+    value,
+    writable: false,
+  });
+}
+
+function initializeConnectRequest(
+  req,
+  oncomplete,
+  address,
+  port = undefined,
+  localAddress = undefined,
+  localPort = undefined,
+  addressType = undefined,
+) {
+  defineImmutableRequestProperty(req, "oncomplete", oncomplete);
+  defineImmutableRequestProperty(req, "address", address);
+  defineImmutableRequestProperty(req, "port", port);
+  defineImmutableRequestProperty(req, "localAddress", localAddress);
+  defineImmutableRequestProperty(req, "localPort", localPort);
+  defineImmutableRequestProperty(req, "addressType", addressType);
+}
 
 function installOdenHttpNetToken(socket, handle) {
   const token = WeakMapPrototypeGet(odenHttpNetTokens, socket);
-  if (token && handle?.setOdenHttpNetToken) {
-    handle.setOdenHttpNetToken(token);
+  if (!token) return false;
+  try {
+    FunctionPrototypeCall(
+      nativeProtectedSetOdenHttpNetToken,
+      handle,
+      token,
+    );
+    return true;
+  } catch (error) {
+    WeakMapPrototypeDelete(odenHttpNetTokens, socket);
+    throw error;
   }
 }
 
@@ -217,18 +335,42 @@ const kAsyncContext = Symbol("kAsyncContext");
 
 // Runs `run` with the async context snapshot that was active when the
 // operation was initiated, restoring the previous context afterwards.
-function _runInAsyncContext(snapshot: any, run: () => void) {
+function _runInAsyncContext(snapshot: any, run: () => any) {
   if (snapshot === undefined) {
-    run();
-    return;
+    return run();
   }
   const prior = core.getAsyncContext();
   core.setAsyncContext(snapshot);
   try {
-    run();
+    return run();
   } finally {
     core.setAsyncContext(prior);
   }
+}
+
+function _runWithoutAsyncContext(run: () => any) {
+  const prior = core.getAsyncContext();
+  core.setAsyncContext(undefined);
+  try {
+    return run();
+  } finally {
+    core.setAsyncContext(prior);
+  }
+}
+
+function closeProtectedSocketNative(socket, handle, isException) {
+  FunctionPrototypeCall(nativeProtectedReadStop, handle);
+  FunctionPrototypeCall(nativeProtectedClose, handle, () => {
+    _runWithoutAsyncContext(() => {
+      if (socket[asyncIdSymbol] > 0) emitDestroy(socket[asyncIdSymbol]);
+      FunctionPrototypeCall(
+        protectedSocketEmit,
+        socket,
+        "close",
+        isException,
+      );
+    });
+  });
 }
 
 // Capture the complete scheduling actor while the public Node call is still
@@ -305,11 +447,13 @@ interface SocketOptions extends ConnectOptions, HandleOptions, DuplexOptions {
   signal?: AbortSignal;
 }
 
-interface TcpNetConnectOptions extends TcpSocketConnectOptions, SocketOptions {
+interface TcpNetConnectOptions
+  extends TcpSocketConnectOptions, SocketOptions {
   timeout?: number;
 }
 
-interface IpcNetConnectOptions extends IpcSocketConnectOptions, SocketOptions {
+interface IpcNetConnectOptions
+  extends IpcSocketConnectOptions, SocketOptions {
   timeout?: number;
 }
 
@@ -523,8 +667,23 @@ function _afterConnect(
   writable: boolean,
 ) {
   _runInAsyncContext(
-    handle?.[kAsyncContext],
-    () => _afterConnectImpl(status, handle, req, readable, writable),
+    WeakMapPrototypeGet(canonicalHandleAsyncContexts, handle),
+    () => {
+      if (typeof getNativeProtectedInspectorPeer(handle) === "string") {
+        const protectedOperationContext = core.getAsyncContext();
+        return _runWithoutAsyncContext(() =>
+          _afterConnectImpl(
+            status,
+            handle,
+            req,
+            readable,
+            writable,
+            protectedOperationContext,
+          )
+        );
+      }
+      return _afterConnectImpl(status, handle, req, readable, writable);
+    },
   );
 }
 
@@ -534,15 +693,45 @@ function _afterConnectImpl(
   req: PipeConnectWrap | TCPConnectWrap,
   readable: boolean,
   writable: boolean,
+  protectedOperationContext?: any,
 ) {
-  let socket = handle[ownerSymbol];
+  // Invoke the loader-captured native method directly. A package can replace
+  // both the public method and the handle's prototype chain before connect
+  // completion; neither may suppress protected tagging, including cleanup of
+  // a failed protected connection.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  const protectedInspectorPeer = getNativeProtectedInspectorPeer(handle);
 
-  if (socket.constructor.name === "ReusedHandle") {
+  let socket = typeof protectedInspectorPeer === "string"
+    ? WeakMapPrototypeGet(canonicalSocketOwners, handle)
+    : handle[ownerSymbol];
+  if (socket === undefined) {
+    if (typeof protectedInspectorPeer === "string") {
+      FunctionPrototypeCall(nativeProtectedClose, handle);
+      return;
+    }
+    throw new Error("connected stream is missing its owner");
+  }
+
+  if (
+    typeof protectedInspectorPeer !== "string" &&
+    socket.constructor.name === "ReusedHandle"
+  ) {
     socket = socket.handle;
   }
 
-  // Callback may come after call to destroy
-  if (socket.destroyed) {
+  // Callback may come after call to destroy. Protected completion consults
+  // closure-private state; a forged public `destroyed` value must never leave
+  // the newly tagged native handle live but unbound.
+  if (
+    typeof protectedInspectorPeer === "string"
+      ? isProtectedReadableDestroyed(socket)
+      : socket.destroyed
+  ) {
+    if (typeof protectedInspectorPeer === "string") {
+      FunctionPrototypeCall(nativeProtectedReadStop, handle);
+      FunctionPrototypeCall(nativeProtectedClose, handle);
+    }
     return;
   }
 
@@ -554,15 +743,246 @@ function _afterConnectImpl(
   socket._sockname = null;
 
   if (status === 0) {
-    const protectedInspectorPeer = socket._handle
-      ?.protectedInspectorPeer?.();
+    const protectedHandle = handle;
     if (typeof protectedInspectorPeer === "string") {
+      const protectedReadableState = getProtectedReadableState(socket);
+      if (protectedReadableState === undefined) {
+        FunctionPrototypeCall(nativeProtectedReadStop, protectedHandle);
+        FunctionPrototypeCall(nativeProtectedClose, protectedHandle);
+        return;
+      }
+    const refuseProtectedSocket = (error) => {
+        closeProtectedSocketNative(
+          socket,
+          protectedHandle,
+          error ? true : false,
+        );
+        WeakMapPrototypeSet(
+          protectedSocketHandles,
+          socket,
+          protectedHandle,
+        );
+        WeakMapPrototypeSet(protectedSocketPreclosed, socket, true);
+        _runWithoutAsyncContext(() =>
+          FunctionPrototypeCall(protectedSocketDestroy, socket, error)
+        );
+    };
+    if (hasProtectedReadableDecoder(socket)) {
+      refuseProtectedSocket(
+        errnoException(MapPrototypeGet(codeMap, "EACCES"), "setEncoding"),
+      );
+      return;
+    }
+    try {
+        // Protected native delivery may call only the canonical Socket read and
+        // destroy implementations. A non-configurable package override means
+        // the object cannot be made safe, so refuse the connection.
+        ObjectDefineProperty(socket, "_read", {
+          __proto__: null,
+          configurable: false,
+          value: protectedSocketReadImpl,
+          writable: false,
+        });
+        ObjectDefineProperty(socket, "_destroy", {
+          __proto__: null,
+          configurable: false,
+          value: protectedSocketDestroyImpl,
+          writable: false,
+        });
+        ObjectDefineProperty(socket, "_writeGeneric", {
+          __proto__: null,
+          configurable: false,
+          value: protectedSocketWriteGenericImpl,
+          writable: false,
+        });
+        ObjectDefineProperty(socket, "_write", {
+          __proto__: null,
+          configurable: false,
+          value: protectedSocketWriteImpl,
+          writable: false,
+        });
+        ObjectDefineProperty(socket, "_writev", {
+          __proto__: null,
+          configurable: false,
+          value: protectedSocketWritevImpl,
+          writable: false,
+        });
+        ObjectDefineProperty(socket, "_final", {
+          __proto__: null,
+          configurable: false,
+          value: protectedSocketFinalImpl,
+          writable: false,
+        });
+        ObjectDefineProperty(socket, "write", {
+          __proto__: null,
+          configurable: false,
+          value: protectedSocketPublicWrite,
+          writable: false,
+        });
+        ObjectDefineProperty(socket, "end", {
+          __proto__: null,
+          configurable: false,
+          value: protectedSocketEndImpl,
+          writable: false,
+        });
+      ObjectDefineProperty(socket, "uncork", {
+          __proto__: null,
+          configurable: false,
+          value: protectedSocketPublicUncork,
+        writable: false,
+      });
+      ObjectDefineProperty(socket, "setEncoding", {
+        __proto__: null,
+        configurable: false,
+        value: () => {
+          throw errnoException(
+            MapPrototypeGet(codeMap, "EACCES"),
+            "setEncoding",
+          );
+        },
+        writable: false,
+      });
+      } catch {
+        refuseProtectedSocket(
+          errnoException(MapPrototypeGet(codeMap, "EACCES"), "read"),
+        );
+        return;
+      }
+      registerProtectedStreamBinding(
+        protectedHandle,
+        socket,
+        () => isProtectedReadableDestroyed(socket),
+        () => isProtectedReadableEndEmitted(socket),
+        pushProtectedReadableChunk,
+        () => FunctionPrototypeCall(nativeProtectedReadStop, protectedHandle),
+        refuseProtectedSocket,
+        () => readProtectedReadableZero(socket),
+        () => {},
+        {
+          __proto__: null,
+          writeBuffer: (req, data) =>
+            FunctionPrototypeCall(
+              nativeProtectedWriteBuffer,
+              protectedHandle,
+              req,
+              data,
+            ),
+          writev: (req, chunks, allBuffers) =>
+            FunctionPrototypeCall(
+              nativeProtectedWritev,
+              protectedHandle,
+              req,
+              chunks,
+              allBuffers,
+            ),
+          writeUtf8String: (req, data) =>
+            FunctionPrototypeCall(
+              nativeProtectedWriteUtf8String,
+              protectedHandle,
+              req,
+              data,
+            ),
+          writeAsciiString: (req, data) =>
+            FunctionPrototypeCall(
+              nativeProtectedWriteAsciiString,
+              protectedHandle,
+              req,
+              data,
+            ),
+          writeLatin1String: (req, data) =>
+            FunctionPrototypeCall(
+              nativeProtectedWriteLatin1String,
+              protectedHandle,
+              req,
+              data,
+            ),
+          writeUcs2String: (req, data) =>
+            FunctionPrototypeCall(
+              nativeProtectedWriteUcs2String,
+              protectedHandle,
+              req,
+              data,
+            ),
+        },
+        (req) =>
+          FunctionPrototypeCall(
+            protectedSocketAfterAsyncWriteImpl,
+            socket,
+            req,
+          ),
+      );
+      if (
+        socket[kHandle] !== protectedHandle || ObjectHasOwn(socket, "_handle")
+      ) {
+        // A public `_handle` replacement must not redirect protected setup or
+        // teardown through package code. Stop and close the exact native peer,
+        // detach any package-selected handle, then report explicit refusal.
+        FunctionPrototypeCall(nativeProtectedReadStop, protectedHandle);
+        FunctionPrototypeCall(nativeProtectedClose, protectedHandle);
+        ReflectDeleteProperty(socket, "_handle");
+        unregisterActiveHandle(socket);
+        socket[kHandle] = null;
+        refuseProtectedSocket(
+          errnoException(MapPrototypeGet(codeMap, "EACCES"), "read"),
+        );
+        return;
+      }
+      if (
+        WeakMapPrototypeGet(protectedSocketOnreadOptions, socket) === true
+      ) {
+        // Protected onread-buffer mode would require a package-visible native
+        // write before delivery authorization. Fail explicitly before read
+        // until checked emulation owns that buffer lifecycle.
+        refuseProtectedSocket(
+          errnoException(MapPrototypeGet(codeMap, "EACCES"), "read"),
+        );
+        return;
+      }
+      WeakMapPrototypeSet(protectedSocketHandles, socket, protectedHandle);
       setReadableUseGuard(socket, () => {
-        op_oden_check_protected_inspector_stream_use(
-          protectedInspectorPeer,
+        checkNativeProtectedInspectorUse(
+          protectedHandle,
           "node:net.Socket readable consumption",
         );
+        return odenScheduleAsyncContext();
       });
+      if (socket[kSetNoDelay]) {
+        FunctionPrototypeCall(
+          nativeProtectedSetNoDelay,
+          protectedHandle,
+          true,
+        );
+      }
+      if (socket[kSetKeepAlive]) {
+        FunctionPrototypeCall(
+          nativeProtectedSetKeepAlive,
+          protectedHandle,
+          true,
+          socket[kSetKeepAliveInitialDelay],
+        );
+      }
+
+      // The protected _afterConnect path runs with ambient authority cleared.
+      // Exact EventEmitter dispatch lets each live JS listener authenticate by
+      // its own frame; bound/native originless gadgets remain no-user.
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+      FunctionPrototypeCall(protectedSocketEmit, socket, "connect");
+      FunctionPrototypeCall(protectedSocketEmit, socket, "ready");
+
+      if (typeof handle.afterConnectTls === "function") {
+        refuseProtectedSocket(
+          errnoException(MapPrototypeGet(codeMap, "EACCES"), "connect"),
+        );
+        return;
+      }
+
+      if (readable && shouldStartProtectedReadable(socket)) {
+        _runInAsyncContext(
+          protectedOperationContext,
+          () => readProtectedReadableZero(socket),
+        );
+      }
+      return;
     }
 
     if (socket.readable && !readable) {
@@ -595,12 +1015,7 @@ function _afterConnectImpl(
 
     // Start the first read, or get an immediate EOF.
     // this doesn't actually consume any bytes, because len=0.
-    if (
-      readable && !socket.isPaused() &&
-      (typeof protectedInspectorPeer !== "string" ||
-        socket.listenerCount("data") > 0 ||
-        socket.listenerCount("readable") > 0)
-    ) {
+    if (readable && !socket.isPaused()) {
       socket.read(0);
     }
   } else {
@@ -659,6 +1074,25 @@ function _afterConnectMultiple(
   readable,
   writable,
 ) {
+  const self = context.socket;
+  if (WeakMapPrototypeGet(canceledConnectRequests, req) === true) {
+    WeakMapPrototypeDelete(canceledConnectRequests, req);
+    return;
+  }
+  if (context.currentHandle !== handle) {
+    FunctionPrototypeCall(nativeProtectedReadStop, handle);
+    FunctionPrototypeCall(nativeProtectedClose, handle);
+    if (typeof getNativeProtectedInspectorPeer(handle) === "string") {
+      _runWithoutAsyncContext(() =>
+        FunctionPrototypeCall(
+          protectedSocketDestroy,
+          self,
+          errnoException(MapPrototypeGet(codeMap, "EACCES"), "connect"),
+        )
+      );
+    }
+    return;
+  }
   debug(
     "connect/multiple: connection attempt to %s:%s completed with status %s",
     req.address,
@@ -676,11 +1110,9 @@ function _afterConnectMultiple(
       req.address,
       req.port,
     );
-    handle.close();
+    FunctionPrototypeCall(nativeProtectedClose, handle);
     return;
   }
-
-  const self = context.socket;
 
   // Some error occurred, add to the list of exceptions
   if (status !== 0) {
@@ -697,13 +1129,13 @@ function _afterConnectMultiple(
 
     // Try the next address, unless we were aborted
     if (context.socket.connecting) {
-      _internalConnectMultiple(context, status === UV_ECANCELED);
+      runInternalConnectMultiple(context, status === UV_ECANCELED);
     }
 
     return;
   }
 
-  _afterConnect(status, self._handle, req, readable, writable);
+  _afterConnect(status, handle, req, readable, writable);
 }
 
 function _internalConnectMultipleTimeout(context, req, handle) {
@@ -712,34 +1144,58 @@ function _internalConnectMultipleTimeout(context, req, handle) {
     req.address,
     req.port,
   );
-  context.socket.emit(
-    "connectionAttemptTimeout",
-    req.address,
-    req.port,
-    req.addressType,
-  );
+  const protectedAttempt =
+    typeof getNativeProtectedInspectorPeer(handle) === "string";
+  if (protectedAttempt) {
+    FunctionPrototypeCall(nativeProtectedReadStop, handle);
+    FunctionPrototypeCall(nativeProtectedClose, handle);
+    _runWithoutAsyncContext(() =>
+      FunctionPrototypeCall(
+        protectedSocketEmit,
+        context.socket,
+        "connectionAttemptTimeout",
+        req.address,
+        req.port,
+        req.addressType,
+      )
+    );
+  } else {
+    context.socket.emit(
+      "connectionAttemptTimeout",
+      req.address,
+      req.port,
+      req.addressType,
+    );
+  }
 
-  req.oncomplete = undefined;
+  WeakMapPrototypeSet(canceledConnectRequests, req, true);
   ArrayPrototypePush(
     context.errors,
     _createConnectionError(req, UV_ETIMEDOUT),
   );
-  handle.close();
+  if (!protectedAttempt) FunctionPrototypeCall(nativeProtectedClose, handle);
 
   // Try the next address, unless we were aborted
   if (context.socket.connecting) {
-    _internalConnectMultiple(context);
+    runInternalConnectMultiple(context);
   }
 }
 
-function _checkBindError(err: number, port: number, handle: TCP) {
+function _checkBindError(
+  err: number,
+  port: number,
+  handle: TCP,
+  exactHandle = false,
+) {
   // EADDRINUSE may not be reported until we call `listen()` or `connect()`.
   // To complicate matters, a failed `bind()` followed by `listen()` or `connect()`
   // will implicitly bind to a random port. Ergo, check that the socket is
   // bound to the expected port before calling `listen()` or `connect()`.
   if (err === 0 && port > 0 && handle.getsockname) {
     const out: AddressInfo | Record<string, never> = {};
-    err = handle.getsockname(out);
+    err = exactHandle
+      ? FunctionPrototypeCall(nativeProtectedGetsockname, handle, out)
+      : handle.getsockname(out);
 
     if (err === 0 && port !== out.port) {
       err = codeMap.get("EADDRINUSE")!;
@@ -769,6 +1225,8 @@ function _internalConnect(
   flags: number = 0,
 ) {
   assert(socket.connecting);
+  const connectHandle = WeakMapPrototypeGet(canonicalSocketHandles, socket) ??
+    socket._handle;
 
   if (
     socket.blockList?.check(address, `ipv${addressType}`)
@@ -784,11 +1242,22 @@ function _internalConnect(
     if (addressType === 4) {
       localAddress = localAddress || DEFAULT_IPV4_ADDR;
       // deno-lint-ignore prefer-primordials -- libuv handle.bind(), not Function.prototype.bind
-      err = (socket._handle as TCP).bind(localAddress, localPort);
+      err = FunctionPrototypeCall(
+        nativeProtectedBind,
+        connectHandle,
+        localAddress,
+        localPort,
+      );
     } else {
       // addressType === 6
       localAddress = localAddress || DEFAULT_IPV6_ADDR;
-      err = (socket._handle as TCP).bind6(localAddress, localPort, flags);
+      err = FunctionPrototypeCall(
+        nativeProtectedBind6,
+        connectHandle,
+        localAddress,
+        localPort,
+        flags,
+      );
     }
 
     debug(
@@ -798,7 +1267,7 @@ function _internalConnect(
       addressType,
     );
 
-    err = _checkBindError(err, localPort, socket._handle as TCP);
+    err = _checkBindError(err, localPort, connectHandle as TCP, true);
 
     if (err) {
       const ex = exceptionWithHostPort(err, "bind", localAddress, localPort);
@@ -810,17 +1279,33 @@ function _internalConnect(
 
   if (addressType === 6 || addressType === 4) {
     const req = new TCPConnectWrap();
-    req.oncomplete = _afterConnect;
-    req.address = address;
-    req.port = port;
-    req.localAddress = localAddress;
-    req.localPort = localPort;
+    initializeConnectRequest(
+      req,
+      _afterConnect,
+      address,
+      port,
+      localAddress,
+      localPort,
+      addressType,
+    );
 
     try {
       if (addressType === 4) {
-        err = (socket._handle as TCP).connect(req, address, port);
+        err = FunctionPrototypeCall(
+          nativeProtectedConnect,
+          connectHandle,
+          req,
+          address,
+          port,
+        );
       } else {
-        err = (socket._handle as TCP).connect6(req, address, port);
+        err = FunctionPrototypeCall(
+          nativeProtectedConnect6,
+          connectHandle,
+          req,
+          address,
+          port,
+        );
       }
     } catch (e) {
       socket.destroy(e);
@@ -828,8 +1313,7 @@ function _internalConnect(
     }
   } else {
     const req = new PipeConnectWrap();
-    req.oncomplete = _afterConnect;
-    req.address = address;
+    initializeConnectRequest(req, _afterConnect, address);
 
     err = (socket._handle as Pipe).connect(req, address);
   }
@@ -872,9 +1356,24 @@ function _internalConnectMultiple(context, canceled?: boolean) {
 
   const current = context.current++;
 
+  let attemptHandle;
   if (current > 0) {
-    self[kReinitializeHandle](new TCP(TCPConstants.SOCKET));
+    attemptHandle = new TCP(TCPConstants.SOCKET);
+    FunctionPrototypeCall(
+      protectedSocketReinitializeHandle,
+      self,
+      attemptHandle,
+    );
+  } else {
+    attemptHandle = context.handle;
   }
+  context.currentHandle = attemptHandle;
+  WeakMapPrototypeSet(
+    canonicalHandleAsyncContexts,
+    attemptHandle,
+    context.asyncContext,
+  );
+  attemptHandle[kAsyncContext] = context.asyncContext;
 
   const { localPort, port, flags } = context;
   const { address, family: addressType } = context.addresses[current];
@@ -885,11 +1384,30 @@ function _internalConnectMultiple(context, canceled?: boolean) {
     if (addressType === 4) {
       localAddress = DEFAULT_IPV4_ADDR;
       // deno-lint-ignore prefer-primordials -- libuv handle.bind(), not Function.prototype.bind
-      err = self._handle.bind(localAddress, localPort);
+      err = _runInAsyncContext(
+        context.asyncContext,
+        () =>
+          FunctionPrototypeCall(
+            nativeProtectedBind,
+            attemptHandle,
+            localAddress,
+            localPort,
+          ),
+      );
     } else {
       // addressType === 6
       localAddress = DEFAULT_IPV6_ADDR;
-      err = self._handle.bind6(localAddress, localPort, flags);
+      err = _runInAsyncContext(
+        context.asyncContext,
+        () =>
+          FunctionPrototypeCall(
+            nativeProtectedBind6,
+            attemptHandle,
+            localAddress,
+            localPort,
+            flags,
+          ),
+      );
     }
 
     debug(
@@ -899,13 +1417,13 @@ function _internalConnectMultiple(context, canceled?: boolean) {
       addressType,
     );
 
-    err = _checkBindError(err, localPort, self._handle);
+    err = _checkBindError(err, localPort, attemptHandle, true);
     if (err) {
       ArrayPrototypePush(
         context.errors,
         exceptionWithHostPort(err, "bind", localAddress, localPort),
       );
-      _internalConnectMultiple(context);
+      runInternalConnectMultiple(context);
       return;
     }
   }
@@ -917,7 +1435,7 @@ function _internalConnectMultiple(context, canceled?: boolean) {
       context.errors,
       new ERR_IP_BLOCKED(address),
     );
-    _internalConnectMultiple(context);
+    runInternalConnectMultiple(context);
     return;
   }
 
@@ -930,17 +1448,20 @@ function _internalConnectMultiple(context, canceled?: boolean) {
   self.emit("connectionAttempt", address, port, addressType);
 
   const req = new TCPConnectWrap();
-  req.oncomplete = FunctionPrototypeBind(
-    _afterConnectMultiple,
-    undefined,
-    context,
-    current,
+  initializeConnectRequest(
+    req,
+    FunctionPrototypeBind(
+      _afterConnectMultiple,
+      undefined,
+      context,
+      current,
+    ),
+    address,
+    port,
+    localAddress,
+    localPort,
+    addressType,
   );
-  req.address = address;
-  req.port = port;
-  req.localAddress = localAddress;
-  req.localPort = localPort;
-  req.addressType = addressType;
 
   ArrayPrototypePush(
     self.autoSelectFamilyAttemptedAddresses,
@@ -948,9 +1469,29 @@ function _internalConnectMultiple(context, canceled?: boolean) {
   );
 
   if (addressType === 4) {
-    err = self._handle.connect(req, address, port);
+    err = _runInAsyncContext(
+      context.asyncContext,
+      () =>
+        FunctionPrototypeCall(
+          nativeProtectedConnect,
+          attemptHandle,
+          req,
+          address,
+          port,
+        ),
+    );
   } else {
-    err = self._handle.connect6(req, address, port);
+    err = _runInAsyncContext(
+      context.asyncContext,
+      () =>
+        FunctionPrototypeCall(
+          nativeProtectedConnect6,
+          attemptHandle,
+          req,
+          address,
+          port,
+        ),
+    );
   }
 
   if (err) {
@@ -965,7 +1506,7 @@ function _internalConnectMultiple(context, canceled?: boolean) {
     ArrayPrototypePush(context.errors, ex);
 
     self.emit("connectionAttemptFailed", address, port, addressType, ex);
-    _internalConnectMultiple(context);
+    runInternalConnectMultiple(context);
     return;
   }
 
@@ -981,9 +1522,15 @@ function _internalConnectMultiple(context, canceled?: boolean) {
       context.timeout,
       context,
       req,
-      self._handle,
+      attemptHandle,
     );
   }
+}
+
+function runInternalConnectMultiple(context, canceled?: boolean) {
+  return _runWithoutAsyncContext(() =>
+    _internalConnectMultiple(context, canceled)
+  );
 }
 
 // Provide a better error message when we call end() as a result
@@ -1035,8 +1582,28 @@ function _writeAfterFIN(
 function _tryReadStart(socket: Socket) {
   // Not already reading, start the flow.
   debug("Socket._handle.readStart");
-  socket._handle!.reading = true;
-  const err = socket._handle!.readStart();
+  const handle = WeakMapPrototypeGet(protectedSocketHandles, socket) ??
+    socket._handle!;
+  const protectedInspectorPeer = getNativeProtectedInspectorPeer(handle);
+  // Protected inspector peers require the native stream wrapper to capture
+  // this exact loader-authenticated adapter. A package may replace the public
+  // `handle.onread` property, but that mutable property is never the byte
+  // destination for a protected stream.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  let err;
+  if (typeof protectedInspectorPeer === "string") {
+    // Ignore the public `reading` bit and mutable readStart method. Tagging
+    // may have retired a pre-connect decoy read while that public bit stayed
+    // true; the native method is idempotent for an already-active real read.
+    err = FunctionPrototypeCall(
+      nativeProtectedReadStart,
+      handle,
+      onStreamRead,
+    );
+  } else {
+    handle.reading = true;
+    err = handle.readStart(onStreamRead);
+  }
 
   if (err) {
     socket.destroy(errnoException(err, "read"));
@@ -1068,10 +1635,25 @@ function _initSocketHandle(socket: Socket) {
 
   // Handle creation may be deferred to bind() or connect() time.
   if (socket._handle) {
-    (socket._handle as any)[ownerSymbol] = socket;
-    socket._handle.onread = onStreamRead;
-    socket[asyncIdSymbol] = _getNewAsyncId(socket._handle);
-    _emitHandleInit(socket._handle, socket[asyncIdSymbol]);
+    const handle = socket._handle;
+    if (typeof getNativeProtectedInspectorPeer(handle) === "string") {
+      // Only connect completion can install the complete canonical binding and
+      // readable guard. Rewrapping an already-tagged handle would otherwise
+      // expose a readStart window before those invariants exist.
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+      FunctionPrototypeCall(nativeProtectedReadStop, handle);
+      FunctionPrototypeCall(nativeProtectedClose, handle);
+      socket[kHandle] = null;
+      throw errnoException(MapPrototypeGet(codeMap, "EACCES"), "open");
+    }
+    if (WeakMapPrototypeGet(canonicalSocketOwners, handle) === undefined) {
+      WeakMapPrototypeSet(canonicalSocketOwners, handle, socket);
+    }
+    WeakMapPrototypeSet(canonicalSocketHandles, socket, handle);
+    (handle as any)[ownerSymbol] = socket;
+    handle.onread = onStreamRead;
+    socket[asyncIdSymbol] = _getNewAsyncId(handle);
+    _emitHandleInit(handle, socket[asyncIdSymbol]);
 
     let userBuf = socket[kBuffer];
 
@@ -1088,7 +1670,7 @@ function _initSocketHandle(socket: Socket) {
         socket[kBuffer] = userBuf;
       }
 
-      socket._handle.useUserBuffer(userBuf);
+      handle.useUserBuffer(userBuf);
     }
   }
 }
@@ -1146,20 +1728,23 @@ function _lookupAndConnect(self: Socket, options: TcpSocketConnectOptions) {
   const addressType = isIP(host);
   if (addressType) {
     defaultTriggerAsyncIdScope(self[asyncIdSymbol], nextTick, () => {
-      _runInAsyncContext(self._handle?.[kAsyncContext], () => {
-        if (self.connecting) {
-          defaultTriggerAsyncIdScope(
-            self[asyncIdSymbol],
-            _internalConnect,
-            self,
-            host,
-            port,
-            addressType,
-            localAddress,
-            localPort,
-          );
-        }
-      });
+      _runInAsyncContext(
+        WeakMapPrototypeGet(canonicalSocketAsyncContexts, self),
+        () => {
+          if (self.connecting) {
+            defaultTriggerAsyncIdScope(
+              self[asyncIdSymbol],
+              _internalConnect,
+              self,
+              host,
+              port,
+              addressType,
+              localAddress,
+              localPort,
+            );
+          }
+        },
+      );
     });
 
     return;
@@ -1243,7 +1828,7 @@ function _lookupAndConnect(self: Socket, options: TcpSocketConnectOptions) {
       netPermToken,
     ) {
       _runInAsyncContext(
-        self._handle?.[kAsyncContext],
+        WeakMapPrototypeGet(canonicalSocketAsyncContexts, self),
         () => emitLookupInContext(err, ip, addressType, netPermToken),
       );
     }
@@ -1258,10 +1843,16 @@ function _lookupAndConnect(self: Socket, options: TcpSocketConnectOptions) {
       // checks permissions against the original hostname instead of the
       // resolved IP. Only honored on the default-lookup path; a custom lookup
       // never installs a token (its IPs are checked literally).
-      if (
-        usingDefaultLookup && netPermToken && self._handle?.setNetPermToken
-      ) {
-        self._handle.setNetPermToken(netPermToken);
+      const canonicalHandle = WeakMapPrototypeGet(
+        canonicalSocketHandles,
+        self,
+      );
+      if (usingDefaultLookup && netPermToken && canonicalHandle) {
+        FunctionPrototypeCall(
+          nativeProtectedSetNetPermToken,
+          canonicalHandle,
+          netPermToken,
+        );
       }
       self.emit("lookup", err, ip, addressType, host);
 
@@ -1334,17 +1925,23 @@ function _lookupAndConnectMultiple(
   defaultTriggerAsyncIdScope(self[asyncIdSymbol], function () {
     function emitLookup(err, addresses, _, netPermToken) {
       _runInAsyncContext(
-        self._handle?.[kAsyncContext],
+        WeakMapPrototypeGet(canonicalSocketAsyncContexts, self),
         () => emitLookupInContext(err, addresses, _, netPermToken),
       );
     }
 
     function emitLookupInContext(err, addresses, _, netPermToken) {
       // Only the built-in lookup installs a token (see _lookupAndConnect).
-      if (
-        usingDefaultLookup && netPermToken && self._handle?.setNetPermToken
-      ) {
-        self._handle.setNetPermToken(netPermToken);
+      const canonicalHandle = WeakMapPrototypeGet(
+        canonicalSocketHandles,
+        self,
+      );
+      if (usingDefaultLookup && netPermToken && canonicalHandle) {
+        FunctionPrototypeCall(
+          nativeProtectedSetNetPermToken,
+          canonicalHandle,
+          netPermToken,
+        );
       }
       // It's possible we were destroyed while looking this up.
       // XXX it would be great if we could cancel the promise returned by
@@ -1376,7 +1973,9 @@ function _lookupAndConnectMultiple(
           return;
         }
         if (isIP(ip) && (addressType === 4 || addressType === 6)) {
-          destinations ||= addressType === 6 ? { 6: 0, 4: 1 } : { 4: 0, 6: 1 };
+          destinations ||= addressType === 6
+            ? { 6: 0, 4: 1 }
+            : { 4: 0, 6: 1 };
 
           const destination = destinations[addressType];
 
@@ -1452,6 +2051,12 @@ function _lookupAndConnectMultiple(
 
       const context = {
         socket: self,
+        handle: self[kHandle],
+        currentHandle: self[kHandle],
+        asyncContext: WeakMapPrototypeGet(
+          canonicalSocketAsyncContexts,
+          self,
+        ),
         addresses: toAttempt,
         current: 0,
         port,
@@ -1465,7 +2070,7 @@ function _lookupAndConnectMultiple(
       self._unrefTimer();
       defaultTriggerAsyncIdScope(
         self[asyncIdSymbol],
-        _internalConnectMultiple,
+        runInternalConnectMultiple,
         context,
       );
     }
@@ -1480,11 +2085,21 @@ function _lookupAndConnectMultiple(
 }
 
 function _afterShutdown(this: ShutdownWrap<TCP>) {
-  const self: any = this.handle[ownerSymbol];
+  const handle = this.handle;
+  const protectedPeer = getNativeProtectedInspectorPeer(handle);
+  const self: any = typeof protectedPeer === "string"
+    ? WeakMapPrototypeGet(canonicalSocketOwners, handle)
+    : handle[ownerSymbol];
 
-  debug("afterShutdown destroyed=%j", self.destroyed, self._readableState);
-
-  this.callback();
+  if (typeof protectedPeer === "string") {
+    _runWithoutAsyncContext(() => {
+      debug("afterShutdown protected");
+      this.callback();
+    });
+  } else {
+    debug("afterShutdown destroyed=%j", self.destroyed, self._readableState);
+    this.callback();
+  }
 }
 
 function _emitCloseNT(s: Socket | Server) {
@@ -1654,6 +2269,7 @@ function Socket(options) {
         this[kBuffer] = onreadBuffer;
       }
       this[kBufferCb] = onread.callback;
+      WeakMapPrototypeSet(protectedSocketOnreadOptions, this, true);
     }
   }
 
@@ -1692,16 +2308,18 @@ Socket.prototype.connect = function (...args) {
   let odenHttpAsyncContext;
 
   if (ObjectHasOwn(options, "__odenHttpNetToken")) {
+    const odenHttpNetToken = options.__odenHttpNetToken;
     // The HTTP Agent restores the request's private actor context around this
     // call. Preserve that exact snapshot: rebuilding it from this deep trusted
     // stack could see only runtime frames and erase the package actor.
-    odenHttpAsyncContext = core.getAsyncContext();
-    WeakMapPrototypeSet(
-      odenHttpNetTokens,
-      this,
-      options.__odenHttpNetToken,
-    );
     ReflectDeleteProperty(options, "__odenHttpNetToken");
+    // A falsey/absent marker is forgeable user data, not proof that the
+    // built-in HTTP path restored an authenticated context. Truthy fakes are
+    // rejected by the native cppgc token conversion before connect.
+    if (odenHttpNetToken) {
+      odenHttpAsyncContext = core.getAsyncContext();
+      WeakMapPrototypeSet(odenHttpNetTokens, this, odenHttpNetToken);
+    }
   }
 
   if (options.port === undefined && options.path == null) {
@@ -1736,14 +2354,30 @@ Socket.prototype.connect = function (...args) {
     _initSocketHandle(this);
   }
 
-  installOdenHttpNetToken(this, this._handle);
+  const validatedOdenHttpNetToken = installOdenHttpNetToken(
+    this,
+    WeakMapPrototypeGet(canonicalSocketHandles, this) ?? this._handle,
+  );
 
   // Capture the async context now, while we are still running synchronously
   // inside the caller's context. The DNS lookup that precedes the actual
   // connect is async and would otherwise drop it before `_afterConnect` runs.
-  this._handle[kAsyncContext] = odenHttpAsyncContext === undefined
-    ? odenScheduleAsyncContext()
-    : odenHttpAsyncContext;
+  const connectHandle = WeakMapPrototypeGet(canonicalSocketHandles, this) ??
+    this._handle;
+  const connectAsyncContext = validatedOdenHttpNetToken
+    ? odenHttpAsyncContext
+    : odenScheduleAsyncContext();
+  WeakMapPrototypeSet(
+    canonicalSocketAsyncContexts,
+    this,
+    connectAsyncContext,
+  );
+  WeakMapPrototypeSet(
+    canonicalHandleAsyncContexts,
+    connectHandle,
+    connectAsyncContext,
+  );
+  connectHandle[kAsyncContext] = connectAsyncContext;
 
   if (cb !== null) {
     this.once("connect", cb);
@@ -1778,11 +2412,21 @@ Socket.prototype.connect = function (...args) {
 };
 
 Socket.prototype.pause = function () {
-  if (!this.connecting && this._handle && this._handle.reading) {
-    this._handle.reading = false;
+  const handle = WeakMapPrototypeGet(protectedSocketHandles, this) ??
+    this._handle;
+  const protectedInspectorPeer = handle === null
+    ? undefined
+    : getNativeProtectedInspectorPeer(handle);
+  if (
+    !this.connecting && handle &&
+    (typeof protectedInspectorPeer === "string" || handle.reading)
+  ) {
+    if (typeof protectedInspectorPeer !== "string") handle.reading = false;
 
     if (!this.destroyed) {
-      const err = this._handle.readStop();
+      const err = typeof protectedInspectorPeer === "string"
+        ? FunctionPrototypeCall(nativeProtectedReadStop, handle)
+        : handle.readStop();
 
       if (err) {
         this.destroy(errnoException(err, "read"));
@@ -1794,7 +2438,13 @@ Socket.prototype.pause = function () {
 };
 
 Socket.prototype.resume = function () {
-  if (!this.connecting && this._handle && !this._handle.reading) {
+  const handle = WeakMapPrototypeGet(protectedSocketHandles, this) ??
+    this._handle;
+  if (
+    !this.connecting && handle &&
+    (typeof getNativeProtectedInspectorPeer(handle) === "string" ||
+      !handle.reading)
+  ) {
     _tryReadStart(this);
   }
 
@@ -2046,6 +2696,7 @@ Socket.prototype.end = function (data, encoding, cb) {
 
   return this;
 };
+protectedSocketEndImpl = Socket.prototype.end;
 
 Socket.prototype.read = function (size) {
   if (
@@ -2082,29 +2733,46 @@ Socket.prototype._unrefTimer = function () {
 };
 
 Socket.prototype._final = function (cb) {
+  const protectedHandle = WeakMapPrototypeGet(protectedSocketHandles, this);
   if (this.connecting) {
     debug("_final: not yet connected");
-    return this.once("connect", () => this._final(cb));
+    return this.once(
+      "connect",
+      () => FunctionPrototypeCall(protectedSocketFinalImpl, this, cb),
+    );
   }
 
-  if (!this._handle) {
+  const handle = protectedHandle ?? this._handle;
+  if (!handle) {
     return cb();
   }
 
   debug("_final: not ended, call shutdown()");
 
   const req = new ShutdownWrap();
-  req.oncomplete = _afterShutdown;
-  req.handle = this._handle;
-  req.callback = cb;
-  const err = this._handle.shutdown(req);
+  if (protectedHandle === undefined) {
+    req.oncomplete = _afterShutdown;
+    req.handle = handle;
+    req.callback = cb;
+  } else {
+    defineImmutableRequestProperty(req, "oncomplete", _afterShutdown);
+    defineImmutableRequestProperty(req, "handle", protectedHandle);
+    defineImmutableRequestProperty(req, "callback", cb);
+  }
+  const err = protectedHandle === undefined
+    ? handle.shutdown(req)
+    : FunctionPrototypeCall(nativeProtectedShutdown, protectedHandle, req);
 
   if (err === 1 || err === codeMap.get("ENOTCONN")) {
-    return cb();
+    return protectedHandle === undefined ? cb() : _runWithoutAsyncContext(cb);
   } else if (err !== 0) {
-    return cb(errnoException(err, "shutdown"));
+    const error = errnoException(err, "shutdown");
+    return protectedHandle === undefined
+      ? cb(error)
+      : _runWithoutAsyncContext(() => cb(error));
   }
 };
+protectedSocketFinalImpl = Socket.prototype._final;
 
 Socket.prototype._onTimeout = function () {
   const handle = this._handle;
@@ -2127,15 +2795,48 @@ Socket.prototype._onTimeout = function () {
 
 Socket.prototype._read = function (size) {
   debug("_read");
-  if (this.connecting || !this._handle) {
+  const handle = WeakMapPrototypeGet(protectedSocketHandles, this) ??
+    this._handle;
+  if (this.connecting || !handle) {
     debug("_read wait for connection");
     this.once("connect", () => this._read(size));
-  } else if (!this._handle.reading) {
+  } else if (
+    typeof getNativeProtectedInspectorPeer(handle) === "string" ||
+    !handle.reading
+  ) {
     _tryReadStart(this);
   }
 };
+protectedSocketReadImpl = Socket.prototype._read;
 
 Socket.prototype._destroy = function (exception, cb) {
+  const protectedHandle = WeakMapPrototypeGet(protectedSocketHandles, this);
+  if (protectedHandle !== undefined) {
+    // Close the exact native peer before touching any reflectable Socket
+    // compatibility field. Cleanup callbacks/events run with ambient positive
+    // authority cleared, so originless package gadgets cannot turn root-owned
+    // destruction into a final write.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    const preclosed = WeakMapPrototypeGet(protectedSocketPreclosed, this) ===
+      true;
+    WeakMapPrototypeDelete(protectedSocketPreclosed, this);
+    if (!preclosed) {
+      closeProtectedSocketNative(
+        this,
+        protectedHandle,
+        exception ? true : false,
+      );
+    }
+    WeakMapPrototypeDelete(protectedSocketHandles, this);
+    _runWithoutAsyncContext(() => {
+      this.connecting = false;
+      ReflectDeleteProperty(this, "_handle");
+      this[kHandle] = null;
+      this._sockname = undefined;
+      cb(exception);
+    });
+    return;
+  }
   debug("destroy");
   this.connecting = false;
 
@@ -2207,6 +2908,7 @@ Socket.prototype._destroy = function (exception, cb) {
     }
   }
 };
+protectedSocketDestroyImpl = Socket.prototype._destroy;
 
 Socket.prototype._getpeername = function () {
   if (
@@ -2235,17 +2937,39 @@ Socket.prototype._getsockname = function () {
 
 Socket.prototype._writeGeneric = function (writev, data, encoding, cb) {
   if (this.connecting) {
-    this._pendingData = data;
-    this._pendingEncoding = encoding;
+    const socket = this;
+    WeakMapPrototypeSet(pendingSocketWrites, socket, {
+      __proto__: null,
+      writev,
+      data,
+      encoding,
+      cb,
+    });
+    // Compatibility fields are non-payload decoys. The actual bytes live
+    // only in the closure-private pending record until exact connect flush.
+    socket._pendingData = null;
+    socket._pendingEncoding = "";
 
     const onClose = () => {
+      WeakMapPrototypeDelete(pendingSocketWrites, socket);
       cb(new ERR_SOCKET_CLOSED_BEFORE_CONNECTION());
     };
-    this.once("connect", function connect() {
-      this.off("close", onClose);
-      this._writeGeneric(writev, data, encoding, cb);
+    FunctionPrototypeCall(protectedSocketOnce, socket, "connect", () => {
+      FunctionPrototypeCall(protectedSocketOff, socket, "close", onClose);
+      const pending = WeakMapPrototypeGet(pendingSocketWrites, socket);
+      WeakMapPrototypeDelete(pendingSocketWrites, socket);
+      if (pending !== undefined) {
+        FunctionPrototypeCall(
+          protectedSocketWriteGenericImpl,
+          socket,
+          pending.writev,
+          pending.data,
+          pending.encoding,
+          pending.cb,
+        );
+      }
     });
-    this.once("close", onClose);
+    FunctionPrototypeCall(protectedSocketOnce, socket, "close", onClose);
 
     return;
   }
@@ -2253,37 +2977,53 @@ Socket.prototype._writeGeneric = function (writev, data, encoding, cb) {
   this._pendingData = null;
   this._pendingEncoding = "";
 
-  if (!this._handle) {
+  const protectedHandle = WeakMapPrototypeGet(protectedSocketHandles, this);
+  const handle = protectedHandle ?? this._handle;
+  if (!handle) {
     cb(new ERR_SOCKET_CLOSED());
 
     return false;
   }
 
-  this._unrefTimer();
+  if (protectedHandle === undefined) this._unrefTimer();
 
   let req;
 
   if (writev) {
-    req = writevGeneric(this, data, cb);
+    req = writevGeneric(this, data, cb, protectedHandle);
   } else {
-    req = writeGeneric(this, data, encoding, cb);
+    req = writeGeneric(this, data, encoding, cb, protectedHandle);
   }
   if (req.async) {
     this[kLastWriteQueueSize] = req.bytes;
   }
 };
+protectedSocketWriteGenericImpl = Socket.prototype._writeGeneric;
 
 Socket.prototype._writev = function (chunks, cb) {
-  this._writeGeneric(true, chunks, "", cb);
+  const writeGenericImpl =
+    WeakMapPrototypeGet(protectedSocketHandles, this) ===
+        undefined
+      ? this._writeGeneric
+      : protectedSocketWriteGenericImpl;
+  FunctionPrototypeCall(writeGenericImpl, this, true, chunks, "", cb);
 };
+protectedSocketWritevImpl = Socket.prototype._writev;
 
 Socket.prototype._write = function (data, encoding, cb) {
-  this._writeGeneric(false, data, encoding, cb);
+  const writeGenericImpl =
+    WeakMapPrototypeGet(protectedSocketHandles, this) ===
+        undefined
+      ? this._writeGeneric
+      : protectedSocketWriteGenericImpl;
+  FunctionPrototypeCall(writeGenericImpl, this, false, data, encoding, cb);
 };
+protectedSocketWriteImpl = Socket.prototype._write;
 
 Socket.prototype[kAfterAsyncWrite] = function () {
   this[kLastWriteQueueSize] = 0;
 };
+protectedSocketAfterAsyncWriteImpl = Socket.prototype[kAfterAsyncWrite];
 
 ObjectDefineProperty(Socket.prototype, kUpdateTimer, {
   __proto__: null,
@@ -2343,12 +3083,19 @@ Socket.prototype[kReinitializeHandle] = function (handle) {
   }
 
   this._handle = handle;
+  WeakMapPrototypeSet(canonicalSocketHandles, this, handle);
+  const asyncContext = WeakMapPrototypeGet(
+    canonicalSocketAsyncContexts,
+    this,
+  );
+  WeakMapPrototypeSet(canonicalHandleAsyncContexts, handle, asyncContext);
   this._handle[ownerSymbol] = this;
 
   installOdenHttpNetToken(this, this._handle);
 
   _initSocketHandle(this);
 };
+protectedSocketReinitializeHandle = Socket.prototype[kReinitializeHandle];
 
 const Stream = Socket;
 

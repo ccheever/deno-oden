@@ -115,6 +115,20 @@ try {
     allNodeWritesEvidenced &&= evidenced;
   }
   result.nodeWriteAudit = allNodeWritesEvidenced ? "EVIDENCED" : "BROKEN";
+  const nativeStream = await runInspectorChild(
+    "endpoint_native_stream_child.js",
+    [],
+    "native-stream",
+    8_000,
+  );
+  Object.assign(result, nativeStream.result);
+  const nativePreload = await runInspectorChild(
+    "endpoint_native_preload_child.js",
+    [],
+    "native-preload",
+    8_000,
+  );
+  Object.assign(result, nativePreload.result);
   console.log(JSON.stringify(result));
 } finally {
   Deno.removeSync(auditDir, { recursive: true });

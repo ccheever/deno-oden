@@ -30,14 +30,16 @@
 const { core, primordials } = __bootstrap;
 const _mod1 =
   core.loadExtScript("ext:deno_node/internal/streams/legacy.js").default;
+const readableModule = core.loadExtScript(
+  "ext:deno_node/internal/streams/readable.js",
+);
 const {
   default: Readable,
   getReadableUseGuard,
   readableStateForStream,
+  registerReadableState,
   setReadableUseGuard,
-} = core.loadExtScript(
-  "ext:deno_node/internal/streams/readable.js",
-);
+} = readableModule;
 const {
   default: Writable,
   writableStateForStream,
@@ -105,6 +107,7 @@ function Duplex(options) {
   };
 
   this._readableState = new Readable.ReadableState(options, this, true);
+  registerReadableState(this, this._readableState);
   this._writableState = new Writable.WritableState(options, this, true);
 
   if (options) {

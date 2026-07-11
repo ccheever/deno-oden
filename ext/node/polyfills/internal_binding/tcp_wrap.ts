@@ -37,11 +37,58 @@ const { TCPWrap } = core.ops;
 const { AsyncWrap, providerType } = core.loadExtScript(
   "ext:deno_node/internal_binding/async_wrap.ts",
 );
-const { FunctionPrototypeCall } = primordials;
+const { FunctionPrototypeCall, ObjectDefineProperty } = primordials;
 
 // Mark TCPWrap as a StreamBase handle, matching Node's StreamBase::AddMethods.
 // This allows parser.consume(socket._handle) to detect it as consumable.
 TCPWrap.prototype.isStreamBase = true;
+
+// Capture the native transport surface at the first internal-binding load,
+// before `process.binding("tcp_wrap")` can expose the constructor to package
+// code. Protected node:net paths may then retain these exact functions even if
+// a package loads before node:net and attempts prototype poisoning.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+for (
+  const name of [
+    "accept",
+    "bind",
+    "bind6",
+    "checkProtectedInspectorUse",
+    "close",
+    "connect",
+    "connect6",
+    "fdForIpc",
+    "getsockname",
+    "open",
+    "openFromRid",
+    "protectedInspectorPeer",
+    "readStart",
+    "readStop",
+    "setKeepAlive",
+    "setNetPermToken",
+    "setNoDelay",
+    "setOdenHttpNetToken",
+    "shutdown",
+    "takeStream",
+    "useUserBuffer",
+    "writeAsciiString",
+    "writeBuffer",
+    "writeLatin1String",
+    "writeUcs2String",
+    "writeUtf8String",
+    "writev",
+  ]
+) {
+  const value = TCPWrap.prototype[name];
+  if (typeof value === "function") {
+    ObjectDefineProperty(TCPWrap.prototype, name, {
+      __proto__: null,
+      configurable: false,
+      value,
+      writable: false,
+    });
+  }
+}
 
 /** The type of TCP socket. */
 enum socketType {

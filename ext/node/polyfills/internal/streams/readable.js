@@ -5,6 +5,9 @@
 const { core, primordials } = __bootstrap;
 const lazyProcess = core.createLazyLoader("node:process");
 const process = lazyProcess().default;
+const { nextTick: ProtectedReadableNextTick } = core.loadExtScript(
+  "ext:deno_node/_next_tick.ts",
+);
 const {
   addEventEmitterListener,
   emitPreparedEvent,
@@ -31,7 +34,8 @@ const { addAbortSignal } = core.loadExtScript(
   "ext:deno_node/internal/streams/add-abort-signal.js",
 );
 const eos =
-  core.loadExtScript("ext:deno_node/internal/streams/end-of-stream.js").default;
+  core.loadExtScript("ext:deno_node/internal/streams/end-of-stream.js")
+    .default;
 const destroyImpl =
   core.loadExtScript("ext:deno_node/internal/streams/destroy.js").default;
 const {
@@ -157,9 +161,12 @@ const {
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
   TypedArrayPrototypeSet,
+  WeakMapPrototypeDelete,
   WeakMapPrototypeGet,
   WeakMapPrototypeSet,
 } = primordials;
+
+const EventEmitterPrototypeEmit = EE.prototype.emit;
 
 Readable.ReadableState = ReadableState;
 
@@ -260,7 +267,11 @@ const directEventDeliverySentinel = FunctionPrototypeBind(nop, undefined);
 
 function nextTickWithCurrent(callback, ...args) {
   const captured = captureCurrentDeliveryCallback(callback);
-  process.nextTick(() => runCapturedCallback(captured, undefined, args));
+  FunctionPrototypeCall(
+    ProtectedReadableNextTick,
+    process,
+    () => runCapturedCallback(captured, undefined, args),
+  );
 }
 
 // Protected native sockets can otherwise prefetch into this module's JS
@@ -270,8 +281,25 @@ function nextTickWithCurrent(callback, ...args) {
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
 const guardedReadableStates = new SafeWeakMap();
 const originalReadableStates = new SafeWeakMap();
+// Native EOF cleanup is allowed after revocation, but it must still use the
+// construction-time state and captured implementation. The override is
+// closure-private and exists only for that exact terminal transition.
+const protectedReadableOperationStates = new SafeWeakMap();
+
+function registerReadableState(stream, state) {
+  const registered = WeakMapPrototypeGet(originalReadableStates, stream);
+  if (registered !== undefined && registered !== state) {
+    throw new Error("Readable state identity changed");
+  }
+  WeakMapPrototypeSet(originalReadableStates, stream, state);
+}
 
 function readableStateForStream(stream) {
+  const operationState = WeakMapPrototypeGet(
+    protectedReadableOperationStates,
+    stream,
+  );
+  if (operationState !== undefined) return operationState;
   const original = WeakMapPrototypeGet(originalReadableStates, stream);
   return original !== undefined && getStreamUseGuard(stream) !== undefined
     ? original
@@ -280,6 +308,41 @@ function readableStateForStream(stream) {
 
 function isRegisteredReadable(stream) {
   return WeakMapPrototypeGet(originalReadableStates, stream) !== undefined;
+}
+
+// Native callers only need an admission signal. Never return the retained
+// ReadableState object across this internal boundary.
+function getProtectedReadableState(stream) {
+  return isRegisteredReadable(stream) ? true : undefined;
+}
+
+function isProtectedReadableDestroyed(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  return state === undefined || (state[kState] & kDestroyed) !== 0;
+}
+
+function isProtectedReadableEndEmitted(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  return state === undefined || (state[kState] & kEndEmitted) !== 0;
+}
+
+function shouldStartProtectedReadable(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  return state !== undefined && (state[kState] & kPaused) === 0 &&
+    (state[kState] & (kDataListening | kReadableListening)) !== 0;
+}
+
+function hasProtectedReadableDecoder(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  return state !== undefined && (state[kState] & kDecoder) !== 0;
+}
+
+function getReadableOperationState(stream) {
+  const state = readableStateForStream(stream);
+  if (state === undefined) {
+    throw new Error("guarded Readable is missing registered state");
+  }
+  return state;
 }
 
 function isReadablePublicRead(callback) {
@@ -316,7 +379,7 @@ function setReadableUseGuard(stream, guard) {
 }
 
 function runReadableUseGuard(stream) {
-  runStreamUseGuard(stream);
+  return runStreamUseGuard(stream);
 }
 
 function getGuardedReadableState(state) {
@@ -724,6 +787,7 @@ function Readable(options) {
   };
 
   this._readableState = new ReadableState(options, this, false);
+  registerReadableState(this, this._readableState);
 
   if (options) {
     if (typeof options.read === "function") {
@@ -794,6 +858,21 @@ function pushReadableChunk(stream, chunk, encoding = undefined) {
     chunk,
     encoding,
   );
+}
+
+// Native protected streams call this closure-owned entry point instead of the
+// public `stream.push` method. Direct-flow delivery also uses the captured
+// EventEmitter implementation, so package replacement of either instance
+// method cannot become a byte sink.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function pushProtectedReadableChunk(stream, chunk) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  if (state === undefined) {
+    throw new Error("protected native stream is missing readable state");
+  }
+  return (state[kState] & kObjectMode) === 0
+    ? readableAddChunkPushByteMode(stream, state, chunk, undefined)
+    : readableAddChunkPushObjectMode(stream, state, chunk, undefined);
 }
 
 // Unshift should *always* be something directly out of read().
@@ -868,7 +947,12 @@ function readableAddChunkUnshiftValue(stream, state, chunk) {
   return canPushMore(state);
 }
 
-function readableAddChunkPushByteMode(stream, state, chunk, encoding) {
+function readableAddChunkPushByteMode(
+  stream,
+  state,
+  chunk,
+  encoding,
+) {
   if (chunk === null) {
     state[kState] &= ~kReading;
     onEofChunk(stream, state);
@@ -927,7 +1011,12 @@ function readableAddChunkPushByteMode(stream, state, chunk, encoding) {
   return canPushMore(state);
 }
 
-function readableAddChunkPushObjectMode(stream, state, chunk, encoding) {
+function readableAddChunkPushObjectMode(
+  stream,
+  state,
+  chunk,
+  encoding,
+) {
   if (chunk === null) {
     state[kState] &= ~kReading;
     onEofChunk(stream, state);
@@ -961,7 +1050,12 @@ function canPushMore(state) {
     (state.length < state.highWaterMark || state.length === 0);
 }
 
-function addChunk(stream, state, chunk, addToFront) {
+function addChunk(
+  stream,
+  state,
+  chunk,
+  addToFront,
+) {
   if (
     (state[kState] & (kFlowing | kSync | kDataListening)) ===
       (kFlowing | kDataListening) && state.length === 0
@@ -1088,7 +1182,13 @@ function howMuchToRead(n, state) {
 
 // You can override either this method, or the async _read(n) below.
 Readable.prototype.read = function (n) {
-  runReadableUseGuard(this);
+  const protectedState = WeakMapPrototypeGet(
+    protectedReadableOperationStates,
+    this,
+  );
+  // Closure-owned native EOF cleanup is always allowed. Positive delivery was
+  // already authorized before the protected operation state is installed.
+  if (protectedState === undefined) runReadableUseGuard(this);
   debug("read", n);
   // Same as parseInt(undefined, 10), however V8 7.3 performance regressed
   // in this scenario, so we are doing it manually.
@@ -1097,7 +1197,7 @@ Readable.prototype.read = function (n) {
   } else if (!NumberIsInteger(n)) {
     n = NumberParseInt(n, 10);
   }
-  const state = readableStateForStream(this);
+  const state = protectedState ?? readableStateForStream(this);
   const nOrig = n;
 
   // If we're asking for more than the current hwm, then raise the hwm.
@@ -1122,9 +1222,9 @@ Readable.prototype.read = function (n) {
   ) {
     debug("read: emitReadable");
     if (state.length === 0 && (state[kState] & kEnded) !== 0) {
-      endReadable(this);
+      endReadable(this, state);
     } else {
-      emitReadable(this);
+      emitReadable(this, state);
     }
     return null;
   }
@@ -1134,7 +1234,7 @@ Readable.prototype.read = function (n) {
   // If we've ended, and we're now clear, then finish it up.
   if (n === 0 && (state[kState] & kEnded) !== 0) {
     if (state.length === 0) {
-      endReadable(this);
+      endReadable(this, state);
     }
     return null;
   }
@@ -1236,11 +1336,13 @@ Readable.prototype.read = function (n) {
 
     // If we tried to read() past the EOF, then emit end on the next tick.
     if (nOrig !== n && (state[kState] & kEnded) !== 0) {
-      endReadable(this);
+      endReadable(this, state);
     }
   }
 
-  if (ret !== null && (state[kState] & (kErrorEmitted | kCloseEmitted)) === 0) {
+  if (
+    ret !== null && (state[kState] & (kErrorEmitted | kCloseEmitted)) === 0
+  ) {
     state[kState] |= kDataEmitted;
     emitPreparedEvent(this, "data", [ret], preparedDataListeners);
   }
@@ -1251,6 +1353,65 @@ ReadablePrototypeRead = Readable.prototype.read;
 
 function readReadableChunk(stream, size = undefined) {
   return FunctionPrototypeCall(ReadablePrototypeRead, stream, size);
+}
+
+// Loader-owned scheduled flow must not call a package-replaced public `read`
+// method while carrying the initiating operation's context. Recheck the live
+// consumer, then run the exact implementation against the registered state.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function readGuardedReadable(stream, state, size) {
+  if (getStreamUseGuard(stream) === undefined) {
+    return stream.read(size);
+  }
+  runReadableUseGuard(stream);
+  const registeredState = WeakMapPrototypeGet(originalReadableStates, stream);
+  if (registeredState === undefined || registeredState !== state) {
+    throw new Error("guarded Readable state identity changed");
+  }
+  const operationState = WeakMapPrototypeGet(
+    protectedReadableOperationStates,
+    stream,
+  );
+  if (operationState !== undefined) {
+    if (operationState !== state) {
+      throw new Error("protected Readable operation state changed");
+    }
+    return FunctionPrototypeCall(ReadablePrototypeRead, stream, size);
+  }
+  WeakMapPrototypeSet(protectedReadableOperationStates, stream, state);
+  try {
+    return FunctionPrototypeCall(ReadablePrototypeRead, stream, size);
+  } finally {
+    WeakMapPrototypeDelete(protectedReadableOperationStates, stream);
+  }
+}
+
+function emitGuardedReadableEvent(stream, event, ...args) {
+  return getStreamUseGuard(stream) === undefined
+    ? stream.emit(event, ...args)
+    : FunctionPrototypeCall(
+      EventEmitterPrototypeEmit,
+      stream,
+      event,
+      ...args,
+    );
+}
+
+// Native protected EOF delivery calls the exact loader-owned read(0) with the
+// construction-time state. Neither a replaced `read` method nor a replaced
+// `_readableState` property participates in the transition to `end`.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function readProtectedReadableZero(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  if (state === undefined) {
+    throw new Error("protected native stream is missing readable state");
+  }
+  WeakMapPrototypeSet(protectedReadableOperationStates, stream, state);
+  try {
+    return FunctionPrototypeCall(ReadablePrototypeRead, stream, 0);
+  } finally {
+    WeakMapPrototypeDelete(protectedReadableOperationStates, stream);
+  }
 }
 
 function onEofChunk(stream, state) {
@@ -1283,25 +1444,23 @@ function onEofChunk(stream, state) {
 // Don't emit readable right away in sync mode, because this can trigger
 // another read() call => stack overflow.  This way, it might trigger
 // a nextTick recursion warning, but that's not so bad.
-function emitReadable(stream) {
-  const state = readableStateForStream(stream);
+function emitReadable(stream, state = getReadableOperationState(stream)) {
   debug("emitReadable");
   state[kState] &= ~kNeedReadable;
   if ((state[kState] & kEmittedReadable) === 0) {
     debug("emitReadable", (state[kState] & kFlowing) !== 0);
     state[kState] |= kEmittedReadable;
-    nextTickWithCurrent(emitReadable_, stream);
+    nextTickWithCurrent(emitReadable_, stream, state);
   }
 }
 
-function emitReadable_(stream) {
-  const state = readableStateForStream(stream);
+function emitReadable_(stream, state = getReadableOperationState(stream)) {
   debug("emitReadable_");
   if (
     (state[kState] & (kDestroyed | kErrored)) === 0 &&
     (state.length || (state[kState] & kEnded) !== 0)
   ) {
-    stream.emit("readable");
+    emitGuardedReadableEvent(stream, "readable");
     state[kState] &= ~kEmittedReadable;
   }
 
@@ -1362,7 +1521,7 @@ function maybeReadMore_(stream, state) {
   ) {
     const len = state.length;
     debug("maybeReadMore read 0");
-    stream.read(0);
+    readGuardedReadable(stream, state, 0);
     if (len === state.length) {
       // Didn't get any data, stop spinning.
       break;
@@ -1382,7 +1541,9 @@ Readable.prototype._read = function (n) {
 Readable.prototype.pipe = function (dest, pipeOpts) {
   runReadableUseGuard(this);
   const sourceGuard = getReadableUseGuard(this);
-  if (dest !== null && (typeof dest === "object" || typeof dest === "function")) {
+  if (
+    dest !== null && (typeof dest === "object" || typeof dest === "function")
+  ) {
     // Every pipe destination is a transition, not an authority boundary. A
     // live constituent link covers both current protection and protection
     // attached after a preconstructed pipe has been assembled.
@@ -1745,7 +1906,7 @@ function nReadingNextTick(self) {
 // If the user uses them, then switch into old mode.
 Readable.prototype.resume = function () {
   runReadableUseGuard(this);
-  const state = readableStateForStream(this);
+  const state = getReadableOperationState(this);
   if ((state[kState] & kDestroyed) !== 0) {
     return this;
   }
@@ -1777,19 +1938,21 @@ function resume(stream, state) {
 function resume_(stream, state) {
   debug("resume", (state[kState] & kReading) !== 0);
   if ((state[kState] & kReading) === 0) {
-    stream.read(0);
+    readGuardedReadable(stream, state, 0);
   }
 
   state[kState] &= ~kResumeScheduled;
-  stream.emit("resume");
+  emitGuardedReadableEvent(stream, "resume");
   flow(stream);
   if ((state[kState] & (kFlowing | kReading)) === kFlowing) {
-    stream.read(0);
+    readGuardedReadable(stream, state, 0);
   }
 }
 
 Readable.prototype.pause = function () {
-  const state = readableStateForStream(this);
+  // Pausing remains available as lifecycle control after revocation, but a
+  // guarded stream still uses its registered state and exact event dispatch.
+  const state = getReadableOperationState(this);
   if ((state[kState] & kDestroyed) !== 0) {
     return this;
   }
@@ -1798,16 +1961,19 @@ Readable.prototype.pause = function () {
     debug("pause");
     state[kState] |= kHasFlowing;
     state[kState] &= ~kFlowing;
-    this.emit("pause");
+    emitGuardedReadableEvent(this, "pause");
   }
   state[kState] |= kHasPaused | kPaused;
   return this;
 };
 
 function flow(stream) {
-  const state = readableStateForStream(stream);
+  const state = getReadableOperationState(stream);
   debug("flow");
-  while ((state[kState] & kFlowing) !== 0 && stream.read() !== null);
+  while (
+    (state[kState] & kFlowing) !== 0 &&
+    readGuardedReadable(stream, state, undefined) !== null
+  );
 }
 
 // Wrap an old-style stream as the async data source.
@@ -2251,9 +2417,7 @@ function fromList(n, state) {
   return ret;
 }
 
-function endReadable(stream) {
-  const state = readableStateForStream(stream);
-
+function endReadable(stream, state = getReadableOperationState(stream)) {
   debug("endReadable");
   if ((state[kState] & kEndEmitted) === 0) {
     state[kState] |= kEnded;
@@ -2270,7 +2434,7 @@ function endReadableNT(state, stream) {
     state.length === 0
   ) {
     state[kState] |= kEndEmitted;
-    stream.emit("end");
+    emitGuardedReadableEvent(stream, "end");
 
     if (stream.writable && stream.allowHalfOpen === false) {
       nextTickWithCurrent(endWritableNT, stream);
@@ -2361,16 +2525,24 @@ return {
   addReadableListener,
   createReadableAsyncIterator,
   default: Readable,
+  getProtectedReadableState,
   getReadableUseGuard,
+  hasProtectedReadableDecoder,
   isRegisteredReadable,
+  isProtectedReadableDestroyed,
+  isProtectedReadableEndEmitted,
   isReadablePublicLifecycleMethod,
   isReadablePublicPipe,
   isReadablePublicPush,
   isReadablePublicRead,
+  pushProtectedReadableChunk,
   pushReadableChunk,
+  readProtectedReadableZero,
   readReadableChunk,
   Readable,
   readableStateForStream,
+  registerReadableState,
   setReadableUseGuard,
+  shouldStartProtectedReadable,
 };
 })();

@@ -677,9 +677,11 @@ function connectionListenerInternal(server, socket) {
     socket._handle?.isStreamBase &&
     !socket._handle._consumed
   ) {
-    parser._consumed = true;
-    socket._handle._consumed = true;
-    parser.consume(socket._handle);
+    const consumed = parser.consume(socket._handle);
+    if (consumed) {
+      parser._consumed = true;
+      socket._handle._consumed = true;
+    }
   }
   parser[kOnExecute] = FunctionPrototypeBind(
     onParserExecute,

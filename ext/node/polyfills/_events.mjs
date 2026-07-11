@@ -1495,6 +1495,13 @@ ObjectDefineProperty(EventEmitter, "EventEmitterAsyncResource", {
   get: getEventEmitterAsyncResource,
 });
 
+// Hidden internal export captured before the public constructor can escape to
+// package code. Protected stream adapters must not bless a poisoned public
+// EventEmitter.prototype when they load later.
+const protectedEventEmitterEmit = EventEmitter.prototype.emit;
+const protectedEventEmitterOff = EventEmitter.prototype.off;
+const protectedEventEmitterOnce = EventEmitter.prototype.once;
+
 return {
   addAbortListener,
   addEventEmitterListener,
@@ -1515,6 +1522,9 @@ return {
   listenerCount,
   on,
   once,
+  protectedEventEmitterEmit,
+  protectedEventEmitterOff,
+  protectedEventEmitterOnce,
   setMaxListeners,
   emitPreparedEvent,
   prepareEventListenerDelivery,

@@ -44,6 +44,9 @@ use crate::ops::stream_wrap_state::RequestCallbackState;
 use crate::ops::stream_wrap_state::ShutdownRequestCallbackState;
 use crate::ops::stream_wrap_state::WriteRequestCallbackState;
 
+const TRUSTED_NODE_STREAM_READ_CALLBACK_LOCATOR: &str =
+  "ext:deno_node/internal/stream_base_commons.ts";
+
 // ---------------------------------------------------------------------------
 // StreamBase state fields — mirrors Node's StreamBaseStateFields enum.
 // These index into a shared Uint8Array visible to JS.
@@ -55,6 +58,8 @@ pub struct StreamBaseState {
   pub array: v8::Global<v8::Int32Array>,
 }
 
+struct TrustedProtectedOnread(v8::Global<v8::Function>);
+
 pub(crate) struct StreamHandleData {
   pub js_handle: UnsafeCell<GlobalHandle<v8::Object>>,
   pub isolate: UnsafeCell<v8::UnsafeRawIsolatePtr>,
@@ -65,6 +70,10 @@ pub(crate) struct StreamHandleData {
   /// Concrete peer retained across object passage so protected inspector
   /// endpoints are rechecked at application-byte delivery.
   pub network_peer: Cell<Option<SocketAddr>>,
+  /// Integrity actor bound at protected connect. Endpoint possession or an
+  /// independent inspector grant held by another package is not a transfer.
+  pub protected_actor:
+    RefCell<Option<deno_permissions::ProtectedInspectorStreamActor>>,
   pub request_callbacks: RefCell<RequestCallbackRegistry>,
   /// User-supplied static read buffer (Node's `onread.buffer` option).
   /// When set, `on_uv_alloc` directs libuv to read into this buffer and
@@ -124,6 +133,24 @@ pub fn op_stream_base_register_state(
   state.put(StreamBaseState {
     array: v8::Global::new(scope, array),
   });
+}
+
+#[op2(fast)]
+pub fn op_stream_base_register_protected_onread<'s>(
+  state: &mut OpState,
+  callback: v8::Local<'s, v8::Function>,
+  scope: &mut v8::PinScope<'s, '_>,
+) -> bool {
+  // First writer wins, and even that writer must come from the exact trusted
+  // loader script. The module registers its lexical onStreamRead before it
+  // exposes any exports to package code.
+  if state.has::<TrustedProtectedOnread>()
+    || !LibUvStreamWrap::has_trusted_protected_onread_locator(callback, scope)
+  {
+    return false;
+  }
+  state.put(TrustedProtectedOnread(v8::Global::new(scope, callback)));
+  true
 }
 
 #[repr(usize)]
@@ -243,6 +270,7 @@ impl LibUvStreamWrap {
         read_callbacks: RefCell::new(ReadCallbackRegistry::default()),
         active_read: Cell::new(None),
         network_peer: Cell::new(None),
+        protected_actor: RefCell::new(None),
         request_callbacks: RefCell::new(RequestCallbackRegistry::default()),
         user_buffer: RefCell::new(None),
       }),
@@ -274,23 +302,68 @@ impl LibUvStreamWrap {
   }
 
   pub(crate) fn set_network_peer(&self, peer: SocketAddr) {
-    self
-      .handle_data
-      .network_peer
-      .set(deno_permissions::oden_capsec_protected_inspector_stream_tag(peer));
+    let actor =
+      deno_permissions::oden_capsec_protected_inspector_stream_actor(peer);
+    let protected = actor.as_ref().map(|actor| actor.endpoint());
+    self.install_protected_network_peer(protected, actor);
+  }
+
+  fn install_protected_network_peer(
+    &self,
+    protected: Option<SocketAddr>,
+    actor: Option<deno_permissions::ProtectedInspectorStreamActor>,
+  ) {
+    if protected.is_some() {
+      // A package may register a user buffer while connect is pending, before
+      // TCPWrap knows the final peer. The HTTP parser consume optimization can
+      // likewise register a native read interceptor before connect completes.
+      // Retire both at the same single-threaded transition that installs the
+      // protected tag, before reads can start; delivery then falls back to the
+      // checked loader-owned JS stream adapter.
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+      self.handle_data.user_buffer.borrow_mut().take();
+      self.handle_data.desired_read_interceptor.set(None);
+      // A second Socket wrapper can start an ordinary read against the raw
+      // handle while connect is pending. Its cached onread/owner identity is
+      // unauthenticated, so retire the whole registration rather than merely
+      // clearing its interceptor. The canonical Socket will start a fresh,
+      // authenticated read after protected connect completion.
+      if self.handle_data.active_read.get().is_some() {
+        let _ = self.read_stop_internal();
+      }
+    }
+    self.handle_data.network_peer.set(protected);
+    *self.handle_data.protected_actor.borrow_mut() = actor;
   }
 
   pub(crate) fn network_peer(&self) -> Option<SocketAddr> {
     self.handle_data.network_peer.get()
   }
 
+  pub(crate) fn protected_network_peer_for_stream(
+    stream: *mut uv_stream_t,
+  ) -> Option<SocketAddr> {
+    let handle_data_ptr = Self::stable_handle_data(stream)?;
+    // SAFETY: stable_handle_data verified that stream.data points at the
+    // owning StreamHandleData for the live stream.
+    unsafe { handle_data_ptr.as_ref() }.network_peer.get()
+  }
+
   fn check_protected_network_peer(&self, api_name: &str) -> bool {
-    self.handle_data.network_peer.get().is_none_or(|peer| {
-      deno_permissions::oden_capsec_check_protected_inspector_stream_use(
-        peer, api_name,
-      )
-      .is_ok()
-    })
+    match self.handle_data.network_peer.get() {
+      None => true,
+      Some(_) => self
+        .handle_data
+        .protected_actor
+        .borrow()
+        .as_ref()
+        .is_some_and(|actor| {
+          deno_permissions::oden_capsec_check_protected_inspector_stream_use_for_actor(
+            actor, api_name,
+          )
+          .is_ok()
+        }),
+    }
   }
 
   pub(crate) fn js_handle_global(
@@ -361,19 +434,27 @@ impl LibUvStreamWrap {
   pub(crate) fn set_read_interceptor_for_stream(
     stream: *mut uv_stream_t,
     interceptor: Option<ReadInterceptor>,
-  ) {
+  ) -> bool {
     let Some(handle_data_ptr) = Self::stable_handle_data(stream) else {
-      return;
+      return false;
     };
     // SAFETY: `uv_stream_t.data` points at the owning handle's stable
     // `StreamHandleData` allocation while the native stream is alive.
     let handle_data = unsafe { handle_data_ptr.as_ref() };
+    // Parser/TLS interceptors run before the trusted onread adapter and have
+    // no callback-scoped actor provenance. Protected streams therefore never
+    // install one; ignoring `consume()` preserves the ordinary JS parser/data
+    // fallback without exposing a second byte-delivery route.
+    let accepted =
+      handle_data.network_peer.get().is_none() || interceptor.is_none();
+    let interceptor = accepted.then_some(interceptor).flatten();
     handle_data.desired_read_interceptor.set(interceptor);
     if let Some(key) = handle_data.active_read.get()
       && let Ok(mut callbacks) = handle_data.read_callbacks.try_borrow_mut()
     {
       let _ = callbacks.update_interceptor(key, interceptor);
     }
+    accepted
   }
 
   #[allow(dead_code, reason = "used by upcoming TLSWrap")]
@@ -386,6 +467,9 @@ impl LibUvStreamWrap {
     // SAFETY: `uv_stream_t.data` points at the owning handle's stable
     // `StreamHandleData` allocation while the native stream is alive.
     let handle_data = unsafe { handle_data_ptr.as_ref() };
+    if handle_data.network_peer.get().is_some() {
+      return UV_EACCES;
+    }
     if handle_data.active_read.get().is_some() {
       return 0;
     }
@@ -400,6 +484,7 @@ impl LibUvStreamWrap {
     let key = callbacks.insert(ReadCallbackState {
       isolate: v8::UnsafeRawIsolatePtr::null(),
       onread: None,
+      delivery_context: None,
       stream_base_state: None,
       handle: None,
       bytes_read: handle_data.bytes_read.clone(),
@@ -432,10 +517,12 @@ impl LibUvStreamWrap {
     unsafe { uv_compat::uv_read_stop(stream) }
   }
 
-  fn read_start_with_handle(
+  fn read_start_with_handle<'s>(
     &self,
-    this: v8::Local<v8::Object>,
-    scope: &mut v8::PinScope,
+    this: v8::Local<'s, v8::Object>,
+    protected_onread: Option<v8::Local<'s, v8::Function>>,
+    delivery_context: Option<v8::Global<v8::Value>>,
+    scope: &mut v8::PinScope<'s, '_>,
     op_state: &mut OpState,
   ) -> i32 {
     let stream = self.stream_ptr();
@@ -447,13 +534,18 @@ impl LibUvStreamWrap {
       return 0;
     }
 
-    let onread_key =
-      v8::String::new_external_onebyte_static(scope, b"onread").unwrap();
-    let Some(onread_val) = this.get(scope, onread_key.into()) else {
-      return UV_EBADF;
-    };
-    let Ok(onread) = v8::Local::<v8::Function>::try_from(onread_val) else {
-      return UV_EBADF;
+    let onread = if let Some(protected_onread) = protected_onread {
+      protected_onread
+    } else {
+      let onread_key =
+        v8::String::new_external_onebyte_static(scope, b"onread").unwrap();
+      let Some(onread_val) = this.get(scope, onread_key.into()) else {
+        return UV_EBADF;
+      };
+      let Ok(onread) = v8::Local::<v8::Function>::try_from(onread_val) else {
+        return UV_EBADF;
+      };
+      onread
     };
 
     let state_global = &op_state.borrow::<StreamBaseState>().array;
@@ -463,10 +555,17 @@ impl LibUvStreamWrap {
       // SAFETY: `scope` is the currently active isolate scope for this op call.
       isolate: unsafe { scope.as_raw_isolate_ptr() },
       onread: Some(v8::Global::new(scope, onread)),
+      delivery_context,
       stream_base_state: Some(v8::Global::new(scope, state_array)),
       handle: Some(v8::Global::new(scope, this)),
       bytes_read: self.handle_data.bytes_read.clone(),
-      read_interceptor: self.handle_data.desired_read_interceptor.get(),
+      read_interceptor: self
+        .handle_data
+        .network_peer
+        .get()
+        .is_none()
+        .then(|| self.handle_data.desired_read_interceptor.get())
+        .flatten(),
     });
     self.reading_started.set(true);
     self.make_handle_strong(scope);
@@ -475,6 +574,47 @@ impl LibUvStreamWrap {
     unsafe {
       uv_compat::uv_read_start(stream, Some(on_uv_alloc), Some(on_uv_read))
     }
+  }
+
+  /// Accept only the exact loader-owned stream adapter. Function names,
+  /// sourceURL text, `handle.onread`, bound functions, and callable proxies are
+  /// all package-mutable or origin-erasing and therefore cannot authenticate a
+  /// protected byte destination.
+  fn has_trusted_protected_onread_locator<'s>(
+    callback: v8::Local<'s, v8::Function>,
+    scope: &mut v8::PinScope<'s, '_>,
+  ) -> bool {
+    if callback.is_proxy() {
+      return false;
+    }
+    let script_id = callback.script_id();
+    if script_id < 0 {
+      return false;
+    }
+    // SAFETY: `scope` is active for this lookup; the pointer is retained only
+    // as the isolate-scoped registry key.
+    let isolate = unsafe { scope.as_raw_isolate_ptr() };
+    deno_core::error::oden_script_locator(
+      deno_core::error::oden_isolate_key(isolate),
+      script_id as usize,
+    )
+    .as_deref()
+      == Some(TRUSTED_NODE_STREAM_READ_CALLBACK_LOCATOR)
+  }
+
+  fn is_trusted_protected_onread<'s>(
+    callback: v8::Local<'s, v8::Function>,
+    scope: &mut v8::PinScope<'s, '_>,
+    op_state: &OpState,
+  ) -> bool {
+    if !Self::has_trusted_protected_onread_locator(callback, scope) {
+      return false;
+    }
+    let Some(trusted) = op_state.try_borrow::<TrustedProtectedOnread>() else {
+      return false;
+    };
+    let trusted = v8::Local::new(scope, &trusted.0);
+    callback.strict_equals(trusted.into())
   }
 
   pub(crate) fn read_stop_internal(&self) -> i32 {
@@ -492,6 +632,9 @@ impl LibUvStreamWrap {
 
 #[cfg(test)]
 mod native_capsec_tests {
+  use std::net::SocketAddr;
+  use std::net::TcpListener;
+  use std::net::TcpStream;
   use std::path::Path;
   use std::path::PathBuf;
   use std::process::Command;
@@ -597,11 +740,21 @@ mod native_capsec_tests {
 
   #[op2(fast)]
   fn op_native_test_tag_pipe(#[cppgc] pipe: &PipeWrap, tagged: bool) {
-    pipe
-      .native_capsec_test_stream()
-      .handle_data
-      .network_peer
-      .set(tagged.then(|| "127.0.0.1:9229".parse().unwrap()));
+    let stream = pipe.native_capsec_test_stream();
+    if !tagged {
+      stream.install_protected_network_peer(None, None);
+      return;
+    }
+    let endpoint: SocketAddr = "127.0.0.1:9229".parse().unwrap();
+    deno_permissions::oden_capsec_reserve_inspector_endpoint(endpoint)
+      .commit(endpoint);
+    let actor =
+      deno_permissions::oden_capsec_protected_inspector_stream_actor(endpoint);
+    deno_permissions::oden_capsec_unprotect_inspector_endpoint(endpoint);
+    stream.install_protected_network_peer(
+      actor.as_ref().map(|actor| actor.endpoint()),
+      actor,
+    );
   }
 
   #[op2(fast)]
@@ -620,6 +773,97 @@ mod native_capsec_tests {
   }
 
   #[op2(fast)]
+  fn op_native_test_pipe_has_delivery_context(
+    #[cppgc] pipe: &PipeWrap,
+  ) -> bool {
+    let stream = pipe.native_capsec_test_stream();
+    stream
+      .handle_data
+      .active_read
+      .get()
+      .and_then(|key| stream.handle_data.read_callbacks.borrow().snapshot(key))
+      .is_some_and(|snapshot| snapshot.delivery_context.is_some())
+  }
+
+  #[op2(fast)]
+  fn op_native_test_pipe_has_user_buffer(#[cppgc] pipe: &PipeWrap) -> bool {
+    pipe
+      .native_capsec_test_stream()
+      .handle_data
+      .user_buffer
+      .borrow()
+      .is_some()
+  }
+
+  unsafe fn native_test_read_interceptor(
+    _ptr: *mut std::ffi::c_void,
+    _stream: *mut uv_stream_t,
+    _nread: isize,
+    _buf: *const uv_buf_t,
+  ) {
+  }
+
+  #[op2(fast)]
+  fn op_native_test_set_pipe_interceptor(
+    #[cppgc] pipe: &PipeWrap,
+    enabled: bool,
+  ) {
+    let stream = pipe.native_capsec_test_stream().stream_ptr();
+    let interceptor = enabled.then_some(ReadInterceptor {
+      ptr: std::ptr::null_mut(),
+      callback: native_test_read_interceptor,
+    });
+    let _ =
+      LibUvStreamWrap::set_read_interceptor_for_stream(stream, interceptor);
+  }
+
+  #[op2(fast)]
+  fn op_native_test_pipe_has_desired_interceptor(
+    #[cppgc] pipe: &PipeWrap,
+  ) -> bool {
+    pipe
+      .native_capsec_test_stream()
+      .handle_data
+      .desired_read_interceptor
+      .get()
+      .is_some()
+  }
+
+  #[op2(fast)]
+  fn op_native_test_pipe_has_active_interceptor(
+    #[cppgc] pipe: &PipeWrap,
+  ) -> bool {
+    let stream = pipe.native_capsec_test_stream();
+    stream
+      .handle_data
+      .active_read
+      .get()
+      .and_then(|key| stream.handle_data.read_callbacks.borrow().snapshot(key))
+      .is_some_and(|snapshot| snapshot.read_interceptor.is_some())
+  }
+
+  #[op2(fast)]
+  fn op_native_test_register_callback_locator(
+    callback: v8::Local<v8::Function>,
+    #[string] locator: &str,
+    scope: &mut v8::PinScope,
+  ) -> bool {
+    let script_id = callback.script_id();
+    if script_id < 0 {
+      return false;
+    }
+    // SAFETY: this test op runs in the callback's active isolate and uses the
+    // pointer only as the registry key.
+    let isolate = unsafe { scope.as_raw_isolate_ptr() };
+    deno_core::error::oden_register_script_locator(
+      isolate,
+      script_id as usize,
+      locator,
+    );
+    true
+  }
+
+  #[op2(fast)]
   #[smi]
   fn op_native_test_close_fd(#[smi] fd: i32) -> i32 {
     // SAFETY: the fixture owns each fd it passes here: writers are closed
@@ -627,17 +871,208 @@ mod native_capsec_tests {
     unsafe { libc::close(fd) }
   }
 
+  struct NativeProtectedRawSocketFixture {
+    _client: TcpStream,
+    _server: TcpStream,
+    endpoint: SocketAddr,
+  }
+
+  struct NativeProtectedRawListenerFixture {
+    _listener: TcpListener,
+    endpoint: SocketAddr,
+  }
+
+  impl Drop for NativeProtectedRawListenerFixture {
+    fn drop(&mut self) {
+      deno_permissions::oden_capsec_unprotect_inspector_endpoint(self.endpoint);
+    }
+  }
+
+  impl Drop for NativeProtectedRawSocketFixture {
+    fn drop(&mut self) {
+      deno_permissions::oden_capsec_unprotect_inspector_endpoint(self.endpoint);
+    }
+  }
+
+  #[op2(fast)]
+  #[smi]
+  fn op_native_test_create_protected_tcp_fd(state: &mut OpState) -> i32 {
+    if state.has::<NativeProtectedRawSocketFixture>() {
+      return -1;
+    }
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+      Ok(listener) => listener,
+      Err(_) => return -1,
+    };
+    let endpoint = match listener.local_addr() {
+      Ok(endpoint) => endpoint,
+      Err(_) => return -1,
+    };
+    deno_permissions::oden_capsec_reserve_inspector_endpoint(endpoint)
+      .commit(endpoint);
+    let client = match TcpStream::connect(endpoint) {
+      Ok(client) => client,
+      Err(_) => {
+        deno_permissions::oden_capsec_unprotect_inspector_endpoint(endpoint);
+        return -1;
+      }
+    };
+    let server = match listener.accept() {
+      Ok((server, _)) => server,
+      Err(_) => {
+        deno_permissions::oden_capsec_unprotect_inspector_endpoint(endpoint);
+        return -1;
+      }
+    };
+    let duplicate = match client.try_clone() {
+      Ok(duplicate) => duplicate,
+      Err(_) => {
+        deno_permissions::oden_capsec_unprotect_inspector_endpoint(endpoint);
+        return -1;
+      }
+    };
+    #[cfg(unix)]
+    let fd = {
+      use std::os::fd::IntoRawFd;
+      duplicate.into_raw_fd()
+    };
+    #[cfg(windows)]
+    let fd = {
+      use std::os::windows::io::IntoRawSocket;
+      duplicate.into_raw_socket() as i32
+    };
+    // The source connection's immutable classification must outlive listener
+    // unregistration. Raw adoption therefore remains refused even after this
+    // process-global endpoint entry is gone.
+    deno_permissions::oden_capsec_unprotect_inspector_endpoint(endpoint);
+    state.put(NativeProtectedRawSocketFixture {
+      _client: client,
+      _server: server,
+      endpoint,
+    });
+    fd
+  }
+
+  #[op2(fast)]
+  #[smi]
+  fn op_native_test_release_protected_tcp_fd(
+    state: &mut OpState,
+    #[smi] fd: i32,
+  ) -> i32 {
+    #[cfg(unix)]
+    let result = {
+      // SAFETY: the create op returned this owned duplicate and neither open
+      // guard adopts it on the expected EACCES path.
+      unsafe { libc::close(fd) }
+    };
+    #[cfg(windows)]
+    let result = {
+      use std::os::windows::io::FromRawSocket;
+      // SAFETY: same ownership argument as the Unix close path.
+      drop(unsafe { TcpStream::from_raw_socket(fd as usize) });
+      0
+    };
+    state.try_take::<NativeProtectedRawSocketFixture>();
+    result
+  }
+
+  #[op2(fast)]
+  #[smi]
+  fn op_native_test_create_protected_tcp_listener_fd(
+    state: &mut OpState,
+  ) -> i32 {
+    if state.has::<NativeProtectedRawListenerFixture>() {
+      return -1;
+    }
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+      Ok(listener) => listener,
+      Err(_) => return -1,
+    };
+    let endpoint = match listener.local_addr() {
+      Ok(endpoint) => endpoint,
+      Err(_) => return -1,
+    };
+    deno_permissions::oden_capsec_reserve_inspector_endpoint(endpoint)
+      .commit(endpoint);
+    let duplicate = match listener.try_clone() {
+      Ok(duplicate) => duplicate,
+      Err(_) => {
+        deno_permissions::oden_capsec_unprotect_inspector_endpoint(endpoint);
+        return -1;
+      }
+    };
+    #[cfg(unix)]
+    let fd = {
+      use std::os::fd::IntoRawFd;
+      duplicate.into_raw_fd()
+    };
+    #[cfg(windows)]
+    let fd = {
+      use std::os::windows::io::IntoRawSocket;
+      duplicate.into_raw_socket() as i32
+    };
+    // Exercise the lifecycle boundary: classification cannot depend on the
+    // listener remaining present in the process-global endpoint registry.
+    deno_permissions::oden_capsec_unprotect_inspector_endpoint(endpoint);
+    state.put(NativeProtectedRawListenerFixture {
+      _listener: listener,
+      endpoint,
+    });
+    fd
+  }
+
+  #[op2(fast)]
+  #[smi]
+  fn op_native_test_release_protected_tcp_listener_fd(
+    state: &mut OpState,
+    #[smi] fd: i32,
+  ) -> i32 {
+    #[cfg(unix)]
+    let result = {
+      // SAFETY: the create op returned this owned duplicate and every expected
+      // adoption guard rejects it before taking ownership.
+      unsafe { libc::close(fd) }
+    };
+    #[cfg(windows)]
+    let result = {
+      use std::os::windows::io::FromRawSocket;
+      // SAFETY: same ownership argument as the Unix close path.
+      drop(unsafe { TcpListener::from_raw_socket(fd as usize) });
+      0
+    };
+    state.try_take::<NativeProtectedRawListenerFixture>();
+    result
+  }
+
   deno_core::extension!(
     native_stream_guard_test_ext,
     ops = [
       op_node_create_pipe,
       op_stream_base_register_state,
+      op_stream_base_register_protected_onread,
       op_native_test_tag_pipe,
       op_native_test_pipe_reading_started,
       op_native_test_pipe_has_active_read,
+      op_native_test_pipe_has_delivery_context,
+      op_native_test_pipe_has_user_buffer,
+      op_native_test_set_pipe_interceptor,
+      op_native_test_pipe_has_desired_interceptor,
+      op_native_test_pipe_has_active_interceptor,
+      op_native_test_register_callback_locator,
       op_native_test_close_fd,
+      op_native_test_create_protected_tcp_fd,
+      op_native_test_release_protected_tcp_fd,
+      op_native_test_create_protected_tcp_listener_fd,
+      op_native_test_release_protected_tcp_listener_fd,
+      crate::ops::udp::op_node_udp_open,
     ],
-    objects = [AsyncWrap, HandleWrap, LibUvStreamWrap, PipeWrap],
+    objects = [
+      AsyncWrap,
+      HandleWrap,
+      LibUvStreamWrap,
+      PipeWrap,
+      crate::ops::tcp_wrap::TCPWrap,
+    ],
     state = |state| {
       state.put::<deno_core::uv_compat::AsyncId>(Default::default());
       state.put::<deno_io::FdTable>(Default::default());
@@ -655,6 +1090,43 @@ mod native_capsec_tests {
       ..Default::default()
     });
 
+    runtime
+      .execute_script(
+        TRUSTED_NODE_STREAM_READ_CALLBACK_LOCATOR,
+        r#"
+        {
+          const ops = Deno.core.ops;
+          globalThis.trustedOnread = function onStreamRead() {};
+          globalThis.wrongSameScriptOnread = function setStreamTimeout() {};
+          if (!ops.op_native_test_register_callback_locator(
+            trustedOnread,
+            "ext:deno_node/internal/stream_base_commons.ts"
+          )) throw new Error("failed to register trusted callback locator");
+          if (!ops.op_stream_base_register_protected_onread(trustedOnread))
+            throw new Error("failed to register exact trusted callback");
+        }
+        "#,
+      )
+      .unwrap();
+    runtime
+      .execute_script(
+        "file:///node_modules/denied-native/callback.cjs",
+        r#"
+        {
+          const ops = Deno.core.ops;
+          globalThis.packageOnread = function packageOnread() {};
+          if (!ops.op_native_test_register_callback_locator(
+            packageOnread,
+            "file:///node_modules/denied-native/callback.cjs"
+          )) throw new Error("failed to register package callback locator");
+          globalThis.boundTrustedOnread = trustedOnread.bind(null);
+          globalThis.proxiedTrustedOnread = new Proxy(trustedOnread, {});
+          globalThis.originlessOnread = Array.prototype.push;
+        }
+        "#,
+      )
+      .unwrap();
+
     set_actor(root, "main.ts");
     runtime
       .execute_script(
@@ -663,6 +1135,59 @@ mod native_capsec_tests {
         {
           const ops = Deno.core.ops;
           ops.op_stream_base_register_state(new Int32Array(4));
+          const protectedFd =
+            ops.op_native_test_create_protected_tcp_fd();
+          if (protectedFd < 0)
+            throw new Error("failed to create protected raw TCP fixture");
+          const duplicateTcp = new ops.TCPWrap(0);
+          const tcpOpen = duplicateTcp.open(protectedFd);
+          if (tcpOpen !== -13)
+            throw new Error(`protected TCP fd reopened: ${tcpOpen}`);
+          const duplicatePipe = new ops.PipeWrap(0);
+          const pipeOpen = duplicatePipe.open(protectedFd);
+          if (pipeOpen !== -13)
+            throw new Error(`protected TCP fd reopened as pipe: ${pipeOpen}`);
+          let connectedUdpRejected = false;
+          try {
+            ops.op_node_udp_open(protectedFd);
+          } catch {
+            connectedUdpRejected = true;
+          }
+          if (!connectedUdpRejected)
+            throw new Error("protected TCP connection reopened as UDP");
+          if (ops.op_native_test_release_protected_tcp_fd(protectedFd) !== 0)
+            throw new Error("failed to release protected raw TCP fixture");
+          const listenerFd =
+            ops.op_native_test_create_protected_tcp_listener_fd();
+          if (listenerFd < 0)
+            throw new Error("failed to create protected raw listener fixture");
+          const listenerTcp = new ops.TCPWrap(1);
+          const listenerTcpOpen = listenerTcp.open(listenerFd);
+          if (listenerTcpOpen !== -13) {
+            throw new Error(
+              `protected listener reopened as TCP: ${listenerTcpOpen}`,
+            );
+          }
+          const listenerPipe = new ops.PipeWrap(1);
+          const listenerPipeOpen = listenerPipe.open(listenerFd);
+          if (listenerPipeOpen !== -13) {
+            throw new Error(
+              `protected listener reopened as pipe: ${listenerPipeOpen}`,
+            );
+          }
+          let udpRejected = false;
+          try {
+            ops.op_node_udp_open(listenerFd);
+          } catch {
+            udpRejected = true;
+          }
+          if (!udpRejected)
+            throw new Error("protected TCP listener reopened as UDP");
+          if (ops.op_native_test_release_protected_tcp_listener_fd(
+            listenerFd,
+          ) !== 0) {
+            throw new Error("failed to release protected listener fixture");
+          }
           function makePipe(tagged) {
             const [readFd, writeFd] = ops.op_node_create_pipe();
             const pipe = new ops.PipeWrap(0);
@@ -673,7 +1198,44 @@ mod native_capsec_tests {
               ops.op_native_test_close_fd(writeFd);
               throw new Error(`failed to open native test pipe: ${opened}`);
             }
+            if (tagged) {
+              const preTagBuffer = new Uint8Array(32).fill(0x3c);
+              if (pipe.useUserBuffer(preTagBuffer) !== 0 ||
+                  !ops.op_native_test_pipe_has_user_buffer(pipe)) {
+                throw new Error("pre-tag user-buffer setup failed");
+              }
+              globalThis.preTagProtectedBuffer = preTagBuffer;
+              globalThis.preTagProtectedBytes =
+                Array.from(preTagBuffer).join(",");
+              ops.op_native_test_set_pipe_interceptor(pipe, true);
+              if (!ops.op_native_test_pipe_has_desired_interceptor(pipe)) {
+                throw new Error("pre-tag read-interceptor setup failed");
+              }
+              if (pipe.readStart() !== 0 ||
+                  !ops.op_native_test_pipe_reading_started(pipe) ||
+                  !ops.op_native_test_pipe_has_active_read(pipe)) {
+                throw new Error("pre-tag native read setup failed");
+              }
+            }
             ops.op_native_test_tag_pipe(pipe, tagged);
+            if (tagged && ops.op_native_test_pipe_has_user_buffer(pipe)) {
+              throw new Error("protected tagging retained a pre-connect buffer");
+            }
+            if (tagged &&
+                ops.op_native_test_pipe_has_desired_interceptor(pipe)) {
+              throw new Error("protected tagging retained a read interceptor");
+            }
+            if (tagged &&
+                (ops.op_native_test_pipe_reading_started(pipe) ||
+                 ops.op_native_test_pipe_has_active_read(pipe))) {
+              throw new Error("protected tagging retained a pre-connect read");
+            }
+            if (tagged) {
+              ops.op_native_test_set_pipe_interceptor(pipe, true);
+              if (ops.op_native_test_pipe_has_desired_interceptor(pipe)) {
+                throw new Error("protected stream accepted a read interceptor");
+              }
+            }
             return { pipe, writeFd };
           }
           const taggedState = makePipe(true);
@@ -695,11 +1257,12 @@ mod native_capsec_tests {
           r#"
           {{
             const ops = Deno.core.ops;
-            const result = tagged.readStart();
+            const result = tagged.readStart(trustedOnread);
             if (result !== {UV_EACCES})
               throw new Error(`expected UV_EACCES, got ${{result}}`);
             if (ops.op_native_test_pipe_reading_started(tagged) ||
-                ops.op_native_test_pipe_has_active_read(tagged)) {{
+                ops.op_native_test_pipe_has_active_read(tagged) ||
+                ops.op_native_test_pipe_has_delivery_context(tagged)) {{
               throw new Error("denied readStart mutated native read state");
             }}
           }}
@@ -716,26 +1279,94 @@ mod native_capsec_tests {
           r#"
           {{
             const ops = Deno.core.ops;
-            const result = tagged.readStart();
-            if (result !== 0)
-              throw new Error(`allowed readStart did not register: ${{result}}`);
-            if (!ops.op_native_test_pipe_reading_started(tagged) ||
-                !ops.op_native_test_pipe_has_active_read(tagged)) {{
-              throw new Error("allowed readStart did not install native read state");
+            for (const [label, callback] of [
+              ["package", packageOnread],
+              ["wrong-same-script", wrongSameScriptOnread],
+              ["bound", boundTrustedOnread],
+              ["proxy", proxiedTrustedOnread],
+              ["originless", originlessOnread],
+            ]) {{
+              const rejected = tagged.readStart(callback);
+              if (rejected !== {UV_EACCES})
+                throw new Error(`${{label}} callback was accepted: ${{rejected}}`);
+              if (ops.op_native_test_pipe_reading_started(tagged) ||
+                  ops.op_native_test_pipe_has_active_read(tagged) ||
+                  ops.op_native_test_pipe_has_delivery_context(tagged)) {{
+                throw new Error(`${{label}} callback mutated native read state`);
+              }}
             }}
-            if (tagged.readStop() !== 0)
-              throw new Error("tagged readStop failed");
+            const independentlyGranted = tagged.readStart(trustedOnread);
+            if (independentlyGranted !== {UV_EACCES}) {{
+              throw new Error(
+                `independent package grant transferred root stream: ${{independentlyGranted}}`,
+              );
+            }}
             if (ops.op_native_test_pipe_reading_started(tagged) ||
-                ops.op_native_test_pipe_has_active_read(tagged)) {{
-              throw new Error("readStop retained native read state");
+                ops.op_native_test_pipe_has_active_read(tagged) ||
+                ops.op_native_test_pipe_has_delivery_context(tagged)) {{
+              throw new Error("actor-mismatch readStart mutated native state");
             }}
-            globalThis.taggedClosed = false;
-            tagged.close(() => {{ globalThis.taggedClosed = true; }});
-            if (ops.op_native_test_close_fd(taggedWriteFd) !== 0)
-              throw new Error("failed to close tagged pipe writer");
+            const independentWrite =
+              tagged.writeBuffer({{}}, new Uint8Array([0x61]));
+            if (independentWrite !== {UV_EACCES}) {{
+              throw new Error(
+                `independent package grant transferred root write: ${{independentWrite}}`,
+              );
+            }}
           }}
           "#
         ),
+      )
+      .unwrap();
+
+    set_actor(root, "main.ts");
+    runtime
+      .execute_script(
+        "file:///native_stream_guard_root.js",
+        format!(
+          r#"
+          {{
+            const ops = Deno.core.ops;
+            const protectedBuffer = new Uint8Array(32).fill(0xa5);
+            const before = Array.from(protectedBuffer).join(",");
+            const userBufferResult = tagged.useUserBuffer(protectedBuffer);
+            if (userBufferResult !== {UV_EACCES})
+              throw new Error(`protected useUserBuffer returned ${{userBufferResult}}`);
+            if (ops.op_native_test_pipe_has_user_buffer(tagged))
+              throw new Error("protected useUserBuffer retained a native pointer");
+            if (Array.from(protectedBuffer).join(",") !== before)
+              throw new Error("protected useUserBuffer mutated bytes synchronously");
+            if (Array.from(preTagProtectedBuffer).join(",") !==
+                preTagProtectedBytes) {{
+              throw new Error("protected tagging mutated the pre-connect buffer");
+            }}
+            if (tagged.readStart(trustedOnread) !== 0)
+              throw new Error("root protected readStart failed");
+            if (!ops.op_native_test_pipe_has_delivery_context(tagged))
+              throw new Error("root protected read lost delivery provenance");
+            if (ops.op_native_test_pipe_has_active_interceptor(tagged))
+              throw new Error("protected read activated an interceptor");
+          }}
+          "#
+        ),
+      )
+      .unwrap();
+
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    runtime
+      .execute_script(
+        "file:///native_stream_guard_cleanup.js",
+        r#"
+        {
+          const ops = Deno.core.ops;
+          if (tagged.readStop() !== 0)
+            throw new Error("denied actor could not stop protected read");
+          globalThis.taggedClosed = false;
+          tagged.close(() => { globalThis.taggedClosed = true; });
+          if (ops.op_native_test_close_fd(taggedWriteFd) !== 0)
+            throw new Error("failed to close tagged pipe writer");
+        }
+        "#,
       )
       .unwrap();
 
@@ -747,13 +1378,24 @@ mod native_capsec_tests {
           r#"
           {{
             const ops = Deno.core.ops;
+            const ordinaryBuffer = new Uint8Array(32).fill(0x5a);
+            if (ordinary.useUserBuffer(ordinaryBuffer) !== 0 ||
+                !ops.op_native_test_pipe_has_user_buffer(ordinary)) {{
+              throw new Error("ordinary useUserBuffer control failed");
+            }}
+            ops.op_native_test_set_pipe_interceptor(ordinary, true);
+            if (!ops.op_native_test_pipe_has_desired_interceptor(ordinary))
+              throw new Error("ordinary interceptor registration failed");
             const result = ordinary.readStart();
             if (result !== 0)
               throw new Error(`untagged stream was over-gated: ${{result}}`);
             if (!ops.op_native_test_pipe_reading_started(ordinary) ||
-                !ops.op_native_test_pipe_has_active_read(ordinary)) {{
+                !ops.op_native_test_pipe_has_active_read(ordinary) ||
+                ops.op_native_test_pipe_has_delivery_context(ordinary)) {{
               throw new Error("ordinary readStart did not install native read state");
             }}
+            if (!ops.op_native_test_pipe_has_active_interceptor(ordinary))
+              throw new Error("ordinary readStart lost its interceptor");
             if (ordinary.readStop() !== 0)
               throw new Error("ordinary readStop failed");
             if (ops.op_native_test_pipe_reading_started(ordinary) ||
@@ -916,7 +1558,8 @@ unsafe extern "C" fn on_uv_alloc(
     // SAFETY: `uv_stream_t.data` points at the owning handle's stable
     // `StreamHandleData` allocation while the native stream is alive.
     let handle_data = unsafe { handle_data_ptr.as_ref() };
-    if let Ok(user_buffer) = handle_data.user_buffer.try_borrow()
+    if handle_data.network_peer.get().is_none()
+      && let Ok(user_buffer) = handle_data.user_buffer.try_borrow()
       && let Some(user_buf) = user_buffer.as_ref()
     {
       // SAFETY: buf is a valid pointer provided by libuv per the uv_alloc_cb contract.
@@ -992,7 +1635,11 @@ unsafe extern "C" fn on_uv_read(
 
   let user_owned = user_owned_buf(handle_data, buf);
 
-  if let Some(interceptor) = snapshot.read_interceptor {
+  // Defense in depth for a pre-tag or re-entrant registration race: a
+  // protected peer must always reach the trusted onread/context path below.
+  if handle_data.network_peer.get().is_none()
+    && let Some(interceptor) = snapshot.read_interceptor
+  {
     if nread < 0 {
       // Socket-level error or EOF: don't hand it to the interceptor.
       // Match Node's PassReadErrorToPreviousListener — the consume
@@ -1076,10 +1723,35 @@ unsafe extern "C" fn on_uv_read(
       // EOF/error path: don't report exceptions as fatal.
       // Socket errors (hang up, reset, etc.) are expected lifecycle
       // events that should be handled by the socket's error handler.
-      onread.call(scope, recv.into(), &[undef.into()]);
+      if let Some(peer) = handle_data.network_peer.get() {
+        // Terminal cleanup is always available, including after revocation,
+        // but it must not inherit the positive context captured for byte
+        // delivery. Bound/native end and error listeners would otherwise be
+        // able to spend the root operation's authority while the connection
+        // is still half-open.
+        // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+        let previous_delivery_context =
+          enter_cleared_read_delivery_context(scope);
+        let nread_from_state = v8::undefined(scope);
+        let peer = v8::String::new(scope, &peer.to_string()).unwrap();
+        onread.call(
+          scope,
+          recv.into(),
+          &[undef.into(), nread_from_state.into(), peer.into()],
+        );
+        exit_read_delivery_context(scope, Some(previous_delivery_context));
+      } else {
+        onread.call(scope, recv.into(), &[undef.into()]);
+      }
     }
     return;
   }
+
+  // Positive reads alone regain the operation-scoped delivery context. The
+  // trusted JS adapter reauthorizes the immutable peer before wrapping or
+  // exposing any bytes.
+  let previous_delivery_context =
+    enter_read_delivery_context(scope, snapshot.delivery_context.as_ref());
 
   // Update bytes_read counter (mirrors Node's EmitRead in stream_base-inl.h)
   snapshot
@@ -1127,7 +1799,20 @@ unsafe extern "C" fn on_uv_read(
       let ab = v8::ArrayBuffer::with_backing_store(tc, &backing_store.into());
       ab.into()
     };
-    let result = onread.call(tc, recv.into(), &[arg]);
+    let result = if let Some(peer) = handle_data.network_peer.get() {
+      // The peer is an immutable native resource tag, not a JS property. The
+      // trusted adapter rechecks it under the callback-scoped provenance
+      // before touching the ArrayBuffer or stream.
+      let nread_from_state = v8::undefined(tc);
+      let peer = v8::String::new(tc, &peer.to_string()).unwrap();
+      onread.call(
+        tc,
+        recv.into(),
+        &[arg, nread_from_state.into(), peer.into()],
+      )
+    } else {
+      onread.call(tc, recv.into(), &[arg])
+    };
     if result.is_none() && tc.has_caught() {
       let exc = tc.exception();
       tc.reset();
@@ -1136,8 +1821,47 @@ unsafe extern "C" fn on_uv_read(
       None
     }
   };
+  exit_read_delivery_context(scope, previous_delivery_context);
   if let Some(exception) = caught_exception {
     call_fatal_exception(scope, exception);
+  }
+}
+
+/// Install the callback-scoped continuation context captured by protected
+/// `readStart`, returning the previous context for exact restoration after the
+/// native callback. Promise work scheduled by the callback retains this
+/// context; unrelated synchronous work resumes with its original context.
+fn enter_read_delivery_context(
+  scope: &mut v8::PinScope,
+  context: Option<&v8::Global<v8::Value>>,
+) -> Option<v8::Global<v8::Value>> {
+  let context = context?;
+  let previous = scope.get_continuation_preserved_embedder_data();
+  let previous = v8::Global::new(scope, previous);
+  let context = v8::Local::new(scope, context);
+  scope.set_continuation_preserved_embedder_data(context);
+  Some(previous)
+}
+
+/// Clear continuation-preserved authority for protected terminal callbacks,
+/// returning the exact prior value for restoration after cleanup.
+fn enter_cleared_read_delivery_context(
+  scope: &mut v8::PinScope,
+) -> v8::Global<v8::Value> {
+  let previous = scope.get_continuation_preserved_embedder_data();
+  let previous = v8::Global::new(scope, previous);
+  let cleared = v8::undefined(scope);
+  scope.set_continuation_preserved_embedder_data(cleared.into());
+  previous
+}
+
+fn exit_read_delivery_context(
+  scope: &mut v8::PinScope,
+  previous: Option<v8::Global<v8::Value>>,
+) {
+  if let Some(previous) = previous {
+    let previous = v8::Local::new(scope, previous);
+    scope.set_continuation_preserved_embedder_data(previous);
   }
 }
 
@@ -1152,6 +1876,12 @@ fn user_owned_buf(
   handle_data: &StreamHandleData,
   buf: *const uv_buf_t,
 ) -> bool {
+  // Protected peers categorically ignore the user-buffer path. `set_network_peer`
+  // retires a buffer registered before connect; this check is the callback-side
+  // defense in depth.
+  if handle_data.network_peer.get().is_some() {
+    return false;
+  }
   if buf.is_null() {
     return false;
   }
@@ -1585,22 +2315,53 @@ impl LibUvStreamWrap {
     self.base.close_handle(op_state, this, scope, cb)
   }
 
-  #[fast]
-  pub fn read_start(
+  // The permission decision needs the live JS frames. The fast op path can
+  // otherwise see only a root continuation context when root synchronously
+  // invokes a package that calls the raw handle method.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  #[nofast]
+  #[stack_trace]
+  pub fn read_start<'s>(
     &self,
+    protected_onread: Option<v8::Local<'s, v8::Function>>,
     #[this] this: v8::Global<v8::Object>,
-    scope: &mut v8::PinScope,
+    scope: &mut v8::PinScope<'s, '_>,
     op_state: &mut OpState,
   ) -> i32 {
     if !self.check_protected_network_peer("Node connected stream read") {
       return UV_EACCES;
     }
+    let protected = self.handle_data.network_peer.get().is_some();
+    let (protected_onread, delivery_context) = if protected {
+      let Some(onread) = protected_onread else {
+        return UV_EACCES;
+      };
+      if !Self::is_trusted_protected_onread(onread, scope, op_state) {
+        return UV_EACCES;
+      }
+      // Capture the exact callback object and the registering actor set once.
+      // Later writes to `handle.onread` cannot redirect native delivery.
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+      let context =
+        deno_core::error::oden_build_callback_context(scope, onread);
+      (Some(onread), Some(v8::Global::new(scope, context)))
+    } else {
+      // Preserve ordinary Node behavior: unprotected streams still read the
+      // public `handle.onread` property in `read_start_with_handle`.
+      (None, None)
+    };
     let this = if let Some(handle) = self.js_handle_global(scope) {
       v8::Local::new(scope, handle)
     } else {
       v8::Local::new(scope, &this)
     };
-    self.read_start_with_handle(this, scope, op_state)
+    self.read_start_with_handle(
+      this,
+      protected_onread,
+      delivery_context,
+      scope,
+      op_state,
+    )
   }
 
   #[string]
@@ -1611,6 +2372,22 @@ impl LibUvStreamWrap {
       .network_peer
       .get()
       .map(|peer| peer.to_string())
+  }
+
+  /// Recheck the unforgeable connect actor for JS stream admission guards.
+  /// The public endpoint string is diagnostic only and cannot reconstruct
+  /// this provenance record.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  #[nofast]
+  #[rename("checkProtectedInspectorUse")]
+  #[smi]
+  #[stack_trace]
+  pub fn check_protected_inspector_use(&self, #[string] api_name: &str) -> i32 {
+    if self.check_protected_network_peer(api_name) {
+      0
+    } else {
+      UV_EACCES
+    }
   }
 
   #[fast]
@@ -1630,9 +2407,17 @@ impl LibUvStreamWrap {
     &self,
     buffer: v8::Local<v8::Uint8Array>,
     scope: &mut v8::PinScope,
-  ) {
+  ) -> i32 {
+    // libuv writes directly into the registered JS backing store before the
+    // read callback can reauthorize delivery. Protected streams therefore
+    // reject this path before retaining or exposing the buffer pointer.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    if self.handle_data.network_peer.get().is_some() {
+      return UV_EACCES;
+    }
     *self.handle_data.user_buffer.borrow_mut() =
       UserBuffer::from_view(scope, buffer);
+    0
   }
 
   #[fast]
@@ -1697,7 +2482,11 @@ impl LibUvStreamWrap {
     err
   }
 
-  #[fast]
+  // Keep raw handle writes on the stack-capturing slow path. Public Socket
+  // guards are not a substitute because packages can retain the native wrap.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  #[nofast]
+  #[stack_trace]
   pub fn write_buffer(
     &self,
     req_wrap_obj: v8::Local<v8::Object>,
@@ -1831,7 +2620,8 @@ impl LibUvStreamWrap {
     0
   }
 
-  #[fast]
+  #[nofast]
+  #[stack_trace]
   pub fn writev(
     &self,
     req_wrap_obj: v8::Local<v8::Object>,
@@ -2081,8 +2871,9 @@ impl LibUvStreamWrap {
     )
   }
 
-  #[fast]
+  #[nofast]
   #[reentrant]
+  #[stack_trace]
   pub fn write_utf8_string(
     &self,
     req_wrap_obj: v8::Local<v8::Object>,
@@ -2101,7 +2892,8 @@ impl LibUvStreamWrap {
     )
   }
 
-  #[fast]
+  #[nofast]
+  #[stack_trace]
   pub fn write_ascii_string(
     &self,
     req_wrap_obj: v8::Local<v8::Object>,
@@ -2120,7 +2912,8 @@ impl LibUvStreamWrap {
     )
   }
 
-  #[fast]
+  #[nofast]
+  #[stack_trace]
   pub fn write_latin1_string(
     &self,
     req_wrap_obj: v8::Local<v8::Object>,
@@ -2139,7 +2932,8 @@ impl LibUvStreamWrap {
     )
   }
 
-  #[fast]
+  #[nofast]
+  #[stack_trace]
   pub fn write_ucs2_string(
     &self,
     req_wrap_obj: v8::Local<v8::Object>,

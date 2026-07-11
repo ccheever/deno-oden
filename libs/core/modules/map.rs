@@ -3334,6 +3334,22 @@ impl ModuleMap {
         return Err(CoreErrorKind::Js(err).into_box());
       }
     };
+    // Lazy extension scripts are compiled outside the ordinary ESM and
+    // `op_compile_function` paths, so register their V8 identity here as the
+    // loader-authenticated specifier. Native adapters can then accept an exact
+    // internal callback without trusting its mutable JS name or sourceURL.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    let oden_script_id = function.script_id();
+    if oden_script_id >= 0 {
+      // SAFETY: `tc_scope` is active for this compilation; the pointer is used
+      // only as the isolate-scoped registry key.
+      let isolate = unsafe { tc_scope.as_raw_isolate_ptr() };
+      crate::error::oden_register_script_locator(
+        isolate,
+        oden_script_id as usize,
+        &specifier_str,
+      );
+    }
     // Store the freshly-compiled cache on the first run (cold), or if V8
     // rejected the existing cache (e.g. the source changed).
     let rejected = compile_source

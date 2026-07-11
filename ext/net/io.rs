@@ -81,6 +81,10 @@ where
     (self.rd.into_inner(), self.wr.into_inner())
   }
 
+  pub fn protected_inspector_peer(&self) -> Option<SocketAddr> {
+    self.network_peer
+  }
+
   pub fn rd_borrow_mut(self: &Rc<Self>) -> AsyncMutFuture<R> {
     RcRef::map(self, |r| &r.rd).borrow_mut()
   }

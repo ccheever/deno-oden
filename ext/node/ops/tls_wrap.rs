@@ -38,6 +38,7 @@ use deno_core::OpState;
 use deno_core::ToJsBuffer;
 use deno_core::op2;
 use deno_core::uv_compat;
+use deno_core::uv_compat::UV_EACCES;
 use deno_core::uv_compat::UV_EBADF;
 use deno_core::uv_compat::UV_ECANCELED;
 use deno_core::uv_compat::UV_EOF;
@@ -798,6 +799,15 @@ impl UnderlyingStream {
         if stream.is_null() {
           return (std::ptr::null_mut(), UV_EBADF);
         }
+        // TLS writes encrypted records directly with uv_write, bypassing the
+        // underlying LibUvStreamWrap write ops. Protected inspector peers
+        // categorically refuse this alternate transport so pre-connect TLS
+        // attachment cannot shed the immutable endpoint tag.
+        // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+        if LibUvStreamWrap::protected_network_peer_for_stream(*stream).is_some()
+        {
+          return (std::ptr::null_mut(), UV_EACCES);
+        }
         let mut write_req = write_req;
         let data_len = write_req._data.len();
         let buf = uv_buf_t {
@@ -852,7 +862,8 @@ impl UnderlyingStream {
   )]
   fn set_read_interceptor(&self, interceptor: Option<ReadInterceptor>) {
     if let UnderlyingStream::Uv { stream } = self {
-      LibUvStreamWrap::set_read_interceptor_for_stream(*stream, interceptor);
+      let _ =
+        LibUvStreamWrap::set_read_interceptor_for_stream(*stream, interceptor);
     }
   }
 }
@@ -2066,6 +2077,9 @@ impl TLSWrap {
     scope: &mut v8::PinScope,
     op_state: &mut OpState,
   ) -> i32 {
+    if tcp.protected_network_peer().is_some() {
+      return UV_EACCES;
+    }
     let stream = tcp.stream_ptr();
     Self::do_attach_uv_stream(&self.inner, stream, scope, op_state)
   }

@@ -1154,7 +1154,7 @@ impl HTTPParser {
     scope: &mut v8::PinScope,
     callbacks: v8::Local<v8::Object>,
     handle: v8::Local<v8::Object>,
-  ) {
+  ) -> bool {
     let inner = self.inner();
 
     // Try to get the LibUvStreamWrap from the handle. Use the
@@ -1167,25 +1167,33 @@ impl HTTPParser {
     let Some(stream_wrap) = deno_core::cppgc::try_unwrap_cppgc_base_object::<
       LibUvStreamWrap,
     >(scope, handle_value) else {
-      return;
+      return false;
     };
 
     let stream = stream_wrap.stream_ptr();
     if stream.is_null() {
-      return;
+      return false;
     }
-
-    // Store the callbacks and isolate for use in the interceptor
-    inner.consume_callbacks = Some(v8::Global::new(scope, callbacks));
-    inner.consume_isolate = unsafe { scope.as_raw_isolate_ptr() };
-    inner.consumed_stream = Some(stream);
 
     // Register the read interceptor
     let interceptor = ReadInterceptor {
       ptr: inner as *mut Inner as *mut c_void,
       callback: consume_read_callback,
     };
-    LibUvStreamWrap::set_read_interceptor_for_stream(stream, Some(interceptor));
+    if !LibUvStreamWrap::set_read_interceptor_for_stream(
+      stream,
+      Some(interceptor),
+    ) {
+      return false;
+    }
+
+    // Retain callback state only after native registration succeeds. A
+    // protected stream refuses this fast path and falls back to checked JS
+    // `data` delivery without leaving the parser marked as consumed.
+    inner.consume_callbacks = Some(v8::Global::new(scope, callbacks));
+    inner.consume_isolate = unsafe { scope.as_raw_isolate_ptr() };
+    inner.consumed_stream = Some(stream);
+    true
   }
 
   /// Unconsume: remove the ReadInterceptor so data goes back
@@ -1194,7 +1202,7 @@ impl HTTPParser {
   fn unconsume(&self) {
     let inner = self.inner();
     if let Some(stream) = inner.consumed_stream.take() {
-      LibUvStreamWrap::set_read_interceptor_for_stream(stream, None);
+      let _ = LibUvStreamWrap::set_read_interceptor_for_stream(stream, None);
     }
     inner.consume_callbacks = None;
     inner.consume_isolate = v8::UnsafeRawIsolatePtr::null();

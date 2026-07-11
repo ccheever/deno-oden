@@ -7,6 +7,7 @@
 
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::rc::Rc;
 
@@ -41,6 +42,46 @@ use crate::ops::stream_wrap::clone_context_from_uv_loop;
 enum SocketType {
   Socket = 0,
   Server = 1,
+}
+
+/// Inspect a raw descriptor without taking ownership. Under the capsec
+/// profile, adopting any INET/INET6 socket is categorically closed: this API
+/// carries no immutable source-resource identity, so it cannot distinguish a
+/// legitimate inherited descriptor from a guessed protected socket before
+/// connect, after connect, or after inspector endpoint unregistration. Unix
+/// domain descriptors remain available to the Pipe IPC path.
+/// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+pub(crate) fn raw_inet_socket_adoption_is_forbidden(fd: i32) -> bool {
+  if fd < 0 {
+    return false;
+  }
+  // SAFETY: SockAddr::try_init zeroes the storage and getsockname initializes
+  // its family/length on success. Unlike BorrowedFd, this is also safe for an
+  // arbitrary closed descriptor: the OS simply returns EBADF/WSAENOTSOCK.
+  let internet_socket = unsafe {
+    Socket2SockAddr::try_init(|storage, len| {
+      #[cfg(unix)]
+      let result = libc::getsockname(fd, storage.cast(), len);
+      #[cfg(windows)]
+      let result = windows_sys::Win32::Networking::WinSock::getsockname(
+        fd as usize,
+        storage.cast(),
+        len,
+      );
+      if result == 0 {
+        Ok(())
+      } else {
+        Err(std::io::Error::last_os_error())
+      }
+    })
+  }
+  .ok()
+  .and_then(|(_, addr)| addr.as_socket())
+  .is_some();
+  internet_socket
+    && deno_permissions::oden_capsec_profile_is(
+      deno_permissions::ODEN_CAPSEC_PROFILE,
+    )
 }
 
 // -- libuv callbacks (called from the event loop) --
@@ -306,6 +347,10 @@ impl TCPWrap {
     self.base.stream_ptr()
   }
 
+  pub(crate) fn protected_network_peer(&self) -> Option<SocketAddr> {
+    self.base.network_peer()
+  }
+
   /// Decide which host to check `--allow-net` against when connecting to
   /// `address`. If a `node:dns.lookup()` token was installed and `address`
   /// is one of the IPs that lookup resolved, the original hostname is used
@@ -421,6 +466,9 @@ impl TCPWrap {
     if fd < 0 {
       return uv_compat::UV_EBADF;
     }
+    if raw_inet_socket_adoption_is_forbidden(fd) {
+      return uv_compat::UV_EACCES;
+    }
     // See `FdTable::begin_uv_adopt` for the duplicate-fd policy (stdio and
     // inherited extra stdio fds may be adopted — the latter covers an
     // inherited TCP socket claimed via net.Socket({ fd }) or
@@ -519,6 +567,14 @@ impl TCPWrap {
 
   #[fast]
   fn fd_for_ipc(&self) -> i32 {
+    // SCM_RIGHTS/child-process transfer reconstructs a fresh TCPWrap in a
+    // different process where this process-local inspector tag cannot follow.
+    // Refuse the descriptor export rather than shed the protected endpoint
+    // identity at that destination transition.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    if self.protected_network_peer().is_some() {
+      return uv_compat::UV_EACCES;
+    }
     #[cfg(unix)]
     {
       let tcp = self.tcp_ptr();
@@ -540,11 +596,19 @@ impl TCPWrap {
     if tcp.is_null() {
       return -1;
     }
-    let fd = state
-      .resource_table
-      .get::<TcpStreamResource>(rid)
-      .ok()
-      .and_then(|r| r.dup_raw_fd());
+    let Ok(resource) = state.resource_table.get::<TcpStreamResource>(rid)
+    else {
+      return -1;
+    };
+    // The source resource owns an immutable tag that deliberately survives
+    // inspector listener shutdown. Refuse reconstruction before duplicating
+    // its descriptor; refresh_network_peer would only consult current global
+    // endpoint state and could declassify the live connection.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    if resource.protected_inspector_peer().is_some() {
+      return uv_compat::UV_EACCES;
+    }
+    let fd = resource.dup_raw_fd();
     let result = match fd {
       // SAFETY: tcp is valid (null-checked above); fd is a valid dup'd descriptor.
       Some(fd) => unsafe { uv_compat::uv_tcp_open(tcp, fd) },
@@ -669,6 +733,15 @@ impl TCPWrap {
     &self,
     state: &mut OpState,
   ) -> Result<ResourceId, deno_error::JsErrorBox> {
+    // Downstream raw HTTP, WebSocket, and TLS resource conversions do not all
+    // preserve the protected peer tag yet. Refuse detachment before touching
+    // the live stream so this destination transition cannot declassify it.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    if self.protected_network_peer().is_some() {
+      return Err(deno_error::JsErrorBox::generic(
+        "EACCES: protected inspector stream cannot be detached",
+      ));
+    }
     let tcp = self.tcp_ptr();
     if tcp.is_null() {
       return Err(deno_error::JsErrorBox::generic("TCP handle is closed"));
@@ -759,6 +832,12 @@ impl TCPWrap {
     #[smi] port: i32,
     scope: &mut v8::PinScope,
   ) -> Result<i32, deno_permissions::PermissionCheckError> {
+    // A failed reconnect must not overwrite the immutable protected tag on
+    // the still-live original stream before libuv reports EISCONN/EALREADY.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    if self.protected_network_peer().is_some() {
+      return Ok(uv_compat::UV_EACCES);
+    }
     // If a hostname was stored from DNS lookup, check permissions against
     // the original hostname instead of the resolved IP address, but only
     // when `address` is one of the token's resolved IPs.
@@ -854,6 +933,9 @@ impl TCPWrap {
     #[smi] port: i32,
     scope: &mut v8::PinScope,
   ) -> Result<i32, deno_permissions::PermissionCheckError> {
+    if self.protected_network_peer().is_some() {
+      return Ok(uv_compat::UV_EACCES);
+    }
     let check_host = self.net_perm_check_host(address);
     let http_api_name = self.oden_http_api_name(&check_host, port as u16);
     if let Some(api_name) = &http_api_name {

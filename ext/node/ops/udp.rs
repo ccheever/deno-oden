@@ -693,6 +693,33 @@ pub fn op_node_udp_open(
   #[cfg(unix)]
   {
     use std::os::unix::io::FromRawFd;
+    // Borrow-check the descriptor type before taking ownership. UDPWrap.open
+    // is an IPC reconstruction seam, not a license to reinterpret a guessed
+    // protected TCP connection/listener as an untagged datagram resource (or
+    // close it as fallout from a failed conversion).
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    let mut socket_type: libc::c_int = 0;
+    let mut socket_type_len =
+      std::mem::size_of_val(&socket_type) as libc::socklen_t;
+    // SAFETY: getsockopt only borrows `fd`; invalid descriptors report an OS
+    // error without transferring ownership.
+    let result = unsafe {
+      libc::getsockopt(
+        fd,
+        libc::SOL_SOCKET,
+        libc::SO_TYPE,
+        (&mut socket_type as *mut libc::c_int).cast(),
+        &mut socket_type_len,
+      )
+    };
+    if result != 0 {
+      return Err(NodeUdpError::Io(std::io::Error::last_os_error()));
+    }
+    if socket_type != libc::SOCK_DGRAM {
+      return Err(NodeUdpError::Io(std::io::Error::from_raw_os_error(
+        libc::EACCES,
+      )));
+    }
     // SAFETY: The fd was received via SCM_RIGHTS and is a valid, open socket.
     let std_socket = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
     std_socket.set_nonblocking(true)?;

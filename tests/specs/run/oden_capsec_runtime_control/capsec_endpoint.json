@@ -3,6 +3,7 @@
   "rootGrants": "inspector:activate",
   "grants": {
     "endpoint-denied": "network:fetch:*,network:connect:*",
+    "native-stream-denied": "network:connect:*",
     "endpoint-allowed": "network:connect:*,inspector:activate"
   }
 }
