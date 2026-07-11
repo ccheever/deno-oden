@@ -665,6 +665,8 @@ const NOT_IMPORTED_OPS = [
   "op_jupyter_send_input_reply",
   "op_jupyter_deno_version",
   "op_jupyter_typescript_version",
+  "op_jupyter_register_repl_host_callback",
+  "op_jupyter_register_kernel_host_callback",
   // Used in jupyter API
   "op_base64_encode",
 
@@ -673,6 +675,7 @@ const NOT_IMPORTED_OPS = [
   "op_lint_get_source",
   "op_lint_create_serialized_ast",
   "op_is_cancelled",
+  "op_lint_register_host_callbacks",
 
   // Related to `Deno.test()` API
   "op_test_event_step_result_failed",
@@ -690,6 +693,11 @@ const NOT_IMPORTED_OPS = [
   "op_test_get_origin",
   "op_test_event_exit",
   "op_test_isolate_exit",
+  "op_test_register_host_callbacks",
+  "op_test_host_trace_leaks",
+  "op_test_host_sanitize_ops",
+  "op_test_host_sanitize_resources",
+  "op_test_host_allow_stale_snapshot_removal",
   "op_pledge_test_permissions",
   "op_test_snapshot_in_update_mode",
   "op_test_snapshot_read",
@@ -735,47 +743,23 @@ function removeImportedOps() {
   }
 }
 
-// --- Oden capsec Phase-0: CPED seal (LLP 0001 async attribution) ------------
-// The raw continuation-preserved-embedder-data (CPED) primitives - the async
-// context get/set and `AsyncVariable` - are the forgery surface for async
-// attribution: any code that reaches them can overwrite the scheduling
-// principal Oden stores in a dedicated slot. LLP 0001 gates sound enforce on a
-// seal that removes them from user reach while keeping `AsyncLocalStorage` /
-// `node:async_hooks` working. Eager consumers (ext/web timers) and lazy node
-// polyfills both destructure these into their own bindings at module
-// evaluation, so stripping them from the *only* user-reachable core view
-// (`Deno[Deno.internal].core`, assigned above) leaves those closures intact.
-//
-// The same treatment closes a script-creation forgery: `compileFunction` /
-// `evalContext` register the compiled script's id to the specifier the caller
-// passes, and the CJS loader passes a loader-resolved path. If user code could
-// reach these wrappers it could register malicious code under any package's
-// locator and borrow its grants. The backing ops are already stripped by
-// `removeImportedOps`; sealing the wrappers off the user-reachable view (the
-// loader uses the captured core, not this one) removes the last route.
+// --- Oden capsec Phase-0: core capability seal (LLP 0001) ------------------
+// Deno's internal core contains async-context mutation, script compilation,
+// extension loading, raw callback registration, and context-free schedulers.
+// Maintaining a denylist here is unsafe: a new core export would become an
+// ambient capability by default. Armed user code needs none of this surface,
+// so expose an empty frozen object. Trusted eager and lazy extensions retain
+// their separately captured raw `core` binding; wholly unarmed Deno retains
+// the exact upstream object.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md
-const ODEN_SEALED_CORE_KEYS = [
-  "getAsyncContext",
-  "setAsyncContext",
-  "scopeAsyncContext",
-  "AsyncVariable",
-  "kNoAsyncContextRestore",
-  "compileFunction",
-  "evalContext",
-];
+// @ref LLP 0010#revision-11-patch-profile [implements] -- Armed runtime-control internals fail closed by construction.
 
 function odenSealAsyncContext() {
-  const realCore = internals.core;
-  const sealed = { __proto__: null };
-  const keys = ObjectKeys(realCore);
-  for (let i = 0; i < keys.length; i++) {
-    const k = keys[i];
-    if (ArrayPrototypeIncludes(ODEN_SEALED_CORE_KEYS, k)) {
-      continue;
-    }
-    sealed[k] = realCore[k];
-  }
-  internals.core = ObjectFreeze(sealed);
+  const userCore = ObjectFreeze({ __proto__: null });
+  finalDenoNs[internalSymbol] = ObjectFreeze({
+    __proto__: null,
+    core: userCore,
+  });
 }
 
 // Trusted bootstrap conformance check for LLP 0001's foreign-key-preserving
@@ -1010,14 +994,16 @@ function odenTameAndFreezeError() {
 
 function odenMaybeSealAsyncContext() {
   const flags = op_oden_capsec_flags();
-  // Runtime-per-isolate arming signal for trusted lazy extension modules. This
-  // is deliberately written during runtime bootstrap instead of cached while
-  // building the startup snapshot. The node timer implementation reads it at
-  // the real async-context capture seam for ENG-23881.
-  internals.odenCapsecArmed = (flags & 1) !== 0;
   if ((flags & 1) === 0) {
     return;
   }
+  // Armed extension closures keep the raw bridge, but it must not inherit
+  // package-planted accessors: a later trusted read of an absent key would
+  // otherwise invoke an inherited getter with raw `internals` as `this`.
+  // Expose the filtered, read-only facade only in armed runtimes so wholly
+  // unarmed Deno retains the exact upstream internal object and prototype.
+  // @ref LLP 0010#revision-11-patch-profile [implements] -- Trusted runtime-control bridges have no package-poisonable prototype.
+  ObjectSetPrototypeOf(internals, null);
   // Always-on seal conformance (LLP 0001 ENG-23775): the four seal conditions
   // run on every armed startup, not just under the env-gated self-test. Verbose
   // (prints PASS/FAIL) only when the self-test bit is set; otherwise silent. The
@@ -1615,7 +1601,10 @@ function bootstrapWorkerRuntime(
       nodeDebug,
       nodeClusterUniqueId,
       nodeClusterSchedPolicy,
-      moduleSpecifier: workerType === "node" ? moduleSpecifier : null,
+      // Every worker type may lazily import node:process. Preserve the trusted
+      // worker entry for that deferred bootstrap instead of making it fall
+      // back to a public cwd inspection after Deno.mainModule is removed.
+      moduleSpecifier,
       // Stashed so process.ts's self-trigger can call __bootstrapNodeProcess
       // without reading Deno.* (see the main-thread branch above).
       denoArgs: Deno.args,

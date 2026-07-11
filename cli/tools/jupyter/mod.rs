@@ -6,7 +6,6 @@ use deno_core::anyhow::Context;
 use deno_core::anyhow::anyhow;
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
-use deno_core::located_script_name;
 use deno_core::serde_json;
 use deno_core::url::Url;
 use deno_core::v8;
@@ -145,10 +144,13 @@ pub async fn kernel(
         .await?;
 
       worker.setup_repl().await?;
-      worker.execute_script_static(
-        located_script_name!(),
-        "Deno[Deno.internal].enableJupyter();",
-      )?;
+      let enable_jupyter = worker
+        .op_state()
+        .borrow()
+        .borrow::<ops::jupyter::JupyterReplHostCallback>()
+        .0
+        .clone();
+      worker.call_function(&enable_jupyter).await?;
       let worker = worker.into_main_worker();
 
       let mut repl_session = repl::ReplSession::initialize(
@@ -246,10 +248,13 @@ pub async fn kernel(
   }
 
   // Bootstrap the JS ZMQ kernel then run the event loop.
-  kernel_worker.execute_script_static(
-    located_script_name!(),
-    "Deno[Deno.internal].startJupyterKernel();",
-  )?;
+  let start_jupyter_kernel = kernel_worker
+    .op_state()
+    .borrow()
+    .borrow::<ops::jupyter::JupyterKernelHostCallback>()
+    .0
+    .clone();
+  kernel_worker.start_trusted_host_function(&start_jupyter_kernel);
   let mut kernel_main = kernel_worker.into_main_worker();
   kernel_main.run_event_loop(false).await?;
 
@@ -360,17 +365,7 @@ impl JupyterReplSession {
       } => {
         let response = self
           .repl_session
-          .post_message_with_event_loop(
-            "Runtime.callFunctionOn",
-            Some(serde_json::json!({
-              "functionDeclaration": r#"async function (execution_count, result) {
-                await Deno[Deno.internal].jupyter.broadcastResult(execution_count, result);
-              }"#,
-              "arguments": [arg0, arg1],
-              "executionContextId": self.repl_session.context_id,
-              "awaitPromise": true,
-            })),
-          )
+          .call_jupyter_broadcast_result(arg0, arg1)
           .await;
         let json: Option<serde_json::Value> =
           serde_json::from_value(response).ok();

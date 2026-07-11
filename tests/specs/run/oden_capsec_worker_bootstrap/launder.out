@@ -1,0 +1,2 @@
+[WILDCARD]{"direct":"DENIED","facade":"HIDDEN","mutation":"BLOCKED","core":"HIDDEN","receiver":"BLOCKED","rootRid":"HIDDEN","timer":"DENIED","rawCore":"HIDDEN","prototype":"BLOCKED","trustedRead":"BLOCKED"}
+worker-bootstrap-ok

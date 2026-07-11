@@ -916,6 +916,92 @@ fn oden_cped_schedule_symbol<'s>(
   Some(v8::Symbol::for_api(scope, desc))
 }
 
+// Rust-owned host callbacks (Jupyter kernel startup today) need a Runtime
+// actor that follows only the promise lineage created by that callback. An API
+// symbol is not present in JavaScript's Symbol.for registry, so packages cannot
+// forge or discover this slot. Permission attribution treats it strictly as a
+// fallback: any live or scheduled package actor still constrains the op.
+fn oden_cped_trusted_host_symbol<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+) -> Option<v8::Local<'s, v8::Symbol>> {
+  let desc = v8::String::new(scope, "oden.trusted-host.slot")?;
+  Some(v8::Symbol::for_api(scope, desc))
+}
+
+/// Install an opaque Runtime actor in the current continuation context and
+/// return the prior context for restoration. Promise continuations created
+/// before restoration retain the marked context; unrelated synchronous work
+/// resumes with the exact previous context.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+pub fn oden_enter_trusted_host_actor(
+  scope: &mut v8::PinScope,
+) -> Option<v8::Global<v8::Value>> {
+  if !oden_capsec_armed() {
+    return None;
+  }
+  let previous = scope.get_continuation_preserved_embedder_data();
+  let previous_handle = v8::Global::new(scope, previous);
+  let Some(symbol) = oden_cped_trusted_host_symbol(scope) else {
+    return Some(previous_handle);
+  };
+
+  let marked = v8::Object::new(scope);
+  if let Ok(old) = v8::Local::<v8::Object>::try_from(previous) {
+    let args = v8::GetPropertyNamesArgsBuilder::new()
+      .mode(v8::KeyCollectionMode::OwnOnly)
+      .property_filter(v8::PropertyFilter::ALL_PROPERTIES)
+      .index_filter(v8::IndexFilter::IncludeIndices)
+      .key_conversion(v8::KeyConversionMode::KeepNumbers)
+      .build();
+    if let Some(names) = old.get_own_property_names(scope, args) {
+      for i in 0..names.length() {
+        if let Some(key) = names.get_index(scope, i)
+          && let Some(value) = old.get(scope, key)
+        {
+          marked.set(scope, key, value);
+        }
+      }
+    }
+  }
+  let marker = v8::Boolean::new(scope, true);
+  marked.set(scope, symbol.into(), marker.into());
+  scope.set_continuation_preserved_embedder_data(marked.into());
+  Some(previous_handle)
+}
+
+/// Restore the continuation context returned by
+/// [`oden_enter_trusted_host_actor`].
+pub fn oden_exit_trusted_host_actor(
+  scope: &mut v8::PinScope,
+  previous: Option<v8::Global<v8::Value>>,
+) {
+  if let Some(previous) = previous {
+    let previous = v8::Local::new(scope, previous);
+    scope.set_continuation_preserved_embedder_data(previous);
+  }
+}
+
+/// Whether the currently dispatched continuation carries the opaque
+/// Rust-owned host actor.
+pub fn oden_read_trusted_host_actor(scope: &mut v8::PinScope) -> bool {
+  if !oden_capsec_armed() {
+    return false;
+  }
+  let cped = scope.get_continuation_preserved_embedder_data();
+  let Ok(cped) = v8::Local::<v8::Object>::try_from(cped) else {
+    return false;
+  };
+  let Some(symbol) = oden_cped_trusted_host_symbol(scope) else {
+    return false;
+  };
+  if cped.has_own_property(scope, symbol.into()) != Some(true) {
+    return false;
+  }
+  cped
+    .get(scope, symbol.into())
+    .is_some_and(|value| value.is_true())
+}
+
 #[allow(
   clippy::print_stderr,
   reason = "capsec stale-token invariant emits an audit signal to stderr"

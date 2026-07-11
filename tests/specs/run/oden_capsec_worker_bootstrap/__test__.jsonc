@@ -13,6 +13,33 @@
       "envs": { "ODEN_CAPSEC_POLICY": "${POLICY}" },
       "output": "main.out",
       "exitCode": 0
+    },
+    "node_eval_and_data_workers_use_creator_require_base": {
+      "args": "run --allow-all eval_main.js",
+      "variants": {
+        "enforce": { "POLICY": "enforce.json" },
+        "audit": { "POLICY": "audit.json" },
+        "permissive": { "POLICY": "permissive.json" }
+      },
+      "envs": { "ODEN_CAPSEC_POLICY": "${POLICY}" },
+      "output": "eval.out",
+      "exitCode": 0
+    },
+    "internal_bridges_and_timer_context_are_sealed": {
+      "args": "run --allow-all launder_main.js",
+      "variants": {
+        "enforce": { "POLICY": "enforce.json" },
+        "audit": { "POLICY": "audit.json" },
+        "permissive": { "POLICY": "permissive.json" }
+      },
+      "envs": { "ODEN_CAPSEC_POLICY": "${POLICY}" },
+      "output": "launder.out",
+      "exitCode": 0
+    },
+    "unarmed_internals_preserve_upstream_identity": {
+      "args": "run unarmed_main.js",
+      "output": "unarmed.out",
+      "exitCode": 0
     }
   }
 }

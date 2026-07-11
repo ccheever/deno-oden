@@ -91,11 +91,16 @@ fn comment_source_to_position_range(
 
 fn get_prelude() -> String {
   r#"(() => {
+  const jupyterBroadcastResultSymbol = Symbol.for("Deno.internal.jupyter.broadcastResult");
+  const jupyterBroadcastResult = globalThis[jupyterBroadcastResultSymbol];
+  delete globalThis[jupyterBroadcastResultSymbol];
+  const inspect = Deno.inspect;
   const repl_internal = {
     String,
     lastEvalResult: undefined,
     lastThrownError: undefined,
-    inspectArgs: Deno[Deno.internal].inspectArgs,
+    jupyterBroadcastResult,
+    inspectArgs: (args, options) => inspect(args[1], options),
     noColor: Deno.noColor,
     get closed() {
       try {
@@ -408,6 +413,33 @@ impl ReplSession {
       .unwrap();
 
     Ok(closed)
+  }
+
+  pub async fn call_jupyter_broadcast_result(
+    &mut self,
+    execution_count: cdp::CallArgument,
+    result: cdp::CallArgument,
+  ) -> Value {
+    self
+      .post_message_with_event_loop(
+        "Runtime.callFunctionOn",
+        Some(cdp::CallFunctionOnArgs {
+          function_declaration:
+            "async function (executionCount, result) { return await this.jupyterBroadcastResult(executionCount, result); }"
+              .to_string(),
+          object_id: self.internal_object_id.clone(),
+          arguments: Some(vec![execution_count, result]),
+          silent: None,
+          return_by_value: None,
+          generate_preview: None,
+          user_gesture: None,
+          await_promise: Some(true),
+          execution_context_id: None,
+          object_group: None,
+          throw_on_side_effect: None,
+        }),
+      )
+      .await
   }
 
   pub async fn post_message_with_event_loop<T: serde::Serialize>(

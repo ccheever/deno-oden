@@ -1673,7 +1673,12 @@ Module._load = function (request, parent, isMain) {
       typeof process !== "undefined" &&
       typeof internals.nodeProcessFatalException === "function"
     ) {
-      if (internals.nodeProcessFatalException(err)) {
+      if (
+        internals.nodeProcessFatalException(
+          internals.nodeProcessTrustedToken,
+          err,
+        )
+      ) {
         return module.exports;
       }
       if (err !== null && typeof err === "object") {

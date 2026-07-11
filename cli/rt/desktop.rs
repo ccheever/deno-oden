@@ -15,9 +15,11 @@ pub use deno_runtime::ops::desktop::DesktopApi;
 pub use deno_runtime::ops::desktop::MenuItem;
 
 /// JS code that exposes desktop APIs via `Deno.BrowserWindow` and `Deno.desktop`.
+// @ref LLP 0010#revision-11-patch-profile [implements] -- Desktop bootstrap captures trusted core bindings without exposing them through Deno.internal.
 pub const DESKTOP_JS: &str = r#"
+import { core, internals } from "ext:core/mod.js";
+
 (() => {
-  const internals = Deno[Deno.internal];
   const {
     BrowserWindow,
     Dock,
@@ -32,7 +34,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_prompt,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
-  } = internals.core.ops;
+  } = core.ops;
   const BrowserWindowPrototype = BrowserWindow.prototype;
   Object.setPrototypeOf(BrowserWindowPrototype, EventTarget.prototype);
 
@@ -298,14 +300,14 @@ pub const DESKTOP_JS: &str = r#"
 
 
   Object.defineProperties(globalThis, {
-    alert: internals.core.propWritable(alert),
-    confirm: internals.core.propWritable(confirm),
-    prompt: internals.core.propWritable(prompt),
-    UIEvent: internals.core.propNonEnumerable(UIEvent),
-    FocusEvent: internals.core.propNonEnumerable(FocusEvent),
-    KeyboardEvent: internals.core.propNonEnumerable(KeyboardEvent),
-    MouseEvent: internals.core.propNonEnumerable(MouseEvent),
-    WheelEvent: internals.core.propNonEnumerable(WheelEvent),
+    alert: core.propWritable(alert),
+    confirm: core.propWritable(confirm),
+    prompt: core.propWritable(prompt),
+    UIEvent: core.propNonEnumerable(UIEvent),
+    FocusEvent: core.propNonEnumerable(FocusEvent),
+    KeyboardEvent: core.propNonEnumerable(KeyboardEvent),
+    MouseEvent: core.propNonEnumerable(MouseEvent),
+    WheelEvent: core.propNonEnumerable(WheelEvent),
   });
 
   const DockPrototype = Dock.prototype;
@@ -326,7 +328,7 @@ pub const DESKTOP_JS: &str = r#"
   internals.defineEventHandler(DockPrototype, "reopen");
 
   const dock = new OrigDock();
-  Object.defineProperty(Deno, "dock", internals.core.propReadOnly(dock));
+  Object.defineProperty(Deno, "dock", core.propReadOnly(dock));
 
   const TrayPrototype = Tray.prototype;
   Object.setPrototypeOf(TrayPrototype, EventTarget.prototype);
@@ -555,8 +557,8 @@ pub const DESKTOP_JS: &str = r#"
         enumerable: true,
         configurable: true,
       },
-      maxActions: internals.core.propReadOnly(0),
-      requestPermission: internals.core.propWritable(function requestPermission(
+      maxActions: core.propReadOnly(0),
+      requestPermission: core.propWritable(function requestPermission(
         cb,
       ) {
         // The Web Notifications spec gates `requestPermission` on a
@@ -696,7 +698,7 @@ pub const DESKTOP_JS: &str = r#"
   // Start polling loops immediately. Use core.unrefOpPromise so these
   // pending ops don't block event loop completion (e.g. the pre-module
   // tick used by HMR, or module evaluation with top-level await).
-  const { unrefOpPromise } = internals.core;
+  const { unrefOpPromise } = core;
 
   // Single polling loop for all native desktop events.
   (async () => {
@@ -948,13 +950,15 @@ pub fn desktop_auto_update_js(
   release_base_url: Option<&str>,
 ) -> String {
   format!(
-    r#"(() => {{
+    r#"import {{ core }} from "ext:core/mod.js";
+
+(() => {{
   const {{
     op_desktop_apply_patch,
     op_desktop_verify_ed25519,
     op_desktop_confirm_update,
-  }} = Deno[Deno.internal].core.ops;
-  const {{ propReadOnly, propWritable }} = Deno[Deno.internal].core;
+  }} = core.ops;
+  const {{ propReadOnly, propWritable }} = core;
 
   const _version = {version};
   const _rolledBack = {rolled_back};
@@ -1137,8 +1141,10 @@ pub fn desktop_error_reporting_js(
   version: Option<&str>,
 ) -> String {
   format!(
-    r#"(() => {{
-  const {{ op_desktop_alert, op_desktop_send_error_report }} = Deno[Deno.internal].core.ops;
+    r#"import {{ core }} from "ext:core/mod.js";
+
+(() => {{
+  const {{ op_desktop_alert, op_desktop_send_error_report }} = core.ops;
   const _errorReportingUrl = {url};
   const _appVersion = {version};
 
@@ -1224,6 +1230,26 @@ mod tests {
   // cheaply exec it in a v8 isolate from here, but the asserts below
   // pin the regressions that motivated this whole fix: the "Deno.env
   // throws NotCapable and aborts the IIFE" bug from May 2026.
+
+  #[test]
+  fn desktop_bootstrap_sources_capture_private_extension_core() {
+    let sources = [
+      DESKTOP_JS.to_string(),
+      desktop_auto_update_js(Some("1.2.3"), false, None),
+      desktop_error_reporting_js(None, None),
+    ];
+    for source in sources {
+      assert!(
+        source.contains("from \"ext:core/mod.js\""),
+        "desktop bootstrap must capture its trusted core binding as an extension module"
+      );
+      assert!(
+        !source.contains("Deno[Deno.internal]")
+          && !source.contains("Deno.internal"),
+        "desktop bootstrap must not recover trusted bindings from the public facade"
+      );
+    }
+  }
 
   #[test]
   fn desktop_js_wraps_binding_trace_env_read_in_try_catch() {

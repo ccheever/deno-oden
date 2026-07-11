@@ -1,5 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::cell::Cell;
+
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
@@ -81,6 +83,12 @@ pub(crate) static MAYBE_CURRENT_ODEN_CPED_STACK: Lazy<
   Mutex<Option<Vec<String>>>,
 > = Lazy::new(|| Mutex::new(None));
 
+// Opaque Rust-owned host actor carried by the current CPED continuation. It is
+// a fallback only: live and scheduled package actors remain authoritative.
+thread_local! {
+  static CURRENT_ODEN_TRUSTED_HOST_ACTOR: Cell<bool> = const { Cell::new(false) };
+}
+
 pub fn set_current_stacktrace(get_stack: GetFormattedStackFn) {
   *MAYBE_CURRENT_STACKTRACE.lock() = Some(get_stack);
 }
@@ -99,6 +107,14 @@ pub(crate) fn current_oden_cped_locator() -> Option<String> {
 
 pub fn set_current_oden_cped_stack(stack: Option<Vec<String>>) {
   *MAYBE_CURRENT_ODEN_CPED_STACK.lock() = stack;
+}
+
+pub fn set_current_oden_trusted_host_actor(active: bool) {
+  CURRENT_ODEN_TRUSTED_HOST_ACTOR.set(active);
+}
+
+pub(crate) fn current_oden_trusted_host_actor() -> bool {
+  CURRENT_ODEN_TRUSTED_HOST_ACTOR.get()
 }
 
 pub(crate) fn current_oden_cped_stack() -> Vec<String> {

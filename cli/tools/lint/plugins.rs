@@ -95,8 +95,6 @@ macro_rules! v8_static_strings {
 
 v8_static_strings! {
   DEFAULT = "default",
-  INSTALL_PLUGINS = "installPlugins",
-  RUN_PLUGINS_FOR_FILE = "runPluginsForFile",
 }
 
 #[derive(Debug)]
@@ -167,35 +165,15 @@ async fn create_plugin_runner_inner(
     )
     .await?;
 
-  let mut worker = worker.into_main_worker();
-  let runtime = &mut worker.js_runtime;
-
-  let obj = runtime.execute_script("lint.js", "Deno[Deno.internal]")?;
-
+  let worker = worker.into_main_worker();
   log::debug!("Lint plugins loaded, capturing default exports");
   let (install_plugins_fn, run_plugins_for_file_fn) = {
-    deno_core::scope!(scope, runtime);
-    let module_exports: v8::Local<v8::Object> =
-      v8::Local::new(scope, obj).try_into().unwrap();
-
-    let install_plugins_fn_name = INSTALL_PLUGINS.v8_string(scope).unwrap();
-    let install_plugins_fn_val = module_exports
-      .get(scope, install_plugins_fn_name.into())
-      .unwrap();
-    let install_plugins_fn: v8::Local<v8::Function> =
-      install_plugins_fn_val.try_into().unwrap();
-
-    let run_plugins_for_file_fn_name =
-      RUN_PLUGINS_FOR_FILE.v8_string(scope).unwrap();
-    let run_plugins_for_file_fn_val = module_exports
-      .get(scope, run_plugins_for_file_fn_name.into())
-      .unwrap();
-    let run_plugins_for_file_fn: v8::Local<v8::Function> =
-      run_plugins_for_file_fn_val.try_into().unwrap();
-
+    let op_state = worker.js_runtime.op_state();
+    let state = op_state.borrow();
+    let callbacks = state.borrow::<crate::ops::lint::LintHostCallbacks>();
     (
-      v8::Global::new(scope, install_plugins_fn),
-      v8::Global::new(scope, run_plugins_for_file_fn),
+      callbacks.install_plugins.clone(),
+      callbacks.run_plugins_for_file.clone(),
     )
   };
 

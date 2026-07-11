@@ -522,6 +522,37 @@ pub fn oden_capsec_record_root_ambient_effect(
   Ok(())
 }
 
+const ODEN_TRUSTED_HOST_INSPECTOR_EFFECTS: [(&str, &str); 2] =
+  [("runtime", "inspect"), ("inspector", "activate")];
+
+/// Authorize a local inspector session created exclusively by the Rust host
+/// for REPL, Jupyter, HMR, coverage, or desktop tooling. This seam is not
+/// reachable from package JavaScript: package-originated inspector routes use
+/// the ordinary terminal inspector checks below. Native host setup often runs
+/// with no active JS frame (`no-user`), so deriving its authority from the
+/// current principal set would misclassify trusted runtime control as package
+/// activity and break the tool before user code starts.
+// @ref LLP 0019#inspector [implements]
+pub fn oden_capsec_check_runtime_local_inspector_session(
+  target: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  for (family, action) in ODEN_TRUSTED_HOST_INSPECTOR_EFFECTS {
+    oden_capsec_audit_record(
+      "root/runtime",
+      family,
+      action,
+      target,
+      "allow(trusted host)",
+      None,
+    );
+  }
+  Ok(())
+}
+
 /// Authorize an inspector activation route from the exact Rev1.1 static floor.
 /// Programmatic package callers must each hold `inspector:activate`; session
 /// overlays and handles cannot satisfy this terminal predicate. Startup and
@@ -4056,6 +4087,25 @@ where
   root
 }
 
+fn oden_capsec_unattributed_principal(
+  trusted_host_actor: bool,
+) -> OdenPrincipal {
+  if trusted_host_actor {
+    OdenPrincipal::Runtime
+  } else {
+    OdenPrincipal::NoUser
+  }
+}
+
+fn oden_capsec_apply_unattributed_fallback(
+  principals: &mut Vec<OdenPrincipal>,
+  trusted_host_actor: bool,
+) {
+  if principals.is_empty() {
+    principals.push(oden_capsec_unattributed_principal(trusted_host_actor));
+  }
+}
+
 fn oden_capsec_principal_with_locator() -> (OdenPrincipal, Option<String>) {
   let frames = MAYBE_CURRENT_ODEN_STACKTRACE
     .lock()
@@ -4102,11 +4152,18 @@ fn oden_capsec_principal_with_locator() -> (OdenPrincipal, Option<String>) {
   {
     return (principal, Some(locator));
   }
-  // Precedence row 4: no live user frame and no scheduling principal — the
-  // fail-closed sentinel, never root. A genuine timer/immediate boundary now
-  // carries schedule-before-first-op through ENG-23881; this fallthrough remains
-  // for contexts with no attributable boundary at all.
-  (OdenPrincipal::NoUser, None)
+  // A Rust-owned host actor is the final ambient fallback, never an override:
+  // any live or scheduled package/quarantine actor above remains authoritative.
+  // Precedence row 4: no live user frame and no scheduling principal is the
+  // fail-closed sentinel, except for the opaque Rust-owned host actor above.
+  // A genuine timer/immediate boundary carries schedule-before-first-op through
+  // ENG-23881; ordinary unattributed continuations still become no-user.
+  (
+    oden_capsec_unattributed_principal(
+      prompter::current_oden_trusted_host_actor(),
+    ),
+    None,
+  )
 }
 
 fn oden_capsec_principal() -> OdenPrincipal {
@@ -4118,9 +4175,9 @@ fn oden_capsec_principal() -> OdenPrincipal {
 // the call chain, plus the appended CPED scheduling principal(s) — the single
 // scheduling locator (row 2) and the carried scheduling stack set
 // (call-boundary attribution). Order is nearest-frame first, scheduler(s) last;
-// duplicates collapse so self-scheduling is a single entry. Empty only when
-// nothing is attributable, in which case the fail-closed sentinel stands in so
-// the intersection denies rather than silently widening.
+// duplicates collapse so self-scheduling is a single entry. Empty becomes the
+// opaque Rust-host actor when present, otherwise the fail-closed no-user
+// sentinel; a host actor never replaces a constrained entry already collected.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md (Async attribution row 3)
 fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
   let mut out: Vec<OdenPrincipal> = Vec::new();
@@ -4164,9 +4221,10 @@ fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
   for locator in prompter::current_oden_cped_stack() {
     push(&mut out, oden_principal_index::resolve_locator(&locator));
   }
-  if out.is_empty() {
-    out.push(OdenPrincipal::NoUser);
-  }
+  oden_capsec_apply_unattributed_fallback(
+    &mut out,
+    prompter::current_oden_trusted_host_actor(),
+  );
   out
 }
 
@@ -9899,6 +9957,82 @@ mod tests {
       )]),
       None
     );
+  }
+
+  #[test]
+  fn trusted_host_actor_is_fallback_only_and_declares_both_effects() {
+    assert_eq!(
+      ODEN_TRUSTED_HOST_INSPECTOR_EFFECTS,
+      [("runtime", "inspect"), ("inspector", "activate")]
+    );
+
+    let mut unattributed = Vec::new();
+    oden_capsec_apply_unattributed_fallback(&mut unattributed, false);
+    assert_eq!(unattributed, vec![OdenPrincipal::NoUser]);
+    assert_eq!(
+      OdenPolicy::constrained_principals(&unattributed),
+      vec![OdenPrincipal::NoUser],
+      "ordinary no-user attribution must remain fail-closed"
+    );
+
+    let mut trusted_host = Vec::new();
+    oden_capsec_apply_unattributed_fallback(&mut trusted_host, true);
+    assert_eq!(trusted_host, vec![OdenPrincipal::Runtime]);
+    assert!(OdenPolicy::constrained_principals(&trusted_host).is_empty());
+
+    let mut package_actor = vec![OdenPrincipal::Quarantine];
+    oden_capsec_apply_unattributed_fallback(&mut package_actor, true);
+    assert_eq!(
+      package_actor,
+      vec![OdenPrincipal::Quarantine],
+      "trusted host actor must not replace a live or scheduled constrained actor"
+    );
+  }
+
+  #[test]
+  fn trusted_host_actor_never_overrides_live_or_scheduled_actor() {
+    static ATTRIBUTION_TEST_LOCK: std::sync::Mutex<()> =
+      std::sync::Mutex::new(());
+    let _lock = ATTRIBUTION_TEST_LOCK.lock().unwrap();
+    struct ResetAttribution;
+    impl Drop for ResetAttribution {
+      fn drop(&mut self) {
+        *prompter::MAYBE_CURRENT_ODEN_STACKTRACE.lock() = None;
+        prompter::set_current_oden_cped_locator(None);
+        prompter::set_current_oden_cped_stack(None);
+        prompter::set_current_oden_trusted_host_actor(false);
+      }
+    }
+    let _reset = ResetAttribution;
+
+    prompter::set_current_oden_cped_locator(None);
+    prompter::set_current_oden_cped_stack(None);
+    prompter::set_current_oden_trusted_host_actor(true);
+    prompter::set_current_oden_stacktrace(Box::new(|| {
+      vec![prompter::OdenStackFrame {
+        isolate_id: Some(1),
+        script_id: Some(1),
+        locator: None,
+        display_name: Some("file:///untrusted-package.js".to_string()),
+      }]
+    }));
+    assert_eq!(oden_capsec_principal(), OdenPrincipal::Quarantine);
+    assert_eq!(oden_capsec_principal_set(), vec![OdenPrincipal::Quarantine]);
+
+    prompter::set_current_oden_stacktrace(Box::new(Vec::new));
+    prompter::set_current_oden_cped_stack(Some(vec![
+      "data:oden-unknown-scheduled-package".to_string(),
+    ]));
+    assert_ne!(oden_capsec_principal(), OdenPrincipal::Runtime);
+    assert_ne!(oden_capsec_principal_set(), vec![OdenPrincipal::Runtime]);
+
+    prompter::set_current_oden_cped_stack(None);
+    assert_eq!(oden_capsec_principal(), OdenPrincipal::Runtime);
+    assert_eq!(oden_capsec_principal_set(), vec![OdenPrincipal::Runtime]);
+
+    prompter::set_current_oden_trusted_host_actor(false);
+    assert_eq!(oden_capsec_principal(), OdenPrincipal::NoUser);
+    assert_eq!(oden_capsec_principal_set(), vec![OdenPrincipal::NoUser]);
   }
 
   #[test]

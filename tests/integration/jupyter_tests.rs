@@ -422,11 +422,18 @@ async fn server_ready(conn: &ConnectionSpec) -> bool {
 }
 
 async fn setup_server() -> (TestContext, ConnectionSpec, JupyterServerProcess) {
-  setup_server_with_key("").await
+  setup_server_with_key_and_policy("", None).await
 }
 
 async fn setup_server_with_key(
   key: &str,
+) -> (TestContext, ConnectionSpec, JupyterServerProcess) {
+  setup_server_with_key_and_policy(key, None).await
+}
+
+async fn setup_server_with_key_and_policy(
+  key: &str,
+  policy: Option<String>,
 ) -> (TestContext, ConnectionSpec, JupyterServerProcess) {
   let context = TestContextBuilder::new().use_temp_cwd().build();
   let (mut conn, mut listeners) = ConnectionSpec::new();
@@ -435,16 +442,18 @@ async fn setup_server_with_key(
   conn_file.write_json(&conn);
 
   let start_process = |conn_file: &test_util::PathRef| {
-    context
-      .new_command()
-      .args_vec(vec![
-        "jupyter",
-        "--kernel",
-        "--conn",
-        conn_file.to_string().as_str(),
-      ])
-      .spawn()
-      .unwrap()
+    let command = context.new_command().args_vec(vec![
+      "jupyter",
+      "--kernel",
+      "--conn",
+      conn_file.to_string().as_str(),
+    ]);
+    let command = if let Some(policy) = policy.as_deref() {
+      command.env("ODEN_CAPSEC_POLICY", policy)
+    } else {
+      command
+    };
+    command.spawn().unwrap()
   };
 
   drop(listeners);
@@ -477,7 +486,21 @@ async fn setup_server_with_key(
 }
 
 async fn setup() -> (TestContext, JupyterClient, JupyterServerProcess) {
-  let (context, conn, process) = setup_server().await;
+  setup_with_policy(None).await
+}
+
+async fn setup_armed() -> (TestContext, JupyterClient, JupyterServerProcess) {
+  let policy = test_util::root_path()
+    .join("tests/specs/run/oden_capsec_worker_bootstrap/enforce.json")
+    .to_string();
+  setup_with_policy(Some(policy)).await
+}
+
+async fn setup_with_policy(
+  policy: Option<String>,
+) -> (TestContext, JupyterClient, JupyterServerProcess) {
+  let (context, conn, process) =
+    setup_server_with_key_and_policy("", policy).await;
   let client = JupyterClient::new(&conn).await;
   client.io_subscribe("").await.unwrap();
   // Prime heartbeat
@@ -494,6 +517,17 @@ async fn jupyter_heartbeat_echoes() -> Result<()> {
   let msg = client.recv_heartbeat().await?;
   // The kernel echoes back the exact bytes sent
   assert_eq!(msg, Bytes::from_static(b"ping"));
+
+  Ok(())
+}
+
+#[test]
+async fn jupyter_armed_heartbeat_echoes_after_host_callback_suspends()
+-> Result<()> {
+  let (_ctx, client, _process) = setup_armed().await;
+  client.send_heartbeat(b"armed-ping").await?;
+  let msg = client.recv_heartbeat().await?;
+  assert_eq!(msg, Bytes::from_static(b"armed-ping"));
 
   Ok(())
 }
@@ -592,6 +626,129 @@ async fn jupyter_execute_request() -> Result<()> {
     json!({
       "name": "stdout",
       "text": "asdf\n",
+    }),
+  );
+
+  Ok(())
+}
+
+// Automatic result delivery must use the trusted callback captured by the
+// REPL prelude, not mutable notebook-facing Deno.jupyter methods.
+#[test]
+async fn jupyter_execute_result_survives_public_api_tampering() -> Result<()> {
+  let (_ctx, client, _process) = setup().await;
+  let request = client
+    .send(
+      Shell,
+      "execute_request",
+      json!({
+        "silent": false,
+        "store_history": true,
+        "user_expressions": {},
+        "allow_stdin": true,
+        "stop_on_error": false,
+        "code": r#"(() => {
+          if (Symbol.for("Deno.internal.jupyter.broadcastResult") in globalThis) {
+            throw new Error("temporary Jupyter result bridge leaked");
+          }
+          Deno.jupyter.format = null;
+          Deno.jupyter.broadcast = null;
+          delete Deno.jupyter.format;
+          delete Deno.jupyter.broadcast;
+          return 42;
+        })()"#
+      }),
+    )
+    .await?;
+  let reply = client.recv(Shell).await?;
+  assert_eq!(reply.header.msg_type, "execute_reply");
+  assert_json_subset(
+    reply.content,
+    json!({
+      "status": "ok",
+      "execution_count": 1,
+    }),
+  );
+
+  let mut msgs = Vec::new();
+  for _ in 0..4 {
+    msgs.push(client.recv(IoPub).await?);
+  }
+  let result = msgs
+    .iter()
+    .find(|msg| msg.header.msg_type == "execute_result")
+    .expect("execute_result not broadcast after public API tampering");
+  assert_eq!(result.parent_header, request.header.to_json());
+  assert_json_subset(
+    result.content.clone(),
+    json!({
+      "execution_count": 1,
+      "data": { "text/plain": "42" },
+      "metadata": {},
+      "transient": {},
+    }),
+  );
+
+  Ok(())
+}
+
+// The trusted actor belongs only to the kernel host Promise lineage. A data
+// module evaluated by the notebook remains quarantine-attributed, including in
+// a timer continuation scheduled by that module.
+#[test]
+async fn jupyter_armed_host_actor_does_not_launder_scheduled_package()
+-> Result<()> {
+  let (_ctx, client, _process) = setup_armed().await;
+  let request = client
+    .send(
+      Shell,
+      "execute_request",
+      json!({
+        "silent": false,
+        "store_history": true,
+        "user_expressions": {},
+        "allow_stdin": true,
+        "stop_on_error": false,
+        "code": r#"await import(
+          "data:text/javascript," + encodeURIComponent(`
+            export default await new Promise((resolve) => setTimeout(() => {
+              try {
+                Deno.env.get("ODEN_JUPYTER_PACKAGE_PROBE");
+                resolve("ALLOWED");
+              } catch (error) {
+                const message = String(error);
+                resolve(message.includes('principal "quarantine"')
+                  ? "QUARANTINE_DENIED"
+                  : `WRONG_ACTOR:${message}`);
+              }
+            }, 0));
+          `)
+        ).then((module) => module.default)"#
+      }),
+    )
+    .await?;
+  let reply = client.recv(Shell).await?;
+  assert_json_subset(
+    reply.content,
+    json!({
+      "status": "ok",
+      "execution_count": 1,
+    }),
+  );
+
+  let mut msgs = Vec::new();
+  for _ in 0..4 {
+    msgs.push(client.recv(IoPub).await?);
+  }
+  let result = msgs
+    .iter()
+    .find(|msg| msg.header.msg_type == "execute_result")
+    .expect("execute_result not broadcast for scheduled package probe");
+  assert_eq!(result.parent_header, request.header.to_json());
+  assert_json_subset(
+    result.content.clone(),
+    json!({
+      "data": { "text/plain": "\"QUARANTINE_DENIED\"" },
     }),
   );
 

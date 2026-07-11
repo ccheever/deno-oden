@@ -191,6 +191,7 @@ const {
   SafeWeakSet,
   String,
   StringPrototypeStartsWith,
+  Symbol,
   SymbolToStringTag,
   TypeError,
 } = primordials;
@@ -1255,21 +1256,57 @@ function _removeAllSignalListeners(
 // @ts-ignore TS doesn't work well with ES5 classes
 const process = new Process();
 
-internals.nodeProcessAddListenerInternal = function (
-  event: string,
-  // deno-lint-ignore no-explicit-any
-  listener: (...args: any[]) => void,
-  prepend = false,
-) {
-  return addProcessListenerInternal(process, event, listener, prepend);
-};
-internals.nodeProcessRemoveListenerInternal = function (
-  event: string,
-  // deno-lint-ignore no-explicit-any
-  listener: (...args: any[]) => void,
-) {
-  return removeProcessListenerInternal(process, event, listener);
-};
+const nodeProcessTrustedToken = Symbol("node-process-trusted-runtime");
+
+function requireNodeProcessTrustedToken(token: unknown) {
+  if (token !== nodeProcessTrustedToken) {
+    throw new TypeError("Node process internal requires trusted runtime token");
+  }
+}
+
+function defineNodeProcessTrustedInternalValue(name: string, value: unknown) {
+  ObjectDefineProperty(internals, name, {
+    __proto__: null,
+    value,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+}
+
+// The real extension `internals` stays closure-private while capsec is armed;
+// its user-facing facade omits these names. The token keeps an accidentally
+// leaked helper inert on its own.
+// @ref LLP 0010#revision-11-patch-profile [implements] -- Trusted process-event bookkeeping uses an unforgeable extension-closure channel.
+defineNodeProcessTrustedInternalValue(
+  "nodeProcessTrustedToken",
+  nodeProcessTrustedToken,
+);
+defineNodeProcessTrustedInternalValue(
+  "nodeProcessAddListenerInternal",
+  function (
+    token: unknown,
+    event: string,
+    // deno-lint-ignore no-explicit-any
+    listener: (...args: any[]) => void,
+    prepend = false,
+  ) {
+    requireNodeProcessTrustedToken(token);
+    return addProcessListenerInternal(process, event, listener, prepend);
+  },
+);
+defineNodeProcessTrustedInternalValue(
+  "nodeProcessRemoveListenerInternal",
+  function (
+    token: unknown,
+    event: string,
+    // deno-lint-ignore no-explicit-any
+    listener: (...args: any[]) => void,
+  ) {
+    requireNodeProcessTrustedToken(token);
+    return removeProcessListenerInternal(process, event, listener);
+  },
+);
 
 // Borrowing EventEmitter.prototype must not bypass the process-specific
 // guards. Protect the sensitive keys in the backing event table as the final
@@ -1719,8 +1756,14 @@ function setUncaughtExceptionCaptureCallbackImpl(fn: any) {
 // Domain and the REPL are trusted compatibility-runtime consumers. Their
 // registration must not be reattributed to a package whose code caused the
 // runtime to enter those helpers.
-internals.nodeProcessSetUncaughtExceptionCaptureCallback =
-  setUncaughtExceptionCaptureCallbackImpl;
+defineNodeProcessTrustedInternalValue(
+  "nodeProcessSetUncaughtExceptionCaptureCallback",
+  // deno-lint-ignore no-explicit-any
+  function (token: unknown, fn: any) {
+    requireNodeProcessTrustedToken(token);
+    return setUncaughtExceptionCaptureCallbackImpl(fn);
+  },
+);
 
 // deno-lint-ignore no-explicit-any
 process.setUncaughtExceptionCaptureCallback = function (fn: any) {
@@ -1800,14 +1843,15 @@ const guardedFatalException = function (err: any, fromPromise?: boolean) {
   );
   return fatalExceptionHandler(err, fromPromise);
 };
-internals.nodeProcessFatalException = function (
-  err: unknown,
-  fromPromise?: boolean,
-) {
-  return typeof fatalExceptionHandler === "function"
-    ? fatalExceptionHandler(err, fromPromise)
-    : false;
-};
+defineNodeProcessTrustedInternalValue(
+  "nodeProcessFatalException",
+  function (token: unknown, err: unknown, fromPromise?: boolean) {
+    requireNodeProcessTrustedToken(token);
+    return typeof fatalExceptionHandler === "function"
+      ? fatalExceptionHandler(err, fromPromise)
+      : false;
+  },
+);
 ObjectDefineProperty(process, "_fatalException", {
   __proto__: null,
   configurable: true,

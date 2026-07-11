@@ -189,6 +189,7 @@ function _newListenerGuard(event: string, listener: any) {
 function _addNewListenerGuard() {
   if (_newListenerGuardCount++ === 0) {
     internals.nodeProcessAddListenerInternal(
+      internals.nodeProcessTrustedToken,
       "newListener",
       _newListenerGuard,
       true,
@@ -198,6 +199,7 @@ function _addNewListenerGuard() {
 function _removeNewListenerGuard() {
   if (--_newListenerGuardCount === 0) {
     internals.nodeProcessRemoveListenerInternal(
+      internals.nodeProcessTrustedToken,
       "newListener",
       _newListenerGuard,
     );

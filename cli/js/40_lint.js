@@ -1595,6 +1595,7 @@ function _dump(ctx) {
 internals.installPlugins = installPlugins;
 internals.runPluginsForFile = runPluginsForFile;
 internals.resetState = resetState;
+core.ops.op_lint_register_host_callbacks?.(installPlugins, runPluginsForFile);
 
 /**
  * @param {Deno.lint.Plugin} plugin

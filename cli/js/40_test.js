@@ -1,8 +1,12 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-import { core, primordials } from "ext:core/mod.js";
+import { core, internals, primordials } from "ext:core/mod.js";
 import { escapeName, withPermissions } from "ext:cli/40_test_common.js";
-import { assertSnapshot, snapshotRunState } from "ext:cli/40_test_snapshot.js";
+import {
+  assertSnapshot,
+  flushTestSnapshots,
+  snapshotRunState,
+} from "ext:cli/40_test_snapshot.js";
 
 // TODO(mmastrac): We cannot import these from "ext:core/ops" yet
 const {
@@ -15,7 +19,13 @@ const {
   op_test_event_step_result_ok,
   op_test_event_step_wait,
   op_test_get_origin,
+  op_test_host_allow_stale_snapshot_removal,
+  op_test_host_sanitize_ops,
+  op_test_host_sanitize_resources,
+  op_test_host_trace_leaks,
   op_test_isolate_exit,
+  op_test_register_host_callbacks,
+  op_test_snapshot_in_update_mode,
 } = core.ops;
 const {
   ArrayIsArray,
@@ -31,6 +41,7 @@ const {
   NumberIsFinite,
   NumberIsInteger,
   NumberIsNaN,
+  ObjectGetPrototypeOf,
   MapPrototypeGet,
   MapPrototypeSet,
   SafeArrayIterator,
@@ -377,9 +388,9 @@ function testInner(
     ignore: false,
     only: false,
     sanitizeOps: moduleSanitizeOps ??
-      Deno[Deno.internal].testSanitizeOps ?? false,
+      internals.testSanitizeOps ?? false,
     sanitizeResources: moduleSanitizeResources ??
-      Deno[Deno.internal].testSanitizeResources ?? false,
+      internals.testSanitizeResources ?? false,
     sanitizeExit: true,
     permissions: null,
     timeout: undefined,
@@ -879,6 +890,36 @@ function wrapTest(desc) {
   return wrapOuter(testFn, desc);
 }
 
+function configureTestHost() {
+  if (op_test_host_sanitize_ops()) {
+    internals.testSanitizeOps = true;
+  }
+  if (op_test_host_sanitize_resources()) {
+    internals.testSanitizeResources = true;
+  }
+  if (ObjectGetPrototypeOf(internals) === null) {
+    internals.testSnapshotInUpdateMode = op_test_snapshot_in_update_mode;
+  } else {
+    internals.installTestIsolateExitHandler = installTestIsolateExitHandler;
+    internals.flushTestSnapshots = flushTestSnapshots;
+  }
+  if (op_test_host_trace_leaks()) {
+    core.setLeakTracingEnabled(true);
+  }
+  installTestIsolateExitHandler();
+}
+
+function flushTestHostSnapshots() {
+  flushTestSnapshots(op_test_host_allow_stale_snapshot_removal());
+}
+
+function closeTestHostIdleConnections() {
+  internals.closeIdleConnections?.();
+}
+
+op_test_register_host_callbacks?.(
+  configureTestHost,
+  flushTestHostSnapshots,
+  closeTestHostIdleConnections,
+);
 globalThis.Deno.test = test;
-globalThis.Deno[globalThis.Deno.internal].installTestIsolateExitHandler =
-  installTestIsolateExitHandler;

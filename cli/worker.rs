@@ -516,12 +516,29 @@ impl CliMainWorker {
     Some(cpu_profiler)
   }
 
-  pub fn execute_script_static(
+  pub async fn call_function(
     &mut self,
-    name: &'static str,
-    source_code: &'static str,
+    function: &v8::Global<v8::Function>,
   ) -> Result<v8::Global<v8::Value>, Box<JsError>> {
-    self.worker.js_runtime().execute_script(name, source_code)
+    self.worker.js_runtime().call(function).await
+  }
+
+  pub fn start_trusted_host_function(
+    &mut self,
+    function: &v8::Global<v8::Function>,
+  ) {
+    // Match the former bare `startJupyterKernel()` script call: invoke the
+    // async function without attaching a Rust promise handler, then let the
+    // runtime event loop drive it. A rejection therefore remains visible to
+    // the runtime's unhandled-rejection machinery instead of being consumed
+    // by a dropped `JsRuntime::call()` receiver.
+    deno_core::scope!(scope, self.worker.js_runtime());
+    let previous_context =
+      deno_core::error::oden_enter_trusted_host_actor(scope);
+    let function = v8::Local::new(scope, function);
+    let recv = v8::undefined(scope).into();
+    let _ = function.call(scope, recv, &[]);
+    deno_core::error::oden_exit_trusted_host_actor(scope, previous_context);
   }
 }
 

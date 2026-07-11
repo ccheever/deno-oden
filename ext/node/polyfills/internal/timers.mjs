@@ -2,7 +2,7 @@
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 
 (function () {
-const { core, internals, primordials } = __bootstrap;
+const { core, primordials } = __bootstrap;
 const {
   createTimer: createTimer_,
   cancelTimer: cancelTimer_,
@@ -57,14 +57,12 @@ const lazyProcess = core.createLazyLoader("node:process");
 // capture seam. Under capsec, ask Rust for a FRESH copy of the current context
 // carrying the scheduling package's snapshot-scoped principal. The callback
 // alone receives that copy; the scheduler's live continuation is never
-// mutated. The runtime bootstrap writes `odenCapsecArmed` per isolate, so the
-// unarmed path remains the exact upstream getAsyncContext() call and no
-// snapshot-build value is cached here.
+// mutated. The op is deliberately inert in an unarmed isolate, so this seam
+// does not depend on writable JavaScript state to decide whether attribution
+// is active.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md (Async attribution row 3)
 function odenScheduleAsyncContext() {
-  return internals.odenCapsecArmed
-    ? core.ops.op_oden_schedule_context()
-    : getAsyncContext();
+  return core.ops.op_oden_schedule_context();
 }
 
 // Timeout values > TIMEOUT_MAX are set to 1.

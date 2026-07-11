@@ -472,6 +472,20 @@ class NodeWorker extends EventEmitter {
 
     const resourceLimits_ = options?.resourceLimits ?? undefined;
 
+    // Eval and data workers need a synthetic path as the base for `require`.
+    // Compute it through the immutable node:process named export while the
+    // creator's attribution is still on-stack, then carry only the resulting
+    // path into the new isolate. Package-created workers remain denied; worker
+    // bootstrap never performs an unattributed public cwd inspection.
+    const needsBootstrapRequireBase = !!options?.eval ||
+      (typeof specifier === "object" && specifier.protocol === "data:");
+    const bootstrapCwd = needsBootstrapRequireBase
+      ? lazyProcess().cwd()
+      : undefined;
+    const bootstrapRequireBase = bootstrapCwd === undefined
+      ? undefined
+      : `${bootstrapCwd}/[worker eval]`;
+
     const serializedWorkerMetadata = serializeJsMessageData({
       workerData: options?.workerData,
       environmentData: environmentData,
@@ -480,6 +494,7 @@ class NodeWorker extends EventEmitter {
       execArgv: options?.execArgv ?? [],
       name: this.#name,
       isEval: !!options?.eval,
+      bootstrapRequireBase,
       isWorkerThread: true,
       hasStdin: !!options?.stdin,
       resourceLimits: resourceLimits_,
@@ -501,10 +516,10 @@ class NodeWorker extends EventEmitter {
       // See: https://github.com/denoland/deno/issues/26739
       sourceCode = `var __filename = ${
         // deno-lint-ignore prefer-primordials
-        JSON.stringify(lazyProcess().default.cwd() + "/[worker eval]")};\n` +
+        JSON.stringify(bootstrapRequireBase)};\n` +
         `var __dirname = ${
           // deno-lint-ignore prefer-primordials
-          JSON.stringify(lazyProcess().default.cwd())};\n` +
+          JSON.stringify(bootstrapCwd)};\n` +
         `var module = { exports: {} };\n` +
         `var exports = module.exports;\n` +
         code;
@@ -1001,9 +1016,19 @@ internals.__initWorkerThreads = (
     // require in worker_threads - this should be rewritten to use proper
     // CJS/ESM loading
     if (moduleSpecifier) {
+      const bootstrapRequireBase = maybeWorkerMetadata?.[0]
+        ?.bootstrapRequireBase;
+      if (
+        StringPrototypeStartsWith(moduleSpecifier, "data:") &&
+        typeof bootstrapRequireBase !== "string"
+      ) {
+        throw new TypeError(
+          "Node worker bootstrap require base is unavailable",
+        );
+      }
       globalThis.require = lazyModule().createRequire(
         StringPrototypeStartsWith(moduleSpecifier, "data:")
-          ? `${Deno.cwd()}/[worker eval]`
+          ? bootstrapRequireBase
           : moduleSpecifier,
       );
     }
@@ -1557,7 +1582,9 @@ function setupCrossThreadMessaging() {
   // protected process meta-events. Use the private process bootstrap path so
   // an unattributed worker bootstrap does not weaken or trip the public guard.
   // @ref LLP 0010#revision-11-patch-profile [implements] -- Trusted worker bookkeeping stays on a non-exported runtime-control path.
+  const nodeProcessTrustedToken = internals.nodeProcessTrustedToken;
   internals.nodeProcessAddListenerInternal(
+    nodeProcessTrustedToken,
     "newListener",
     (eventName: string) => {
       if (eventName === "workerMessage") {
@@ -1571,6 +1598,7 @@ function setupCrossThreadMessaging() {
     },
   );
   internals.nodeProcessAddListenerInternal(
+    nodeProcessTrustedToken,
     "removeListener",
     (eventName: string) => {
       if (eventName === "workerMessage") {

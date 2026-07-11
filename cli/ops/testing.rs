@@ -43,6 +43,11 @@ deno_core::extension!(deno_test,
     op_test_event_step_result_failed,
     op_test_event_exit,
     op_test_isolate_exit,
+    op_test_register_host_callbacks,
+    op_test_host_trace_leaks,
+    op_test_host_sanitize_ops,
+    op_test_host_sanitize_resources,
+    op_test_host_allow_stale_snapshot_removal,
     op_test_snapshot_in_update_mode,
     op_test_snapshot_read,
     op_test_snapshot_write,
@@ -75,6 +80,22 @@ pub struct IsolateExitInfo {
 /// runner when it creates the worker.
 #[derive(Clone)]
 pub struct TestIsolateHandle(pub v8::IsolateHandle);
+
+pub struct TestHostCallbacks {
+  pub configure: v8::Global<v8::Function>,
+  pub flush_snapshots: v8::Global<v8::Function>,
+  pub close_idle_connections: v8::Global<v8::Function>,
+}
+
+pub struct TestHostOptions {
+  pub trace_leaks: bool,
+  pub sanitize_ops: bool,
+  pub sanitize_resources: bool,
+}
+
+pub struct TestHostFlushOptions {
+  pub allow_stale_snapshot_removal: bool,
+}
 
 #[derive(Clone)]
 struct PermissionsHolder(Uuid, PermissionsContainer);
@@ -123,6 +144,42 @@ pub fn op_restore_test_permissions(
 }
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+#[op2]
+fn op_test_register_host_callbacks(
+  state: &mut OpState,
+  #[scoped] configure: v8::Global<v8::Function>,
+  #[scoped] flush_snapshots: v8::Global<v8::Function>,
+  #[scoped] close_idle_connections: v8::Global<v8::Function>,
+) {
+  state.put(TestHostCallbacks {
+    configure,
+    flush_snapshots,
+    close_idle_connections,
+  });
+}
+
+#[op2(fast)]
+fn op_test_host_trace_leaks(state: &mut OpState) -> bool {
+  state.borrow::<TestHostOptions>().trace_leaks
+}
+
+#[op2(fast)]
+fn op_test_host_sanitize_ops(state: &mut OpState) -> bool {
+  state.borrow::<TestHostOptions>().sanitize_ops
+}
+
+#[op2(fast)]
+fn op_test_host_sanitize_resources(state: &mut OpState) -> bool {
+  state.borrow::<TestHostOptions>().sanitize_resources
+}
+
+#[op2(fast)]
+fn op_test_host_allow_stale_snapshot_removal(state: &mut OpState) -> bool {
+  state
+    .borrow::<TestHostFlushOptions>()
+    .allow_stale_snapshot_removal
+}
 
 #[allow(clippy::too_many_arguments, reason = "op")]
 #[op2]

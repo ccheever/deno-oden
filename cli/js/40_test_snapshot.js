@@ -395,7 +395,7 @@ function buildSnapshotFileContent(names, getValue) {
  * stale snapshots when safe to do so, and reports a summary to the test
  * reporter. No-op when not running with `--update-snapshots`.
  */
-function flushTestSnapshots(allowStaleRemoval) {
+export function flushTestSnapshots(allowStaleRemoval) {
   if (!getIsUpdateMode()) {
     return;
   }
@@ -447,6 +447,3 @@ function flushTestSnapshots(allowStaleRemoval) {
     op_test_event_snapshot_summary(updated, removed);
   }
 }
-
-globalThis.Deno[globalThis.Deno.internal].flushTestSnapshots =
-  flushTestSnapshots;

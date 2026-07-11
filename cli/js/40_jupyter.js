@@ -39,6 +39,9 @@
 import { core, internals } from "ext:core/mod.js";
 
 const $display = Symbol.for("Jupyter.display");
+const jupyterBroadcastResultSymbol = Symbol.for(
+  "Deno.internal.jupyter.broadcastResult",
+);
 
 /** Escape copied from https://jsr.io/@std/html/0.221.0/entities.ts */
 const rawToEntityEntries = [
@@ -258,7 +261,7 @@ async function format(obj) {
   }
   if (typeof obj !== "object") {
     return {
-      "text/plain": Deno[Deno.internal].inspectArgs(["%o", obj], {
+      "text/plain": internals.inspectArgs(["%o", obj], {
         colors: !Deno.noColor,
       }),
     };
@@ -304,7 +307,7 @@ async function format(obj) {
   }
   if (obj instanceof GPUBuffer) {
     return {
-      "text/plain": Deno[Deno.internal].inspectArgs([
+      "text/plain": internals.inspectArgs([
         "%o",
         core.ops.op_jupyter_get_buffer(obj),
       ], {
@@ -313,7 +316,7 @@ async function format(obj) {
     };
   }
   return {
-    "text/plain": Deno[Deno.internal].inspectArgs(["%o", obj], {
+    "text/plain": internals.inspectArgs(["%o", obj], {
       colors: !Deno.noColor,
     }),
   };
@@ -574,6 +577,11 @@ function enableJupyter() {
     image,
     $display,
   };
+  // ReplSession's trusted prelude captures and deletes this before any user
+  // module or expression runs. The callback keeps the private format and
+  // broadcast closures even if notebook code later mutates Deno.jupyter.
+  globalThis[jupyterBroadcastResultSymbol] = broadcastResult;
 }
 
 internals.enableJupyter = enableJupyter;
+core.ops.op_jupyter_register_repl_host_callback?.(enableJupyter);

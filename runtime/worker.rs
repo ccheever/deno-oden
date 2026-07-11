@@ -1035,19 +1035,8 @@ impl MainWorker {
     // channel. They execute as trusted runtime/root, not as the package later
     // observed through the session.
     // @ref LLP 0019#inspector [implements]
-    deno_permissions::oden_capsec_guard_deny_only_surface(
-      "runtime",
-      "inspect",
+    deno_permissions::oden_capsec_check_runtime_local_inspector_session(
       "inspector:local-session",
-      "runtime local inspector session",
-    )
-    .unwrap_or_else(|error| {
-      panic!("capsec refused local inspector session: {error}")
-    });
-    deno_permissions::oden_capsec_check_inspector_activation(
-      "runtime:local-session",
-      "runtime local inspector session",
-      false,
     )
     .unwrap_or_else(|error| {
       panic!("capsec refused local inspector session: {error}")
@@ -1377,6 +1366,7 @@ pub fn create_permissions_stack_trace_callback()
     |stack: Vec<deno_core::error::JsStackFrame>,
      cped_locator: Option<String>,
      schedule_stack: Vec<String>,
+     trusted_host_actor: bool,
      display_frames: Option<Vec<deno_core::error::JsStackFrame>>| {
       let oden_stack = stack
         .iter()
@@ -1404,6 +1394,9 @@ pub fn create_permissions_stack_trace_callback()
       // and cannot falsely deny an unrelated later package's own op.
       deno_permissions::prompter::set_current_oden_cped_stack(
         (!schedule_stack.is_empty()).then_some(schedule_stack),
+      );
+      deno_permissions::prompter::set_current_oden_trusted_host_actor(
+        trusted_host_actor,
       );
       deno_permissions::prompter::set_current_oden_stacktrace(Box::new(
         move || oden_stack.clone(),

@@ -2,7 +2,7 @@
 
 (function () {
 "use strict";
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const {
   ArrayIsArray,
   ArrayPrototypeForEach,
@@ -277,14 +277,15 @@ function getPathForSnapshot() {
 // compat surface does for reporter detection above.
 //
 // The deno_test extension's ops are registered at runtime - after this
-// polyfill's snapshot is built - so they are not on the captured `core.ops`.
-// They are however reachable via `Deno[Deno.internal].core.ops`, which the
-// test runner exposes for cli/js code; we look them up lazily through there.
+// polyfill's snapshot is built. The trusted test extension publishes only this
+// closure-private callback on raw internals; armed user core remains empty.
 let _fileSnapshotUpdateMode = undefined;
 function isFileSnapshotUpdateMode() {
   if (_fileSnapshotUpdateMode !== undefined) return _fileSnapshotUpdateMode;
-  const denoInternal = globalThis.Deno?.[globalThis.Deno.internal];
-  const op = denoInternal?.core?.ops?.op_test_snapshot_in_update_mode;
+  const op = ObjectGetPrototypeOf(internals) === null
+    ? internals.testSnapshotInUpdateMode
+    : globalThis.Deno?.[globalThis.Deno.internal]?.core?.ops
+      ?.op_test_snapshot_in_update_mode;
   if (typeof op === "function") {
     try {
       if (op()) {

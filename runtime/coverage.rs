@@ -122,22 +122,11 @@ impl CoverageCollector {
     // ambient root caller, but both effects are still evaluated before session
     // construction so no indirect helper bypass exists.
     // @ref LLP 0019#runtime-and-memory-inspection [implements]
-    deno_permissions::oden_capsec_guard_deny_only_surface(
-      "runtime",
-      "inspect",
+    deno_permissions::oden_capsec_check_runtime_local_inspector_session(
       "coverage:precise",
-      "coverage collector",
     )
     .unwrap_or_else(|error| {
       panic!("capsec refused coverage collector: {error}")
-    });
-    deno_permissions::oden_capsec_check_inspector_activation(
-      "runtime:coverage-session",
-      "coverage inspector session",
-      false,
-    )
-    .unwrap_or_else(|error| {
-      panic!("capsec refused coverage inspector session: {error}")
     });
     let state = CoverageCollectorState::new(coverage_dir);
 

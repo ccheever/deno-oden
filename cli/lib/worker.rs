@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use boxed_error::Boxed;
 use deno_bundle_runtime::BundleProvider;
+use deno_core::ModuleCodeString;
 use deno_core::ModuleSpecifier;
 use deno_core::error::JsError;
 use deno_node::NodeRequireLoaderRc;
@@ -966,6 +967,22 @@ impl LibMainWorker {
     }
 
     Ok(())
+  }
+
+  /// Evaluate an embedder-provided side module before the user entrypoint.
+  /// Unlike an injected script, a side module can capture trusted extension
+  /// imports without routing them through the public `Deno.internal` facade.
+  pub async fn execute_side_module_from_code(
+    &mut self,
+    module_specifier: &ModuleSpecifier,
+    source_code: ModuleCodeString,
+  ) -> Result<(), CoreError> {
+    let id = self
+      .worker
+      .js_runtime
+      .load_side_es_module_from_code(module_specifier, source_code)
+      .await?;
+    self.worker.evaluate_module(id).await
   }
 
   pub async fn execute_preload_modules(&mut self) -> Result<(), CoreError> {

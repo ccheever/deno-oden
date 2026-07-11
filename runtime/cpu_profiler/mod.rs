@@ -233,21 +233,10 @@ impl CpuProfiler {
     generate_flamegraph: bool,
   ) -> Self {
     // @ref LLP 0019#runtime-and-memory-inspection [implements]
-    deno_permissions::oden_capsec_guard_deny_only_surface(
-      "runtime",
-      "inspect",
+    deno_permissions::oden_capsec_check_runtime_local_inspector_session(
       "profiler:cpu",
-      "CPU profiler",
     )
     .unwrap_or_else(|error| panic!("capsec refused CPU profiler: {error}"));
-    deno_permissions::oden_capsec_check_inspector_activation(
-      "runtime:cpu-profiler-session",
-      "CPU profiler inspector session",
-      false,
-    )
-    .unwrap_or_else(|error| {
-      panic!("capsec refused CPU profiler inspector session: {error}")
-    });
     let state = CpuProfilerState::new(
       cpu_prof_dir,
       filename,

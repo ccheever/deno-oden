@@ -10,6 +10,7 @@ use deno_core::FromV8;
 use deno_core::OpState;
 use deno_core::convert::Uint8Array;
 use deno_core::op2;
+use deno_core::v8;
 use deno_lint::diagnostic::LintDiagnostic;
 use deno_lint::diagnostic::LintDiagnosticDetails;
 use deno_lint::diagnostic::LintDiagnosticRange;
@@ -28,7 +29,8 @@ deno_core::extension!(
     op_lint_create_serialized_ast,
     op_lint_report,
     op_lint_get_source,
-    op_is_cancelled
+    op_is_cancelled,
+    op_lint_register_host_callbacks,
   ],
   options = {
     logger: PluginLogger,
@@ -47,11 +49,32 @@ deno_core::extension!(
 
 deno_core::extension!(
   deno_lint_ext_for_test,
-  ops = [op_lint_create_serialized_ast, op_is_cancelled],
+  ops = [
+    op_lint_create_serialized_ast,
+    op_is_cancelled,
+    op_lint_register_host_callbacks,
+  ],
   state = |state| {
     state.put(LintPluginContainer::default());
   },
 );
+
+pub struct LintHostCallbacks {
+  pub install_plugins: v8::Global<v8::Function>,
+  pub run_plugins_for_file: v8::Global<v8::Function>,
+}
+
+#[op2]
+fn op_lint_register_host_callbacks(
+  state: &mut OpState,
+  #[scoped] install_plugins: v8::Global<v8::Function>,
+  #[scoped] run_plugins_for_file: v8::Global<v8::Function>,
+) {
+  state.put(LintHostCallbacks {
+    install_plugins,
+    run_plugins_for_file,
+  });
+}
 
 #[derive(Default)]
 pub struct LintPluginContainer {

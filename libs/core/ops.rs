@@ -234,7 +234,10 @@ impl ExternalOpsTracker {
 
 // The second argument carries the Oden CPED scheduling-principal locator when
 // no live user frame is present at dispatch (precedence row 2); `None`
-// otherwise. The third argument carries rich display frames (the upstream
+// otherwise. The third argument carries the scheduling-principal stack, and
+// the fourth carries the opaque Rust-owned host-actor bit from CPED;
+// attribution may use it only when no package actor is live or scheduled. The
+// fifth argument carries rich display frames (the upstream
 // JsError-style capture: receiver type names + exact call positions) and is
 // `Some` only when `DENO_TRACE_PERMISSIONS` is set — the raw frames are the
 // attribution source (unforgeable script IDs) but v8::StackFrame lacks
@@ -247,6 +250,7 @@ pub type OpStackTraceCallback = Box<
     Vec<JsStackFrame>,
     Option<String>,
     Vec<String>,
+    bool,
     Option<Vec<JsStackFrame>>,
   ),
 >;

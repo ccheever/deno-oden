@@ -39,7 +39,6 @@ use deno_core::error::JsError;
 use deno_core::futures::StreamExt;
 use deno_core::futures::future;
 use deno_core::futures::stream;
-use deno_core::located_script_name;
 use deno_core::unsync::spawn;
 use deno_core::unsync::spawn_blocking;
 use deno_core::url::Url;
@@ -809,35 +808,23 @@ async fn configure_main_worker(
       .put(ops::testing::SnapshotUpdateMode);
   }
   worker
-    .execute_script_static(
-      located_script_name!(),
-      "Deno[Deno.internal].installTestIsolateExitHandler();",
-    )
+    .op_state()
+    .borrow_mut()
+    .put(ops::testing::TestHostOptions {
+      trace_leaks: options.trace_leaks,
+      sanitize_ops: options.sanitize_ops,
+      sanitize_resources: options.sanitize_resources,
+    });
+  let configure_test_host = worker
+    .op_state()
+    .borrow()
+    .borrow::<ops::testing::TestHostCallbacks>()
+    .configure
+    .clone();
+  worker
+    .call_function(&configure_test_host)
+    .await
     .map_err(|e| CoreErrorKind::Js(e).into_box())?;
-  if options.trace_leaks {
-    worker
-      .execute_script_static(
-        located_script_name!(),
-        "Deno[Deno.internal].core.setLeakTracingEnabled(true);",
-      )
-      .map_err(|e| CoreErrorKind::Js(e).into_box())?;
-  }
-  if options.sanitize_ops {
-    worker
-      .execute_script_static(
-        located_script_name!(),
-        "Deno[Deno.internal].testSanitizeOps = true;",
-      )
-      .map_err(|e| CoreErrorKind::Js(e).into_box())?;
-  }
-  if options.sanitize_resources {
-    worker
-      .execute_script_static(
-        located_script_name!(),
-        "Deno[Deno.internal].testSanitizeResources = true;",
-      )
-      .map_err(|e| CoreErrorKind::Js(e).into_box())?;
-  }
 
   let op_state = worker.op_state();
 
@@ -1257,15 +1244,20 @@ pub async fn run_tests_for_worker(
   {
     let allow_stale_removal =
       !options.filter.is_active() && !fail_fast_tracker.should_stop();
+    state_rc
+      .borrow_mut()
+      .put(ops::testing::TestHostFlushOptions {
+        allow_stale_snapshot_removal: allow_stale_removal,
+      });
+    let flush_snapshots = state_rc
+      .borrow()
+      .borrow::<ops::testing::TestHostCallbacks>()
+      .flush_snapshots
+      .clone();
     worker
       .js_runtime
-      .execute_script(
-        located_script_name!(),
-        format!(
-          "Deno[Deno.internal].flushTestSnapshots?.({})",
-          allow_stale_removal
-        ),
-      )
+      .call(&flush_snapshots)
+      .await
       .map(|_| ())
       .map_err(|e| RunTestsForWorkerErr::Core(CoreErrorKind::Js(e).into_box()))
   } else {
@@ -1597,10 +1589,14 @@ async fn run_tests_for_worker_inner(
         // Close idle Node.js HTTP Agent connections to prevent cross-test
         // pollution and false positive resource leak detection from pooled
         // keepAlive connections. Defined in ext/node/polyfills/01_require.js.
-        _ = worker.js_runtime.execute_script(
-          located_script_name!(),
-          "Deno[Deno.internal].closeIdleConnections?.()",
-        );
+        let close_idle_connections = worker
+          .js_runtime
+          .op_state()
+          .borrow()
+          .borrow::<ops::testing::TestHostCallbacks>()
+          .close_idle_connections
+          .clone();
+        _ = worker.js_runtime.call(&close_idle_connections).await;
 
         // Await activity stabilization. A leak counts as a failure of the
         // attempt, and is therefore retryable like any other failure. Only

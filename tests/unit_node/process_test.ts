@@ -47,6 +47,28 @@ import nodeAssert from "node:assert";
 
 const testDir = new URL(".", import.meta.url);
 
+Deno.test("trusted process helpers reject tokenless invocation", () => {
+  // @ts-ignore: Deno[Deno.internal] is intentionally available to internal tests.
+  const internals = Deno[Deno.internal] as unknown as Record<
+    string,
+    (...args: unknown[]) => unknown
+  >;
+  const helpers = [
+    "nodeProcessAddListenerInternal",
+    "nodeProcessRemoveListenerInternal",
+    "nodeProcessSetUncaughtExceptionCaptureCallback",
+    "nodeProcessFatalException",
+  ];
+  for (const name of helpers) {
+    assertEquals(typeof internals[name], "function");
+    assertThrows(
+      () => internals[name](undefined),
+      TypeError,
+      "trusted runtime token",
+    );
+  }
+});
+
 const processWithActiveResources = process as typeof process & {
   _getActiveHandles(): unknown[];
   _getActiveRequests(): unknown[];

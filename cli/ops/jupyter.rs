@@ -7,6 +7,7 @@ use deno_core::OpState;
 use deno_core::error::AnyError;
 use deno_core::op2;
 use deno_core::serde_json;
+use deno_core::v8;
 use deno_error::JsErrorBox;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -104,6 +105,9 @@ pub struct ReplInputSender {
   pub tx: mpsc::UnboundedSender<PendingInputRequest>,
 }
 
+pub struct JupyterReplHostCallback(pub v8::Global<v8::Function>);
+pub struct JupyterKernelHostCallback(pub v8::Global<v8::Function>);
+
 // ------------------------------------------------------------------
 // Extension declarations
 // ------------------------------------------------------------------
@@ -124,6 +128,7 @@ deno_core::extension!(
     op_jupyter_send_input_reply,
     op_jupyter_deno_version,
     op_jupyter_typescript_version,
+    op_jupyter_register_kernel_host_callback,
   ],
 );
 
@@ -134,6 +139,7 @@ deno_core::extension!(
     op_jupyter_input,
     op_jupyter_create_png_from_texture,
     op_jupyter_get_buffer,
+    op_jupyter_register_repl_host_callback,
   ],
   options = {
     iopub_sender: mpsc::UnboundedSender<IopubMessage>,
@@ -157,6 +163,7 @@ deno_core::extension!(
     op_jupyter_input,
     op_jupyter_create_png_from_texture,
     op_jupyter_get_buffer,
+    op_jupyter_register_repl_host_callback,
   ],
   options = {
     iopub_sender: mpsc::UnboundedSender<IopubMessage>,
@@ -170,6 +177,22 @@ deno_core::extension!(
 
 // Backward-compat alias used by cli/tools/test/mod.rs
 pub use deno_jupyter_repl_for_test as deno_jupyter_for_test;
+
+#[op2]
+fn op_jupyter_register_repl_host_callback(
+  state: &mut OpState,
+  #[scoped] callback: v8::Global<v8::Function>,
+) {
+  state.put(JupyterReplHostCallback(callback));
+}
+
+#[op2]
+fn op_jupyter_register_kernel_host_callback(
+  state: &mut OpState,
+  #[scoped] callback: v8::Global<v8::Function>,
+) {
+  state.put(JupyterKernelHostCallback(callback));
+}
 
 // ------------------------------------------------------------------
 // Kernel-side ops

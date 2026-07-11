@@ -1207,3 +1207,4 @@ async function startJupyterKernel() {
 }
 
 internals.startJupyterKernel = startJupyterKernel;
+core.ops.op_jupyter_register_kernel_host_callback?.(startJupyterKernel);

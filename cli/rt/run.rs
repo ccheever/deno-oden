@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use deno_cache_dir::npm::NpmCacheDir;
 use deno_config::workspace::ResolverWorkspaceJsrPackage;
 use deno_core::FastString;
+use deno_core::ModuleCodeString;
 use deno_core::ModuleLoadOptions;
 use deno_core::ModuleLoadReferrer;
 use deno_core::ModuleLoader;
@@ -1818,8 +1819,11 @@ pub async fn run_with_options(
   // Initialize desktop APIs (Deno.desktop.*).
   if has_desktop {
     worker
-      .js_runtime()
-      .execute_script("ext:deno_desktop/init", crate::desktop::DESKTOP_JS)?;
+      .execute_side_module_from_code(
+        &ModuleSpecifier::parse("ext:deno_desktop/init")?,
+        ModuleCodeString::from_static(crate::desktop::DESKTOP_JS),
+      )
+      .await?;
 
     // Initialize auto-update JS (DesktopUpdater cppgc object is already
     // registered via the desktop extension's objects).
@@ -1829,16 +1833,22 @@ pub async fn run_with_options(
       options.release_base_url.as_deref(),
     );
     worker
-      .js_runtime()
-      .execute_script("ext:deno_desktop/auto_update", js)?;
+      .execute_side_module_from_code(
+        &ModuleSpecifier::parse("ext:deno_desktop/auto_update")?,
+        ModuleCodeString::from(js),
+      )
+      .await?;
 
     let js = crate::desktop::desktop_error_reporting_js(
       options.error_reporting_url.as_deref(),
       options.auto_update_version.as_deref(),
     );
     worker
-      .js_runtime()
-      .execute_script("ext:deno_desktop/error_reporting", js)?;
+      .execute_side_module_from_code(
+        &ModuleSpecifier::parse("ext:deno_desktop/error_reporting")?,
+        ModuleCodeString::from(js),
+      )
+      .await?;
   }
 
   if let Some(watch_dir) = hmr_watch_dir {
