@@ -775,6 +775,19 @@ struct OdenProtectedInspectorEndpoints {
   pending: std::collections::HashMap<IpAddr, usize>,
 }
 
+/// Use the same effective-address spelling as ordinary network permission
+/// checks. Otherwise an IPv4-mapped IPv6 connect can reach an IPv4 inspector
+/// listener without matching the listener's protected endpoint registration.
+// @ref LLP 0019#inspector [implements]
+fn oden_normalize_inspector_endpoint(endpoint: SocketAddr) -> SocketAddr {
+  let normalized_ip = normalize_ip(endpoint.ip());
+  if normalized_ip == endpoint.ip() {
+    endpoint
+  } else {
+    SocketAddr::new(normalized_ip, endpoint.port())
+  }
+}
+
 fn oden_protected_inspector_endpoints()
 -> &'static Mutex<OdenProtectedInspectorEndpoints> {
   static ENDPOINTS: OnceLock<Mutex<OdenProtectedInspectorEndpoints>> =
@@ -792,6 +805,7 @@ pub struct OdenInspectorEndpointReservation {
 impl OdenInspectorEndpointReservation {
   pub fn commit(mut self, actual: SocketAddr) {
     if let Some(requested) = self.requested.take() {
+      let actual = oden_normalize_inspector_endpoint(actual);
       let mut endpoints = oden_protected_inspector_endpoints().lock();
       if requested.port() == 0 {
         if let Some(count) = endpoints.pending.get_mut(&requested.ip()) {
@@ -843,6 +857,7 @@ pub fn oden_capsec_reserve_inspector_endpoint(
   if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
     return OdenInspectorEndpointReservation { requested: None };
   }
+  let requested = oden_normalize_inspector_endpoint(requested);
   let mut endpoints = oden_protected_inspector_endpoints().lock();
   if requested.port() == 0 {
     *endpoints.pending.entry(requested.ip()).or_default() += 1;
@@ -856,6 +871,7 @@ pub fn oden_capsec_reserve_inspector_endpoint(
 
 pub fn oden_capsec_unprotect_inspector_endpoint(endpoint: SocketAddr) {
   if oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    let endpoint = oden_normalize_inspector_endpoint(endpoint);
     let mut endpoints = oden_protected_inspector_endpoints().lock();
     if let Some(count) = endpoints.exact.get_mut(&endpoint) {
       *count -= 1;
@@ -889,6 +905,7 @@ fn oden_capsec_check_protected_inspector_endpoint(
 }
 
 fn oden_capsec_is_protected_inspector_endpoint(ip: IpAddr, port: u16) -> bool {
+  let ip = normalize_ip(ip);
   let endpoints = oden_protected_inspector_endpoints().lock();
   endpoints
     .pending
@@ -930,6 +947,82 @@ pub fn oden_capsec_protected_inspector_stream_tag(
       endpoint.port(),
     ))
   .then_some(endpoint)
+}
+
+/// Unforgeable native provenance retained for the lifetime of a protected
+/// inspector transport. JavaScript receives only an operation that rechecks
+/// this record; neither the endpoint nor the actor identity is accepted back
+/// from JavaScript as authority.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtectedInspectorStreamActor {
+  endpoint: SocketAddr,
+  actor_keys: Arc<[String]>,
+}
+
+impl ProtectedInspectorStreamActor {
+  pub fn endpoint(&self) -> SocketAddr {
+    self.endpoint
+  }
+}
+
+/// Snapshot the actor only for an endpoint that is protected at connection
+/// publication time. The trusted caller invokes this immediately after the
+/// successful protected-connect decision and stores the result on the native
+/// resource; a later listener shutdown cannot declassify that resource.
+pub fn oden_capsec_protected_inspector_stream_actor(
+  endpoint: SocketAddr,
+) -> Option<ProtectedInspectorStreamActor> {
+  let endpoint = oden_normalize_inspector_endpoint(endpoint);
+  (oden_capsec_profile_is(ODEN_CAPSEC_PROFILE)
+    && oden_capsec_is_protected_inspector_endpoint(
+      endpoint.ip(),
+      endpoint.port(),
+    ))
+  .then(|| ProtectedInspectorStreamActor {
+    endpoint,
+    actor_keys: oden_capsec_integrity_actor_keys().into(),
+  })
+}
+
+/// Recheck a protected transport for the actor bound at connect. Independent
+/// inspector authority held by a different package does not authorize object
+/// passage: the integrity actor set must match before the ordinary terminal
+/// permission/negative check is repeated.
+pub fn oden_capsec_check_protected_inspector_stream_use_for_actor(
+  actor: &ProtectedInspectorStreamActor,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  let current_actor_keys = oden_capsec_integrity_actor_keys();
+  if current_actor_keys.as_slice() != actor.actor_keys.as_ref() {
+    let target = format!("protected-inspector-stream:{}", actor.endpoint);
+    for principal in oden_capsec_principal_set() {
+      oden_capsec_audit_record(
+        &principal.label(),
+        "inspector",
+        "activate",
+        &target,
+        "DENY(protected stream actor mismatch)",
+        None,
+      );
+    }
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("{api_name} access to {target:?}"),
+        name: "capsec",
+        custom_message: Some(format!(
+          "oden capsec: protected inspector stream actor at {:?} does not match the actor bound at connect",
+          actor.endpoint
+        )),
+        state: PermissionState::Denied,
+      },
+    ));
+  }
+  oden_capsec_check_protected_inspector_stream_use(actor.endpoint, api_name)
 }
 
 /// JS-backed stream wrappers retain this endpoint string after the native
@@ -4169,6 +4262,87 @@ fn oden_capsec_principal_with_locator() -> (OdenPrincipal, Option<String>) {
 
 fn oden_capsec_principal() -> OdenPrincipal {
   oden_capsec_principal_with_locator().0
+}
+
+/// Canonical actor identity for lifetime-bound positive provenance. Package,
+/// JSR, and URL actors include the physical integrity-bound locator instance;
+/// ambient root remains the one distinguished root identity. Ambient entries
+/// are discarded when any constrained actor exists, matching the decision
+/// core's constrained-set semantics.
+fn oden_capsec_integrity_actor_keys() -> Vec<String> {
+  fn push(
+    constrained: &mut std::collections::BTreeSet<String>,
+    ambient: &mut std::collections::BTreeSet<String>,
+    principal: OdenPrincipal,
+    locator: Option<&str>,
+  ) {
+    if principal == OdenPrincipal::Runtime && locator.is_some() {
+      return;
+    }
+    if principal.is_ambient() {
+      ambient.insert(principal.key());
+    } else {
+      constrained.insert(oden_capsec_compartment_key(&principal, locator));
+    }
+  }
+
+  let mut constrained = std::collections::BTreeSet::new();
+  let mut ambient = std::collections::BTreeSet::new();
+  let frames = MAYBE_CURRENT_ODEN_STACKTRACE
+    .lock()
+    .as_ref()
+    .map(|stack| stack())
+    .unwrap_or_default();
+  for frame in frames {
+    match frame.locator.as_deref() {
+      Some(locator) => push(
+        &mut constrained,
+        &mut ambient,
+        oden_principal_index::resolve_frame(
+          frame.isolate_id,
+          frame.script_id,
+          locator,
+        ),
+        Some(locator),
+      ),
+      None if oden_capsec_runtime_display(frame.display_name.as_deref()) => {}
+      None if frame.script_id.is_some() => push(
+        &mut constrained,
+        &mut ambient,
+        OdenPrincipal::Quarantine,
+        None,
+      ),
+      None => {}
+    }
+  }
+  if let Some(locator) = prompter::current_oden_cped_locator() {
+    push(
+      &mut constrained,
+      &mut ambient,
+      oden_principal_index::resolve_locator(&locator),
+      Some(&locator),
+    );
+  }
+  for locator in prompter::current_oden_cped_stack() {
+    push(
+      &mut constrained,
+      &mut ambient,
+      oden_principal_index::resolve_locator(&locator),
+      Some(&locator),
+    );
+  }
+  if !constrained.is_empty() {
+    return constrained.into_iter().collect();
+  }
+  if !ambient.is_empty() {
+    return ambient.into_iter().collect();
+  }
+  vec![
+    oden_capsec_unattributed_principal(
+      prompter::current_oden_trusted_host_actor(),
+    )
+    .key(),
+  ]
 }
 
 // The full set of principals implicated in the current op, for stack-
