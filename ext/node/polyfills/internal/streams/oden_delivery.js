@@ -158,8 +158,15 @@ function installDefaultEventDeliveryHook(stream) {
     isProtected() {
       return getStreamUseGuard(stream) !== undefined;
     },
-    capture(type, recipient, listener = recipient) {
-      const captured = isStreamTrustedDeliveryCallback(stream, recipient)
+    capture(
+      type,
+      recipient,
+      listener = recipient,
+      _direct = false,
+      trusted = false,
+    ) {
+      const captured = trusted ||
+          isStreamTrustedDeliveryCallback(stream, recipient)
         ? captureTrustedDeliveryCallback(recipient, listener)
         : captureDeliveryCallback(recipient, listener);
       if (type === "data") {
@@ -199,6 +206,9 @@ function installDefaultEventDeliveryHook(stream) {
           preflightCapturedDelivery(stream, captured);
         },
       };
+    },
+    runUseGuard() {
+      return runStreamUseGuard(stream);
     },
   });
 }
@@ -484,7 +494,10 @@ function markStreamTrustedDeliveryCallback(stream, callback) {
 }
 
 function isStreamTrustedDeliveryCallback(stream, callback) {
-  const callbacks = WeakMapPrototypeGet(streamTrustedDeliveryCallbacks, stream);
+  const callbacks = WeakMapPrototypeGet(
+    streamTrustedDeliveryCallbacks,
+    stream,
+  );
   return callbacks !== undefined && WeakSetPrototypeHas(callbacks, callback);
 }
 
@@ -498,7 +511,10 @@ function markStreamCleanupDeliveryCallback(stream, callback) {
 }
 
 function isStreamCleanupDeliveryCallback(stream, callback) {
-  const callbacks = WeakMapPrototypeGet(streamCleanupDeliveryCallbacks, stream);
+  const callbacks = WeakMapPrototypeGet(
+    streamCleanupDeliveryCallbacks,
+    stream,
+  );
   return callbacks !== undefined && WeakSetPrototypeHas(callbacks, callback);
 }
 

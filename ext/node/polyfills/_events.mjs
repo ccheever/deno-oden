@@ -52,6 +52,8 @@ const {
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   Promise,
+  PromisePrototypeFinally,
+  PromisePrototypeThen,
   PromiseReject,
   PromiseResolve,
   ReflectOwnKeys,
@@ -115,6 +117,55 @@ const kMaxEventTargetListenersWarned = Symbol(
 const eventListenerDeliveryHooks = new SafeWeakMap();
 const genuineOnceWrappers = new SafeWeakMap();
 const trackedEventListeners = new SafeWeakMap();
+const trustedEventListenerRegistrations = [];
+
+// Trust belongs to one exact internal registration, never to a reusable
+// function identity. The token is consumed while preparing that registration,
+// before `_addListener()` can emit a reentrant `newListener` event. A reflected
+// internal callback therefore cannot be transplanted to another target/type or
+// re-registered from a meta-event and retain trusted delivery.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function withTrustedEventListenerRegistration(
+  target,
+  type,
+  listener,
+  register,
+) {
+  const registration = { consumed: false, listener, target, type };
+  ArrayPrototypePush(trustedEventListenerRegistrations, registration);
+  try {
+    return register();
+  } finally {
+    ArrayPrototypePop(trustedEventListenerRegistrations);
+  }
+}
+
+function findTrustedEventListenerRegistration(target, type, listener) {
+  const original = WeakMapPrototypeGet(genuineOnceWrappers, listener);
+  for (let i = trustedEventListenerRegistrations.length - 1; i >= 0; i--) {
+    const registration = trustedEventListenerRegistrations[i];
+    if (
+      !registration.consumed && registration.target === target &&
+      registration.type === type &&
+      (registration.listener === listener ||
+        registration.listener === original)
+    ) {
+      return registration;
+    }
+  }
+  return undefined;
+}
+
+function consumeTrustedEventListenerRegistration(target, type, listener) {
+  const registration = findTrustedEventListenerRegistration(
+    target,
+    type,
+    listener,
+  );
+  if (registration === undefined) return false;
+  registration.consumed = true;
+  return true;
+}
 
 function setEventListenerDeliveryHook(target, hook) {
   WeakMapPrototypeSet(eventListenerDeliveryHooks, target, hook);
@@ -127,7 +178,10 @@ function setDefaultEventListenerDeliveryHook(target, hook) {
 }
 
 function isProtectedEventEmitter(target) {
-  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  const deliveryHook = WeakMapPrototypeGet(
+    eventListenerDeliveryHooks,
+    target,
+  );
   return deliveryHook?.isProtected?.() === true;
 }
 
@@ -161,7 +215,10 @@ function listenerMatches(stored, listener) {
 }
 
 function captureEventListenerDeliveries(target, type, listeners) {
-  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  const deliveryHook = WeakMapPrototypeGet(
+    eventListenerDeliveryHooks,
+    target,
+  );
   if (deliveryHook === undefined) return undefined;
   const tracked = WeakMapPrototypeGet(trackedEventListeners, target);
   const deliveries = [];
@@ -185,6 +242,7 @@ function captureEventListenerDeliveries(target, type, listeners) {
         onceListener ?? listener,
         listener,
         true,
+        false,
       );
     }
     ArrayPrototypePush(deliveries, delivery);
@@ -193,7 +251,10 @@ function captureEventListenerDeliveries(target, type, listeners) {
 }
 
 function prepareCapturedEventDelivery(target, type, listeners) {
-  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  const deliveryHook = WeakMapPrototypeGet(
+    eventListenerDeliveryHooks,
+    target,
+  );
   const protectedDelivery = deliveryHook?.isProtected?.() === true;
   // Protected delivery freezes this decision before raw bytes can leave their
   // queue. Ordinary EventEmitters retain Node's per-listener post-call read.
@@ -224,7 +285,10 @@ function preflightPreparedEventDelivery(prepared) {
 }
 
 function captureRejectionDelivery(target) {
-  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  const deliveryHook = WeakMapPrototypeGet(
+    eventListenerDeliveryHooks,
+    target,
+  );
   return deliveryHook?.captureRejection?.();
 }
 
@@ -394,7 +458,9 @@ function setMaxListeners(
       const target = eventTargets[i];
       if (isProtectedEventEmitter(target)) {
         FunctionPrototypeCall(EventEmitterPublicSetMaxListeners, target, n);
-      } else if (ObjectPrototypeIsPrototypeOf(EventTarget.prototype, target)) {
+      } else if (
+        ObjectPrototypeIsPrototypeOf(EventTarget.prototype, target)
+      ) {
         target[kMaxEventTargetListeners] = n;
         target[kMaxEventTargetListenersWarned] = false;
       } else if (typeof target.setMaxListeners === "function") {
@@ -772,9 +838,17 @@ EventEmitter.prototype.emit = function emit(type, ...args) {
 const EventEmitterPublicEmit = EventEmitter.prototype.emit;
 
 function emitLifecycleMetaEvent(target, type, ...args) {
-  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  const deliveryHook = WeakMapPrototypeGet(
+    eventListenerDeliveryHooks,
+    target,
+  );
   if (deliveryHook?.isProtected?.() === true) {
-    return FunctionPrototypeCall(EventEmitterPublicEmit, target, type, ...args);
+    return FunctionPrototypeCall(
+      EventEmitterPublicEmit,
+      target,
+      type,
+      ...args,
+    );
   }
   return target.emit(type, ...args);
 }
@@ -786,13 +860,22 @@ function emitLifecycleMetaEvent(target, type, ...args) {
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
 function prepareEventListenerRegistration(target, type, listener) {
   checkListener(listener);
-  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  const deliveryHook = WeakMapPrototypeGet(
+    eventListenerDeliveryHooks,
+    target,
+  );
   const onceListener = WeakMapPrototypeGet(genuineOnceWrappers, listener);
+  const trusted = consumeTrustedEventListenerRegistration(
+    target,
+    type,
+    listener,
+  );
   const delivery = deliveryHook?.capture(
     type,
     onceListener ?? listener,
     listener,
     false,
+    trusted,
   );
   delivery?.preflight();
   return { delivery, listener, target, type };
@@ -908,11 +991,19 @@ function _addListener(target, type, listener, prepend, prepared = undefined) {
  * @returns {EventEmitter}
  */
 EventEmitter.prototype.addListener = function addListener(type, listener) {
-  if (isProtectedEventEmitter(this)) {
+  const protectedTarget = isProtectedEventEmitter(this);
+  const trustedRegistration = findTrustedEventListenerRegistration(
+    this,
+    type,
+    listener,
+  ) !== undefined;
+  if (protectedTarget || trustedRegistration) {
     const prepared = prepareEventListenerRegistration(this, type, listener);
-    return runWithoutAsyncContext(() =>
-      _addListener(this, type, listener, false, prepared)
-    );
+    return protectedTarget
+      ? runWithoutAsyncContext(() =>
+        _addListener(this, type, listener, false, prepared)
+      )
+      : _addListener(this, type, listener, false, prepared);
   }
   return _addListener(this, type, listener, false);
 };
@@ -930,11 +1021,19 @@ EventEmitter.prototype.prependListener = function prependListener(
   type,
   listener,
 ) {
-  if (isProtectedEventEmitter(this)) {
+  const protectedTarget = isProtectedEventEmitter(this);
+  const trustedRegistration = findTrustedEventListenerRegistration(
+    this,
+    type,
+    listener,
+  ) !== undefined;
+  if (protectedTarget || trustedRegistration) {
     const prepared = prepareEventListenerRegistration(this, type, listener);
-    return runWithoutAsyncContext(() =>
-      _addListener(this, type, listener, true, prepared)
-    );
+    return protectedTarget
+      ? runWithoutAsyncContext(() =>
+        _addListener(this, type, listener, true, prepared)
+      )
+      : _addListener(this, type, listener, true, prepared);
   }
   return _addListener(this, type, listener, true);
 };
@@ -987,7 +1086,10 @@ EventEmitter.prototype.once = function once(type, listener) {
 
   if (isProtectedEventEmitter(this)) {
     const wrapped = _onceWrap(this, type, listener);
-    const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, this);
+    const deliveryHook = WeakMapPrototypeGet(
+      eventListenerDeliveryHooks,
+      this,
+    );
     if (typeof deliveryHook?.addOnceListener === "function") {
       // Readable.once() normally dispatches through Readable.on(), whose
       // flow/listening bookkeeping is security-relevant for exact delivery.
@@ -1259,7 +1361,11 @@ function removeAllEventEmitterListeners(target, type, hasType = true) {
     );
   }
   return hasType
-    ? FunctionPrototypeCall(EventEmitterPublicRemoveAllListeners, target, type)
+    ? FunctionPrototypeCall(
+      EventEmitterPublicRemoveAllListeners,
+      target,
+      type,
+    )
     : FunctionPrototypeCall(EventEmitterPublicRemoveAllListeners, target);
 }
 
@@ -1348,7 +1454,10 @@ const _listenerCount = function listenerCount(type, listener) {
   return 0;
 };
 
-EventEmitter.prototype.listenerCount = function listenerCount(type, listener) {
+EventEmitter.prototype.listenerCount = function listenerCount(
+  type,
+  listener,
+) {
   const read = () =>
     FunctionPrototypeCall(_listenerCount, this, type, listener);
   return isProtectedEventEmitter(this) ? runWithoutAsyncContext(read) : read();
@@ -1444,6 +1553,136 @@ function getEventListeners(emitterOrTarget, type) {
   );
 }
 
+function hasDataEventDeliveryHook(emitter, name) {
+  return name === "data" &&
+    WeakMapPrototypeGet(eventListenerDeliveryHooks, emitter) !== undefined;
+}
+
+function runDataEventUseGuard(emitter, name = "data") {
+  if (name !== "data") return;
+  const deliveryHook = WeakMapPrototypeGet(
+    eventListenerDeliveryHooks,
+    emitter,
+  );
+  if (deliveryHook?.isProtected?.() === true) {
+    deliveryHook.runUseGuard?.();
+  }
+}
+
+// A data-event Promise can cross principal boundaries before it settles. Its
+// array retains the bytes behind per-index accessors, so native Promise
+// assimilation or a root-created derived Promise cannot turn settlement into
+// authority for a later package consumer.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function guardDataEventArguments(emitter, name, args) {
+  if (name !== "data" || !isProtectedEventEmitter(emitter)) return args;
+  const guarded = [];
+  guarded.length = args.length;
+  for (let i = 0; i < args.length; i++) {
+    let value = args[i];
+    ObjectDefineProperty(guarded, i, {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() {
+        runDataEventUseGuard(emitter, name);
+        return value;
+      },
+      set(next) {
+        runDataEventUseGuard(emitter, name);
+        value = next;
+      },
+    });
+  }
+  return guarded;
+}
+
+function captureEventPromiseCallback(emitter, callback) {
+  if (typeof callback !== "function") return undefined;
+  const deliveryHook = WeakMapPrototypeGet(
+    eventListenerDeliveryHooks,
+    emitter,
+  );
+  const delivery = deliveryHook?.capture(
+    "error",
+    callback,
+    callback,
+    false,
+    false,
+  );
+  return delivery ?? {
+    invoke(receiver, args) {
+      return FunctionPrototypeApply(callback, receiver, args);
+    },
+  };
+}
+
+function invokeEventPromiseCallback(delivery, args) {
+  const result = delivery.invoke(undefined, args);
+  // Promise resolution may inspect an arbitrary returned thenable. Do that
+  // after the exact callback CPED has been restored, without lending the
+  // registering caller's positive continuation to a bound getter.
+  return runWithoutAsyncContext(() => PromiseResolve(result));
+}
+
+// The shell is a genuine but permanently pending Promise, preserving Promise
+// brand checks. Its own immutable `constructor` forces `await` and Promise
+// combinators through the guarded `then`; calling a captured
+// `%Promise.prototype.then%` directly can observe only the inert shell, never
+// the data-bearing private Promise.
+function guardDataEventPromise(emitter, promise) {
+  const guarded = new Promise(() => {});
+  ObjectDefineProperties(guarded, {
+    constructor: {
+      __proto__: null,
+      value: undefined,
+    },
+    then: {
+      __proto__: null,
+      value(onFulfilled, onRejected) {
+        if (typeof onFulfilled === "function") {
+          runDataEventUseGuard(emitter);
+        }
+        const fulfilled = captureEventPromiseCallback(emitter, onFulfilled);
+        const rejected = captureEventPromiseCallback(emitter, onRejected);
+        const next = PromisePrototypeThen(
+          promise,
+          fulfilled === undefined
+            ? undefined
+            : (value) => invokeEventPromiseCallback(fulfilled, [value]),
+          rejected === undefined
+            ? undefined
+            : (error) => invokeEventPromiseCallback(rejected, [error]),
+        );
+        return guardDataEventPromise(emitter, next);
+      },
+    },
+    catch: {
+      __proto__: null,
+      value(onRejected) {
+        return guarded.then(undefined, onRejected);
+      },
+    },
+    finally: {
+      __proto__: null,
+      value(onFinally) {
+        if (typeof onFinally === "function") {
+          runDataEventUseGuard(emitter);
+        }
+        const delivery = captureEventPromiseCallback(emitter, onFinally);
+        const next = PromisePrototypeFinally(
+          promise,
+          delivery === undefined
+            ? onFinally
+            : () => invokeEventPromiseCallback(delivery, []),
+        );
+        return guardDataEventPromise(emitter, next);
+      },
+    },
+  });
+  return guarded;
+}
+
 /**
  * Creates a `Promise` that is fulfilled when the emitter
  * emits the given event.
@@ -1452,8 +1691,17 @@ function getEventListeners(emitterOrTarget, type) {
  * @param {{ signal: AbortSignal; }} [options]
  * @returns {Promise}
  */
-// deno-lint-ignore require-await
-async function once(emitter, name, options = kEmptyObject) {
+function once(emitter, name, options = kEmptyObject) {
+  try {
+    return onceInternal(emitter, name, options);
+  } catch (error) {
+    // Preserve the native async-function contract: validation and already-
+    // aborted signal failures reject instead of throwing synchronously.
+    return PromiseReject(error);
+  }
+}
+
+function onceInternal(emitter, name, options) {
   validateObject(options, "options");
   const signal = options?.signal;
   validateAbortSignal(signal, "options.signal");
@@ -1469,9 +1717,10 @@ async function once(emitter, name, options = kEmptyObject) {
     ObjectDefineProperty(signal, kEvents, kEventsGetter);
   }
 
-  return new Promise((resolve, reject) => {
+  const promise = new Promise((resolve, reject) => {
     const hasErrorListener = name !== "error" &&
-      (isProtectedEventEmitter(emitter) || typeof emitter.once === "function");
+      (isProtectedEventEmitter(emitter) ||
+        typeof emitter.once === "function");
     const errorListener = (err) => {
       eventTargetAgnosticRemoveListener(emitter, name, resolver);
       if (signal != null) {
@@ -1486,11 +1735,16 @@ async function once(emitter, name, options = kEmptyObject) {
       if (signal != null) {
         eventTargetAgnosticRemoveListener(signal, "abort", abortListener);
       }
-      resolve(args);
+      resolve(guardDataEventArguments(emitter, name, args));
     };
-    eventTargetAgnosticAddListener(emitter, name, resolver, { once: true });
+    eventTargetAgnosticAddTrustedListener(
+      emitter,
+      name,
+      resolver,
+      { once: true },
+    );
     if (hasErrorListener) {
-      eventTargetAgnosticAddListener(
+      eventTargetAgnosticAddTrustedListener(
         emitter,
         "error",
         errorListener,
@@ -1511,6 +1765,9 @@ async function once(emitter, name, options = kEmptyObject) {
       );
     }
   });
+  return hasDataEventDeliveryHook(emitter, name)
+    ? guardDataEventPromise(emitter, promise)
+    : promise;
 }
 
 const AsyncIteratorPrototype = ObjectGetPrototypeOf(
@@ -1519,6 +1776,34 @@ const AsyncIteratorPrototype = ObjectGetPrototypeOf(
 
 function createIterResult(value, done) {
   return { value, done };
+}
+
+function createDataEventIterResult(emitter, event, value) {
+  if (event !== "data" || !isProtectedEventEmitter(emitter)) {
+    return createIterResult(value, false);
+  }
+  const result = {};
+  ObjectDefineProperties(result, {
+    value: {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() {
+        runDataEventUseGuard(emitter, event);
+        return value;
+      },
+    },
+    done: {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() {
+        runDataEventUseGuard(emitter, event);
+        return false;
+      },
+    },
+  });
+  return result;
 }
 
 function eventTargetAgnosticRemoveListener(emitter, name, listener, flags) {
@@ -1573,6 +1858,25 @@ function eventTargetAgnosticAddListener(emitter, name, listener, flags) {
   } else {
     throw new ERR_INVALID_ARG_TYPE("emitter", "EventEmitter", emitter);
   }
+}
+
+function eventTargetAgnosticAddTrustedListener(
+  emitter,
+  name,
+  listener,
+  flags,
+) {
+  if (
+    WeakMapPrototypeGet(eventListenerDeliveryHooks, emitter) === undefined
+  ) {
+    return eventTargetAgnosticAddListener(emitter, name, listener, flags);
+  }
+  return withTrustedEventListenerRegistration(
+    emitter,
+    name,
+    listener,
+    () => eventTargetAgnosticAddListener(emitter, name, listener, flags),
+  );
 }
 
 const kEventsGetter = {
@@ -1632,6 +1936,7 @@ function on(emitter, event, options = kEmptyObject) {
 
   const iterator = ObjectSetPrototypeOf({
     next() {
+      runDataEventUseGuard(emitter, event);
       // First, we consume all unread events
       if (size) {
         const value = ArrayPrototypeShift(unconsumedEvents);
@@ -1640,7 +1945,9 @@ function on(emitter, event, options = kEmptyObject) {
           resumeEventEmitter(emitter);
           paused = false;
         }
-        return PromiseResolve(createIterResult(value, false));
+        return PromiseResolve(
+          createDataEventIterResult(emitter, event, value),
+        );
       }
 
       // Then we error, if an error happened
@@ -1663,18 +1970,20 @@ function on(emitter, event, options = kEmptyObject) {
     },
 
     return() {
-      return closeHandler();
+      return runWithoutAsyncContext(() => closeHandler(true));
     },
 
     throw(err) {
-      if (!err || !ObjectPrototypeIsPrototypeOf(ErrorPrototype, err)) {
-        throw new ERR_INVALID_ARG_TYPE(
-          "EventEmitter.AsyncIterator",
-          "Error",
-          err,
-        );
-      }
-      errorHandler(err);
+      return runWithoutAsyncContext(() => {
+        if (!err || !ObjectPrototypeIsPrototypeOf(ErrorPrototype, err)) {
+          throw new ERR_INVALID_ARG_TYPE(
+            "EventEmitter.AsyncIterator",
+            "Error",
+            err,
+          );
+        }
+        errorHandler(err);
+      });
     },
 
     [SymbolAsyncIterator]() {
@@ -1683,15 +1992,19 @@ function on(emitter, event, options = kEmptyObject) {
 
     [kWatermarkData]: {
       get size() {
+        runDataEventUseGuard(emitter, event);
         return size;
       },
       get low() {
+        runDataEventUseGuard(emitter, event);
         return lowWatermark;
       },
       get high() {
+        runDataEventUseGuard(emitter, event);
         return highWatermark;
       },
       get isPaused() {
+        runDataEventUseGuard(emitter, event);
         return paused;
       },
     },
@@ -1739,7 +2052,7 @@ function on(emitter, event, options = kEmptyObject) {
       ArrayPrototypePush(unconsumedEvents, value);
     } else {
       ArrayPrototypeShift(unconsumedPromises).resolve(
-        createIterResult(value, false),
+        createDataEventIterResult(emitter, event, value),
       );
     }
   }
@@ -1754,10 +2067,15 @@ function on(emitter, event, options = kEmptyObject) {
     closeHandler();
   }
 
-  function closeHandler() {
+  function closeHandler(discardEvents = false) {
     removeAll();
     finished = true;
     paused = false;
+    if (discardEvents) {
+      unconsumedEvents.length = 0;
+      size = 0;
+      error = null;
+    }
     const doneResult = createIterResult(undefined, true);
     while (unconsumedPromises.length > 0) {
       ArrayPrototypeShift(unconsumedPromises).resolve(doneResult);
@@ -1776,6 +2094,7 @@ function pauseEventEmitter(emitter) {
     if (typeof deliveryHook?.pause === "function") {
       return deliveryHook.pause();
     }
+    return runWithoutAsyncContext(() => emitter.pause());
   }
   return emitter.pause();
 }
@@ -1789,6 +2108,7 @@ function resumeEventEmitter(emitter) {
     if (typeof deliveryHook?.resume === "function") {
       return deliveryHook.resume();
     }
+    return runWithoutAsyncContext(() => emitter.resume());
   }
   return emitter.resume();
 }
@@ -1798,7 +2118,12 @@ function listenersController() {
 
   return {
     addEventListener(emitter, event, handler, flags) {
-      eventTargetAgnosticAddListener(emitter, event, handler, flags);
+      eventTargetAgnosticAddTrustedListener(
+        emitter,
+        event,
+        handler,
+        flags,
+      );
       ArrayPrototypePush(listeners, [emitter, event, handler, flags]);
     },
     removeAll() {

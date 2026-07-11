@@ -1,6 +1,6 @@
 import inspector from "node:inspector";
 import { createRequire } from "node:module";
-import { EventEmitter } from "node:events";
+import { EventEmitter, on as eventsOn, once as eventsOnce } from "node:events";
 import { PassThrough, Readable, Transform, Writable } from "node:stream";
 
 const port = Number(Deno.args[0]);
@@ -273,6 +273,103 @@ try {
     "scheduled listener",
   );
 
+  phase("events-derived-results");
+  const onceRoot = await protectedNodeBuffer("events.once root");
+  const onceRootArgs = await bounded(
+    eventsOnce(onceRoot, "data"),
+    "events.once root delivery",
+  );
+  result.eventsOnceRoot = onceRootArgs[0] == null ? "EMPTY" : "ROOT_ALLOWED";
+
+  const oncePassed = await protectedNodeBuffer("events.once passage");
+  result.eventsOncePassedPromise = await bounded(
+    deniedProbe.consumeEventPromise(eventsOnce(oncePassed, "data")),
+    "events.once package passage",
+  );
+
+  const onceCallback = await protectedNodeBuffer("events.once callback");
+  const onceCallbackPromise = eventsOnce(onceCallback, "data");
+  result.eventsOncePackageCallback = await bounded(
+    onceCallbackPromise.then(deniedProbe.inspectEventArguments),
+    "events.once package callback",
+  );
+
+  const preprotectedDestination = new PassThrough();
+  streams.add(preprotectedDestination);
+  const preprotectedPromise = eventsOnce(preprotectedDestination, "data");
+  const preprotectedSource = await protectedNodeBuffer(
+    "events.once pre-protection",
+  );
+  preprotectedSource.pipe(preprotectedDestination);
+  const preprotectedArgs = await bounded(
+    preprotectedPromise,
+    "events.once pre-protection delivery",
+  );
+  result.eventsOncePreProtection = preprotectedArgs[0] == null
+    ? "EMPTY"
+    : "ROOT_ALLOWED";
+
+  const trustedSource = await protectedNodeBuffer(
+    "trusted listener source",
+  );
+  const trustedTarget = await protectedNodeBuffer(
+    "trusted listener target",
+  );
+  const trustedTargetLength = trustedTarget.readableLength;
+  const trustedPromise = eventsOnce(trustedSource, "data");
+  trustedPromise.catch(() => {});
+  trustedTarget._events.data = trustedSource._events.data;
+  result.trustedListenerTransplant = attempt(() => trustedTarget.read());
+  result.trustedListenerTransplantRetainsBuffer =
+    trustedTarget.readableLength === trustedTargetLength ? "YES" : "NO";
+
+  const iteratorRootSource = await protectedNodeBuffer("events.on root");
+  const iteratorRoot = eventsOn(iteratorRootSource, "data");
+  const iteratorRootResult = await bounded(
+    iteratorRoot.next(),
+    "events.on root delivery",
+  );
+  result.eventsOnRoot = iteratorRootResult.value?.[0] == null
+    ? "EMPTY"
+    : "ROOT_ALLOWED";
+  await iteratorRoot.return();
+
+  const iteratorPassedSource = await protectedNodeBuffer(
+    "events.on iterator passage",
+  );
+  const iteratorPassed = eventsOn(iteratorPassedSource, "data");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  result.eventsOnPassedIterator = await bounded(
+    deniedProbe.consumeEventIterator(iteratorPassed),
+    "events.on package iterator",
+  );
+  const iteratorRetainedResult = await bounded(
+    iteratorPassed.next(),
+    "events.on retained root delivery",
+  );
+  result.eventsOnIteratorDenialRetainsValue =
+    iteratorRetainedResult.value?.[0] == null ? "EMPTY" : "ROOT_ALLOWED";
+  await iteratorPassed.return();
+
+  const iteratorPromiseSource = await protectedNodeBuffer(
+    "events.on promise passage",
+  );
+  const iteratorPromise = eventsOn(iteratorPromiseSource, "data");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const rootNextPromise = iteratorPromise.next();
+  result.eventsOnPassedNextPromise = await bounded(
+    deniedProbe.consumeEventIteratorPromise(rootNextPromise),
+    "events.on package next promise",
+  );
+  const rootNextResult = await bounded(
+    rootNextPromise,
+    "events.on root next promise",
+  );
+  result.eventsOnPassedNextPromiseRoot = rootNextResult.value?.[0] == null
+    ? "EMPTY"
+    : "ROOT_ALLOWED";
+  await iteratorPromise.return();
+
   phase("rejections");
   const previousCapture = EventEmitter.captureRejections;
   EventEmitter.captureRejections = true;
@@ -396,7 +493,7 @@ try {
       ? "CALLED"
       : "MISSING";
     result.boundCaptureFlagRootCalls = boundCaptureRootCalls;
-  result.boundCaptureFlagRetainsGadget = boundCaptureGadget.readableLength ===
+    result.boundCaptureFlagRetainsGadget = boundCaptureGadget.readableLength ===
         boundCaptureGadgetBefore
       ? "YES"
       : "NO";

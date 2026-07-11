@@ -350,7 +350,8 @@ function isReadableDestroyed(stream) {
 function isReadableActive(stream) {
   const state = WeakMapPrototypeGet(originalReadableStates, stream);
   return state !== undefined && readableStateEnabled(state) &&
-    (state[kState] & (kDestroyed | kErrored | kErrorEmitted | kEndEmitted)) ===
+    (state[kState] &
+        (kDestroyed | kErrored | kErrorEmitted | kEndEmitted)) ===
       0;
 }
 
@@ -638,11 +639,19 @@ function installReadableDeliveryHook(stream) {
         listener,
       );
     },
-    capture(type, recipient, listener = recipient, direct = false) {
-      const captured = captureDeliveryCallback(
-        type === "data" && direct ? directEventDeliverySentinel : recipient,
-        listener,
-      );
+    capture(
+      type,
+      recipient,
+      listener = recipient,
+      direct = false,
+      trusted = false,
+    ) {
+      const captured = trusted
+        ? captureTrustedDeliveryCallback(recipient, listener)
+        : captureDeliveryCallback(
+          type === "data" && direct ? directEventDeliverySentinel : recipient,
+          listener,
+        );
       if (type !== "data") {
         // Lifecycle events carry no queued bytes, so they need no read
         // preflight. They still restore the exact listener CPED so native or
@@ -692,6 +701,9 @@ function installReadableDeliveryHook(stream) {
     },
     resume() {
       return FunctionPrototypeCall(ReadablePrototypeResume, stream);
+    },
+    runUseGuard() {
+      return runReadableUseGuard(stream);
     },
   });
 }
@@ -1428,7 +1440,8 @@ Readable.prototype.read = function (n) {
   } else if (!NumberIsInteger(n)) {
     n = NumberParseInt(n, 10);
   }
-  const state = protectedState ?? admittedState ?? readableStateForStream(this);
+  const state = protectedState ?? admittedState ??
+    readableStateForStream(this);
   const nOrig = n;
 
   // If we're asking for more than the current hwm, then raise the hwm.
@@ -2267,7 +2280,11 @@ Readable.prototype.removeListener = function (ev, fn) {
     nextTickWithCurrent(updateReadableListening, this);
   } else if (
     ev === "data" &&
-    FunctionPrototypeCall(protectedEventEmitterListenerCount, this, "data") ===
+    FunctionPrototypeCall(
+        protectedEventEmitterListenerCount,
+        this,
+        "data",
+      ) ===
       0
   ) {
     state[kState] &= ~kDataListening;
@@ -2616,7 +2633,8 @@ ObjectDefineProperties(Readable.prototype, {
       // Compat. The user might manually disable readable side through
       // deprecated setter.
       return !!r && readableStateEnabled(r) &&
-        (r[kState] & (kDestroyed | kErrored | kErrorEmitted | kEndEmitted)) ===
+        (r[kState] &
+            (kDestroyed | kErrored | kErrorEmitted | kEndEmitted)) ===
           0;
     },
     set(val) {
