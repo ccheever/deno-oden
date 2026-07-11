@@ -246,6 +246,11 @@ impl PipeWrap {
     self.base.stream_ptr()
   }
 
+  #[cfg(test)]
+  pub(crate) fn native_capsec_test_stream(&self) -> &LibUvStreamWrap {
+    &self.base
+  }
+
   fn oden_http_api_name(&self, path: &str) -> Option<String> {
     self
       .oden_http_net_token

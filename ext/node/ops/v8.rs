@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -26,6 +28,18 @@ use v8::ValueDeserializerHelper;
 use v8::ValueSerializerHelper;
 
 static EXPOSE_GC_FROM_SET_FLAGS: AtomicBool = AtomicBool::new(false);
+
+// These mutation canaries are absent from production artifacts. They count
+// actual native work only in deno_node's cfg(test) unit-test build.
+#[cfg(test)]
+static TAKE_HEAP_SNAPSHOT_CHUNK_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT: AtomicUsize =
+  AtomicUsize::new(0);
 
 #[op2(fast)]
 pub fn op_v8_cached_data_version_tag() -> u32 {
@@ -140,6 +154,8 @@ pub fn op_v8_take_heap_snapshot(
   )?;
   let mut buf = Vec::new();
   scope.take_heap_snapshot(|chunk| {
+    #[cfg(test)]
+    TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.fetch_add(1, Ordering::SeqCst);
     buf.extend_from_slice(chunk);
     true
   });
@@ -322,6 +338,8 @@ pub fn op_v8_set_heap_snapshot_near_heap_limit(
     "node:v8.setHeapSnapshotNearHeapLimit",
   )?;
   let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+  #[cfg(test)]
+  NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT.fetch_add(1, Ordering::SeqCst);
   let dir = state
     .borrow_mut::<PermissionsContainer>()
     .check_write(Cow::Owned(dir), "v8.setHeapSnapshotNearHeapLimit")?
@@ -342,6 +360,8 @@ pub fn op_v8_set_heap_snapshot_near_heap_limit(
   // Leak the state so it outlives the isolate (see the struct doc comment).
   let data = Box::into_raw(state) as *mut c_void;
   scope.add_near_heap_limit_callback(near_heap_limit_snapshot_callback, data);
+  #[cfg(test)]
+  NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT.fetch_add(1, Ordering::SeqCst);
   Ok(())
 }
 
@@ -370,6 +390,8 @@ pub fn op_v8_query_objects_count(
 
   let mut buf = Vec::new();
   scope.take_heap_snapshot(|chunk| {
+    #[cfg(test)]
+    QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT.fetch_add(1, Ordering::SeqCst);
     buf.extend_from_slice(chunk);
     true
   });
@@ -1248,7 +1270,6 @@ mod native_capsec_tests {
   use deno_core::RuntimeOptions;
   use deno_permissions::Permissions;
   use deno_permissions::PermissionsContainer;
-  use deno_permissions::PermissionsOptions;
   use deno_permissions::RuntimePermissionDescriptorParser;
 
   use super::*;
@@ -1335,17 +1356,14 @@ mod native_capsec_tests {
     }
   }
 
-  fn native_test_permissions() -> PermissionsContainer {
+  fn native_test_permissions(allow_all: bool) -> PermissionsContainer {
     let parser =
       RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
-    let permissions = Permissions::from_options(
-      &parser,
-      &PermissionsOptions {
-        allow_write: Some(vec![]),
-        ..Default::default()
-      },
-    )
-    .unwrap();
+    let permissions = if allow_all {
+      Permissions::allow_all()
+    } else {
+      Permissions::none_without_prompt()
+    };
     PermissionsContainer::new(Arc::new(parser), permissions)
   }
 
@@ -1361,7 +1379,7 @@ mod native_capsec_tests {
       super::op_v8_gc_profiler_stop,
     ],
     state = |state| {
-      state.put::<PermissionsContainer>(native_test_permissions());
+      state.put::<PermissionsContainer>(native_test_permissions(false));
     }
   );
 
@@ -1371,6 +1389,10 @@ mod native_capsec_tests {
 
   fn run_native_v8_guard_contract(root: &Path, mode: &str) {
     EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
+    TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
+    QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
+    NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT.store(0, Ordering::SeqCst);
+    NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT.store(0, Ordering::SeqCst);
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -1410,9 +1432,10 @@ mod native_capsec_tests {
             operation();
           } catch (error) {
             const message = String(error);
-            const expected = `deny-only runtime:inspect:${target}`;
+            const expected =
+              `principal set [denied-native] may not use deny-only runtime:inspect:${target}`;
             if (!message.includes(expected)) {
-              throw new Error(`${name} failed at the wrong boundary: ${message}`);
+              throw new Error(`${name} used the wrong actor or boundary: ${message}`);
             }
             return;
           }
@@ -1443,6 +1466,35 @@ mod native_capsec_tests {
       !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
       "denied native flag mutation reached shared V8 state in {mode}"
     );
+    assert_eq!(
+      TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.load(Ordering::SeqCst),
+      0,
+      "denied heap snapshot reached native snapshot work in {mode}"
+    );
+    assert_eq!(
+      QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT.load(Ordering::SeqCst),
+      0,
+      "denied queryObjects reached native snapshot work in {mode}"
+    );
+    assert_eq!(
+      NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT.load(Ordering::SeqCst),
+      0,
+      "near-heap guard ran after check_write in {mode}"
+    );
+    assert_eq!(
+      NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT.load(Ordering::SeqCst),
+      0,
+      "denied near-heap operation installed its callback in {mode}"
+    );
+
+    // The denied near-heap attempt above ran with write permission denied, so
+    // its exact capsec error plus a zero check_write counter proves the native
+    // deny-only gate precedes both the substrate permission check and callback
+    // installation. Ambient-root positive controls may use the filesystem.
+    runtime
+      .op_state()
+      .borrow_mut()
+      .put::<PermissionsContainer>(native_test_permissions(true));
 
     set_actor(root, "main.ts");
     execute(
@@ -1451,11 +1503,19 @@ mod native_capsec_tests {
       r#"
       {
         const ops = Deno.core.ops;
-        ops.op_v8_gc_profiler_start(startHandle);
-        const startReport = ops.op_v8_gc_profiler_stop(startHandle);
+        const deniedStartReport = ops.op_v8_gc_profiler_stop(startHandle);
+        if (deniedStartReport !== null) {
+          throw new Error("denied GC profiler start mutated its handle");
+        }
+        const positiveHandle = ops.op_v8_gc_profiler_new();
+        ops.op_v8_gc_profiler_start(positiveHandle);
+        const positiveReport = ops.op_v8_gc_profiler_stop(positiveHandle);
         const stopReport = ops.op_v8_gc_profiler_stop(stopHandle);
-        if (startReport === null || stopReport === null) {
-          throw new Error("denied GC profiler operation mutated its native handle");
+        if (positiveReport === null) {
+          throw new Error("fresh root GC profiler start/stop returned null");
+        }
+        if (stopReport === null) {
+          throw new Error("denied GC profiler stop consumed its native handle");
         }
       }
       "#
@@ -1477,11 +1537,6 @@ mod native_capsec_tests {
           if (snapshot.byteLength === 0) throw new Error("empty heap snapshot");
           const count = ops.op_v8_query_objects_count("Object");
           if (!Number.isInteger(count)) throw new Error("invalid object count");
-          const handle = ops.op_v8_gc_profiler_new();
-          ops.op_v8_gc_profiler_start(handle);
-          if (ops.op_v8_gc_profiler_stop(handle) === null) {
-            throw new Error("GC profiler positive control returned null");
-          }
           ops.op_v8_set_heap_snapshot_near_heap_limit(0);
           ops.op_v8_set_flags_from_string("--no-expose-gc");
         }
@@ -1491,6 +1546,24 @@ mod native_capsec_tests {
       assert!(
         !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
         "root positive control failed to restore the shared V8 flag"
+      );
+      assert!(
+        TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.load(Ordering::SeqCst) > 0,
+        "root heap snapshot positive control did no native snapshot work"
+      );
+      assert!(
+        QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT.load(Ordering::SeqCst) > 0,
+        "root queryObjects positive control did no native snapshot work"
+      );
+      assert_eq!(
+        NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT.load(Ordering::SeqCst),
+        1,
+        "root near-heap positive control did not reach check_write exactly once"
+      );
+      assert_eq!(
+        NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT.load(Ordering::SeqCst),
+        1,
+        "root near-heap positive control did not install exactly one callback"
       );
     }
   }

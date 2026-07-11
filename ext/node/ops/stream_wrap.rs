@@ -505,6 +505,9 @@ mod native_capsec_tests {
   use deno_core::RuntimeOptions;
   use deno_core::op2;
 
+  use crate::ops::fs::op_node_create_pipe;
+  use crate::ops::pipe_wrap::PipeWrap;
+
   use super::*;
 
   const NATIVE_STREAM_GUARD_CHILD: &str = "ODEN_NATIVE_STREAM_GUARD_CHILD";
@@ -592,36 +595,61 @@ mod native_capsec_tests {
     }
   }
 
-  #[op2]
-  #[cppgc]
-  fn op_native_test_stream(
-    state: &mut OpState,
-    tagged: bool,
-  ) -> LibUvStreamWrap {
-    let base = HandleWrap::create(
-      AsyncWrap::create(state, ProviderType::TcpWrap as i32),
-      None,
-    );
-    let wrap = LibUvStreamWrap::new(base, -1, std::ptr::null());
-    if tagged {
-      wrap
-        .handle_data
-        .network_peer
-        .set(Some("127.0.0.1:9229".parse().unwrap()));
-    }
-    wrap
+  #[op2(fast)]
+  fn op_native_test_tag_pipe(#[cppgc] pipe: &PipeWrap, tagged: bool) {
+    pipe
+      .native_capsec_test_stream()
+      .handle_data
+      .network_peer
+      .set(tagged.then(|| "127.0.0.1:9229".parse().unwrap()));
+  }
+
+  #[op2(fast)]
+  fn op_native_test_pipe_reading_started(#[cppgc] pipe: &PipeWrap) -> bool {
+    pipe.native_capsec_test_stream().reading_started.get()
+  }
+
+  #[op2(fast)]
+  fn op_native_test_pipe_has_active_read(#[cppgc] pipe: &PipeWrap) -> bool {
+    pipe
+      .native_capsec_test_stream()
+      .handle_data
+      .active_read
+      .get()
+      .is_some()
+  }
+
+  #[op2(fast)]
+  #[smi]
+  fn op_native_test_close_fd(#[smi] fd: i32) -> i32 {
+    // SAFETY: the fixture owns each fd it passes here: writers are closed
+    // exactly once after readStop, and an unadopted reader only on open error.
+    unsafe { libc::close(fd) }
   }
 
   deno_core::extension!(
     native_stream_guard_test_ext,
-    ops = [op_native_test_stream],
-    objects = [super::AsyncWrap, super::HandleWrap, super::LibUvStreamWrap],
+    ops = [
+      op_node_create_pipe,
+      op_stream_base_register_state,
+      op_native_test_tag_pipe,
+      op_native_test_pipe_reading_started,
+      op_native_test_pipe_has_active_read,
+      op_native_test_close_fd,
+    ],
+    objects = [AsyncWrap, HandleWrap, LibUvStreamWrap, PipeWrap],
     state = |state| {
       state.put::<deno_core::uv_compat::AsyncId>(Default::default());
+      state.put::<deno_io::FdTable>(Default::default());
     }
   );
 
   fn run_native_stream_guard_contract(root: &Path) {
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let tokio_guard = tokio_runtime.enter();
     let mut runtime = JsRuntime::new(RuntimeOptions {
       extensions: vec![native_stream_guard_test_ext::init()],
       ..Default::default()
@@ -631,8 +659,31 @@ mod native_capsec_tests {
     runtime
       .execute_script(
         "file:///native_stream_guard_setup.js",
-        "globalThis.tagged = Deno.core.ops.op_native_test_stream(true);\n\
-         globalThis.ordinary = Deno.core.ops.op_native_test_stream(false);",
+        r#"
+        {
+          const ops = Deno.core.ops;
+          ops.op_stream_base_register_state(new Int32Array(4));
+          function makePipe(tagged) {
+            const [readFd, writeFd] = ops.op_node_create_pipe();
+            const pipe = new ops.PipeWrap(0);
+            pipe.onread = () => {};
+            const opened = pipe.open(readFd);
+            if (opened !== 0) {
+              ops.op_native_test_close_fd(readFd);
+              ops.op_native_test_close_fd(writeFd);
+              throw new Error(`failed to open native test pipe: ${opened}`);
+            }
+            ops.op_native_test_tag_pipe(pipe, tagged);
+            return { pipe, writeFd };
+          }
+          const taggedState = makePipe(true);
+          globalThis.tagged = taggedState.pipe;
+          globalThis.taggedWriteFd = taggedState.writeFd;
+          const ordinaryState = makePipe(false);
+          globalThis.ordinary = ordinaryState.pipe;
+          globalThis.ordinaryWriteFd = ordinaryState.writeFd;
+        }
+        "#,
       )
       .unwrap();
 
@@ -641,8 +692,18 @@ mod native_capsec_tests {
       .execute_script(
         "file:///native_stream_guard_denied.js",
         format!(
-          "{{ const result = tagged.readStart();\n\
-           if (result !== {UV_EACCES}) throw new Error(`expected UV_EACCES, got ${{result}}`); }}"
+          r#"
+          {{
+            const ops = Deno.core.ops;
+            const result = tagged.readStart();
+            if (result !== {UV_EACCES})
+              throw new Error(`expected UV_EACCES, got ${{result}}`);
+            if (ops.op_native_test_pipe_reading_started(tagged) ||
+                ops.op_native_test_pipe_has_active_read(tagged)) {{
+              throw new Error("denied readStart mutated native read state");
+            }}
+          }}
+          "#
         ),
       )
       .unwrap();
@@ -652,8 +713,28 @@ mod native_capsec_tests {
       .execute_script(
         "file:///native_stream_guard_allowed.js",
         format!(
-          "{{ const result = tagged.readStart();\n\
-           if (result !== {UV_EBADF}) throw new Error(`expected guard pass-through to UV_EBADF, got ${{result}}`); }}"
+          r#"
+          {{
+            const ops = Deno.core.ops;
+            const result = tagged.readStart();
+            if (result !== 0)
+              throw new Error(`allowed readStart did not register: ${{result}}`);
+            if (!ops.op_native_test_pipe_reading_started(tagged) ||
+                !ops.op_native_test_pipe_has_active_read(tagged)) {{
+              throw new Error("allowed readStart did not install native read state");
+            }}
+            if (tagged.readStop() !== 0)
+              throw new Error("tagged readStop failed");
+            if (ops.op_native_test_pipe_reading_started(tagged) ||
+                ops.op_native_test_pipe_has_active_read(tagged)) {{
+              throw new Error("readStop retained native read state");
+            }}
+            globalThis.taggedClosed = false;
+            tagged.close(() => {{ globalThis.taggedClosed = true; }});
+            if (ops.op_native_test_close_fd(taggedWriteFd) !== 0)
+              throw new Error("failed to close tagged pipe writer");
+          }}
+          "#
         ),
       )
       .unwrap();
@@ -663,9 +744,42 @@ mod native_capsec_tests {
       .execute_script(
         "file:///native_stream_guard_ordinary.js",
         format!(
-          "{{ const result = ordinary.readStart();\n\
-           if (result !== {UV_EBADF}) throw new Error(`untagged stream was over-gated: ${{result}}`); }}"
+          r#"
+          {{
+            const ops = Deno.core.ops;
+            const result = ordinary.readStart();
+            if (result !== 0)
+              throw new Error(`untagged stream was over-gated: ${{result}}`);
+            if (!ops.op_native_test_pipe_reading_started(ordinary) ||
+                !ops.op_native_test_pipe_has_active_read(ordinary)) {{
+              throw new Error("ordinary readStart did not install native read state");
+            }}
+            if (ordinary.readStop() !== 0)
+              throw new Error("ordinary readStop failed");
+            if (ops.op_native_test_pipe_reading_started(ordinary) ||
+                ops.op_native_test_pipe_has_active_read(ordinary)) {{
+              throw new Error("ordinary readStop retained native read state");
+            }}
+            globalThis.ordinaryClosed = false;
+            ordinary.close(() => {{ globalThis.ordinaryClosed = true; }});
+            if (ops.op_native_test_close_fd(ordinaryWriteFd) !== 0)
+              throw new Error("failed to close ordinary pipe writer");
+          }}
+          "#
         ),
+      )
+      .unwrap();
+
+    drop(tokio_guard);
+    tokio_runtime
+      .block_on(runtime.run_event_loop(Default::default()))
+      .unwrap();
+    runtime
+      .execute_script(
+        "file:///native_stream_guard_closed.js",
+        "if (!taggedClosed || !ordinaryClosed) {\n\
+         throw new Error('native pipe close callback did not run');\n\
+         }",
       )
       .unwrap();
   }
