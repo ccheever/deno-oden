@@ -154,8 +154,8 @@ const {
 // top of native inheritance rather than interpreted as a user replacement.
 const kInheritEnv = Symbol("kInheritEnv");
 const kNeedsOwnedCleanup = Symbol("kNeedsOwnedCleanup");
-// @ref LLP 0010#revision-11-patch-profile [implements] — Timeout/abort cleanup is reachable only through trusted, non-exported internals.
-// @ref LLP 0019#operation-scoped-positive-authority-provenance [constrained-by] — The bound closure preserves the exact owned child resource across async cleanup.
+// @ref LLP 0010#revision-11-patch-profile [implements] -- Timeout/abort cleanup is reachable only through trusted, non-exported internals.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [constrained-by] -- The bound closure preserves the exact owned child resource across async cleanup.
 const childCleanupKillers = new SafeWeakMap();
 
 function killChildForCleanup(child, signal) {
