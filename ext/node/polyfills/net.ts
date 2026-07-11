@@ -231,6 +231,14 @@ function _runInAsyncContext(snapshot: any, run: () => void) {
   }
 }
 
+// Capture the complete scheduling actor while the public Node call is still
+// on the stack. A raw async-context snapshot can omit a package on its first
+// async network operation and let continuation work fall back to ambient root.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function odenScheduleAsyncContext() {
+  return core.ops.op_oden_schedule_context();
+}
+
 const DEFAULT_IPV4_ADDR = "0.0.0.0";
 const DEFAULT_IPV6_ADDR = "::";
 
@@ -1138,18 +1146,20 @@ function _lookupAndConnect(self: Socket, options: TcpSocketConnectOptions) {
   const addressType = isIP(host);
   if (addressType) {
     defaultTriggerAsyncIdScope(self[asyncIdSymbol], nextTick, () => {
-      if (self.connecting) {
-        defaultTriggerAsyncIdScope(
-          self[asyncIdSymbol],
-          _internalConnect,
-          self,
-          host,
-          port,
-          addressType,
-          localAddress,
-          localPort,
-        );
-      }
+      _runInAsyncContext(self._handle?.[kAsyncContext], () => {
+        if (self.connecting) {
+          defaultTriggerAsyncIdScope(
+            self[asyncIdSymbol],
+            _internalConnect,
+            self,
+            host,
+            port,
+            addressType,
+            localAddress,
+            localPort,
+          );
+        }
+      });
     });
 
     return;
@@ -1227,6 +1237,18 @@ function _lookupAndConnect(self: Socket, options: TcpSocketConnectOptions) {
 
   defaultTriggerAsyncIdScope(self[asyncIdSymbol], function () {
     function emitLookup(
+      err: ErrnoException | null,
+      ip: string,
+      addressType: number,
+      netPermToken,
+    ) {
+      _runInAsyncContext(
+        self._handle?.[kAsyncContext],
+        () => emitLookupInContext(err, ip, addressType, netPermToken),
+      );
+    }
+
+    function emitLookupInContext(
       err: ErrnoException | null,
       ip: string,
       addressType: number,
@@ -1311,6 +1333,13 @@ function _lookupAndConnectMultiple(
 ) {
   defaultTriggerAsyncIdScope(self[asyncIdSymbol], function () {
     function emitLookup(err, addresses, _, netPermToken) {
+      _runInAsyncContext(
+        self._handle?.[kAsyncContext],
+        () => emitLookupInContext(err, addresses, _, netPermToken),
+      );
+    }
+
+    function emitLookupInContext(err, addresses, _, netPermToken) {
       // Only the built-in lookup installs a token (see _lookupAndConnect).
       if (
         usingDefaultLookup && netPermToken && self._handle?.setNetPermToken
@@ -1660,8 +1689,13 @@ Socket.prototype.connect = function (...args) {
 
   const options = normalized[0];
   const cb = normalized[1];
+  let odenHttpAsyncContext;
 
   if (ObjectHasOwn(options, "__odenHttpNetToken")) {
+    // The HTTP Agent restores the request's private actor context around this
+    // call. Preserve that exact snapshot: rebuilding it from this deep trusted
+    // stack could see only runtime frames and erase the package actor.
+    odenHttpAsyncContext = core.getAsyncContext();
     WeakMapPrototypeSet(
       odenHttpNetTokens,
       this,
@@ -1707,7 +1741,9 @@ Socket.prototype.connect = function (...args) {
   // Capture the async context now, while we are still running synchronously
   // inside the caller's context. The DNS lookup that precedes the actual
   // connect is async and would otherwise drop it before `_afterConnect` runs.
-  this._handle[kAsyncContext] = core.getAsyncContext();
+  this._handle[kAsyncContext] = odenHttpAsyncContext === undefined
+    ? odenScheduleAsyncContext()
+    : odenHttpAsyncContext;
 
   if (cb !== null) {
     this.once("connect", cb);
@@ -2518,6 +2554,13 @@ function _lookupAndListen(
 ) {
   const listeningId = server._listeningId;
   dnsLookup(address, { port }, function doListen(err, ip, addressType) {
+    _runInAsyncContext(
+      server[kAsyncContext],
+      () => doListenInContext(err, ip, addressType),
+    );
+  });
+
+  function doListenInContext(err, ip, addressType) {
     if (server._listeningId !== listeningId) {
       return;
     }
@@ -2537,7 +2580,7 @@ function _lookupAndListen(
         flags,
       );
     }
-  });
+  }
 }
 
 function _addAbortSignalOption(server: Server, options: ListenOptions) {
@@ -2798,7 +2841,7 @@ function _setupListenHandle(
 
   this[asyncIdSymbol] = _getNewAsyncId(this._handle);
   this._handle.onconnection = _onconnection;
-  this._handle[kAsyncContext] = core.getAsyncContext();
+  this._handle[kAsyncContext] = this[kAsyncContext];
   this._handle[ownerSymbol] = this;
 
   // For TCP and Pipe handles, wrap the onconnection callback to create
@@ -2957,6 +3000,8 @@ Server.prototype.listen = function (...args: unknown[]) {
   const normalized = _normalizeArgs(args);
   let options = normalized[0] as Partial<ListenOptions>;
   const cb = normalized[1];
+
+  this[kAsyncContext] = odenScheduleAsyncContext();
 
   this._listeningId++;
 

@@ -556,7 +556,11 @@ impl TCPWrap {
     result
   }
 
+  // Async Node network continuations restore a schedule snapshot in JS; stack
+  // capture here makes that actor visible to the permission decision.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
   #[nofast]
+  #[stack_trace]
   fn bind(
     &self,
     state: &mut OpState,
@@ -568,6 +572,7 @@ impl TCPWrap {
 
   #[nofast]
   #[rename("bindWithFlags")]
+  #[stack_trace]
   fn bind_with_flags(
     &self,
     state: &mut OpState,
@@ -579,6 +584,7 @@ impl TCPWrap {
   }
 
   #[nofast]
+  #[stack_trace]
   fn bind6(
     &self,
     state: &mut OpState,
@@ -744,6 +750,7 @@ impl TCPWrap {
   /// Connect to an address. Takes (req, address, port) where req is a
   /// TCPConnectWrap with oncomplete callback, matching Node.js API.
   #[nofast]
+  #[stack_trace]
   fn connect(
     &self,
     state: &mut OpState,
@@ -838,6 +845,7 @@ impl TCPWrap {
 
   /// Connect to an IPv6 address. uv_tcp_connect handles both v4 and v6.
   #[nofast]
+  #[stack_trace]
   fn connect6(
     &self,
     state: &mut OpState,

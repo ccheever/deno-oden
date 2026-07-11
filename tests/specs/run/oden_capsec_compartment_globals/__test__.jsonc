@@ -28,9 +28,12 @@
       "output": "off.out",
       "exitCode": 0
     },
+    // The harness must remain unarmed: it launches the explicitly armed
+    // control and experiment children itself. An armed parent scrubs the
+    // protected control namespace and propagates its own policy to children.
     "compat_harness_classifies_two_arms": {
       "args": "run -A ../../../../tools/oden/compartment_compat.ts compat_corpus.json",
-      "envs": { "ODEN_CAPSEC_POLICY": "capsec_audit.json" },
+      "envs": { "ODEN_CAPSEC_ROOT": "../../../../tools" },
       "output": "compat.out",
       "exitCode": 0
     }

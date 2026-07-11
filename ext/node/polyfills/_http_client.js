@@ -80,6 +80,9 @@ import {
 } from "node:_http_outgoing";
 import httpAgent from "node:_http_agent";
 import httpProxy from "node:_http_proxy";
+import {
+  captureOdenHttpRequestActor,
+} from "ext:deno_node/internal/http/oden_actor.js";
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const { urlToHttpOptions } = core.loadExtScript(
   "ext:deno_node/internal/url.ts",
@@ -450,6 +453,7 @@ function isURL(input) {
 
 function ClientRequest(input, options, cb) {
   FunctionPrototypeCall(OutgoingMessage, this);
+  captureOdenHttpRequestActor(this);
 
   if (typeof input === "string") {
     const urlStr = input;

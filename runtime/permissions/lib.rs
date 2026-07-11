@@ -4038,6 +4038,24 @@ fn oden_capsec_mode(file: Option<&OdenPolicyFile>) -> OdenMode {
   OdenMode::Audit
 }
 
+fn oden_capsec_scheduling_principal<I>(
+  principals: I,
+) -> Option<(OdenPrincipal, String)>
+where
+  I: IntoIterator<Item = (OdenPrincipal, String)>,
+{
+  let mut root = None;
+  for (principal, locator) in principals {
+    if !principal.is_ambient() {
+      return Some((principal, locator));
+    }
+    if principal == OdenPrincipal::Root && root.is_none() {
+      root = Some((principal, locator));
+    }
+  }
+  root
+}
+
 fn oden_capsec_principal_with_locator() -> (OdenPrincipal, Option<String>) {
   let frames = MAYBE_CURRENT_ODEN_STACKTRACE
     .lock()
@@ -4068,13 +4086,21 @@ fn oden_capsec_principal_with_locator() -> (OdenPrincipal, Option<String>) {
     // Precedence row 1: the nearest live user frame wins.
     return (principal, locator);
   }
-  // Precedence row 2: no live user frame, but a scheduling principal survives
-  // in the CPED slot (a detached callback) — attribute to the scheduler.
-  if let Some(locator) = prompter::current_oden_cped_locator() {
-    let principal = oden_principal_index::resolve_locator(&locator);
-    if principal != OdenPrincipal::Runtime {
-      return (principal, Some(locator));
-    }
+  // Precedence row 2: no live user frame, but one or more scheduling frames
+  // survive in CPED. Trusted runtime/root wrappers may precede the package in
+  // that captured stack, so select the nearest non-ambient scheduler. Preserve
+  // root only when the captured stack contains no non-ambient scheduler; a
+  // runtime-only stack remains unattributable and falls through to no-user.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  let scheduling_locators = prompter::current_oden_cped_locator()
+    .into_iter()
+    .chain(prompter::current_oden_cped_stack());
+  if let Some((principal, locator)) =
+    oden_capsec_scheduling_principal(scheduling_locators.map(|locator| {
+      (oden_principal_index::resolve_locator(&locator), locator)
+    }))
+  {
+    return (principal, Some(locator));
   }
   // Precedence row 4: no live user frame and no scheduling principal — the
   // fail-closed sentinel, never root. A genuine timer/immediate boundary now
@@ -9831,6 +9857,49 @@ mod tests {
   use sys_traits::EnvCurrentDir;
 
   use super::*;
+
+  #[test]
+  fn cped_principal_selection_skips_ambient_wrappers() {
+    let package = OdenPrincipal::Package {
+      name: "network-probe".to_string(),
+      version: Some("1.0.0".to_string()),
+    };
+    assert_eq!(
+      oden_capsec_scheduling_principal([
+        (OdenPrincipal::Runtime, "ext:deno_node/net.ts".to_string()),
+        (OdenPrincipal::Root, "file:///app/main.ts".to_string()),
+        (
+          package.clone(),
+          "file:///app/node_modules/network-probe/index.js".to_string(),
+        ),
+      ]),
+      Some((
+        package,
+        "file:///app/node_modules/network-probe/index.js".to_string(),
+      ))
+    );
+    assert_eq!(
+      oden_capsec_scheduling_principal([
+        (OdenPrincipal::Root, "file:///app/main.ts".to_string()),
+        (OdenPrincipal::Quarantine, "eval:dynamic".to_string()),
+      ]),
+      Some((OdenPrincipal::Quarantine, "eval:dynamic".to_string()))
+    );
+    assert_eq!(
+      oden_capsec_scheduling_principal([
+        (OdenPrincipal::Runtime, "ext:deno_node/net.ts".to_string()),
+        (OdenPrincipal::Root, "file:///app/main.ts".to_string()),
+      ]),
+      Some((OdenPrincipal::Root, "file:///app/main.ts".to_string()))
+    );
+    assert_eq!(
+      oden_capsec_scheduling_principal([(
+        OdenPrincipal::Runtime,
+        "ext:deno_node/net.ts".to_string(),
+      )]),
+      None
+    );
+  }
 
   #[test]
   #[allow(

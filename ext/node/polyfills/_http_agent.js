@@ -7,6 +7,9 @@ import {
   op_node_http_capsec_no_reuse,
   op_node_http_net_token,
 } from "ext:core/ops";
+import {
+  runWithOdenHttpRequestActor,
+} from "ext:deno_node/internal/http/oden_actor.js";
 import * as net from "node:net";
 import httpProxy from "node:_http_proxy";
 const lazyTls = core.createLazyLoader("node:tls");
@@ -526,7 +529,10 @@ Agent.prototype.createSocket = function createSocket(req, options, cb) {
     options.keepAliveInitialDelay = this.keepAliveMsecs;
   }
 
-  const newSocket = this.createConnection(options, oncreate);
+  const newSocket = runWithOdenHttpRequestActor(
+    req,
+    () => this.createConnection(options, oncreate),
+  );
   if (newSocket) {
     oncreate(null, newSocket);
   }

@@ -363,7 +363,11 @@ impl PipeWrap {
     ret
   }
 
+  // Unix-socket checks need a fresh live-frame capture just like TCP checks;
+  // otherwise they can inherit a prior operation's attribution state.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
   #[nofast]
+  #[stack_trace]
   fn bind(
     &self,
     state: &mut OpState,
@@ -397,6 +401,7 @@ impl PipeWrap {
   }
 
   #[nofast]
+  #[stack_trace]
   fn listen(
     &self,
     state: &mut OpState,
@@ -442,6 +447,7 @@ impl PipeWrap {
   /// Connect to a path. Takes (req, path) where req is a PipeConnectWrap
   /// with oncomplete callback, matching Node.js ConnectionWrap::AfterConnect.
   #[nofast]
+  #[stack_trace]
   fn connect(
     &self,
     state: &mut OpState,
