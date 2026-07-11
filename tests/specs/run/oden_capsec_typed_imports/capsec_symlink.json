@@ -1,0 +1,6 @@
+{
+  "mode": "enforce",
+  "grants": {
+    "typed-denied": "fs:read:./node_modules/typed-denied"
+  }
+}

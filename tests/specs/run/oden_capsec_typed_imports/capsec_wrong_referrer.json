@@ -1,0 +1,6 @@
+{
+  "mode": "enforce",
+  "grants": {
+    "typed-good": "fs:read:./node_modules/typed-good"
+  }
+}

@@ -1294,6 +1294,25 @@ pub struct CliModuleLoader<TGraphContainer: ModuleGraphContainer>(
   Rc<CliModuleLoaderInner<TGraphContainer>>,
 );
 
+fn oden_capsec_gate_typed_import(
+  specifier: &ModuleSpecifier,
+  referrer: Option<&ModuleSpecifier>,
+  requested_module_type: &RequestedModuleType,
+) -> Result<(), JsErrorBox> {
+  let import_type = match requested_module_type {
+    RequestedModuleType::Text => "text",
+    RequestedModuleType::Json => "json",
+    RequestedModuleType::Bytes => "bytes",
+    RequestedModuleType::None | RequestedModuleType::Other(_) => return Ok(()),
+  };
+  deno_runtime::deno_permissions::oden_capsec_gate_local_typed_import(
+    specifier,
+    referrer,
+    import_type,
+  )
+  .map_err(JsErrorBox::from_err)
+}
+
 impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
   for CliModuleLoader<TGraphContainer>
 {
@@ -1406,6 +1425,23 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
 
     if let Some(eszip_loader) = &inner.shared.maybe_eszip_loader {
       return eszip_loader.load(specifier);
+    }
+
+    if !options.is_dynamic_import {
+      // The loader knows the referrer before every default, hook, async, and
+      // synchronous source branch. Gate here once so static graph privilege and
+      // stock-read behavior cannot create different capsec semantics. Dynamic
+      // roots use prepare_load below because core supplies their referrer there.
+      // The eszip branch above serves embedded bytes rather than a local file.
+      // @ref LLP 0019#typed-local-imports [implements]
+      // @ref LLP 0019#reachability-does-not-replace-operation-checks [constrained-by]
+      if let Err(err) = oden_capsec_gate_typed_import(
+        &specifier,
+        maybe_referrer.map(|value| &value.specifier),
+        &options.requested_module_type,
+      ) {
+        return deno_core::ModuleLoadResponse::Sync(Err(err));
+      }
     }
 
     self.0.loaded_files.borrow_mut().insert(specifier.clone());
@@ -1582,13 +1618,32 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
   fn prepare_load(
     &self,
     specifier: &ModuleSpecifier,
-    _maybe_referrer: Option<String>,
+    maybe_referrer: Option<String>,
     maybe_code: Option<String>,
     options: ModuleLoadOptions,
   ) -> Pin<Box<dyn Future<Output = Result<(), ModuleLoaderError>>>> {
     // always call this first unconditionally because it will be
     // decremented unconditionally in "finish_load"
     self.0.shared.in_flight_loads_tracker.increase();
+
+    if options.is_dynamic_import {
+      let parsed_referrer = maybe_referrer
+        .as_deref()
+        .and_then(|value| ModuleSpecifier::parse(value).ok());
+      // Dynamic roots carry their trustworthy referrer only through
+      // prepare_load. Enforce before graph preparation or any typed source
+      // branch, then skip the load-site gate above so one import produces one
+      // decision.
+      // @ref LLP 0019#typed-local-imports [implements]
+      // @ref LLP 0019#reachability-does-not-replace-operation-checks [constrained-by]
+      if let Err(err) = oden_capsec_gate_typed_import(
+        specifier,
+        parsed_referrer.as_ref(),
+        &options.requested_module_type,
+      ) {
+        return Box::pin(deno_core::futures::future::ready(Err(err)));
+      }
+    }
 
     if matches!(
       options.requested_module_type,

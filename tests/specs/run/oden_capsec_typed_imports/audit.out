@@ -1,0 +1,10 @@
+computed-bytes.bin:1
+computed-json.json:1
+computed-text.txt:1
+literal-bytes.bin:1
+literal-json.json:1
+literal-text.txt:1
+require.json:[WILDCHAR]
+static-bytes.bin:1
+static-json.json:1
+static-text.txt:1

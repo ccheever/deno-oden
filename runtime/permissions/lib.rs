@@ -151,7 +151,7 @@ fn oden_capsec_decide(
   target: &str,
   api_name: Option<&str>,
 ) -> Result<(), PermissionCheckError> {
-  oden_capsec_decide_inner(family, action, target, api_name, false)
+  oden_capsec_decide_inner(family, action, target, api_name, false, None)
 }
 
 fn oden_capsec_decide_aggregate(
@@ -160,7 +160,28 @@ fn oden_capsec_decide_aggregate(
   target: &str,
   api_name: Option<&str>,
 ) -> Result<(), PermissionCheckError> {
-  oden_capsec_decide_inner(family, action, target, api_name, true)
+  oden_capsec_decide_inner(family, action, target, api_name, true, None)
+}
+
+/// Apply the ordinary capability decision to a principal the loader resolved
+/// from its referrer. Loader admission has no op-dispatch stack, so asking the
+/// generic decision path to rediscover the actor would collapse to a sentinel
+/// instead of checking the package that requested the bytes.
+fn oden_capsec_decide_for_principal(
+  principal: OdenPrincipal,
+  family: OdenFamily,
+  action: &str,
+  target: &str,
+  api_name: Option<&str>,
+) -> Result<(), PermissionCheckError> {
+  oden_capsec_decide_inner(
+    family,
+    action,
+    target,
+    api_name,
+    false,
+    Some(principal),
+  )
 }
 
 fn oden_capsec_decide_inner(
@@ -169,6 +190,7 @@ fn oden_capsec_decide_inner(
   target: &str,
   api_name: Option<&str>,
   aggregate: bool,
+  explicit_principal: Option<OdenPrincipal>,
 ) -> Result<(), PermissionCheckError> {
   if !oden_capsec_active() {
     return Ok(());
@@ -199,7 +221,9 @@ fn oden_capsec_decide_inner(
   // wins even over an authored wildcard grant.
   let control_target = oden_capsec_is_control_request(&req, aggregate);
   if control_target {
-    let principal = oden_capsec_principal();
+    let principal = explicit_principal
+      .clone()
+      .unwrap_or_else(oden_capsec_principal);
     let label = principal.label();
     oden_capsec_audit_record(
       &label,
@@ -228,7 +252,9 @@ fn oden_capsec_decide_inner(
   // whole set (least privilege) so a deputy cannot launder a scheduler's
   // authority. Every other case -- every unarmed class, and the collapsed
   // single-principal case -- takes the byte-identical rows 1/2/4 path below.
-  let intersection = if oden_capsec_deputy_class_armed(family, &req.action) {
+  let intersection = if explicit_principal.is_none()
+    && oden_capsec_deputy_class_armed(family, &req.action)
+  {
     let constrained =
       OdenPolicy::constrained_principals(&oden_capsec_principal_set());
     (constrained.len() >= 2).then_some(constrained)
@@ -261,7 +287,9 @@ fn oden_capsec_decide_inner(
         (decision, label, false, suggestion)
       }
       None => {
-        let principal = oden_capsec_principal();
+        let principal = explicit_principal
+          .clone()
+          .unwrap_or_else(oden_capsec_principal);
         let decision = policy.decide(&principal, &req);
         let is_ambient_allow =
           principal.is_ambient() && decision == OdenDecision::Allow;
@@ -288,7 +316,10 @@ fn oden_capsec_decide_inner(
   // byte-identical to the pre-handle behavior when handles are not exercised.
   // The rescue does not widen: `active_covers` matches the attenuated scope, so
   // a use outside the handle's scope still denies through the normal path.
-  if decision == OdenDecision::Deny && oden_handle::active_covers(&req) {
+  if explicit_principal.is_none()
+    && decision == OdenDecision::Deny
+    && oden_handle::active_covers(&req)
+  {
     oden_capsec_audit_record(
       &principal_label,
       family.name(),
@@ -395,6 +426,18 @@ pub fn oden_capsec_armed() -> bool {
   static ARMED: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(oden_capsec_armed_uncached);
   *ARMED
+}
+
+/// Exact engine semantics advertised by the current binary. Revision 1 stays
+/// frozen; Stage-B safety closures ship as the explicitly attested 1.1 patch
+/// profile until the generated Revision-2 plane is ready.
+pub const ODEN_CAPSEC_PROFILE: &str = "oden/capsec/1.1";
+
+/// True only for a structurally armed execution on the exact requested engine
+/// profile. The profile is compile-time/attested state, never a policy or
+/// environment selector an application could use to downgrade enforcement.
+pub fn oden_capsec_profile_is(profile: &str) -> bool {
+  profile == ODEN_CAPSEC_PROFILE && oden_capsec_armed()
 }
 
 /// Snapshot every shipping handoff before user code starts, initialize the
@@ -2486,6 +2529,91 @@ pub fn oden_capsec_gate_import(
     ));
   }
   Ok(())
+}
+
+fn oden_capsec_loader_read_identity_denied(
+  principal: &OdenPrincipal,
+  import_type: &str,
+  target: &str,
+  reason: &str,
+) -> PermissionCheckError {
+  let label = principal.label();
+  oden_capsec_audit_record(
+    &label,
+    "fs",
+    "read",
+    target,
+    &format!("DENY(loader identity: {reason})"),
+    None,
+  );
+  PermissionCheckError::PermissionDenied(PermissionDeniedError {
+    access: format!("typed import ({import_type}) access to {target:?}"),
+    name: "capsec",
+    custom_message: Some(format!(
+      "oden capsec: typed import ({import_type}) has no trustworthy referrer/path identity ({reason})"
+    )),
+    state: PermissionState::Denied,
+  })
+}
+
+/// Gate local typed-data bytes at the loader boundary using the principal of
+/// the importing module. Static loader reads bypass Deno's ordinary read
+/// permission check, and dynamic behavior is not a stable security contract,
+/// so every text/JSON/bytes branch enters this one rule before source loading.
+///
+/// The Stage-B engine deliberately has no package-self fallback: that allow is
+/// reserved for the integrity-bound, pre-armed payload inventory introduced by
+/// the Rev2 registry. Until then an ungranted package read fails closed.
+// @ref LLP 0019#typed-local-imports [implements] — Typed loader bytes emit referrer-attributed fs:read.
+// @ref LLP 0019#reachability-does-not-replace-operation-checks [constrained-by] — Graph reachability never substitutes for this operation decision.
+// @ref LLP 0019#implicit-package-self-access [constrained-by] — No ad hoc package-root read fallback before the generated payload inventory exists.
+pub fn oden_capsec_gate_local_typed_import(
+  specifier: &Url,
+  referrer: Option<&Url>,
+  import_type: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is("oden/capsec/1.1") || specifier.scheme() != "file"
+  {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+
+  let principal = referrer
+    .map(|value| oden_principal_index::resolve_locator(value.as_str()))
+    .unwrap_or(OdenPrincipal::NoUser);
+  if !matches!(import_type, "text" | "json" | "bytes") {
+    return Err(oden_capsec_loader_read_identity_denied(
+      &principal,
+      import_type,
+      specifier.as_str(),
+      "unknown typed-import kind",
+    ));
+  }
+  if matches!(principal, OdenPrincipal::NoUser | OdenPrincipal::Quarantine) {
+    return Err(oden_capsec_loader_read_identity_denied(
+      &principal,
+      import_type,
+      specifier.as_str(),
+      "missing or unattributable referrer",
+    ));
+  }
+  let path = specifier.to_file_path().map_err(|_| {
+    oden_capsec_loader_read_identity_denied(
+      &principal,
+      import_type,
+      specifier.as_str(),
+      "malformed local resource identity",
+    )
+  })?;
+  let target = path.to_string_lossy();
+  let api_name = format!("typed import ({import_type})");
+  oden_capsec_decide_for_principal(
+    principal,
+    OdenFamily::Fs,
+    "read",
+    &target,
+    Some(&api_name),
+  )
 }
 
 // Interim worker stance (LLP 0001 Phase 2): worker creation by a package

@@ -39,7 +39,8 @@ deno_core::extension!(
 #[op2]
 #[string]
 pub fn op_oden_attestation() -> &'static str {
-  r#"{"schema":2,"semantics":"oden-capsec-2026-07-10","features":["action-sensitive-env","action-sensitive-network","canonical-fs","closed-op-inventory","compartment-principal-key-v2","default-closed-escape-hatches","layer2-run-fastpath","resource-ownership"]}"#
+  debug_assert_eq!(deno_permissions::ODEN_CAPSEC_PROFILE, "oden/capsec/1.1");
+  r#"{"schema":2,"profile":"oden/capsec/1.1","semantics":"oden-capsec-2026-07-10","features":["action-sensitive-env","action-sensitive-network","canonical-fs","closed-op-inventory","compartment-principal-key-v2","default-closed-escape-hatches","layer2-run-fastpath","resource-ownership","typed-local-import-gate"]}"#
 }
 
 /// Default-deny a capability surface that has no safe scoped grant yet.

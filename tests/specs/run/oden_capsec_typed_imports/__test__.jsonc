@@ -1,0 +1,79 @@
+{
+  // LLP 0019 Stage B.3 / gate 9: every local typed-data loader branch is a
+  // referrer-attributed fs:read, independent of Deno's process read flags and
+  // sandbox graph reachability. The future package-self inventory is not
+  // approximated here: ungranted self reads stay closed.
+  "tempDir": true,
+  "steps": [
+    {
+      "args": "run --unstable-raw-imports --allow-read --allow-env app_positive.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_positive.json",
+        "ODEN_CAPSEC_AUDIT": "typed-audit.ndjson"
+      },
+      "output": "positive.out",
+      "exitCode": 0
+    },
+    {
+      "args": "run --allow-read=. audit_reader.js",
+      "output": "audit.out",
+      "exitCode": 0
+    },
+    {
+      "args": "run --unstable-raw-imports --allow-read --allow-env app_static_text_denied.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_denied.json" },
+      "output": "denied_static.out",
+      "exitCode": 1
+    },
+    {
+      "args": "run --unstable-raw-imports --allow-read --allow-env app_static_json_denied.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_denied.json" },
+      "output": "denied_static.out",
+      "exitCode": 1
+    },
+    {
+      "args": "run --unstable-raw-imports --allow-read --allow-env app_static_bytes_denied.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_denied.json" },
+      "output": "denied_static.out",
+      "exitCode": 1
+    },
+    {
+      "args": "run --unstable-raw-imports --allow-read --allow-env app_dynamic_denied.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_denied.json" },
+      "output": "dynamic_denied.out",
+      "exitCode": 0
+    },
+    {
+      "args": "run --allow-read --allow-env app_wrong_referrer.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_wrong_referrer.json" },
+      "output": "wrong_referrer.out",
+      "exitCode": 0
+    },
+    {
+      "args": "run --allow-read --allow-env app_missing_attribution.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_permissive.json" },
+      "output": "missing_attribution.out",
+      "exitCode": 0
+    },
+    {
+      "args": "run --allow-read --allow-env app_malformed.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_denied.json" },
+      "output": "malformed.out",
+      "exitCode": 0
+    },
+    {
+      "args": "run --allow-read --allow-write --allow-env app_symlink_escape.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_symlink.json"
+      },
+      "output": "symlink.out",
+      "exitCode": 0
+    },
+    {
+      "args": "run --allow-read --allow-env app_package_enumeration.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_denied.json" },
+      "output": "enumeration.out",
+      "exitCode": 0
+    }
+  ]
+}

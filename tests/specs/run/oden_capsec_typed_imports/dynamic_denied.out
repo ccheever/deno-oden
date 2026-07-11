@@ -1,0 +1,7 @@
+literal-text:DENIED
+literal-json:DENIED
+literal-bytes:DENIED
+computed-text:DENIED
+computed-json:DENIED
+computed-bytes:DENIED
+create-require:DENIED
