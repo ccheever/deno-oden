@@ -41,6 +41,7 @@ const streamTrustedDeliveryCallbacks = new SafeWeakMap();
 const streamCleanupDeliveryCallbacks = new SafeWeakMap();
 const streamDestroyDeliverySnapshots = new SafeWeakMap();
 const snapshottedStreamDestroyDeliveries = new SafeWeakSet();
+const streamOperationIterables = new SafeWeakSet();
 const trustedDeliveryCallbacks = new SafeWeakMap();
 const trustedDeliveryContexts = new SafeWeakMap();
 const trustedDeliveryPreflights = new SafeWeakMap();
@@ -324,7 +325,16 @@ function streamUseAdmissionContext(stream, admission) {
       throw new TypeError("stream use admission constituents changed");
     }
   }
-  return admission.context;
+  if (admission.context !== undefined) return admission.context;
+  // A synchronous public guard may authenticate from the live call stack even
+  // when no raw schedule context exists yet. Preserve the context returned by
+  // that exact successful guard as the fallback for its loader continuations.
+  for (let i = 0; i < admission.contexts.length; i++) {
+    if (admission.contexts[i] !== undefined) {
+      return admission.contexts[i];
+    }
+  }
+  return undefined;
 }
 
 function runWithStreamUseAdmission(stream, admission, callback) {
@@ -424,6 +434,11 @@ function markTrustedDeliveryCallback(callback, preflight, context = undefined) {
   return callback;
 }
 
+function markStreamOperationIterable(iterable) {
+  WeakSetPrototypeAdd(streamOperationIterables, iterable);
+  return iterable;
+}
+
 function captureDeliveryCallback(callback, invoke = callback) {
   const trusted = WeakMapPrototypeGet(trustedDeliveryCallbacks, callback) ===
     true;
@@ -451,7 +466,9 @@ function captureTrustedDeliveryCallback(callback, invoke = callback) {
 function captureCurrentDeliveryCallback(callback, invoke = callback) {
   return {
     callback: invoke,
-    context: core.ops.op_oden_schedule_context(),
+    context: activeStreamUseAdmissionContexts[
+      activeStreamUseAdmissionContexts.length - 1
+    ] ?? core.ops.op_oden_schedule_context(),
     preflight: undefined,
     trusted: true,
   };
@@ -558,6 +575,17 @@ function runIterableDelivery(target, captured, receiver, args) {
 }
 
 function wrapIterableDelivery(iterable, recipient) {
+  const operationIterable = recipient === undefined &&
+    WeakSetPrototypeHas(streamOperationIterables, iterable);
+  const captureIterableCallback = (callback, invoke = callback) => {
+    const captured = captureDeliveryCallback(recipient ?? callback, invoke);
+    // Internal operator generators execute loader forwarding code, while their
+    // application callbacks are captured and checked separately. Keep the
+    // forwarding callbacks on the constituent-bound operation admission rather
+    // than their loader function provenance.
+    if (operationIterable) captured.context = undefined;
+    return captured;
+  };
   const snapshotFactories = function () {
     const asyncFactory = this?.[SymbolAsyncIterator];
     const syncFactory = typeof asyncFactory === "function"
@@ -565,8 +593,8 @@ function wrapIterableDelivery(iterable, recipient) {
       : this?.[SymbolIterator];
     return [asyncFactory, syncFactory];
   };
-  const capturedFactorySnapshot = captureDeliveryCallback(
-    recipient ?? snapshotFactories,
+  const capturedFactorySnapshot = captureIterableCallback(
+    snapshotFactories,
     snapshotFactories,
   );
   const [asyncFactory, syncFactory] = runIterableDelivery(
@@ -580,83 +608,98 @@ function wrapIterableDelivery(iterable, recipient) {
     throw new TypeError("value is not iterable");
   }
 
-  const capturedFactory = captureDeliveryCallback(
-    recipient ?? factory,
-    factory,
-  );
+  const capturedFactory = captureIterableCallback(factory, factory);
   const wrapper = {};
   const iteratorSymbol = typeof asyncFactory === "function"
     ? SymbolAsyncIterator
     : SymbolIterator;
+  let deliveryAdmission;
+  let seedActor;
+  const runDeliveryOperation = (callback) => {
+    deliveryAdmission ??= createStreamUseAdmission(wrapper, seedActor);
+    return runWithStreamUseAdmission(wrapper, deliveryAdmission, callback);
+  };
 
   wrapper[iteratorSymbol] = function deliveryIteratorFactory() {
-    const iterator = runIterableDelivery(
-      wrapper,
-      capturedFactory,
-      iterable,
-      [],
-    );
-    const snapshotMethods = function () {
-      return [this?.next, this?.return, this?.throw];
-    };
-    const capturedSnapshot = captureDeliveryCallback(
-      recipient ?? factory,
-      snapshotMethods,
-    );
-    const [next, iteratorReturn, iteratorThrow] = runIterableDelivery(
-      wrapper,
-      capturedSnapshot,
-      iterator,
-      [],
-    );
-    if (typeof next !== "function") {
-      throw new TypeError("iterator.next is not callable");
-    }
-    const capturedNext = captureDeliveryCallback(recipient ?? next, next);
-    const wrappedIterator = {
-      next(value) {
-        return runIterableDelivery(
-          wrapper,
-          capturedNext,
-          iterator,
-          [value],
-        );
-      },
-    };
-
-    if (typeof iteratorReturn === "function") {
-      const capturedReturn = captureDeliveryCallback(
-        recipient ?? iteratorReturn,
-        iteratorReturn,
+    const factoryAdmission = createStreamUseAdmission(wrapper, seedActor);
+    return runWithStreamUseAdmission(wrapper, factoryAdmission, () => {
+      const iterator = runIterableDelivery(
+        wrapper,
+        capturedFactory,
+        iterable,
+        [],
       );
-      wrappedIterator.return = function (value) {
-        return runCapturedCleanup(capturedReturn, iterator, [value]);
+      const snapshotMethods = function () {
+        return [this?.next, this?.return, this?.throw];
       };
-    }
-
-    if (typeof iteratorThrow === "function") {
-      const capturedThrow = captureDeliveryCallback(
-        recipient ?? iteratorThrow,
-        iteratorThrow,
+      const capturedSnapshot = captureIterableCallback(
+        factory,
+        snapshotMethods,
       );
-      wrappedIterator.throw = function (error) {
-        return runIterableDelivery(
-          wrapper,
-          capturedThrow,
-          iterator,
-          [error],
-        );
+      const [next, iteratorReturn, iteratorThrow] = runIterableDelivery(
+        wrapper,
+        capturedSnapshot,
+        iterator,
+        [],
+      );
+      if (typeof next !== "function") {
+        throw new TypeError("iterator.next is not callable");
+      }
+      const capturedNext = captureIterableCallback(next, next);
+      const wrappedIterator = {
+        next(value) {
+          return runDeliveryOperation(() =>
+            runIterableDelivery(
+              wrapper,
+              capturedNext,
+              iterator,
+              [value],
+            )
+          );
+        },
       };
-    }
 
-    wrappedIterator[iteratorSymbol] = function () {
-      return this;
-    };
-    linkStreamUseGuard(wrapper, wrappedIterator);
-    return wrappedIterator;
+      if (typeof iteratorReturn === "function") {
+        const capturedReturn = captureIterableCallback(
+          iteratorReturn,
+          iteratorReturn,
+        );
+        wrappedIterator.return = function (value) {
+          return runCapturedCleanup(capturedReturn, iterator, [value]);
+        };
+      }
+
+      if (typeof iteratorThrow === "function") {
+        const capturedThrow = captureIterableCallback(
+          iteratorThrow,
+          iteratorThrow,
+        );
+        wrappedIterator.throw = function (error) {
+          return runDeliveryOperation(() =>
+            runIterableDelivery(
+              wrapper,
+              capturedThrow,
+              iterator,
+              [error],
+            )
+          );
+        };
+      }
+
+      wrappedIterator[iteratorSymbol] = function () {
+        return this;
+      };
+      linkStreamUseGuard(wrapper, wrappedIterator);
+      return wrappedIterator;
+    });
   };
 
   linkStreamUseGuard(iterable, wrapper);
+  const seedAdmission = createStreamUseAdmission(
+    wrapper,
+    capturedFactorySnapshot.context,
+  );
+  seedActor = streamUseAdmissionContext(wrapper, seedAdmission);
   return wrapper;
 }
 
@@ -694,6 +737,7 @@ return {
   getStreamDestroyDeliverySnapshot,
   hasStreamUseGuard,
   markTrustedDeliveryCallback,
+  markStreamOperationIterable,
   isStreamTrustedDeliveryCallback,
   isStreamCleanupDeliveryCallback,
   linkStreamUseGuard,

@@ -25,8 +25,8 @@ const nodeReadable = await source(
   "ext/node/polyfills/internal/streams/readable.js",
 );
 const nodeStream = await source("ext/node/polyfills/stream.ts");
-const nodeDuplex = await source(
-  "ext/node/polyfills/internal/streams/duplex.js",
+const nodeWebAdapters = await source(
+  "ext/node/polyfills/internal/webstreams/adapters.js",
 );
 const nodeDuplexify = await source(
   "ext/node/polyfills/internal/streams/duplexify.js",
@@ -82,9 +82,9 @@ const nodeOperators = section(
   "const promiseKeys = ObjectKeys(promiseReturningOperators);",
 );
 const nodeDuplexConversions = section(
-  nodeDuplex,
-  "Duplex.fromWeb = function (pair, options)",
-  "let duplexify;",
+  nodeWebAdapters,
+  "function newStreamDuplexFromReadableWritablePair(",
+  "function newReadableStreamFromStreamReadable(",
 );
 const nodeDuplexifyFunction = section(
   nodeDuplexify,
@@ -154,7 +154,11 @@ const evidence = {
   ),
   nodeIteratorCarrierPropagation: nodeIterator.includes(
     "linkStreamUseGuard(stream, iter);",
-  ) && nodeFrom.includes("linkStreamUseGuard(iterable, readable);"),
+  ) && nodeFrom.includes(
+    "linkStreamUseGuard(iterable, guardedIterable);",
+  ) && nodeFrom.includes(
+    "linkStreamUseGuard(guardedIterable, readable);",
+  ),
   nodePipeReadableDestinationPropagation: ordered(
     nodePipe,
     "runReadableUseGuard(this);",
@@ -168,12 +172,17 @@ const evidence = {
     "const sourceGuard = getReadableUseGuard(this);",
   ) && nodeOperators.includes("setReadableUseGuard(readable, sourceGuard);"),
   nodeDuplexWebConversionPropagation: nodeDuplexConversions.includes(
-    "getReadableStreamUseGuard(readableStream)",
+    "registerStreamGuardAttachHook(duplex, (guard) =>",
   ) && nodeDuplexConversions.includes(
-    "setReadableUseGuard(duplex, sourceGuard);",
+    "setReadableStreamUseGuard(readableStream, guard);",
   ) && nodeDuplexConversions.includes(
-    "setReadableStreamUseGuard(pair.readable, sourceGuard);",
-  ),
+    "setWritableStreamUseGuard(writableStream, guard);",
+  ) && nodeDuplexConversions.includes(
+    "registerReadableStreamGuardAttachHook(readableStream, (guard) =>",
+  ) && nodeDuplexConversions.includes(
+    "registerWritableStreamGuardAttachHook(writableStream, (guard) =>",
+  ) && nodeDuplexConversions.match(/setStreamUseGuard\(duplex, guard\);/g)
+        ?.length === 2,
   nodeDuplexifyPropagation: nodeDuplexifyFunction.includes(
     "linkStreamUseGuard(carrier, guardedValue);",
   ) && nodeDuplexify.includes("linkStreamUseGuard(stream, carrier);") &&

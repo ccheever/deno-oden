@@ -30,6 +30,7 @@ const {
   captureDeliveryCallback,
   createStreamUseAdmission,
   linkStreamUseGuard,
+  markStreamOperationIterable,
   markTrustedDeliveryCallback,
   preflightCapturedDelivery,
   runCapturedDelivery,
@@ -113,6 +114,7 @@ function createOperatorCarrier(source) {
 }
 
 function guardOperatorOutput(source, output) {
+  markStreamOperationIterable(output);
   linkStreamUseGuard(source, output);
   return output;
 }

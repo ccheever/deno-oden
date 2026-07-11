@@ -76,40 +76,29 @@ async function pipelineOutcome(stages, label) {
   );
 }
 
-function webQueue(readable) {
-  const controllerKey = Reflect.ownKeys(readable).find((key) =>
-    typeof key === "symbol" && key.description === "[[controller]]"
-  );
-  const controller = controllerKey === undefined
-    ? undefined
-    : readable[controllerKey];
-  const queueKey = Reflect.ownKeys(controller ?? {}).find((key) =>
-    typeof key === "symbol" && key.description === "[[queue]]"
-  );
-  return queueKey === undefined ? undefined : controller[queueKey];
-}
-
 async function protectedNodeBuffer(label) {
   const response = await fetch(httpUrl);
-  const web = response.body.pipeThrough(
-    new TransformStream(undefined, undefined, { highWaterMark: 16 }),
+  // The Web queue is intentionally closure-private. Let pipeTo's captured
+  // operation context drive the protected source, and observe readiness only
+  // through the registered Node adapter state.
+  const transform = new TransformStream(
+    undefined,
+    undefined,
+    { highWaterMark: 16 },
   );
+  const web = response.body.pipeThrough(transform);
   webStreams.add(web);
-  await bounded(
-    (async () => {
-      while ((webQueue(web)?.size ?? 0) === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-    })(),
-    `${label} Web buffer`,
-  );
-
   const node = Readable.fromWeb(web);
   streams.add(node);
+  let nodeError;
+  node.on("error", (error) => {
+    nodeError = error;
+  });
   node._read(0);
   await bounded(
     (async () => {
       while (node.readableLength === 0) {
+        if (nodeError !== undefined) throw nodeError;
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
     })(),

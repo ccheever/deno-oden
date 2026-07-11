@@ -21,6 +21,7 @@ const {
   op_read_all,
   op_pipe,
   op_oden_callback_context,
+  op_oden_schedule_context,
   op_readable_stream_resource_allocate,
   op_readable_stream_resource_allocate_sized,
   op_readable_stream_resource_await_close,
@@ -205,6 +206,21 @@ function runWebStreamUseGuardParts(partListsMap, stream) {
   const parts = WeakMapPrototypeGet(partListsMap, stream);
   if (parts === undefined) return;
   for (let i = 0; i < parts.length; i++) parts[i]();
+}
+
+// Controller start promises settle under loader microtasks, but their first
+// pull/queue transition still belongs to the operation that constructed the
+// controller. Preserve that actor without changing any user callback record.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function runWithCapturedOperationContext(context, callback) {
+  if (context === undefined) return callback();
+  const priorContext = getAsyncContext();
+  setAsyncContext(context);
+  try {
+    return callback();
+  } finally {
+    setAsyncContext(priorContext);
+  }
 }
 
 function forEachReadableStreamUseGuard(stream, callback) {
@@ -4355,6 +4371,17 @@ function readableStreamPipeTo(
   assert(!isReadableStreamLocked(source));
   assert(!isWritableStreamLocked(dest));
 
+  // Internal pump/read continuations may resume after backpressure or native
+  // input under loader-owned microtasks. Preserve the actor that initiated this
+  // exact pipe operation for those trusted transitions; user size/write/
+  // transform algorithms still rebind to their independently captured callback
+  // CPED before any application bytes are delivered.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  const operationContext = op_oden_schedule_context();
+  function runWithPipeOperationContext(callback) {
+    return runWithCapturedOperationContext(operationContext, callback);
+  }
+
   // A pipe is a destination transition. Attach every constituent before
   // inspecting resource backing, acquiring a writer, or allowing any
   // queue/callback to observe a chunk; object passage never substitutes the
@@ -4502,12 +4529,14 @@ function readableStreamPipeTo(
   /** @type {ReadRequest} */
   const readRequest = {
     chunkSteps(chunk) {
-      writeChunk(chunk);
-      if (pumping) {
-        syncAdvance = true;
-      } else {
-        pump();
-      }
+      return runWithPipeOperationContext(() => {
+        writeChunk(chunk);
+        if (pumping) {
+          syncAdvance = true;
+        } else {
+          pump();
+        }
+      });
     },
     // Source close is finalized by the installed closed handler. A per-use
     // authority guard can reject a read without transitioning the source to
@@ -4528,53 +4557,57 @@ function readableStreamPipeTo(
   registerReadableLiteralRequest(readRequest);
 
   function pump() {
-    pumping = true;
-    do {
-      syncAdvance = false;
-      if (shuttingDown === true) {
-        break;
-      }
-
-      // Recompute identity-bypass eligibility each iteration; any state change
-      // on either side permanently disables the route (a later chunk then
-      // takes the generic writer path, surfacing the proper rejection).
-      if (bypassActive) {
-        const readableController = bypassTS[_readable][_controller];
-        if (
-          dest[_state] === "writable" &&
-          writableStreamCloseQueuedOrInFlight(dest) === false &&
-          readableStreamDefaultControllerCanCloseOrEnqueue(readableController)
-        ) {
-          if (bypassTS[_backpressure] === true) {
-            // Pace on the transform's own backpressure flag; resume when the
-            // next readable-side pull clears it. Rejection (transform errored)
-            // is left to the shutdown handlers.
-            uponPromise(
-              bypassTS[_backpressureChangePromise].promise,
-              pump,
-              noopHandler,
-            );
-            break;
-          }
-        } else {
-          bypassActive = false;
+    return runWithPipeOperationContext(() => {
+      pumping = true;
+      do {
+        syncAdvance = false;
+        if (shuttingDown === true) {
+          break;
         }
-      }
 
-      if (bypassActive === false && dest[_backpressure] === true) {
-        // Writable backpressure: wait for the writer-ready promise, then
-        // resume. Rejection (dest errored) is left to the shutdown handlers.
-        uponPromise(writer[_readyPromise].promise, pump, noopHandler);
-        break;
-      }
+        // Recompute identity-bypass eligibility each iteration; any state
+        // change on either side permanently disables the route (a later chunk
+        // then takes the generic writer path, surfacing the proper rejection).
+        if (bypassActive) {
+          const readableController = bypassTS[_readable][_controller];
+          if (
+            dest[_state] === "writable" &&
+            writableStreamCloseQueuedOrInFlight(dest) === false &&
+            readableStreamDefaultControllerCanCloseOrEnqueue(
+              readableController,
+            )
+          ) {
+            if (bypassTS[_backpressure] === true) {
+              // Pace on the transform's own backpressure flag; resume when the
+              // next readable-side pull clears it. Rejection (transform
+              // errored) is left to the shutdown handlers.
+              uponPromise(
+                bypassTS[_backpressureChangePromise].promise,
+                pump,
+                noopHandler,
+              );
+              break;
+            }
+          } else {
+            bypassActive = false;
+          }
+        }
 
-      // No backpressure on the active path: read one chunk. A queued chunk is
-      // delivered synchronously (chunkSteps sets syncAdvance and the loop
-      // re-arms at constant stack depth); an empty queue delivers
-      // asynchronously and re-enters pump from chunkSteps.
-      readableStreamDefaultReaderRead(reader, readRequest);
-    } while (syncAdvance);
-    pumping = false;
+        if (bypassActive === false && dest[_backpressure] === true) {
+          // Writable backpressure: wait for the writer-ready promise, then
+          // resume. Rejection (dest errored) is left to the shutdown handlers.
+          uponPromise(writer[_readyPromise].promise, pump, noopHandler);
+          break;
+        }
+
+        // No backpressure on the active path: read one chunk. A queued chunk is
+        // delivered synchronously (chunkSteps sets syncAdvance and the loop
+        // re-arms at constant stack depth); an empty queue delivers
+        // asynchronously and re-enters pump from chunkSteps.
+        readableStreamDefaultReaderRead(reader, readRequest);
+      } while (syncAdvance);
+      pumping = false;
+    });
   }
 
   isOrBecomesErrored(
@@ -4681,11 +4714,13 @@ function readableStreamPipeTo(
    */
   function shutdownWithAction(action, originalIsError, originalError) {
     function doTheRest() {
-      uponPromise(
-        action(),
-        () => finalize(originalIsError, originalError),
-        (newError) => finalize(true, newError),
-      );
+      runWithPipeOperationContext(() => {
+        uponPromise(
+          action(),
+          () => finalize(originalIsError, originalError),
+          (newError) => finalize(true, newError),
+        );
+      });
     }
 
     if (shuttingDown === true) {
@@ -5412,19 +5447,22 @@ function setUpReadableByteStreamController(
   controller[_autoAllocateChunkSize] = autoAllocateChunkSize;
   setReadableControllerQueue(controller, _pendingPullIntos, new Queue());
   setProtectedReadableSlot(stream, _controller, controller);
+  const startOperationContext = op_oden_schedule_context();
   const startResult = startAlgorithm(controller);
   const startPromise = PromiseResolve(startResult);
   uponPromise(
     startPromise,
-    () => {
-      controller[_started] = true;
-      assert(controller[_pulling] === false);
-      assert(controller[_pullAgain] === false);
-      readableByteStreamControllerCallPullIfNeeded(controller);
-    },
-    (r) => {
-      readableByteStreamControllerError(controller, r);
-    },
+    () =>
+      runWithCapturedOperationContext(startOperationContext, () => {
+        controller[_started] = true;
+        assert(controller[_pulling] === false);
+        assert(controller[_pullAgain] === false);
+        readableByteStreamControllerCallPullIfNeeded(controller);
+      }),
+    (r) =>
+      runWithCapturedOperationContext(startOperationContext, () => {
+        readableByteStreamControllerError(controller, r);
+      }),
   );
 }
 
@@ -5576,16 +5614,23 @@ function setUpReadableStreamDefaultController(
   controller[_pullAlgorithm] = pullAlgorithm;
   controller[_cancelAlgorithm] = cancelAlgorithm;
   setProtectedReadableSlot(stream, _controller, controller);
+  const startOperationContext = op_oden_schedule_context();
   const startResult = startAlgorithm(controller);
   const startPromise = PromiseResolve(startResult);
-  uponPromise(startPromise, () => {
-    controller[_started] = true;
-    assert(controller[_pulling] === false);
-    assert(controller[_pullAgain] === false);
-    readableStreamDefaultControllerCallPullIfNeeded(controller);
-  }, (r) => {
-    readableStreamDefaultControllerError(controller, r);
-  });
+  uponPromise(
+    startPromise,
+    () =>
+      runWithCapturedOperationContext(startOperationContext, () => {
+        controller[_started] = true;
+        assert(controller[_pulling] === false);
+        assert(controller[_pullAgain] === false);
+        readableStreamDefaultControllerCallPullIfNeeded(controller);
+      }),
+    (r) =>
+      runWithCapturedOperationContext(startOperationContext, () => {
+        readableStreamDefaultControllerError(controller, r);
+      }),
+  );
 }
 
 /**
@@ -5843,17 +5888,24 @@ function setUpWritableStreamDefaultController(
     controller,
   );
   writableStreamUpdateBackpressure(stream, backpressure);
+  const startOperationContext = op_oden_schedule_context();
   const startResult = startAlgorithm(controller);
   const startPromise = resolvePromiseWith(startResult);
-  uponPromise(startPromise, () => {
-    assert(stream[_state] === "writable" || stream[_state] === "erroring");
-    controller[_started] = true;
-    writableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
-  }, (r) => {
-    assert(stream[_state] === "writable" || stream[_state] === "erroring");
-    controller[_started] = true;
-    writableStreamDealWithRejection(stream, r);
-  });
+  uponPromise(
+    startPromise,
+    () =>
+      runWithCapturedOperationContext(startOperationContext, () => {
+        assert(stream[_state] === "writable" || stream[_state] === "erroring");
+        controller[_started] = true;
+        writableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
+      }),
+    (r) =>
+      runWithCapturedOperationContext(startOperationContext, () => {
+        assert(stream[_state] === "writable" || stream[_state] === "erroring");
+        controller[_started] = true;
+        writableStreamDealWithRejection(stream, r);
+      }),
+  );
 }
 
 /**

@@ -35,6 +35,7 @@ const {
   isReadableDestroyed,
   isRegisteredReadable,
   pauseReadable,
+  pushProtectedReadableChunk,
   pushReadableChunk,
   readableHighWaterMark,
   readableObjectMode,
@@ -128,6 +129,21 @@ function uponPromise(promise, onFulfilled, onRejected) {
   return PromisePrototypeThen(promise, onFulfilled, onRejected);
 }
 
+// A trusted adapter read may settle after the public Node read frame has
+// unwound. Carry only that operation's context into the loader-owned promise
+// handlers; application listeners are still authorized independently when the
+// resulting chunk is pushed.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function uponPromiseWithCurrent(promise, onFulfilled, onRejected) {
+  const capturedFulfilled = captureCurrentDeliveryCallback(onFulfilled);
+  const capturedRejected = captureCurrentDeliveryCallback(onRejected);
+  return PromisePrototypeThen(
+    promise,
+    (value) => runCapturedCallback(capturedFulfilled, undefined, [value]),
+    (error) => runCapturedCallback(capturedRejected, undefined, [error]),
+  );
+}
+
 function destroyNodeStream(stream, error) {
   return FunctionPrototypeCall(destroy, stream, error);
 }
@@ -169,20 +185,22 @@ function newStreamReadableFromReadableStream(
   let closed = false;
 
   function readFromWeb() {
-    uponPromise(
+    uponPromiseWithCurrent(
       readableStreamDefaultReaderReadPromise(reader),
       (chunk) => {
         try {
           if (chunk.done) {
-            pushReadableChunk(readable, null);
+            pushProtectedReadableChunk(readable, null);
           } else {
-            pushReadableChunk(readable, chunk.value);
+            pushProtectedReadableChunk(readable, chunk.value);
           }
         } catch (error) {
           destroyNodeStream(readable, error);
         }
       },
-      (error) => destroyNodeStream(readable, error),
+      (error) => {
+        destroyNodeStream(readable, error);
+      },
     );
   }
 
@@ -470,14 +488,14 @@ function newStreamDuplexFromReadableWritablePair(
   let readableClosed = false;
 
   function readFromWeb() {
-    uponPromise(
+    uponPromiseWithCurrent(
       readableStreamDefaultReaderReadPromise(reader),
       (chunk) => {
         try {
           if (chunk.done) {
-            pushReadableChunk(duplex, null);
+            pushProtectedReadableChunk(duplex, null);
           } else {
-            pushReadableChunk(duplex, chunk.value);
+            pushProtectedReadableChunk(duplex, chunk.value);
           }
         } catch (error) {
           destroyNodeStream(duplex, error);
