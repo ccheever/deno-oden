@@ -12,6 +12,7 @@ const {
   setReadableUseGuard,
 } = core.loadExtScript("ext:deno_node/internal/streams/readable.js");
 const {
+  destroyProtectedWritable,
   isRegisteredWritable,
   isWritablePublicEnd,
   isWritablePublicWrite,
@@ -223,9 +224,9 @@ export default function compose(...streams) {
     if (cb) {
       cb(err);
     } else if (err) {
-      d.destroy(err);
+      destroyProtectedWritable(d, err);
     } else if (!readable && !writable) {
-      d.destroy();
+      destroyProtectedWritable(d);
     }
   }
 
@@ -272,12 +273,14 @@ export default function compose(...streams) {
       };
       d._write = function composedWrite(chunk, encoding, callback) {
         const continuation = captureCurrentDeliveryCallback(callback);
-        if (runCapturedDelivery(
-          d,
-          capturedHeadWrite,
-          head,
-          [chunk, encoding],
-        )) {
+        if (
+          runCapturedDelivery(
+            d,
+            capturedHeadWrite,
+            head,
+            [chunk, encoding],
+          )
+        ) {
           runCapturedCallback(continuation, undefined, []);
         } else {
           ondrain = continuation;

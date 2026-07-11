@@ -67,6 +67,9 @@
 const { core, primordials } = __bootstrap;
 const lazyProcess = core.createLazyLoader("node:process");
 const process = lazyProcess().default;
+const { nextTick: ProtectedTransformNextTick } = core.loadExtScript(
+  "ext:deno_node/_next_tick.ts",
+);
 const _mod1 = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const Duplex = core.loadExtScript(
   "ext:deno_node/internal/streams/duplex.js",
@@ -81,6 +84,7 @@ const { getHighWaterMark } = core.loadExtScript(
   "ext:deno_node/internal/streams/state.js",
 );
 const {
+  captureCurrentDeliveryCallback,
   captureDeliveryCallback,
   captureTrustedDeliveryCallback,
   isStreamTrustedDeliveryCallback,
@@ -89,10 +93,20 @@ const {
   registerStreamDeliveryPreflight,
   registerStreamGuardAttachHook,
   runCapturedDelivery,
+  runCapturedCallback,
   runStreamUseGuard,
 } = core.loadExtScript(
   "ext:deno_node/internal/streams/oden_delivery.js",
 );
+
+function nextTickWithCurrent(callback, ...args) {
+  const captured = captureCurrentDeliveryCallback(callback);
+  FunctionPrototypeCall(
+    ProtectedTransformNextTick,
+    process,
+    () => runCapturedCallback(captured, undefined, args),
+  );
+}
 
 const {
   ERR_METHOD_NOT_IMPLEMENTED,
@@ -128,9 +142,7 @@ function protectTransform(stream) {
       : captureDeliveryCallback(callback);
   WeakMapPrototypeSet(guardedTransforms, stream, {
     flush: typeof flush === "function" ? capture(flush) : null,
-    transform: typeof transform === "function"
-      ? capture(transform)
-      : null,
+    transform: typeof transform === "function" ? capture(transform) : null,
     writeIsTransform: stream._write === TransformPrototypeWrite,
   });
 }
@@ -295,7 +307,7 @@ Transform.prototype._write = function (chunk, encoding, callback) {
       // If user has called this.push(null) we have to
       // delay the callback to properly propagate the new
       // state.
-      process.nextTick(callback);
+      nextTickWithCurrent(callback);
     } else if (
       wState.ended || // Backwards compat.
       length === rState.length || // Backwards compat.

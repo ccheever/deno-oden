@@ -45,7 +45,7 @@ function hasStreamUseGuard(stream) {
 
 function runStreamUseGuard(stream) {
   const guard = getStreamUseGuard(stream);
-  if (guard !== undefined) guard();
+  if (guard !== undefined) return guard();
 }
 
 function streamUseGuardRunner(stream) {
@@ -54,7 +54,12 @@ function streamUseGuardRunner(stream) {
     runner = () => {
       const parts = WeakMapPrototypeGet(streamUseGuardPartLists, stream);
       if (parts === undefined) return;
-      for (let i = 0; i < parts.length; i++) parts[i]();
+      let context;
+      for (let i = 0; i < parts.length; i++) {
+        const partContext = parts[i]();
+        if (partContext !== undefined) context = partContext;
+      }
+      return context;
     };
     WeakMapPrototypeSet(streamUseGuardRunners, stream, runner);
   }
@@ -227,7 +232,7 @@ function preflightCapturedDelivery(stream, captured) {
 
 function runCapturedDelivery(stream, captured, receiver, args) {
   if (!hasStreamUseGuard(stream)) {
-    return ReflectApply(captured.callback, receiver, args);
+    return runCapturedCallback(captured, receiver, args);
   }
   if (captured.context === undefined) {
     runCapturedPreflight(stream, captured);

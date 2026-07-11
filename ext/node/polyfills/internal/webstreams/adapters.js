@@ -2,6 +2,9 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 (function () {
 const { core, primordials } = __bootstrap;
+const { nextTick: ProtectedAdapterNextTick } = core.loadExtScript(
+  "ext:deno_node/_next_tick.ts",
+);
 const {
   ArrayBufferIsView,
   ArrayPrototypeMap,
@@ -14,18 +17,33 @@ const {
   Uint8Array,
 } = primordials;
 const {
+  captureCurrentDeliveryCallback,
   captureDeliveryCallback,
   captureTrustedDeliveryCallback,
   markStreamCleanupDeliveryCallback,
   markStreamTrustedDeliveryCallback,
   markTrustedDeliveryCallback,
   registerStreamGuardAttachHook,
+  runCapturedCallback,
   runCapturedCleanup,
   runCapturedDelivery,
   setStreamUseGuard,
 } = core.loadExtScript("ext:deno_node/internal/streams/oden_delivery.js");
-const { pushReadableChunk } = core.loadExtScript(
+const {
+  addReadableListener,
+  isReadableActive,
+  isReadableDestroyed,
+  isRegisteredReadable,
+  pauseReadable,
+  pushReadableChunk,
+  readableHighWaterMark,
+  readableObjectMode,
+  resumeReadable,
+} = core.loadExtScript(
   "ext:deno_node/internal/streams/readable.js",
+);
+const { addEventEmitterListener } = core.loadExtScript(
+  "ext:deno_node/_events.mjs",
 );
 const {
   acquireReadableStreamDefaultReader,
@@ -85,10 +103,26 @@ const lazyProcess = core.createLazyLoader("node:process");
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const lazyStream = core.createLazyLoader("node:stream");
 const {
+  destroyProtectedWritable,
   isRegisteredWritable,
+  isWritableActive,
+  isWritableDestroyed,
+  isWritableEnded: isRegisteredWritableEnded,
+  isWritablePublicEnd,
   isWritablePublicWrite,
+  writableHighWaterMark,
   writableNeedsDrain,
+  writableObjectMode,
 } = core.loadExtScript("ext:deno_node/internal/streams/writable.js");
+
+function nextTickWithCurrent(callback, ...args) {
+  const captured = captureCurrentDeliveryCallback(callback);
+  FunctionPrototypeCall(
+    ProtectedAdapterNextTick,
+    lazyProcess().default,
+    () => runCapturedCallback(captured, undefined, args),
+  );
+}
 
 function uponPromise(promise, onFulfilled, onRejected) {
   return PromisePrototypeThen(promise, onFulfilled, onRejected);
@@ -168,7 +202,7 @@ function newStreamReadableFromReadableStream(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() => {
+          nextTickWithCurrent(() => {
             throw error;
           });
         }
@@ -251,9 +285,7 @@ function newStreamWritableFromWritableStream(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() =>
-            destroyNodeStream(writable, error)
-          );
+          nextTickWithCurrent(() => destroyNodeStream(writable, error));
         }
       }
 
@@ -312,7 +344,7 @@ function newStreamWritableFromWritableStream(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() => {
+          nextTickWithCurrent(() => {
             throw error;
           });
         }
@@ -348,9 +380,7 @@ function newStreamWritableFromWritableStream(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() =>
-            destroyNodeStream(writable, error)
-          );
+          nextTickWithCurrent(() => destroyNodeStream(writable, error));
         }
       }
 
@@ -453,9 +483,7 @@ function newStreamDuplexFromReadableWritablePair(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() =>
-            destroyNodeStream(duplex, error)
-          );
+          nextTickWithCurrent(() => destroyNodeStream(duplex, error));
         }
       }
 
@@ -514,9 +542,7 @@ function newStreamDuplexFromReadableWritablePair(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() =>
-            destroyNodeStream(duplex, error)
-          );
+          nextTickWithCurrent(() => destroyNodeStream(duplex, error));
         }
       }
 
@@ -557,7 +583,7 @@ function newStreamDuplexFromReadableWritablePair(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() => {
+          nextTickWithCurrent(() => {
             throw error;
           });
         }
@@ -641,7 +667,10 @@ function newReadableStreamFromStreamReadable(
   // here because it will return false if streamReadable is a Duplex
   // whose readable option is false. For a Duplex that is not readable,
   // we want it to pass this check but return a closed ReadableStream.
-  if (typeof streamReadable?._readableState !== "object") {
+  const registeredReadable = isRegisteredReadable(streamReadable);
+  if (
+    !registeredReadable && typeof streamReadable?._readableState !== "object"
+  ) {
     throw new ERR_INVALID_ARG_TYPE(
       "streamReadable",
       "stream.Readable",
@@ -653,14 +682,43 @@ function newReadableStreamFromStreamReadable(
     validateOneOf(options.type, "options.type", ["bytes", undefined]);
   }
 
-  if (isDestroyed(streamReadable) || !isReadable(streamReadable)) {
+  if (
+    registeredReadable
+      ? isReadableDestroyed(streamReadable) || !isReadableActive(streamReadable)
+      : isDestroyed(streamReadable) || !isReadable(streamReadable)
+  ) {
     const readable = new ReadableStream();
     readable.cancel();
     return readable;
   }
 
-  const objectMode = streamReadable.readableObjectMode;
-  const highWaterMark = streamReadable.readableHighWaterMark;
+  const objectMode = registeredReadable
+    ? readableObjectMode(streamReadable)
+    : streamReadable.readableObjectMode;
+  const highWaterMark = registeredReadable
+    ? readableHighWaterMark(streamReadable)
+    : streamReadable.readableHighWaterMark;
+  const capturedOn = registeredReadable
+    ? undefined
+    : captureDeliveryCallback(streamReadable.on);
+  const capturedPause = registeredReadable
+    ? undefined
+    : captureDeliveryCallback(streamReadable.pause);
+  const capturedResume = registeredReadable
+    ? undefined
+    : captureDeliveryCallback(streamReadable.resume);
+  const addNodeListener = (type, listener) =>
+    registeredReadable
+      ? addReadableListener(streamReadable, type, listener)
+      : runCapturedCallback(capturedOn, streamReadable, [type, listener]);
+  const pauseNodeReadable = () =>
+    registeredReadable
+      ? pauseReadable(streamReadable)
+      : runCapturedCallback(capturedPause, streamReadable, []);
+  const resumeNodeReadable = () =>
+    registeredReadable
+      ? resumeReadable(streamReadable)
+      : runCapturedCallback(capturedResume, streamReadable, []);
 
   const evaluateStrategyOrFallback = (strategy) => {
     // If there is a strategy available, use it
@@ -700,12 +758,12 @@ function newReadableStreamFromStreamReadable(
       ? readableByteStreamControllerGetDesiredSize(controller)
       : readableStreamDefaultControllerGetDesiredSize(controller);
     if (desiredSize <= 0) {
-      streamReadable.pause();
+      pauseNodeReadable();
     }
   }
   markTrustedDeliveryCallback(onData);
 
-  streamReadable.pause();
+  pauseNodeReadable();
 
   let isCanceled = false;
 
@@ -722,7 +780,7 @@ function newReadableStreamFromStreamReadable(
     cleanup();
     // This is a protection against non-standard, legacy streams
     // that happen to emit an error event again after finished is called.
-    streamReadable.on("error", () => {});
+    addNodeListener("error", () => {});
     if (error) {
       return isByteStream
         ? readableByteStreamControllerError(controller, error)
@@ -738,7 +796,7 @@ function newReadableStreamFromStreamReadable(
     }
   });
 
-  streamReadable.on("data", onData);
+  addNodeListener("data", onData);
 
   const underlyingSource = {
     start(c) {
@@ -746,7 +804,7 @@ function newReadableStreamFromStreamReadable(
     },
 
     pull() {
-      streamReadable.resume();
+      resumeNodeReadable();
     },
 
     cancel(reason) {
@@ -774,8 +832,9 @@ function newWritableStreamFromStreamWritable(streamWritable) {
   // we want it to pass this check but return a closed WritableStream.
   // We check if the given stream is a stream.Writable or http.OutgoingMessage
   const checkIfWritableOrOutgoingMessage = streamWritable &&
-    typeof streamWritable?.write === "function" &&
-    typeof streamWritable?.on === "function";
+    (isRegisteredWritable(streamWritable) ||
+      typeof streamWritable?.write === "function" &&
+        typeof streamWritable?.on === "function");
   if (!checkIfWritableOrOutgoingMessage) {
     throw new ERR_INVALID_ARG_TYPE(
       "streamWritable",
@@ -784,7 +843,12 @@ function newWritableStreamFromStreamWritable(streamWritable) {
     );
   }
 
-  if (isDestroyed(streamWritable) || !isWritable(streamWritable)) {
+  const registeredWritable = isRegisteredWritable(streamWritable);
+  if (
+    registeredWritable
+      ? isWritableDestroyed(streamWritable) || !isWritableActive(streamWritable)
+      : isDestroyed(streamWritable) || !isWritable(streamWritable)
+  ) {
     const writable = new WritableStream();
     writable.close();
     return writable;
@@ -797,13 +861,27 @@ function newWritableStreamFromStreamWritable(streamWritable) {
     : captureDeliveryCallback(nodeWrite);
   const nodeEnd = streamWritable.end;
   const capturedNodeEnd = typeof nodeEnd === "function"
-    ? captureDeliveryCallback(nodeEnd)
+    ? isWritablePublicEnd(nodeEnd) && registeredWritable
+      ? captureTrustedDeliveryCallback(nodeEnd)
+      : captureDeliveryCallback(nodeEnd)
     : undefined;
+  const capturedOn = registeredWritable
+    ? undefined
+    : captureDeliveryCallback(streamWritable.on);
+  const addNodeListener = (type, listener) =>
+    registeredWritable
+      ? addEventEmitterListener(streamWritable, type, listener)
+      : runCapturedCallback(capturedOn, streamWritable, [type, listener]);
 
-  const highWaterMark = streamWritable.writableHighWaterMark;
-  const strategy = streamWritable.writableObjectMode
-    ? new CountQueuingStrategy({ highWaterMark })
-    : { highWaterMark };
+  const highWaterMark = registeredWritable
+    ? writableHighWaterMark(streamWritable)
+    : streamWritable.writableHighWaterMark;
+  const strategy =
+    (registeredWritable
+        ? writableObjectMode(streamWritable)
+        : streamWritable.writableObjectMode)
+      ? new CountQueuingStrategy({ highWaterMark })
+      : { highWaterMark };
 
   let controller;
   let backpressurePromise;
@@ -824,7 +902,7 @@ function newWritableStreamFromStreamWritable(streamWritable) {
     cleanup();
     // This is a protection against non-standard, legacy streams
     // that happen to emit an error event again after finished is called.
-    streamWritable.on("error", () => {});
+    addNodeListener("error", () => {});
     if (error != null) {
       if (backpressurePromise !== undefined) {
         backpressurePromise.reject(error);
@@ -850,7 +928,7 @@ function newWritableStreamFromStreamWritable(streamWritable) {
     controller = undefined;
   });
 
-  streamWritable.on("drain", onDrain);
+  addNodeListener("drain", onDrain);
 
   const underlyingSink = {
     start(c) {
@@ -878,16 +956,24 @@ function newWritableStreamFromStreamWritable(streamWritable) {
     },
 
     abort(reason) {
-      destroyNodeStream(streamWritable, reason);
+      return registeredWritable
+        ? destroyProtectedWritable(streamWritable, reason)
+        : destroyNodeStream(streamWritable, reason);
     },
 
     close() {
-      if (closed === undefined && !isWritableEnded(streamWritable)) {
+      if (
+        closed === undefined &&
+        !(registeredWritable
+          ? isRegisteredWritableEnded(streamWritable)
+          : isWritableEnded(streamWritable))
+      ) {
         closed = PromiseWithResolvers();
         if (capturedNodeEnd === undefined) {
           closed.resolve();
         } else {
-          runCapturedCleanup(
+          runCapturedDelivery(
+            streamWritable,
             capturedNodeEnd,
             streamWritable,
             [],

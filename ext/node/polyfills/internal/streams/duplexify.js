@@ -2,6 +2,9 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 import process from "node:process";
 import { core, primordials } from "ext:core/mod.js";
+const { nextTick: ProtectedDuplexifyNextTick } = core.loadExtScript(
+  "ext:deno_node/_next_tick.ts",
+);
 
 const {
   isDuplexNodeStream,
@@ -72,10 +75,20 @@ const {
 "use strict";
 
 const {
+  FunctionPrototypeCall,
   PromiseWithResolvers,
 } = primordials;
 
 let _Duplexify;
+
+function nextTickWithCurrent(callback, ...args) {
+  const captured = captureCurrentDeliveryCallback(callback);
+  FunctionPrototypeCall(
+    ProtectedDuplexifyNextTick,
+    process,
+    () => runCapturedCallback(captured, undefined, args),
+  );
+}
 
 function captureReadableMethod(stream, method) {
   return isRegisteredReadable(stream) && isReadablePublicRead(method)
@@ -225,9 +238,9 @@ export default function duplexify(body, name) {
           final(async () => {
             try {
               await promise;
-              process.nextTick(cb, null);
+              nextTickWithCurrent(cb, null);
             } catch (err) {
-              process.nextTick(cb, err);
+              nextTickWithCurrent(cb, err);
             }
           });
         },
@@ -349,19 +362,19 @@ function fromAsyncGen(fn) {
   const carrier = {};
   const capturedBody = captureDeliveryCallback(fn);
   const input = async function* () {
-    while (true) {
-      const _promise = promise;
-      promise = null;
-      const { chunk, done, cb } = await _promise;
-      process.nextTick(() => runCapturedCallback(cb, undefined, []));
-      if (done) return;
-      if (signal.aborted) {
-        throw new AbortError(undefined, { cause: signal.reason });
-      }
-      preflightCapturedDelivery(carrier, capturedBody);
-      ({ promise, resolve } = PromiseWithResolvers());
-      yield chunk;
+  while (true) {
+    const _promise = promise;
+    promise = null;
+    const { chunk, done, cb } = await _promise;
+    nextTickWithCurrent(() => runCapturedCallback(cb, undefined, []));
+    if (done) return;
+    if (signal.aborted) {
+      throw new AbortError(undefined, { cause: signal.reason });
     }
+    preflightCapturedDelivery(carrier, capturedBody);
+    ({ promise, resolve } = PromiseWithResolvers());
+    yield chunk;
+  }
   }();
   const guardedInput = wrapIterableDelivery(input, fn);
   const value = runCapturedDelivery(
@@ -465,12 +478,14 @@ function _duplexify(pair) {
 
     d._write = function duplexifiedWrite(chunk, encoding, callback) {
       const continuation = captureCurrentDeliveryCallback(callback);
-      if (runCapturedDelivery(
-        d,
-        capturedWrite,
-        w,
-        [chunk, encoding],
-      )) {
+      if (
+        runCapturedDelivery(
+          d,
+          capturedWrite,
+          w,
+          [chunk, encoding],
+        )
+      ) {
         runCapturedCallback(continuation, undefined, []);
       } else {
         ondrain = continuation;

@@ -3,6 +3,9 @@
 
 import process from "node:process";
 import { core, primordials } from "ext:core/mod.js";
+const { nextTick: ProtectedDuplexPairNextTick } = core.loadExtScript(
+  "ext:deno_node/_next_tick.ts",
+);
 import { Duplex } from "node:stream";
 const { addReadableListener, pushReadableChunk } = core.loadExtScript(
   "ext:deno_node/internal/streams/readable.js",
@@ -86,8 +89,10 @@ class DuplexSide extends Duplex {
     // authority transfer.
     // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
     if (isEmptyChunk(chunk)) {
-      process.nextTick(() =>
-        runCapturedCallback(capturedCallback, undefined, [])
+      FunctionPrototypeCall(
+        ProtectedDuplexPairNextTick,
+        process,
+        () => runCapturedCallback(capturedCallback, undefined, []),
       );
     } else {
       pushReadableChunk(this.#otherSide, chunk);

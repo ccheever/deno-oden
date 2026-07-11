@@ -12,14 +12,18 @@ const {
   addEventEmitterListener,
   emitPreparedEvent,
   EventEmitter: EE,
+  isEventEmitterPublicEmit,
+  isEventEmitterPublicLifecycleMethod,
+  isEventEmitterPublicListenerCount,
   prepareEventListenerDelivery,
+  protectedEventEmitterEmit,
+  protectedEventEmitterListenerCount,
   removeEventEmitterListener,
   setEventListenerDeliveryHook,
 } = core.loadExtScript("ext:deno_node/_events.mjs");
-const {
-  prependListener,
-  Stream,
-} = core.loadExtScript("ext:deno_node/internal/streams/legacy.js");
+const { Stream } = core.loadExtScript(
+  "ext:deno_node/internal/streams/legacy.js",
+);
 const {
   Buffer,
   protectedBufferAlloc,
@@ -90,6 +94,7 @@ const {
   runCapturedDelivery,
   runStreamUseGuard,
   setStreamUseGuard,
+  wrapIterableDelivery,
 } = core.loadExtScript(
   "ext:deno_node/internal/streams/oden_delivery.js",
 );
@@ -166,8 +171,6 @@ const {
   WeakMapPrototypeSet,
 } = primordials;
 
-const EventEmitterPrototypeEmit = EE.prototype.emit;
-
 Readable.ReadableState = ReadableState;
 
 let debug = _mod2.debuglog("stream", (fn) => {
@@ -190,6 +193,9 @@ let ReadablePublicOff;
 let ReadablePublicOn;
 let ReadablePublicPipe;
 let ReadablePublicRemoveListener;
+let ReadablePublicUnpipe;
+let ReadablePrototypePause;
+let ReadablePrototypeResume;
 
 function bufferAlloc(length) {
   return FunctionPrototypeCall(BufferAlloc, Buffer, length);
@@ -267,6 +273,17 @@ const directEventDeliverySentinel = FunctionPrototypeBind(nop, undefined);
 
 function nextTickWithCurrent(callback, ...args) {
   const captured = captureCurrentDeliveryCallback(callback);
+  scheduleCapturedNextTick(captured, args);
+}
+
+function nextTickWithContext(context, callback, ...args) {
+  const captured = context === undefined
+    ? captureCurrentDeliveryCallback(callback)
+    : { callback, context, preflight: undefined };
+  scheduleCapturedNextTick(captured, args);
+}
+
+function scheduleCapturedNextTick(captured, args) {
   FunctionPrototypeCall(
     ProtectedReadableNextTick,
     process,
@@ -308,6 +325,28 @@ function readableStateForStream(stream) {
 
 function isRegisteredReadable(stream) {
   return WeakMapPrototypeGet(originalReadableStates, stream) !== undefined;
+}
+
+function isReadableDestroyed(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  return state === undefined || (state[kState] & kDestroyed) !== 0;
+}
+
+function isReadableActive(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  return state !== undefined && state.readable !== false &&
+    (state[kState] & (kDestroyed | kErrored | kErrorEmitted | kEndEmitted)) ===
+      0;
+}
+
+function readableObjectMode(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  return state !== undefined && (state[kState] & kObjectMode) !== 0;
+}
+
+function readableHighWaterMark(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  return state?.highWaterMark;
 }
 
 // Native callers only need an admission signal. Never return the retained
@@ -360,6 +399,26 @@ function isReadablePublicLifecycleMethod(callback) {
 
 function isReadablePublicPipe(callback) {
   return callback === ReadablePublicPipe;
+}
+
+function isReadablePublicUnpipe(callback) {
+  return callback === ReadablePublicUnpipe;
+}
+
+function isReadablePublicPause(callback) {
+  return callback === ReadablePrototypePause;
+}
+
+function isReadablePublicResume(callback) {
+  return callback === ReadablePrototypeResume;
+}
+
+function pauseReadable(stream) {
+  return FunctionPrototypeCall(ReadablePrototypePause, stream);
+}
+
+function resumeReadable(stream) {
+  return FunctionPrototypeCall(ReadablePrototypeResume, stream);
 }
 
 function addReadableListener(stream, type, listener) {
@@ -878,9 +937,33 @@ function pushProtectedReadableChunk(stream, chunk) {
   if (state === undefined) {
     throw new Error("protected native stream is missing readable state");
   }
+  // Positive native delivery was actor-checked immediately before this exact
+  // call. Preserve that already-authenticated CPED for loader-owned follow-up
+  // scheduling; rebuilding it from trusted loader frames would erase the
+  // consumer and turn the continuation into no-user.
+  let deliveryContext;
+  if (chunk !== null) {
+    const checkedContext = runReadableUseGuard(stream);
+    // Native delivery already restored its authenticated actor in CPED. Prefer
+    // that raw snapshot over rebuilding from the trusted adapter's live frames;
+    // the guard-return snapshot remains the public-operation fallback.
+    deliveryContext = core.getAsyncContext() ?? checkedContext;
+  }
   return (state[kState] & kObjectMode) === 0
-    ? readableAddChunkPushByteMode(stream, state, chunk, undefined)
-    : readableAddChunkPushObjectMode(stream, state, chunk, undefined);
+    ? readableAddChunkPushByteMode(
+      stream,
+      state,
+      chunk,
+      undefined,
+      deliveryContext,
+    )
+    : readableAddChunkPushObjectMode(
+      stream,
+      state,
+      chunk,
+      undefined,
+      deliveryContext,
+    );
 }
 
 // Unshift should *always* be something directly out of read().
@@ -960,6 +1043,7 @@ function readableAddChunkPushByteMode(
   state,
   chunk,
   encoding,
+  deliveryContext,
 ) {
   if (chunk === null) {
     state[kState] &= ~kReading;
@@ -1015,7 +1099,7 @@ function readableAddChunkPushByteMode(
     }
   }
 
-  addChunk(stream, state, chunk, false);
+  addChunk(stream, state, chunk, false, deliveryContext);
   return canPushMore(state);
 }
 
@@ -1024,6 +1108,7 @@ function readableAddChunkPushObjectMode(
   state,
   chunk,
   encoding,
+  deliveryContext,
 ) {
   if (chunk === null) {
     state[kState] &= ~kReading;
@@ -1046,7 +1131,7 @@ function readableAddChunkPushObjectMode(
     chunk = writeReadableStateDecoder(state, chunk);
   }
 
-  addChunk(stream, state, chunk, false);
+  addChunk(stream, state, chunk, false, deliveryContext);
   return canPushMore(state);
 }
 
@@ -1063,6 +1148,7 @@ function addChunk(
   state,
   chunk,
   addToFront,
+  deliveryContext,
 ) {
   if (
     (state[kState] & (kFlowing | kSync | kDataListening)) ===
@@ -1095,10 +1181,10 @@ function addChunk(
     }
 
     if ((state[kState] & kNeedReadable) !== 0) {
-      emitReadable(stream);
+      emitReadable(stream, state, deliveryContext);
     }
   }
-  maybeReadMore(stream, state);
+  maybeReadMore(stream, state, deliveryContext);
 }
 
 Readable.prototype.isPaused = function () {
@@ -1194,6 +1280,11 @@ Readable.prototype.read = function (n) {
     protectedReadableOperationStates,
     this,
   );
+  // Consume the single exact-call admission before any user callback can run.
+  // A reentrant public read must perform its own live authorization.
+  if (protectedState !== undefined) {
+    WeakMapPrototypeDelete(protectedReadableOperationStates, this);
+  }
   // Closure-owned native EOF cleanup is always allowed. Positive delivery was
   // already authorized before the protected operation state is installed.
   if (protectedState === undefined) runReadableUseGuard(this);
@@ -1398,7 +1489,7 @@ function emitGuardedReadableEvent(stream, event, ...args) {
   return getStreamUseGuard(stream) === undefined
     ? stream.emit(event, ...args)
     : FunctionPrototypeCall(
-      EventEmitterPrototypeEmit,
+      protectedEventEmitterEmit,
       stream,
       event,
       ...args,
@@ -1452,13 +1543,17 @@ function onEofChunk(stream, state) {
 // Don't emit readable right away in sync mode, because this can trigger
 // another read() call => stack overflow.  This way, it might trigger
 // a nextTick recursion warning, but that's not so bad.
-function emitReadable(stream, state = getReadableOperationState(stream)) {
+function emitReadable(
+  stream,
+  state = getReadableOperationState(stream),
+  deliveryContext,
+) {
   debug("emitReadable");
   state[kState] &= ~kNeedReadable;
   if ((state[kState] & kEmittedReadable) === 0) {
     debug("emitReadable", (state[kState] & kFlowing) !== 0);
     state[kState] |= kEmittedReadable;
-    nextTickWithCurrent(emitReadable_, stream, state);
+    nextTickWithContext(deliveryContext, emitReadable_, stream, state);
   }
 }
 
@@ -1491,14 +1586,28 @@ function emitReadable_(stream, state = getReadableOperationState(stream)) {
 // it's in progress.
 // However, if we're not ended, or reading, and the length < hwm,
 // then go ahead and try to read some more preemptively.
-function maybeReadMore(stream, state) {
+function maybeReadMore(stream, state, deliveryContext) {
   if ((state[kState] & (kReadingMore | kConstructed)) === kConstructed) {
     state[kState] |= kReadingMore;
-    nextTickWithCurrent(maybeReadMore_, stream, state);
+    nextTickWithContext(
+      deliveryContext,
+      maybeReadMore_,
+      stream,
+      state,
+      getStreamUseGuard(stream),
+    );
   }
 }
 
-function maybeReadMore_(stream, state) {
+function maybeReadMore_(stream, state, scheduledGuard) {
+  // A constructor-side prefetch may have been queued before a native stream
+  // became protected. It carries no consumer actor, so retire it when the
+  // stable guard identity changed; an authorized read/listener schedules new
+  // work under its own operation context.
+  if (getStreamUseGuard(stream) !== scheduledGuard) {
+    state[kState] &= ~kReadingMore;
+    return;
+  }
   // Attempt to read more data if we should.
   //
   // The conditions for reading more data are (one of):
@@ -1562,7 +1671,10 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
   const destWrite = dest.write;
   const {
     isRegisteredWritable,
+    isWritablePublicEnd,
     isWritablePublicWrite,
+    writableNeedsDrain,
+    writableStateForStream,
   } = core.loadExtScript("ext:deno_node/internal/streams/writable.js");
   if (isWritablePublicWrite(destWrite) && !isRegisteredWritable(dest)) {
     throw new ERR_INVALID_ARG_TYPE("dest", "Writable", dest);
@@ -1570,6 +1682,39 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
   const capturedDestWrite = isWritablePublicWrite(destWrite)
     ? captureTrustedDeliveryCallback(destWrite)
     : captureDeliveryCallback(destWrite);
+  const targetIsRegistered = (target) =>
+    isRegisteredReadable(target) || isRegisteredWritable(target);
+  const captureLifecycleMethod = (target, method) =>
+    targetIsRegistered(target) &&
+      (isReadablePublicLifecycleMethod(method) ||
+        isReadablePublicUnpipe(method) ||
+        isEventEmitterPublicEmit(method) ||
+        isEventEmitterPublicLifecycleMethod(method) ||
+        isEventEmitterPublicListenerCount(method))
+      ? captureTrustedDeliveryCallback(method)
+      : captureDeliveryCallback(method);
+  const capturedSrcOnce = captureLifecycleMethod(src, src.once);
+  const capturedSrcOn = captureLifecycleMethod(src, src.on);
+  const capturedSrcRemoveListener = captureLifecycleMethod(
+    src,
+    src.removeListener,
+  );
+  const capturedSrcUnpipe = captureLifecycleMethod(src, src.unpipe);
+  const capturedDestEmit = captureLifecycleMethod(dest, dest.emit);
+  const capturedDestListenerCount = captureLifecycleMethod(
+    dest,
+    dest.listenerCount,
+  );
+  const capturedDestOn = captureLifecycleMethod(dest, dest.on);
+  const capturedDestOnce = captureLifecycleMethod(dest, dest.once);
+  const capturedDestPrependListener = captureLifecycleMethod(
+    dest,
+    dest.prependListener,
+  );
+  const capturedDestRemoveListener = captureLifecycleMethod(
+    dest,
+    dest.removeListener,
+  );
 
   if (state.pipes.length === 1) {
     if ((state[kState] & kMultiAwaitDrain) === 0) {
@@ -1586,15 +1731,26 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
   const doEnd = (!pipeOpts || pipeOpts.end !== false) &&
     dest !== process.stdout &&
     dest !== process.stderr;
+  const destEnd = doEnd ? dest.end : undefined;
+  if (
+    doEnd && isWritablePublicEnd(destEnd) && !isRegisteredWritable(dest)
+  ) {
+    throw new ERR_INVALID_ARG_TYPE("dest", "Writable", dest);
+  }
+  const capturedDestEnd = !doEnd
+    ? undefined
+    : isWritablePublicEnd(destEnd)
+    ? captureTrustedDeliveryCallback(destEnd)
+    : captureDeliveryCallback(destEnd);
 
   const endFn = doEnd ? onend : unpipe;
   if ((state[kState] & kEndEmitted) !== 0) {
     nextTickWithCurrent(endFn);
   } else {
-    src.once("end", endFn);
+    runCapturedCallback(capturedSrcOnce, src, ["end", endFn]);
   }
 
-  dest.on("unpipe", onunpipe);
+  runCapturedCallback(capturedDestOn, dest, ["unpipe", onunpipe]);
   function onunpipe(readable, unpipeInfo) {
     debug("onunpipe");
     if (readable === src) {
@@ -1607,7 +1763,7 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
 
   function onend() {
     debug("onend");
-    dest.end();
+    runCapturedDelivery(dest, capturedDestEnd, dest, []);
   }
 
   let ondrain;
@@ -1616,16 +1772,25 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
   function cleanup() {
     debug("cleanup");
     // Cleanup event handlers once the pipe is broken.
-    dest.removeListener("close", onclose);
-    dest.removeListener("finish", onfinish);
+    runCapturedCallback(capturedDestRemoveListener, dest, ["close", onclose]);
+    runCapturedCallback(capturedDestRemoveListener, dest, [
+      "finish",
+      onfinish,
+    ]);
     if (ondrain) {
-      dest.removeListener("drain", ondrain);
+      runCapturedCallback(capturedDestRemoveListener, dest, [
+        "drain",
+        ondrain,
+      ]);
     }
-    dest.removeListener("error", onerror);
-    dest.removeListener("unpipe", onunpipe);
-    src.removeListener("end", onend);
-    src.removeListener("end", unpipe);
-    src.removeListener("data", ondata);
+    runCapturedCallback(capturedDestRemoveListener, dest, ["error", onerror]);
+    runCapturedCallback(capturedDestRemoveListener, dest, [
+      "unpipe",
+      onunpipe,
+    ]);
+    runCapturedCallback(capturedSrcRemoveListener, src, ["end", onend]);
+    runCapturedCallback(capturedSrcRemoveListener, src, ["end", unpipe]);
+    runCapturedCallback(capturedSrcRemoveListener, src, ["data", ondata]);
 
     cleanedUp = true;
 
@@ -1656,7 +1821,7 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
         debug("false write response, pause", state.awaitDrainWriters.size);
         state.awaitDrainWriters.add(dest);
       }
-      src.pause();
+      FunctionPrototypeCall(ReadablePrototypePause, src);
     }
     if (!ondrain) {
       // When the dest drains, it reduces the awaitDrain counter
@@ -1664,7 +1829,7 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
       // handler in flow(), but adding and removing repeatedly is
       // too slow.
       ondrain = pipeOnDrain(src, dest);
-      dest.on("drain", ondrain);
+      runCapturedCallback(capturedDestOn, dest, ["drain", ondrain]);
     }
   }
 
@@ -1675,7 +1840,7 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
       preflightStreamDelivery(dest);
     },
   );
-  src.on("data", ondata);
+  runCapturedCallback(capturedSrcOn, src, ["data", ondata]);
   function ondata(chunk) {
     debug("ondata");
     const ret = runCapturedDelivery(dest, capturedDestWrite, dest, [chunk]);
@@ -1690,49 +1855,58 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
   function onerror(er) {
     debug("onerror", er);
     unpipe();
-    dest.removeListener("error", onerror);
-    if (dest.listenerCount("error") === 0) {
-      const s = dest._writableState || dest._readableState;
+    runCapturedCallback(capturedDestRemoveListener, dest, ["error", onerror]);
+    if (
+      runCapturedCallback(capturedDestListenerCount, dest, ["error"]) === 0
+    ) {
+      const s = isRegisteredWritable(dest)
+        ? writableStateForStream(dest)
+        : isRegisteredReadable(dest)
+        ? readableStateForStream(dest)
+        : undefined;
       if (s && !s.errorEmitted) {
         // User incorrectly emitted 'error' directly on the stream.
         errorOrDestroy(dest, er);
       } else {
-        dest.emit("error", er);
+        runCapturedCallback(capturedDestEmit, dest, ["error", er]);
       }
     }
   }
 
   // Make sure our error handler is attached before userland ones.
-  prependListener(dest, "error", onerror);
+  runCapturedCallback(capturedDestPrependListener, dest, ["error", onerror]);
 
   // Both close and finish should trigger unpipe, but only once.
   function onclose() {
-    dest.removeListener("finish", onfinish);
+    runCapturedCallback(capturedDestRemoveListener, dest, [
+      "finish",
+      onfinish,
+    ]);
     unpipe();
   }
-  dest.once("close", onclose);
+  runCapturedCallback(capturedDestOnce, dest, ["close", onclose]);
   function onfinish() {
     debug("onfinish");
-    dest.removeListener("close", onclose);
+    runCapturedCallback(capturedDestRemoveListener, dest, ["close", onclose]);
     unpipe();
   }
-  dest.once("finish", onfinish);
+  runCapturedCallback(capturedDestOnce, dest, ["finish", onfinish]);
 
   function unpipe() {
     debug("unpipe");
-    src.unpipe(dest);
+    runCapturedCallback(capturedSrcUnpipe, src, [dest]);
   }
 
   // Tell the dest that it's being piped to.
-  dest.emit("pipe", src);
+  runCapturedCallback(capturedDestEmit, dest, ["pipe", src]);
 
   // Start the flow if it hasn't been started already.
 
-  if (dest.writableNeedDrain === true) {
+  if (isRegisteredWritable(dest) && writableNeedsDrain(dest)) {
     pause();
   } else if ((state[kState] & kFlowing) === 0) {
     debug("pipe resume");
-    src.resume();
+    FunctionPrototypeCall(ReadablePrototypeResume, src);
   }
 
   return dest;
@@ -1758,7 +1932,7 @@ function pipeOnDrain(src, dest) {
       (!state.awaitDrainWriters || state.awaitDrainWriters.size === 0) &&
       (state[kState] & kDataListening) !== 0
     ) {
-      src.resume();
+      FunctionPrototypeCall(ReadablePrototypeResume, src);
     }
   };
 }
@@ -1776,7 +1950,7 @@ Readable.prototype.unpipe = function (dest) {
     // remove all.
     const dests = state.pipes;
     state.pipes = [];
-    this.pause();
+    FunctionPrototypeCall(ReadablePrototypePause, this);
 
     for (let i = 0; i < dests.length; i++) {
       dests[i].emit("unpipe", this, { hasUnpiped: false });
@@ -1792,13 +1966,14 @@ Readable.prototype.unpipe = function (dest) {
 
   state.pipes.splice(index, 1);
   if (state.pipes.length === 0) {
-    this.pause();
+    FunctionPrototypeCall(ReadablePrototypePause, this);
   }
 
   dest.emit("unpipe", this, unpipeInfo);
 
   return this;
 };
+ReadablePublicUnpipe = Readable.prototype.unpipe;
 
 // Set up data events if they are asked for
 // Ensure readable listeners eventually get something.
@@ -1814,7 +1989,11 @@ Readable.prototype.on = function (ev, fn) {
 
     // Update readableListening so that resume() may be a no-op
     // a few lines down. This is needed to support once('readable').
-    state[kState] |= this.listenerCount("readable") > 0
+    state[kState] |= FunctionPrototypeCall(
+        protectedEventEmitterListenerCount,
+        this,
+        "readable",
+      ) > 0
       ? kReadableListening
       : 0;
 
@@ -1853,7 +2032,11 @@ Readable.prototype.removeListener = function (ev, fn) {
     // resume within the same tick will have no
     // effect.
     nextTickWithCurrent(updateReadableListening, this);
-  } else if (ev === "data" && this.listenerCount("data") === 0) {
+  } else if (
+    ev === "data" &&
+    FunctionPrototypeCall(protectedEventEmitterListenerCount, this, "data") ===
+      0
+  ) {
     state[kState] &= ~kDataListening;
   }
 
@@ -1882,7 +2065,13 @@ Readable.prototype.removeAllListeners = function (ev) {
 function updateReadableListening(self) {
   const state = readableStateForStream(self);
 
-  if (self.listenerCount("readable") > 0) {
+  if (
+    FunctionPrototypeCall(
+      protectedEventEmitterListenerCount,
+      self,
+      "readable",
+    ) > 0
+  ) {
     state[kState] |= kReadableListening;
   } else {
     state[kState] &= ~kReadableListening;
@@ -1898,7 +2087,7 @@ function updateReadableListening(self) {
 
     // Crude way to check if we should resume.
   } else if ((state[kState] & kDataListening) !== 0) {
-    self.resume();
+    FunctionPrototypeCall(ReadablePrototypeResume, self);
   } else if ((state[kState] & kReadableListening) === 0) {
     state[kState] &= ~(kHasFlowing | kFlowing);
   }
@@ -1906,7 +2095,7 @@ function updateReadableListening(self) {
 
 function nReadingNextTick(self) {
   debug("readable nexttick read 0");
-  self.read(0);
+  readGuardedReadable(self, readableStateForStream(self), 0);
 }
 
 // pause() and resume() are remnants of the legacy readable stream API
@@ -1934,6 +2123,7 @@ Readable.prototype.resume = function () {
   state[kState] &= ~kPaused;
   return this;
 };
+ReadablePrototypeResume = Readable.prototype.resume;
 
 function resume(stream, state) {
   if ((state[kState] & kResumeScheduled) === 0) {
@@ -1973,6 +2163,7 @@ Readable.prototype.pause = function () {
   state[kState] |= kHasPaused | kPaused;
   return this;
 };
+ReadablePrototypePause = Readable.prototype.pause;
 
 function flow(stream) {
   const state = getReadableOperationState(stream);
@@ -1995,41 +2186,63 @@ Readable.prototype.wrap = function (stream) {
   // a static factory method, e.g. Readable.wrap(stream).
 
   const wrapped = this;
+  const registeredSource = isRegisteredReadable(stream);
+  const captureSourceMethod = (method, trusted) =>
+    trusted && registeredSource
+      ? captureTrustedDeliveryCallback(method)
+      : captureDeliveryCallback(method);
+  const sourceOn = stream.on;
+  const sourcePause = stream.pause;
+  const sourceResume = stream.resume;
+  const capturedSourceOn = captureSourceMethod(
+    sourceOn,
+    isReadablePublicLifecycleMethod(sourceOn) ||
+      isEventEmitterPublicLifecycleMethod(sourceOn),
+  );
+  const capturedSourcePause = typeof sourcePause === "function"
+    ? captureSourceMethod(sourcePause, isReadablePublicPause(sourcePause))
+    : undefined;
+  const capturedSourceResume = typeof sourceResume === "function"
+    ? captureSourceMethod(sourceResume, isReadablePublicResume(sourceResume))
+    : undefined;
+  const addSourceListener = (type, listener) =>
+    runCapturedCallback(capturedSourceOn, stream, [type, listener]);
+
   function ondata(chunk) {
     if (
       !FunctionPrototypeCall(ReadablePrototypePush, wrapped, chunk) &&
-      stream.pause
+      capturedSourcePause !== undefined
     ) {
       paused = true;
-      stream.pause();
+      runCapturedCallback(capturedSourcePause, stream, []);
     }
   }
   markTrustedDeliveryCallback(
     ondata,
     () => preflightStreamDelivery(wrapped),
   );
-  stream.on("data", ondata);
+  addSourceListener("data", ondata);
 
-  stream.on("end", () => {
+  addSourceListener("end", () => {
     FunctionPrototypeCall(ReadablePrototypePush, wrapped, null);
   });
 
-  stream.on("error", (err) => {
-    errorOrDestroy(this, err);
+  addSourceListener("error", (err) => {
+    errorOrDestroy(wrapped, err);
   });
 
-  stream.on("close", () => {
-    this.destroy();
+  addSourceListener("close", () => {
+    destroyReadableStream(wrapped);
   });
 
-  stream.on("destroy", () => {
-    this.destroy();
+  addSourceListener("destroy", () => {
+    destroyReadableStream(wrapped);
   });
 
   this._read = () => {
-    if (paused && stream.resume) {
+    if (paused && capturedSourceResume !== undefined) {
       paused = false;
-      stream.resume();
+      runCapturedCallback(capturedSourceResume, stream, []);
     }
   };
 
@@ -2037,8 +2250,10 @@ Readable.prototype.wrap = function (stream) {
   const streamKeys = ObjectKeys(stream);
   for (let j = 1; j < streamKeys.length; j++) {
     const i = streamKeys[j];
-    if (this[i] === undefined && typeof stream[i] === "function") {
-      this[i] = stream[i].bind(stream);
+    const method = stream[i];
+    if (this[i] === undefined && typeof method === "function") {
+      const capturedMethod = captureDeliveryCallback(method);
+      this[i] = (...args) => runCapturedCallback(capturedMethod, stream, args);
     }
   }
 
@@ -2457,13 +2672,29 @@ function endReadableNT(state, stream) {
       );
 
       if (autoDestroy) {
-        stream.destroy();
+        destroyReadableStream(stream);
       }
     }
   }
 }
 
 function endWritableNT(stream) {
+  if (getStreamUseGuard(stream) !== undefined) {
+    const {
+      endProtectedWritableCleanup,
+      isRegisteredWritable,
+      writableStateForStream,
+    } = core.loadExtScript("ext:deno_node/internal/streams/writable.js");
+    if (!isRegisteredWritable(stream)) return;
+    const state = writableStateForStream(stream);
+    if (
+      state.writable !== false && !state.ending && !state.ended &&
+      !state.destroyed
+    ) {
+      endProtectedWritableCleanup(stream);
+    }
+    return;
+  }
   const writable = stream.writable && !stream.writableEnded &&
     !stream.destroyed;
   if (writable) {
@@ -2471,9 +2702,30 @@ function endWritableNT(stream) {
   }
 }
 
+function destroyReadableStream(stream, error) {
+  if (getStreamUseGuard(stream) === undefined) {
+    FunctionPrototypeCall(destroyImpl.destroy, stream, error);
+    return;
+  }
+  const {
+    destroyProtectedWritable,
+    isRegisteredWritable,
+  } = core.loadExtScript("ext:deno_node/internal/streams/writable.js");
+  if (isRegisteredWritable(stream)) {
+    destroyProtectedWritable(stream, error);
+    return;
+  }
+  FunctionPrototypeCall(destroyImpl.destroy, stream, error);
+}
+
 Readable.from = function (iterable, opts) {
-  const readable = lazyFrom().default(Readable, iterable, opts);
-  linkStreamUseGuard(iterable, readable);
+  const guardedIterable =
+    typeof iterable === "string" || BufferIsBuffer(iterable)
+      ? iterable
+      : wrapIterableDelivery(iterable);
+  const readable = lazyFrom().default(Readable, guardedIterable, opts);
+  linkStreamUseGuard(iterable, guardedIterable);
+  linkStreamUseGuard(guardedIterable, readable);
   return readable;
 };
 
@@ -2516,23 +2768,33 @@ return {
   addReadableListener,
   createReadableAsyncIterator,
   default: Readable,
+  destroyReadableStream,
   getProtectedReadableState,
   getReadableUseGuard,
   hasProtectedReadableDecoder,
   isRegisteredReadable,
+  isReadableActive,
+  isReadableDestroyed,
   isProtectedReadableDestroyed,
   isProtectedReadableEndEmitted,
   isReadablePublicLifecycleMethod,
   isReadablePublicPipe,
+  isReadablePublicPause,
   isReadablePublicPush,
   isReadablePublicRead,
+  isReadablePublicResume,
+  isReadablePublicUnpipe,
+  pauseReadable,
   pushProtectedReadableChunk,
   pushReadableChunk,
   readProtectedReadableZero,
   readReadableChunk,
   Readable,
   readableStateForStream,
+  readableHighWaterMark,
+  readableObjectMode,
   registerReadableState,
+  resumeReadable,
   setReadableUseGuard,
   shouldStartProtectedReadable,
 };

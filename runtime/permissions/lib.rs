@@ -992,7 +992,7 @@ fn oden_capsec_fd_is_inet_stream(
 // @ref LLP 0001#the-inherited-hole-checklist [implements] — Numeric descriptors are guessable; validate the concrete object before child/IPC passage.
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] — Socket object passage does not transfer authority.
 pub fn oden_capsec_check_raw_inet_stream_fd_transfer(
-  #[cfg_attr(not(unix), allow(unused_variables))] fd: i32,
+  fd: i32,
   api_name: &str,
 ) -> Result<(), PermissionCheckError> {
   if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
@@ -1001,8 +1001,34 @@ pub fn oden_capsec_check_raw_inet_stream_fd_transfer(
 
   #[cfg(not(unix))]
   {
-    let _ = api_name;
-    return Ok(());
+    oden_capsec_readiness_gate()?;
+    let target = format!("raw-fd-unsupported-platform:{fd}");
+    let mut principals =
+      OdenPolicy::constrained_principals(&oden_capsec_principal_set());
+    if principals.is_empty() {
+      principals.push(oden_capsec_principal());
+    }
+    for principal in principals {
+      oden_capsec_audit_record(
+        &principal.label(),
+        "inspector",
+        "activate",
+        &target,
+        "DENY(raw descriptor passage without native classifier)",
+        None,
+      );
+    }
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("{api_name} access to {target:?}"),
+        name: "capsec",
+        custom_message: Some(
+          "oden capsec: numeric descriptors cannot be transferred on a platform without a native socket classifier"
+            .to_string(),
+        ),
+        state: PermissionState::Denied,
+      },
+    ));
   }
 
   #[cfg(unix)]

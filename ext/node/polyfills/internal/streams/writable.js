@@ -128,6 +128,7 @@ const {
   TypedArrayPrototypeGetBuffer,
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
+  WeakMapPrototypeDelete,
   WeakMapPrototypeGet,
   WeakMapPrototypeSet,
 } = primordials;
@@ -189,6 +190,7 @@ const kBufferedValue = Symbol("kBufferedValue");
 const guardedWritableStates = new SafeWeakMap();
 const originalWritableStates = new SafeWeakMap();
 const bufferedWriteAdmissions = new SafeWeakMap();
+const protectedWritableCleanupEnds = new SafeWeakMap();
 let WritablePrototypeWrite;
 let WritablePrototypeUncork;
 let WritablePublicDestroy;
@@ -197,6 +199,31 @@ let WritablePublicWrite;
 
 function isRegisteredWritable(stream) {
   return WeakMapPrototypeGet(originalWritableStates, stream) !== undefined;
+}
+
+function isWritableDestroyed(stream) {
+  const state = WeakMapPrototypeGet(originalWritableStates, stream);
+  return state === undefined || (state[kState] & kDestroyed) !== 0;
+}
+
+function isWritableActive(stream) {
+  const state = WeakMapPrototypeGet(originalWritableStates, stream);
+  return state !== undefined && state.writable !== false &&
+    (state[kState] & (kEnding | kEnded | kDestroyed | kErrored)) === 0;
+}
+
+function isWritableEnded(stream) {
+  const state = WeakMapPrototypeGet(originalWritableStates, stream);
+  return state === undefined || (state[kState] & kEnding) !== 0;
+}
+
+function writableObjectMode(stream) {
+  const state = WeakMapPrototypeGet(originalWritableStates, stream);
+  return state !== undefined && (state[kState] & kObjectMode) !== 0;
+}
+
+function writableHighWaterMark(stream) {
+  return WeakMapPrototypeGet(originalWritableStates, stream)?.highWaterMark;
 }
 
 function isWritablePublicWrite(callback) {
@@ -246,6 +273,28 @@ function protectedWritableEnd(stream, chunk, encoding, callback) {
     encoding,
     callback,
   );
+}
+
+// Terminal half-close carries no new application bytes and remains available
+// after revocation. Consume the bypass at exact method entry so reentrant
+// package calls cannot inherit it.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function endProtectedWritableCleanup(stream) {
+  if (!isRegisteredWritable(stream)) {
+    throw new Error("protected Writable is missing registered state");
+  }
+  WeakMapPrototypeSet(protectedWritableCleanupEnds, stream, true);
+  try {
+    return FunctionPrototypeCall(
+      WritablePublicEnd,
+      stream,
+      undefined,
+      undefined,
+      undefined,
+    );
+  } finally {
+    WeakMapPrototypeDelete(protectedWritableCleanupEnds, stream);
+  }
 }
 
 function protectedWritableUncork(stream) {
@@ -1430,7 +1479,13 @@ WritablePrototypeWrite = Writable.prototype._write;
 Writable.prototype._writev = null;
 
 Writable.prototype.end = function (chunk, encoding, cb) {
-  runStreamUseGuard(this);
+  const cleanupEnd = WeakMapPrototypeGet(protectedWritableCleanupEnds, this) ===
+    true;
+  if (cleanupEnd) {
+    WeakMapPrototypeDelete(protectedWritableCleanupEnds, this);
+  } else {
+    runStreamUseGuard(this);
+  }
   const state = writableStateForStream(this);
 
   if (typeof chunk === "function") {
@@ -1815,7 +1870,11 @@ Writable.prototype[SymbolAsyncDispose] = function () {
 return {
   default: Writable,
   destroyProtectedWritable,
+  endProtectedWritableCleanup,
   isRegisteredWritable,
+  isWritableActive,
+  isWritableDestroyed,
+  isWritableEnded,
   isWritablePublicEnd,
   isWritablePublicUncork,
   isWritablePublicWrite,
@@ -1827,6 +1886,8 @@ return {
   setWritableUseGuard,
   Writable,
   writableNeedsDrain,
+  writableHighWaterMark,
+  writableObjectMode,
   writableStateForStream,
 };
 })();

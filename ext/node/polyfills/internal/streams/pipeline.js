@@ -3,6 +3,9 @@
 
 import process from "node:process";
 import { core, primordials } from "ext:core/mod.js";
+const { nextTick: ProtectedPipelineNextTick } = core.loadExtScript(
+  "ext:deno_node/_next_tick.ts",
+);
 const eos =
   core.loadExtScript("ext:deno_node/internal/streams/end-of-stream.js").default;
 const destroyImpl =
@@ -96,12 +99,22 @@ const {
   ArrayPrototypePop,
   ArrayPrototypePush,
   ArrayPrototypeShift,
+  FunctionPrototypeCall,
   Promise,
   SymbolDispose,
 } = primordials;
 
 let PassThrough;
 let addAbortListener;
+
+function nextTickWithCurrent(callback, ...args) {
+  const captured = captureCurrentDeliveryCallback(callback);
+  FunctionPrototypeCall(
+    ProtectedPipelineNextTick,
+    process,
+    () => runCapturedCallback(captured, undefined, args),
+  );
+}
 function captureReadableMethod(stream, method) {
   return isReadablePublicPipe(method) && isRegisteredReadable(stream)
     ? captureTrustedDeliveryCallback(method)
@@ -318,12 +331,14 @@ async function pumpToNode(iterable, writable, finish, { end }) {
     preflightStreamDelivery(writable);
     for await (const chunk of iterable) {
       preflightStreamDelivery(writable);
-      if (!runCapturedDelivery(
-        writable,
-        capturedWrite,
-        writable,
-        [chunk],
-      )) {
+      if (
+        !runCapturedDelivery(
+          writable,
+          capturedWrite,
+          writable,
+          [chunk],
+        )
+      ) {
         await wait();
       }
       preflightStreamDelivery(writable);
@@ -446,7 +461,7 @@ function pipelineImpl(streams, callback, opts) {
       if (!error) {
         ArrayPrototypeForEach(lastStreamCleanup, (fn) => fn());
       }
-      process.nextTick(() => {
+      nextTickWithCurrent(() => {
         if (callbackCalled) return;
         callbackCalled = true;
         const carrier = deliveryCarrierFor(ret);
@@ -613,16 +628,16 @@ function pipelineImpl(streams, callback, opts) {
                   runCapturedDelivery(pt, capturedPtEnd, pt, []);
                 }
                 value = val;
-                process.nextTick(finish);
+                nextTickWithCurrent(finish);
               } catch (err) {
                 value = undefined;
                 runCapturedCleanup(capturedPtDestroy, pt, [err]);
-                process.nextTick(finish, err);
+                nextTickWithCurrent(finish, err);
               }
             },
             (err) => {
               runCapturedCleanup(capturedPtDestroy, pt, [err]);
-              process.nextTick(finish, err);
+              nextTickWithCurrent(finish, err);
             },
           ]);
         } else if (isIterable(ret, true)) {
@@ -720,7 +735,7 @@ function pipelineImpl(streams, callback, opts) {
   }
 
   if (signal?.aborted || outerSignal?.aborted) {
-    process.nextTick(abort);
+    nextTickWithCurrent(abort);
   }
 
   return ret;
@@ -769,11 +784,10 @@ function pipe(src, dst, finish, finishOnlyHandleError, { end }) {
       runCapturedDelivery(dst, capturedDstEnd, dst, []);
     }
     const capturedEndFn = captureCurrentDeliveryCallback(endFn);
-    const resumeEnd = () =>
-      runCapturedCallback(capturedEndFn, undefined, []);
+    const resumeEnd = () => runCapturedCallback(capturedEndFn, undefined, []);
 
     if (isReadableFinished(src)) { // End the destination if the source has already ended.
-      process.nextTick(resumeEnd);
+      nextTickWithCurrent(resumeEnd);
     } else {
       runCapturedCallback(capturedSrcOnce, src, ["end", resumeEnd]);
     }

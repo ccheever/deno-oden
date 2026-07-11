@@ -737,7 +737,7 @@ EventEmitter.prototype.prependListener = function prependListener(
 
 function onceWrapper() {
   if (!this.fired) {
-    this.target.removeListener(this.type, this.wrapFn);
+    removeEventEmitterListener(this.target, this.type, this.wrapFn);
     this.fired = true;
     if (arguments.length === 0) {
       return FunctionPrototypeCall(this.listener, this.target);
@@ -852,15 +852,27 @@ EventEmitter.prototype.off = EventEmitter.prototype.removeListener;
 const EventEmitterPublicOff = EventEmitter.prototype.off;
 const EventEmitterPublicOn = EventEmitter.prototype.on;
 const EventEmitterPublicOnce = EventEmitter.prototype.once;
+const EventEmitterPublicPrependListener =
+  EventEmitter.prototype.prependListener;
 const EventEmitterPublicRemoveListener = EventEmitter.prototype.removeListener;
 
 function isEventEmitterPublicOnce(callback) {
   return callback === EventEmitterPublicOnce;
 }
 
+function isEventEmitterPublicEmit(callback) {
+  return callback === protectedEventEmitterEmit;
+}
+
+function isEventEmitterPublicListenerCount(callback) {
+  return callback === protectedEventEmitterListenerCount;
+}
+
 function isEventEmitterPublicLifecycleMethod(callback) {
-  return callback === EventEmitterPublicOff || callback === EventEmitterPublicOn ||
+  return callback === EventEmitterPublicOff ||
+    callback === EventEmitterPublicOn ||
     callback === EventEmitterPublicOnce ||
+    callback === EventEmitterPublicPrependListener ||
     callback === EventEmitterPublicRemoveListener;
 }
 
@@ -1499,6 +1511,7 @@ ObjectDefineProperty(EventEmitter, "EventEmitterAsyncResource", {
 // package code. Protected stream adapters must not bless a poisoned public
 // EventEmitter.prototype when they load later.
 const protectedEventEmitterEmit = EventEmitter.prototype.emit;
+const protectedEventEmitterListenerCount = _listenerCount;
 const protectedEventEmitterOff = EventEmitter.prototype.off;
 const protectedEventEmitterOnce = EventEmitter.prototype.once;
 
@@ -1516,6 +1529,8 @@ return {
   getEventListeners,
   getMaxListeners,
   isEventEmitterPublicLifecycleMethod,
+  isEventEmitterPublicEmit,
+  isEventEmitterPublicListenerCount,
   isEventEmitterPublicOnce,
   kEvents,
   kFirstEventParam,
@@ -1523,6 +1538,7 @@ return {
   on,
   once,
   protectedEventEmitterEmit,
+  protectedEventEmitterListenerCount,
   protectedEventEmitterOff,
   protectedEventEmitterOnce,
   setMaxListeners,
