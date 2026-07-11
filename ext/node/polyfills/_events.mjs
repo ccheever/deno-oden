@@ -849,6 +849,33 @@ EventEmitter.prototype.removeListener = function removeListener(
 };
 
 EventEmitter.prototype.off = EventEmitter.prototype.removeListener;
+const EventEmitterPublicOff = EventEmitter.prototype.off;
+const EventEmitterPublicOn = EventEmitter.prototype.on;
+const EventEmitterPublicOnce = EventEmitter.prototype.once;
+const EventEmitterPublicRemoveListener = EventEmitter.prototype.removeListener;
+
+function isEventEmitterPublicOnce(callback) {
+  return callback === EventEmitterPublicOnce;
+}
+
+function isEventEmitterPublicLifecycleMethod(callback) {
+  return callback === EventEmitterPublicOff || callback === EventEmitterPublicOn ||
+    callback === EventEmitterPublicOnce ||
+    callback === EventEmitterPublicRemoveListener;
+}
+
+function addEventEmitterListener(target, type, listener) {
+  return FunctionPrototypeCall(EventEmitterPublicOn, target, type, listener);
+}
+
+function removeEventEmitterListener(target, type, listener) {
+  return FunctionPrototypeCall(
+    EventEmitterPublicRemoveListener,
+    target,
+    type,
+    listener,
+  );
+}
 
 /**
  * Removes all listeners from the event emitter. (Only
@@ -1470,6 +1497,7 @@ ObjectDefineProperty(EventEmitter, "EventEmitterAsyncResource", {
 
 return {
   addAbortListener,
+  addEventEmitterListener,
   captureRejectionSymbol,
   default: EventEmitter,
   defaultMaxListeners,
@@ -1480,6 +1508,8 @@ return {
   },
   getEventListeners,
   getMaxListeners,
+  isEventEmitterPublicLifecycleMethod,
+  isEventEmitterPublicOnce,
   kEvents,
   kFirstEventParam,
   listenerCount,
@@ -1488,6 +1518,7 @@ return {
   setMaxListeners,
   emitPreparedEvent,
   prepareEventListenerDelivery,
+  removeEventEmitterListener,
   setEventListenerDeliveryHook,
 };
 })();

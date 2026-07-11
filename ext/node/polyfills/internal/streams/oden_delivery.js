@@ -4,10 +4,17 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const {
+  ArrayPrototypeIndexOf,
+  ArrayPrototypePush,
+  ArrayPrototypeSplice,
   ReflectApply,
   SafeWeakSet,
   SafeWeakMap,
+  SymbolAsyncIterator,
+  SymbolIterator,
+  TypeError,
   WeakMapPrototypeGet,
+  WeakMapPrototypeDelete,
   WeakMapPrototypeSet,
   WeakSetPrototypeAdd,
   WeakSetPrototypeDelete,
@@ -17,6 +24,9 @@ const {
 // Guard and hook state stays outside every user-reachable stream/state object.
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
 const streamUseGuards = new SafeWeakMap();
+const streamUseGuardRunners = new SafeWeakMap();
+const streamUseGuardParts = new SafeWeakMap();
+const streamUseGuardPartLists = new SafeWeakMap();
 const streamGuardAttachHooks = new SafeWeakMap();
 const streamDeliveryPreflights = new SafeWeakMap();
 const activeStreamDeliveryPreflights = new SafeWeakSet();
@@ -38,38 +48,96 @@ function runStreamUseGuard(stream) {
   if (guard !== undefined) guard();
 }
 
+function streamUseGuardRunner(stream) {
+  let runner = WeakMapPrototypeGet(streamUseGuardRunners, stream);
+  if (runner === undefined) {
+    runner = () => {
+      const parts = WeakMapPrototypeGet(streamUseGuardPartLists, stream);
+      if (parts === undefined) return;
+      for (let i = 0; i < parts.length; i++) parts[i]();
+    };
+    WeakMapPrototypeSet(streamUseGuardRunners, stream, runner);
+  }
+  return runner;
+}
+
+function addStreamUseGuardPart(stream, guard) {
+  let parts = WeakMapPrototypeGet(streamUseGuardParts, stream);
+  if (parts === undefined) {
+    parts = new SafeWeakSet();
+    WeakMapPrototypeSet(streamUseGuardParts, stream, parts);
+    WeakMapPrototypeSet(streamUseGuardPartLists, stream, []);
+  }
+  if (WeakSetPrototypeHas(parts, guard)) return false;
+  WeakSetPrototypeAdd(parts, guard);
+  ArrayPrototypePush(
+    WeakMapPrototypeGet(streamUseGuardPartLists, stream),
+    guard,
+  );
+  return true;
+}
+
 function setStreamUseGuard(stream, guard) {
-  const existing = getStreamUseGuard(stream);
-  if (existing === undefined) {
+  if (!addStreamUseGuardPart(stream, guard)) return;
+  const parts = WeakMapPrototypeGet(streamUseGuardParts, stream);
+  const partList = WeakMapPrototypeGet(streamUseGuardPartLists, stream);
+  try {
     const attach = WeakMapPrototypeGet(streamGuardAttachHooks, stream);
-    if (attach !== undefined) attach();
-    WeakMapPrototypeSet(streamUseGuards, stream, guard);
-  } else if (existing !== guard) {
-    WeakMapPrototypeSet(streamUseGuards, stream, () => {
-      existing();
-      guard();
-    });
+    if (attach !== undefined) attach(guard);
+    if (getStreamUseGuard(stream) === undefined) {
+      WeakMapPrototypeSet(
+        streamUseGuards,
+        stream,
+        streamUseGuardRunner(stream),
+      );
+    }
+  } catch (error) {
+    WeakSetPrototypeDelete(parts, guard);
+    const index = ArrayPrototypeIndexOf(partList, guard);
+    if (index !== -1) ArrayPrototypeSplice(partList, index, 1);
+    if (partList.length === 0) {
+      WeakMapPrototypeDelete(streamUseGuards, stream);
+    }
+    throw error;
   }
 }
 
 function propagateStreamUseGuard(source, target) {
-  const guard = getStreamUseGuard(source);
-  if (guard !== undefined) setStreamUseGuard(target, guard);
+  const parts = WeakMapPrototypeGet(streamUseGuardPartLists, source);
+  if (parts === undefined) return;
+  for (let i = 0; i < parts.length; i++) {
+    setStreamUseGuard(target, parts[i]);
+  }
+}
+
+function linkStreamUseGuard(source, target) {
+  if (
+    source === null || target === null ||
+    source === undefined || target === undefined ||
+    typeof source !== "object" && typeof source !== "function" ||
+    typeof target !== "object" && typeof target !== "function"
+  ) {
+    return;
+  }
+  registerStreamGuardAttachHook(
+    source,
+    (guard) => setStreamUseGuard(target, guard),
+  );
 }
 
 function registerStreamGuardAttachHook(stream, hook) {
-  if (hasStreamUseGuard(stream)) {
-    hook();
-    return;
-  }
   const existing = WeakMapPrototypeGet(streamGuardAttachHooks, stream);
   if (existing === undefined) {
     WeakMapPrototypeSet(streamGuardAttachHooks, stream, hook);
   } else {
-    WeakMapPrototypeSet(streamGuardAttachHooks, stream, () => {
-      existing();
-      hook();
+    WeakMapPrototypeSet(streamGuardAttachHooks, stream, (guard) => {
+      existing(guard);
+      hook(guard);
     });
+  }
+  const parts = WeakMapPrototypeGet(streamUseGuardPartLists, stream);
+  if (parts !== undefined) {
+    for (let i = 0; i < parts.length; i++) hook(parts[i]);
   }
 }
 
@@ -96,6 +164,16 @@ function captureTrustedDeliveryCallback(callback, invoke = callback) {
     callback: invoke,
     context: undefined,
     preflight: WeakMapPrototypeGet(trustedDeliveryPreflights, callback),
+  };
+}
+
+// Internal continuations resume the actor that initiated an operation, rather
+// than the module provenance of the core callback used to implement it.
+function captureCurrentDeliveryCallback(callback, invoke = callback) {
+  return {
+    callback: invoke,
+    context: core.ops.op_oden_schedule_context(),
+    preflight: undefined,
   };
 }
 
@@ -165,7 +243,7 @@ function runCapturedDelivery(stream, captured, receiver, args) {
   }
 }
 
-function runCapturedCleanup(captured, receiver, args) {
+function runCapturedCallback(captured, receiver, args) {
   if (captured.context === undefined) {
     return ReflectApply(captured.callback, receiver, args);
   }
@@ -176,6 +254,119 @@ function runCapturedCleanup(captured, receiver, args) {
   } finally {
     core.setAsyncContext(previous);
   }
+}
+
+function runCapturedCleanup(captured, receiver, args) {
+  return runCapturedCallback(captured, receiver, args);
+}
+
+function runIterableDelivery(target, captured, receiver, args) {
+  return hasStreamUseGuard(target)
+    ? runCapturedDelivery(target, captured, receiver, args)
+    : runCapturedCallback(captured, receiver, args);
+}
+
+function wrapIterableDelivery(iterable, recipient) {
+  const snapshotFactories = function () {
+    const asyncFactory = this?.[SymbolAsyncIterator];
+    const syncFactory = typeof asyncFactory === "function"
+      ? undefined
+      : this?.[SymbolIterator];
+    return [asyncFactory, syncFactory];
+  };
+  const capturedFactorySnapshot = captureDeliveryCallback(
+    recipient ?? snapshotFactories,
+    snapshotFactories,
+  );
+  const [asyncFactory, syncFactory] = runIterableDelivery(
+    iterable,
+    capturedFactorySnapshot,
+    iterable,
+    [],
+  );
+  const factory = asyncFactory ?? syncFactory;
+  if (typeof factory !== "function") {
+    throw new TypeError("value is not iterable");
+  }
+
+  const capturedFactory = captureDeliveryCallback(
+    recipient ?? factory,
+    factory,
+  );
+  const wrapper = {};
+  const iteratorSymbol = typeof asyncFactory === "function"
+    ? SymbolAsyncIterator
+    : SymbolIterator;
+
+  wrapper[iteratorSymbol] = function deliveryIteratorFactory() {
+    const iterator = runIterableDelivery(
+      wrapper,
+      capturedFactory,
+      iterable,
+      [],
+    );
+    const snapshotMethods = function () {
+      return [this?.next, this?.return, this?.throw];
+    };
+    const capturedSnapshot = captureDeliveryCallback(
+      recipient ?? factory,
+      snapshotMethods,
+    );
+    const [next, iteratorReturn, iteratorThrow] = runIterableDelivery(
+      wrapper,
+      capturedSnapshot,
+      iterator,
+      [],
+    );
+    if (typeof next !== "function") {
+      throw new TypeError("iterator.next is not callable");
+    }
+    const capturedNext = captureDeliveryCallback(recipient ?? next, next);
+    const wrappedIterator = {
+      next(value) {
+        return runIterableDelivery(
+          wrapper,
+          capturedNext,
+          iterator,
+          [value],
+        );
+      },
+    };
+
+    if (typeof iteratorReturn === "function") {
+      const capturedReturn = captureDeliveryCallback(
+        recipient ?? iteratorReturn,
+        iteratorReturn,
+      );
+      wrappedIterator.return = function (value) {
+        return runCapturedCleanup(capturedReturn, iterator, [value]);
+      };
+    }
+
+    if (typeof iteratorThrow === "function") {
+      const capturedThrow = captureDeliveryCallback(
+        recipient ?? iteratorThrow,
+        iteratorThrow,
+      );
+      wrappedIterator.throw = function (error) {
+        return runIterableDelivery(
+          wrapper,
+          capturedThrow,
+          iterator,
+          [error],
+        );
+      };
+    }
+
+    wrappedIterator[iteratorSymbol] = function () {
+      return this;
+    };
+    linkStreamUseGuard(wrapper, wrappedIterator);
+    return wrappedIterator;
+  };
+
+  linkStreamUseGuard(iterable, wrapper);
+  return wrapper;
 }
 
 function registerStreamDeliveryPreflight(stream, preflight) {
@@ -205,12 +396,14 @@ function preflightStreamDelivery(stream) {
 
 return {
   captureDeliveryCallback,
+  captureCurrentDeliveryCallback,
   captureTrustedDeliveryCallback,
   getStreamUseGuard,
   hasStreamUseGuard,
   markTrustedDeliveryCallback,
   isStreamTrustedDeliveryCallback,
   isStreamCleanupDeliveryCallback,
+  linkStreamUseGuard,
   markStreamCleanupDeliveryCallback,
   markStreamTrustedDeliveryCallback,
   preflightCapturedDelivery,
@@ -218,9 +411,11 @@ return {
   propagateStreamUseGuard,
   registerStreamDeliveryPreflight,
   registerStreamGuardAttachHook,
+  runCapturedCallback,
   runCapturedDelivery,
   runCapturedCleanup,
   runStreamUseGuard,
   setStreamUseGuard,
+  wrapIterableDelivery,
 };
 })();

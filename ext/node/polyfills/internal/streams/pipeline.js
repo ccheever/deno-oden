@@ -5,7 +5,6 @@ import process from "node:process";
 import { core, primordials } from "ext:core/mod.js";
 const eos =
   core.loadExtScript("ext:deno_node/internal/streams/end-of-stream.js").default;
-const { once } = core.loadExtScript("ext:deno_node/internal/util.mjs");
 const destroyImpl =
   core.loadExtScript("ext:deno_node/internal/streams/destroy.js").default;
 import Duplex from "node:_stream_duplex";
@@ -24,6 +23,7 @@ const {
   isReadableStream,
   isTransformStream,
   isWebStream,
+  isWritableStream,
 } = core.loadExtScript("ext:deno_node/internal/streams/utils.js");
 
 const { AbortController } = core.loadExtScript(
@@ -34,6 +34,43 @@ const _mod4 = core.loadExtScript(
   "ext:deno_node/internal/events/abort_listener.mjs",
 );
 import _mod5 from "node:_stream_passthrough";
+const {
+  createReadableAsyncIterator,
+  isRegisteredReadable,
+  isReadablePublicLifecycleMethod,
+  isReadablePublicPipe,
+  setReadableUseGuard,
+} = core.loadExtScript("ext:deno_node/internal/streams/readable.js");
+const {
+  isRegisteredWritable,
+  isWritablePublicEnd,
+  isWritablePublicWrite,
+} = core.loadExtScript("ext:deno_node/internal/streams/writable.js");
+const { isEventEmitterPublicLifecycleMethod } = core.loadExtScript(
+  "ext:deno_node/_events.mjs",
+);
+const {
+  getReadableStreamUseGuard,
+  getWritableStreamUseGuard,
+  registerReadableStreamGuardAttachHook,
+  registerWritableStreamGuardAttachHook,
+  setReadableStreamUseGuard,
+  setWritableStreamUseGuard,
+} = core.loadExtScript("ext:deno_web/06_streams.js");
+const {
+  captureCurrentDeliveryCallback,
+  captureDeliveryCallback,
+  captureTrustedDeliveryCallback,
+  preflightCapturedDelivery,
+  preflightStreamDelivery,
+  registerStreamGuardAttachHook,
+  runCapturedCallback,
+  runCapturedCleanup,
+  runCapturedDelivery,
+  wrapIterableDelivery,
+} = core.loadExtScript(
+  "ext:deno_node/internal/streams/oden_delivery.js",
+);
 
 const {
   AbortError,
@@ -55,20 +92,127 @@ const {
 
 const {
   ArrayIsArray,
+  ArrayPrototypeForEach,
+  ArrayPrototypePop,
+  ArrayPrototypePush,
+  ArrayPrototypeShift,
   Promise,
-  SymbolAsyncIterator,
   SymbolDispose,
 } = primordials;
 
 let PassThrough;
-let Readable;
 let addAbortListener;
+function captureReadableMethod(stream, method) {
+  return isReadablePublicPipe(method) && isRegisteredReadable(stream)
+    ? captureTrustedDeliveryCallback(method)
+    : captureDeliveryCallback(method);
+}
+
+function captureWritableMethod(stream, method) {
+  return isRegisteredWritable(stream) &&
+      (isWritablePublicEnd(method) || isWritablePublicWrite(method))
+    ? captureTrustedDeliveryCallback(method)
+    : captureDeliveryCallback(method);
+}
+
+function captureLifecycleMethod(stream, method) {
+  return (isReadablePublicLifecycleMethod(method) ||
+      isEventEmitterPublicLifecycleMethod(method)) &&
+      (isRegisteredReadable(stream) || isRegisteredWritable(stream))
+    ? captureTrustedDeliveryCallback(method)
+    : captureDeliveryCallback(method);
+}
+
+function applyGuardPart(target, guard) {
+  if (target === null || target === undefined) return;
+  if (isTransformStream(target)) {
+    setReadableStreamUseGuard(target.readable, guard);
+    setWritableStreamUseGuard?.(target.writable, guard);
+  } else if (isReadableStream(target)) {
+    setReadableStreamUseGuard(target, guard);
+  } else if (isWritableStream(target)) {
+    setWritableStreamUseGuard?.(target, guard);
+  } else if (typeof target === "object" || typeof target === "function") {
+    setReadableUseGuard(target, guard);
+  }
+}
+
+function linkGuardSource(source, target) {
+  if (source === null || source === undefined) return target;
+  const linkReadableWeb = (readable) => {
+    if (typeof registerReadableStreamGuardAttachHook === "function") {
+      registerReadableStreamGuardAttachHook(
+        readable,
+        (guard) => applyGuardPart(target, guard),
+      );
+    } else {
+      const guard = getReadableStreamUseGuard(readable);
+      if (guard !== undefined) applyGuardPart(target, guard);
+    }
+  };
+  const linkWritableWeb = (writable) => {
+    if (typeof registerWritableStreamGuardAttachHook === "function") {
+      registerWritableStreamGuardAttachHook(
+        writable,
+        (guard) => applyGuardPart(target, guard),
+      );
+    } else {
+      const guard = getWritableStreamUseGuard?.(writable);
+      if (guard !== undefined) applyGuardPart(target, guard);
+    }
+  };
+  if (isTransformStream(source)) {
+    linkReadableWeb(source.readable);
+    linkWritableWeb(source.writable);
+  } else if (isReadableStream(source)) {
+    linkReadableWeb(source);
+  } else if (isWritableStream(source)) {
+    linkWritableWeb(source);
+  } else if (typeof source === "object" || typeof source === "function") {
+    registerStreamGuardAttachHook(
+      source,
+      (guard) => applyGuardPart(target, guard),
+    );
+  }
+  return target;
+}
+
+function propagateReadableGuards(source, target) {
+  return linkGuardSource(source, target);
+}
+
+function deliveryCarrierFor(value) {
+  const carrier = {};
+  linkGuardSource(value, carrier);
+  return carrier;
+}
+
+function invokeCaptured(carrier, captured, receiver, args) {
+  return runCapturedDelivery(carrier, captured, receiver, args);
+}
+
+function getThen() {
+  return this?.then;
+}
+
+function wrapPipelineIterable(iterable, recipient, inheritedFrom) {
+  if (inheritedFrom !== undefined) {
+    linkGuardSource(inheritedFrom, iterable);
+  }
+  const wrapped = wrapIterableDelivery(iterable, recipient);
+  linkGuardSource(iterable, wrapped);
+  return wrapped;
+}
 
 function destroyer(stream, reading, writing) {
   let finished = false;
-  stream.on("close", () => {
+  const capturedOn = captureLifecycleMethod(
+    stream,
+    stream.on,
+  );
+  runCapturedCallback(capturedOn, stream, ["close", () => {
     finished = true;
-  });
+  }]);
 
   const cleanup = eos(
     stream,
@@ -93,15 +237,15 @@ function popCallback(streams) {
   // a single stream. Therefore optimize for the average case instead of
   // checking for length === 0 as well.
   validateFunction(streams[streams.length - 1], "streams[stream.length - 1]");
-  return streams.pop();
+  return ArrayPrototypePop(streams);
 }
 
 function makeAsyncIterable(val) {
   if (isIterable(val)) {
-    return val;
+    return wrapPipelineIterable(val);
   } else if (isReadableNodeStream(val)) {
     // Legacy streams are not Iterable.
-    return fromReadable(val);
+    return wrapPipelineIterable(fromReadable(val), undefined, val);
   }
   throw new ERR_INVALID_ARG_TYPE(
     "val",
@@ -111,13 +255,30 @@ function makeAsyncIterable(val) {
 }
 
 async function* fromReadable(val) {
-  Readable ??= _mod3;
-  yield* Readable.prototype[SymbolAsyncIterator].call(val);
+  yield* createReadableAsyncIterator(val);
 }
 
 async function pumpToNode(iterable, writable, finish, { end }) {
+  propagateReadableGuards(iterable, writable);
+  iterable = wrapPipelineIterable(iterable);
   let error;
   let onresolve = null;
+  const capturedOn = captureLifecycleMethod(
+    writable,
+    writable.on,
+  );
+  const capturedOff = captureLifecycleMethod(
+    writable,
+    writable.off,
+  );
+  const capturedWrite = captureWritableMethod(
+    writable,
+    writable.write,
+  );
+  const capturedEnd = captureWritableMethod(
+    writable,
+    writable.end,
+  );
 
   const resume = (err) => {
     if (err) {
@@ -146,7 +307,7 @@ async function pumpToNode(iterable, writable, finish, { end }) {
       }
     });
 
-  writable.on("drain", resume);
+  runCapturedCallback(capturedOn, writable, ["drain", resume]);
   const cleanup = eos(writable, { readable: false }, resume);
 
   try {
@@ -154,14 +315,22 @@ async function pumpToNode(iterable, writable, finish, { end }) {
       await wait();
     }
 
+    preflightStreamDelivery(writable);
     for await (const chunk of iterable) {
-      if (!writable.write(chunk)) {
+      preflightStreamDelivery(writable);
+      if (!runCapturedDelivery(
+        writable,
+        capturedWrite,
+        writable,
+        [chunk],
+      )) {
         await wait();
       }
+      preflightStreamDelivery(writable);
     }
 
     if (end) {
-      writable.end();
+      runCapturedDelivery(writable, capturedEnd, writable, []);
       await wait();
     }
 
@@ -170,7 +339,7 @@ async function pumpToNode(iterable, writable, finish, { end }) {
     finish(error !== err ? aggregateTwoErrors(error, err) : err);
   } finally {
     cleanup();
-    writable.off("drain", resume);
+    runCapturedCleanup(capturedOff, writable, ["drain", resume]);
   }
 }
 
@@ -180,22 +349,26 @@ async function pumpToWeb(readable, writable, finish, { end }) {
   }
   // https://streams.spec.whatwg.org/#example-manual-write-with-backpressure
   const writer = writable.getWriter();
+  const capturedWrite = captureDeliveryCallback(writer.write);
+  const capturedClose = captureDeliveryCallback(writer.close);
+  const capturedAbort = captureDeliveryCallback(writer.abort);
+  const carrier = deliveryCarrierFor(readable);
   try {
     for await (const chunk of readable) {
       await writer.ready;
-      writer.write(chunk).catch(() => {});
+      invokeCaptured(carrier, capturedWrite, writer, [chunk]).catch(() => {});
     }
 
     await writer.ready;
 
     if (end) {
-      await writer.close();
+      await invokeCaptured(carrier, capturedClose, writer, []);
     }
 
     finish();
   } catch (err) {
     try {
-      await writer.abort(err);
+      await runCapturedCleanup(capturedAbort, writer, [err]);
       finish(err);
     } catch (err) {
       finish(err);
@@ -204,7 +377,7 @@ async function pumpToWeb(readable, writable, finish, { end }) {
 }
 
 function pipeline(...streams) {
-  return pipelineImpl(streams, once(popCallback(streams)));
+  return pipelineImpl(streams, popCallback(streams));
 }
 
 function pipelineImpl(streams, callback, opts) {
@@ -239,6 +412,9 @@ function pipelineImpl(streams, callback, opts) {
   let error;
   let value;
   const destroys = [];
+  const capturedCallback = captureDeliveryCallback(callback);
+  let callbackCalled = false;
+  let ret;
 
   let finishCount = 0;
 
@@ -260,7 +436,7 @@ function pipelineImpl(streams, callback, opts) {
     }
 
     while (destroys.length) {
-      destroys.shift()(error);
+      ArrayPrototypeShift(destroys)(error);
     }
 
     disposable?.[SymbolDispose]();
@@ -268,13 +444,26 @@ function pipelineImpl(streams, callback, opts) {
 
     if (final) {
       if (!error) {
-        lastStreamCleanup.forEach((fn) => fn());
+        ArrayPrototypeForEach(lastStreamCleanup, (fn) => fn());
       }
-      process.nextTick(callback, error, value);
+      process.nextTick(() => {
+        if (callbackCalled) return;
+        callbackCalled = true;
+        const carrier = deliveryCarrierFor(ret);
+        if (!error && value != null && carrier !== undefined) {
+          runCapturedDelivery(
+            carrier,
+            capturedCallback,
+            undefined,
+            [error, value],
+          );
+        } else {
+          runCapturedCallback(capturedCallback, undefined, [error, value]);
+        }
+      });
     }
   }
 
-  let ret;
   for (let i = 0; i < streams.length; i++) {
     const stream = streams[i];
     const reading = i < streams.length - 1;
@@ -284,16 +473,24 @@ function pipelineImpl(streams, callback, opts) {
     const isLastStream = i === streams.length - 1;
 
     if (isNodeStream(stream)) {
+      const capturedStreamOn = captureLifecycleMethod(
+        stream,
+        stream.on,
+      );
+      const capturedStreamRemove = captureLifecycleMethod(
+        stream,
+        stream.removeListener,
+      );
       if (next !== null && (next?.closed || next?.destroyed)) {
         throw new ERR_STREAM_UNABLE_TO_PIPE();
       }
 
       if (end) {
         const { destroy, cleanup } = destroyer(stream, reading, writing);
-        destroys.push(destroy);
+        ArrayPrototypePush(destroys, destroy);
 
         if (isReadable(stream) && isLastStream) {
-          lastStreamCleanup.push(cleanup);
+          ArrayPrototypePush(lastStreamCleanup, cleanup);
         }
       }
 
@@ -307,17 +504,22 @@ function pipelineImpl(streams, callback, opts) {
           finishOnlyHandleError(err);
         }
       }
-      stream.on("error", onError);
+      runCapturedCallback(capturedStreamOn, stream, ["error", onError]);
       if (isReadable(stream) && isLastStream) {
-        lastStreamCleanup.push(() => {
-          stream.removeListener("error", onError);
+        ArrayPrototypePush(lastStreamCleanup, () => {
+          runCapturedCleanup(
+            capturedStreamRemove,
+            stream,
+            ["error", onError],
+          );
         });
       }
     }
 
     if (i === 0) {
       if (typeof stream === "function") {
-        ret = stream({ signal });
+        const capturedSource = captureDeliveryCallback(stream);
+        ret = runCapturedCallback(capturedSource, undefined, [{ signal }]);
         if (!isIterable(ret)) {
           throw new ERR_INVALID_RETURN_VALUE(
             "Iterable, AsyncIterable or Stream",
@@ -325,6 +527,7 @@ function pipelineImpl(streams, callback, opts) {
             ret,
           );
         }
+        ret = wrapPipelineIterable(ret, stream);
       } else if (
         isIterable(stream) || isReadableNodeStream(stream) ||
         isTransformStream(stream)
@@ -339,7 +542,15 @@ function pipelineImpl(streams, callback, opts) {
       } else {
         ret = makeAsyncIterable(ret);
       }
-      ret = stream(ret, { signal });
+      const stageInput = ret;
+      const stageCarrier = deliveryCarrierFor(stageInput);
+      const capturedStage = captureDeliveryCallback(stream);
+      ret = invokeCaptured(
+        stageCarrier,
+        capturedStage,
+        undefined,
+        [stageInput, { signal }],
+      );
 
       if (reading) {
         if (!isIterable(ret, true)) {
@@ -349,6 +560,7 @@ function pipelineImpl(streams, callback, opts) {
             ret,
           );
         }
+        ret = wrapPipelineIterable(ret, stream, stageInput);
       } else {
         PassThrough ??= _mod5;
 
@@ -360,32 +572,76 @@ function pipelineImpl(streams, callback, opts) {
         const pt = new PassThrough({
           objectMode: true,
         });
+        propagateReadableGuards(stageInput, pt);
+        const capturedPtWrite = captureWritableMethod(
+          pt,
+          pt.write,
+        );
+        const capturedPtEnd = captureWritableMethod(
+          pt,
+          pt.end,
+        );
+        const capturedPtDestroy = captureDeliveryCallback(pt.destroy);
 
         // Handle Promises/A+ spec, `then` could be a getter that throws on
         // second use.
-        const then = ret?.then;
+        const capturedThenGetter = captureDeliveryCallback(stream, getThen);
+        const then = invokeCaptured(
+          stageCarrier,
+          capturedThenGetter,
+          ret,
+          [],
+        );
         if (typeof then === "function") {
           finishCount++;
-          then.call(ret, (val) => {
-            value = val;
-            if (val != null) {
-              pt.write(val);
-            }
-            if (end) {
-              pt.end();
-            }
-            process.nextTick(finish);
-          }, (err) => {
-            pt.destroy(err);
-            process.nextTick(finish, err);
-          });
+          const capturedThen = captureDeliveryCallback(stream, then);
+          invokeCaptured(stageCarrier, capturedThen, ret, [
+            (val) => {
+              try {
+                if (stageCarrier !== undefined) {
+                  preflightCapturedDelivery(stageCarrier, capturedStage);
+                }
+                if (val != null) {
+                  runCapturedDelivery(
+                    pt,
+                    capturedPtWrite,
+                    pt,
+                    [val],
+                  );
+                }
+                if (end) {
+                  runCapturedDelivery(pt, capturedPtEnd, pt, []);
+                }
+                value = val;
+                process.nextTick(finish);
+              } catch (err) {
+                value = undefined;
+                runCapturedCleanup(capturedPtDestroy, pt, [err]);
+                process.nextTick(finish, err);
+              }
+            },
+            (err) => {
+              runCapturedCleanup(capturedPtDestroy, pt, [err]);
+              process.nextTick(finish, err);
+            },
+          ]);
         } else if (isIterable(ret, true)) {
           finishCount++;
-          pumpToNode(ret, pt, finish, { end });
+          pumpToNode(
+            wrapPipelineIterable(ret, stream, stageInput),
+            pt,
+            finish,
+            { end },
+          );
         } else if (isReadableStream(ret) || isTransformStream(ret)) {
           const toRead = ret.readable || ret;
           finishCount++;
-          pumpToNode(toRead, pt, finish, { end });
+          pumpToNode(
+            wrapPipelineIterable(toRead, stream, stageInput),
+            pt,
+            finish,
+            { end },
+          );
         } else {
           throw new ERR_INVALID_RETURN_VALUE(
             "AsyncIterable or Promise",
@@ -397,19 +653,20 @@ function pipelineImpl(streams, callback, opts) {
         ret = pt;
 
         const { destroy, cleanup } = destroyer(ret, false, true);
-        destroys.push(destroy);
+        ArrayPrototypePush(destroys, destroy);
         if (isLastStream) {
-          lastStreamCleanup.push(cleanup);
+          ArrayPrototypePush(lastStreamCleanup, cleanup);
         }
       }
     } else if (isNodeStream(stream)) {
+      propagateReadableGuards(ret, stream);
       if (isReadableNodeStream(ret)) {
         finishCount += 2;
         const cleanup = pipe(ret, stream, finish, finishOnlyHandleError, {
           end,
         });
         if (isReadable(stream) && isLastStream) {
-          lastStreamCleanup.push(cleanup);
+          ArrayPrototypePush(lastStreamCleanup, cleanup);
         }
       } else if (isTransformStream(ret) || isReadableStream(ret)) {
         const toRead = ret.readable || ret;
@@ -433,6 +690,7 @@ function pipelineImpl(streams, callback, opts) {
       }
       ret = stream;
     } else if (isWebStream(stream)) {
+      propagateReadableGuards(ret, stream);
       if (isReadableNodeStream(ret)) {
         finishCount++;
         pumpToWeb(makeAsyncIterable(ret), stream, finish, { end });
@@ -470,14 +728,36 @@ function pipelineImpl(streams, callback, opts) {
 
 function pipe(src, dst, finish, finishOnlyHandleError, { end }) {
   let ended = false;
-  dst.on("close", () => {
+  propagateReadableGuards(src, dst);
+  const capturedDstOn = captureLifecycleMethod(
+    dst,
+    dst.on,
+  );
+  const capturedDstEnd = captureWritableMethod(
+    dst,
+    dst.end,
+  );
+  const capturedSrcPipe = captureReadableMethod(
+    src,
+    src.pipe,
+  );
+  const capturedSrcOnce = captureLifecycleMethod(
+    src,
+    src.once,
+  );
+  runCapturedCallback(capturedDstOn, dst, ["close", () => {
     if (!ended) {
       // Finish if the destination closes before the source has completed.
       finishOnlyHandleError(new ERR_STREAM_PREMATURE_CLOSE());
     }
-  });
+  }]);
 
-  src.pipe(dst, { end: false }); // If end is true we already will have a listener to end dst.
+  runCapturedDelivery(
+    src,
+    capturedSrcPipe,
+    src,
+    [dst, { end: false }],
+  ); // If end is true we already will have a listener to end dst.
 
   if (end) {
     // Compat. Before node v10.12.0 stdio used to throw an error so
@@ -486,13 +766,16 @@ function pipe(src, dst, finish, finishOnlyHandleError, { end }) {
 
     function endFn() {
       ended = true;
-      dst.end();
+      runCapturedDelivery(dst, capturedDstEnd, dst, []);
     }
+    const capturedEndFn = captureCurrentDeliveryCallback(endFn);
+    const resumeEnd = () =>
+      runCapturedCallback(capturedEndFn, undefined, []);
 
     if (isReadableFinished(src)) { // End the destination if the source has already ended.
-      process.nextTick(endFn);
+      process.nextTick(resumeEnd);
     } else {
-      src.once("end", endFn);
+      runCapturedCallback(capturedSrcOnce, src, ["end", resumeEnd]);
     }
   } else {
     finish();
@@ -513,9 +796,8 @@ function pipe(src, dst, finish, finishOnlyHandleError, { end }) {
       // We don't need to check if this is a writable premature close since
       // eos will only fail with premature close on the reading side for
       // duplex streams.
-      src
-        .once("end", finish)
-        .once("error", finish);
+      runCapturedCallback(capturedSrcOnce, src, ["end", finish]);
+      runCapturedCallback(capturedSrcOnce, src, ["error", finish]);
     } else {
       finish(err);
     }

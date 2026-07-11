@@ -26,7 +26,14 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const bufMod = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
-const { Buffer } = bufMod;
+const {
+  Buffer,
+  protectedBufferAllocUnsafe,
+  protectedBufferCopy,
+  protectedBufferFrom,
+  protectedBufferIsBuffer,
+  protectedBufferToString,
+} = bufMod;
 const { MAX_STRING_LENGTH } = bufMod.constants;
 const { normalizeEncoding: castEncoding } = core.loadExtScript(
   "ext:deno_node/internal/util.mjs",
@@ -58,14 +65,14 @@ const {
   Uint8Array,
 } = primordials;
 const { isTypedArray } = core;
-const BufferAllocUnsafe = Buffer.allocUnsafe;
-const BufferCopy = Buffer.prototype.copy;
+const BufferAllocUnsafe = protectedBufferAllocUnsafe ?? Buffer.allocUnsafe;
+const BufferCopy = protectedBufferCopy ?? Buffer.prototype.copy;
 const BufferFrom = Buffer.from;
-const BufferIsBuffer = Buffer.isBuffer;
-const BufferToString = Buffer.prototype.toString;
+const BufferIsBuffer = protectedBufferIsBuffer ?? Buffer.isBuffer;
+const BufferToString = protectedBufferToString ?? Buffer.prototype.toString;
 
 function bufferFrom(value) {
-  return FunctionPrototypeCall(BufferFrom, Buffer, value);
+  return FunctionPrototypeCall(protectedBufferFrom ?? BufferFrom, Buffer, value);
 }
 
 const ENCODING_UTF8 = 0;
@@ -363,6 +370,26 @@ StringDecoder.prototype.end = function end(buf) {
   return ret;
 };
 
+// Internal protected-stream consumers must not redispatch through mutable
+// `write`, `decode`, or `flush` properties with capability-bearing bytes.
+function writeStringDecoder(decoder, buf) {
+  if (typeof buf === "string") return buf;
+  const normalizedBuf = normalizeBuffer(buf);
+  if (decoder[kBufferedBytes] === undefined) {
+    throw new ERR_INVALID_THIS("StringDecoder");
+  }
+  return FunctionPrototypeCall(decode, decoder, normalizedBuf);
+}
+
+function endStringDecoder(decoder, buf = undefined) {
+  let ret = "";
+  if (buf !== undefined) ret = writeStringDecoder(decoder, buf);
+  if (decoder[kBufferedBytes] > 0) {
+    ret += FunctionPrototypeCall(flush, decoder);
+  }
+  return ret;
+}
+
 StringDecoder.prototype.text = function text(buf, offset) {
   this[kBufferedBytes] = 0;
   this[kMissingBytes] = 0;
@@ -405,8 +432,10 @@ function transferStringDecoder(source) {
 }
 
 return {
+  endStringDecoder,
   StringDecoder,
   transferStringDecoder,
+  writeStringDecoder,
   default: { StringDecoder },
 };
 })();

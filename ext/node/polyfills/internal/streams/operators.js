@@ -26,6 +26,16 @@ const {
   isNodeStream,
   isWritable,
 } = core.loadExtScript("ext:deno_node/internal/streams/utils.js");
+const {
+  captureDeliveryCallback,
+  linkStreamUseGuard,
+  markTrustedDeliveryCallback,
+  preflightCapturedDelivery,
+  runCapturedDelivery,
+  wrapIterableDelivery,
+} = core.loadExtScript(
+  "ext:deno_node/internal/streams/oden_delivery.js",
+);
 
 const {
   AbortError,
@@ -41,7 +51,7 @@ const {
 
 const {
   ArrayPrototypePush,
-  Boolean,
+  ArrayPrototypeShift,
   MathFloor,
   Number,
   NumberIsNaN,
@@ -54,6 +64,36 @@ const {
 
 const kEmpty = Symbol("kEmpty");
 const kEof = Symbol("kEof");
+
+function createOperatorCarrier(source) {
+  const carrier = {};
+  linkStreamUseGuard(source, carrier);
+  return carrier;
+}
+
+function guardOperatorOutput(source, output) {
+  linkStreamUseGuard(source, output);
+  return output;
+}
+
+function createProjectedCallback(source, callback, project) {
+  const captured = captureDeliveryCallback(callback);
+  const carrier = createOperatorCarrier(source);
+  const projected = async function (value, options) {
+    const result = await runCapturedDelivery(
+      carrier,
+      captured,
+      undefined,
+      [value, options],
+    );
+    return project(result, value);
+  };
+  markTrustedDeliveryCallback(
+    projected,
+    () => preflightCapturedDelivery(carrier, captured),
+  );
+  return projected;
+}
 
 function compose(stream, options) {
   if (options != null) {
@@ -110,9 +150,14 @@ function map(fn, options) {
 
   highWaterMark += concurrency;
 
-  return async function* map() {
-    const signal = AbortSignal.any([options?.signal].filter(Boolean));
-    const stream = this;
+  const source = this;
+  const carrier = createOperatorCarrier(source);
+  const capturedFn = captureDeliveryCallback(fn);
+  const output = async function* map() {
+    const signal = AbortSignal.any(
+      options?.signal === undefined ? [] : [options.signal],
+    );
+    const stream = source;
     const queue = [];
     const signalOpt = { signal };
 
@@ -145,6 +190,7 @@ function map(fn, options) {
 
     async function pump() {
       try {
+        preflightCapturedDelivery(carrier, capturedFn);
         for await (let val of stream) {
           if (done) {
             return;
@@ -155,7 +201,12 @@ function map(fn, options) {
           }
 
           try {
-            val = fn(val, signalOpt);
+            val = runCapturedDelivery(
+              carrier,
+              capturedFn,
+              undefined,
+              [val, signalOpt],
+            );
 
             if (val === kEmpty) {
               continue;
@@ -170,7 +221,7 @@ function map(fn, options) {
 
           PromisePrototypeThen(val, afterItemProcessed, onCatch);
 
-          queue.push(val);
+          ArrayPrototypePush(queue, val);
           if (next) {
             next();
             next = null;
@@ -182,11 +233,11 @@ function map(fn, options) {
             });
           }
         }
-        queue.push(kEof);
+        ArrayPrototypePush(queue, kEof);
       } catch (err) {
         const val = PromiseReject(err);
         PromisePrototypeThen(val, afterItemProcessed, onCatch);
-        queue.push(val);
+        ArrayPrototypePush(queue, val);
       } finally {
         done = true;
         if (next) {
@@ -212,10 +263,11 @@ function map(fn, options) {
           }
 
           if (val !== kEmpty) {
+            preflightCapturedDelivery(carrier, capturedFn);
             yield val;
           }
 
-          queue.shift();
+          ArrayPrototypeShift(queue);
           maybeResume();
         }
 
@@ -230,7 +282,8 @@ function map(fn, options) {
         resume = null;
       }
     }
-  }.call(this);
+  }.call(source);
+  return guardOperatorOutput(source, output);
 }
 
 async function some(fn, options = undefined) {
@@ -249,9 +302,12 @@ async function every(fn, options = undefined) {
     );
   }
   // https://en.wikipedia.org/wiki/De_Morgan%27s_laws
-  return !(await some.call(this, async (...args) => {
-    return !(await fn(...args));
-  }, options));
+  const negated = createProjectedCallback(
+    this,
+    fn,
+    (selected) => !selected,
+  );
+  return !(await some.call(this, negated, options));
 }
 
 async function find(fn, options) {
@@ -269,10 +325,11 @@ async function forEach(fn, options) {
       fn,
     );
   }
-  async function forEachFn(value, options) {
-    await fn(value, options);
-    return kEmpty;
-  }
+  const forEachFn = createProjectedCallback(
+    this,
+    fn,
+    () => kEmpty,
+  );
   // eslint-disable-next-line no-unused-vars
   for await (const unused of map.call(this, forEachFn, options));
 }
@@ -285,12 +342,11 @@ function filter(fn, options) {
       fn,
     );
   }
-  async function filterFn(value, options) {
-    if (await fn(value, options)) {
-      return value;
-    }
-    return kEmpty;
-  }
+  const filterFn = createProjectedCallback(
+    this,
+    fn,
+    (selected, value) => selected ? value : kEmpty,
+  );
   return map.call(this, filterFn, options);
 }
 
@@ -327,6 +383,9 @@ async function reduce(reducer, initialValue, options) {
   }
   const ac = new AbortController();
   const signal = ac.signal;
+  const carrier = createOperatorCarrier(this);
+  const capturedReducer = captureDeliveryCallback(reducer);
+  preflightCapturedDelivery(carrier, capturedReducer);
   if (options?.signal) {
     const opts = {
       once: true,
@@ -346,7 +405,12 @@ async function reduce(reducer, initialValue, options) {
         initialValue = value;
         hasInitialValue = true;
       } else {
-        initialValue = await reducer(initialValue, value, { signal });
+        initialValue = await runCapturedDelivery(
+          carrier,
+          capturedReducer,
+          undefined,
+          [initialValue, value, { signal }],
+        );
       }
     }
     if (!gotAnyItemFromStream && !hasInitialValue) {
@@ -378,11 +442,15 @@ async function toArray(options) {
 
 function flatMap(fn, options) {
   const values = map.call(this, fn, options);
-  return async function* flatMap() {
+  const source = this;
+  const output = async function* flatMap() {
     for await (const val of values) {
-      yield* val;
+      const iterable = wrapIterableDelivery(val, fn);
+      linkStreamUseGuard(source, iterable);
+      yield* iterable;
     }
-  }.call(this);
+  }.call(source);
+  return guardOperatorOutput(source, output);
 }
 
 function toIntegerOrInfinity(number) {
@@ -407,7 +475,8 @@ function drop(number, options = undefined) {
   }
 
   number = toIntegerOrInfinity(number);
-  return async function* drop() {
+  const source = this;
+  const output = async function* drop() {
     if (options?.signal?.aborted) {
       throw new AbortError();
     }
@@ -419,7 +488,8 @@ function drop(number, options = undefined) {
         yield val;
       }
     }
-  }.call(this);
+  }.call(source);
+  return guardOperatorOutput(source, output);
 }
 
 function take(number, options = undefined) {
@@ -431,7 +501,8 @@ function take(number, options = undefined) {
   }
 
   number = toIntegerOrInfinity(number);
-  return async function* take() {
+  const source = this;
+  const output = async function* take() {
     if (options?.signal?.aborted) {
       throw new AbortError();
     }
@@ -448,7 +519,8 @@ function take(number, options = undefined) {
         return;
       }
     }
-  }.call(this);
+  }.call(source);
+  return guardOperatorOutput(source, output);
 }
 
 const streamReturningOperators = {

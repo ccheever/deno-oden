@@ -3203,6 +3203,17 @@ return {
   "module.exports": mod,
   default: mod,
   Buffer,
+  // Builtins that deliver protected bytes consume these definition-time
+  // identities instead of recapturing mutable public Buffer properties.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  protectedBufferAlloc: Buffer.alloc,
+  protectedBufferAllocUnsafe: Buffer.allocUnsafe,
+  protectedBufferCopy: Buffer.prototype.copy,
+  protectedBufferFrom: BufferFrom,
+  protectedBufferIsBuffer: BufferIsBuffer,
+  protectedBufferIsEncoding: BufferIsEncoding,
+  protectedBufferToString: Buffer.prototype.toString,
+  protectedFastBuffer: FastBuffer,
   SlowBuffer,
   readUInt48LE,
   readUInt40LE,
