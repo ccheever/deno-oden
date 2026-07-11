@@ -3,7 +3,7 @@ import asyncHooks from "node:async_hooks";
 import diagnostics from "node:diagnostics_channel";
 import inspector from "node:inspector";
 import os from "node:os";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import traceEvents from "node:trace_events";
 import v8 from "node:v8";
 
@@ -21,6 +21,22 @@ const rootChild = spawn(Deno.execPath(), [
   "eval",
   "setTimeout(() => {}, 10_000)",
 ]);
+const rootExecChild = execFile(
+  Deno.execPath(),
+  ["eval", "setTimeout(() => {}, 10_000)"],
+  { maxBuffer: 1 },
+  () => {},
+);
+const rootDenoChild = new Deno.Command(Deno.execPath(), {
+  args: ["eval", "setTimeout(() => {}, 10_000)"],
+  stdout: "null",
+  stderr: "null",
+}).spawn();
+let rootDenoExited = false;
+const rootDenoStatus = rootDenoChild.status.then((status) => {
+  rootDenoExited = true;
+  return status;
+});
 process.on("uncaughtException", rootExceptionListener);
 process.on("SIGUSR2", rootProcessSignalListener);
 
@@ -65,6 +81,8 @@ try {
     rootHook,
     rootChannel,
     rootChild,
+    rootExecChild,
+    rootDenoChild,
     rootInactiveChannel,
     rootBinding,
     rootBindingFields,
@@ -190,11 +208,30 @@ try {
       ? "DENIED"
       : "LEAKED"
     : "UNAVAILABLE";
+  result.nodePassedDisposeDeniedNoKill =
+    result.nodePassedDisposeDeniedNoKill === "DENIED"
+      ? !rootChild.killed ? "DENIED" : "LEAKED"
+      : result.nodePassedDisposeDeniedNoKill;
+  result.execFilePassedCleanupNoKill =
+    result.execFilePassedCleanupNoKill === "DENIED"
+      ? !rootExecChild.killed ? "DENIED" : "LEAKED"
+      : result.execFilePassedCleanupNoKill;
+  result.denoPassedAsyncDisposeDeniedNoKill =
+    result.denoPassedAsyncDisposeDeniedNoKill === "DENIED"
+      ? !rootDenoExited ? "DENIED" : "LEAKED"
+      : result.denoPassedAsyncDisposeDeniedNoKill;
   rootChannel.unsubscribe(rootChannelSubscriber);
   consoleChannel.unsubscribe(consoleSubscriber);
   console.log(JSON.stringify(result));
 } finally {
   rootChild.kill("SIGTERM");
+  rootExecChild.kill("SIGTERM");
+  try {
+    rootDenoChild.kill("SIGTERM");
+  } catch {
+    // It may have reached its bounded fallback exit already.
+  }
+  await rootDenoStatus;
   process.removeListener("uncaughtException", rootExceptionListener);
   process.removeListener("SIGUSR2", rootProcessSignalListener);
   if (process.stdout.isTTY === true) {

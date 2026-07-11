@@ -24,6 +24,7 @@ const {
   TypedArrayPrototypeSet,
   Uint8Array,
   TypeError,
+  TypeErrorPrototype,
   NumberIsFinite,
   ObjectEntries,
   SafeArrayIterator,
@@ -517,7 +518,8 @@ class ChildProcess {
 
     const onAbort = () => {
       try {
-        this.kill("SIGTERM");
+        // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- Abort cleanup reauthenticates the retained child owner.
+        op_spawn_kill_for_cleanup(this.#rid, "SIGTERM");
       } catch {
         // Ignore the error for https://github.com/denoland/deno/issues/27112
       }
@@ -583,8 +585,21 @@ class ChildProcess {
 
   async [SymbolAsyncDispose]() {
     try {
-      op_spawn_kill(this.#rid, "SIGTERM");
-    } catch {
+      op_spawn_kill_for_cleanup(this.#rid, "SIGTERM");
+    } catch (err) {
+      const alreadyClosed =
+        ObjectPrototypeIsPrototypeOf(TypeErrorPrototype, err) ||
+        ObjectPrototypeIsPrototypeOf(
+          Deno.errors.NotFound.prototype,
+          err,
+        ) ||
+        ObjectPrototypeIsPrototypeOf(
+          Deno.errors.BadResource.prototype,
+          err,
+        );
+      if (!alreadyClosed) {
+        throw err;
+      }
       // ignore errors from killing the process (such as ESRCH or BadResource)
     }
     await this.#status;
@@ -685,7 +700,7 @@ function spawnInner(command, {
   if (signal !== undefined) {
     onAbort = () => {
       try {
-        op_spawn_kill(child.rid, "SIGTERM");
+        op_spawn_kill_for_cleanup(child.rid, "SIGTERM");
       } catch {
         // Ignore the error for https://github.com/denoland/deno/issues/27112
       }

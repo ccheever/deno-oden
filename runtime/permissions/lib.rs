@@ -2851,6 +2851,44 @@ impl OdenResourceOwner {
     Ok(())
   }
 
+  /// Check a resource-identity invariant that cannot degrade with policy mode.
+  /// Trusted cleanup may release only the current actor's resource; audit and
+  /// permissive mode are not authority to clean up another principal's child.
+  /// Ambient root may clean up its deliberately unowned resources, while
+  /// missing and quarantine attribution always fail closed.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] — Async cleanup reauthenticates the original resource owner.
+  pub fn check_deny_only(
+    &self,
+    rid: u32,
+    family: &str,
+  ) -> Result<(), PermissionCheckError> {
+    if !oden_capsec_active() {
+      return Ok(());
+    }
+    oden_capsec_readiness_gate()?;
+    let principal = oden_capsec_principal();
+    let label = principal.label();
+    let owner = self.owner.lock().clone();
+    let mode = oden_capsec_mode(oden_capsec_policy_file());
+    if matches!(
+      oden_deny_only_resource_use_decision(&principal, owner.as_deref(), mode),
+      OdenDecision::Allow
+    ) {
+      return Ok(());
+    }
+
+    let owner_label = owner.as_deref().unwrap_or("(untracked)");
+    oden_capsec_audit_record(
+      &label,
+      family,
+      "cleanup",
+      &rid.to_string(),
+      "DENY(cleanup owner mismatch)",
+      None,
+    );
+    Err(oden_resource_owner_error(&label, owner_label, rid, family))
+  }
+
   fn transfer_for(
     &self,
     caller: &str,
@@ -2876,6 +2914,22 @@ impl OdenResourceOwner {
   #[cfg(test)]
   fn owner_for_test(&self) -> Option<String> {
     self.owner.lock().clone()
+  }
+}
+
+fn oden_deny_only_resource_use_decision(
+  principal: &OdenPrincipal,
+  owner: Option<&str>,
+  _mode: OdenMode,
+) -> OdenDecision {
+  let label = principal.label();
+  let same_owner = owner == Some(label.as_str());
+  let attributable =
+    !matches!(principal, OdenPrincipal::NoUser | OdenPrincipal::Quarantine);
+  if principal.is_ambient() && owner.is_none() || attributable && same_owner {
+    OdenDecision::Allow
+  } else {
+    OdenDecision::Deny
   }
 }
 
@@ -10121,6 +10175,60 @@ mod tests {
       oden_resource_use_decision("dep-b", Some("dep-a"), OdenMode::Permissive),
       OdenDecision::Allow
     );
+  }
+
+  #[test]
+  fn deny_only_resource_owner_is_mode_independent() {
+    let dep_a = OdenPrincipal::Package {
+      name: "dep-a".to_string(),
+      version: Some("1.0.0".to_string()),
+    };
+    let dep_b = OdenPrincipal::Package {
+      name: "dep-b".to_string(),
+      version: Some("1.0.0".to_string()),
+    };
+    for mode in [OdenMode::Enforce, OdenMode::Audit, OdenMode::Permissive] {
+      assert_eq!(
+        oden_deny_only_resource_use_decision(&dep_a, Some("dep-a"), mode),
+        OdenDecision::Allow
+      );
+      assert_eq!(
+        oden_deny_only_resource_use_decision(&dep_b, Some("dep-a"), mode),
+        OdenDecision::Deny
+      );
+      assert_eq!(
+        oden_deny_only_resource_use_decision(&dep_a, None, mode),
+        OdenDecision::Deny
+      );
+      assert_eq!(
+        oden_deny_only_resource_use_decision(&OdenPrincipal::Root, None, mode),
+        OdenDecision::Allow
+      );
+      assert_eq!(
+        oden_deny_only_resource_use_decision(
+          &OdenPrincipal::Root,
+          Some("dep-a"),
+          mode
+        ),
+        OdenDecision::Deny
+      );
+      assert_eq!(
+        oden_deny_only_resource_use_decision(
+          &OdenPrincipal::Quarantine,
+          Some("quarantine"),
+          mode
+        ),
+        OdenDecision::Deny
+      );
+      assert_eq!(
+        oden_deny_only_resource_use_decision(
+          &OdenPrincipal::NoUser,
+          None,
+          mode
+        ),
+        OdenDecision::Deny
+      );
+    }
   }
 
   #[test]

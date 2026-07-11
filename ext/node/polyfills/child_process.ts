@@ -68,6 +68,7 @@ const {
   Error,
   ObjectAssign,
   ObjectDefineProperty,
+  ObjectPrototypeIsPrototypeOf,
   Promise,
   PromiseWithResolvers,
   SafeArrayIterator,
@@ -75,6 +76,7 @@ const {
   SetPrototypeHas,
   String,
   StringPrototypeSlice,
+  TypeErrorPrototype,
 } = primordials;
 
 const MAX_BUFFER = 1024 * 1024;
@@ -691,6 +693,22 @@ function execFile(
   }
 
   function kill() {
+    try {
+      if (!killChildForCleanup(child, execOptions.killSignal)) return false;
+    } catch (e) {
+      const alreadyClosed =
+        ObjectPrototypeIsPrototypeOf(TypeErrorPrototype, e) ||
+        ObjectPrototypeIsPrototypeOf(
+          Deno.errors.NotFound.prototype,
+          e,
+        ) ||
+        ObjectPrototypeIsPrototypeOf(Deno.errors.BadResource.prototype, e);
+      if (!alreadyClosed) {
+        throw e;
+      }
+      return false;
+    }
+
     if (child.stdout) {
       child.stdout.destroy();
     }
@@ -700,14 +718,7 @@ function execFile(
     }
 
     killed = true;
-    try {
-      killChildForCleanup(child, execOptions.killSignal);
-    } catch (e) {
-      if (e) {
-        ex = e as ChildProcessError;
-      }
-      exithandler();
-    }
+    return true;
   }
 
   if (execOptions.timeout > 0) {
@@ -734,15 +745,20 @@ function execFile(
         ? Buffer.byteLength(chunk, encoding)
         : chunk.length;
       const slice = encoding ? StringPrototypeSlice : bufferSlice;
-      stdoutLen += length;
+      const nextStdoutLen = stdoutLen + length;
 
-      if (stdoutLen > execOptions.maxBuffer) {
-        const truncatedLen = execOptions.maxBuffer - (stdoutLen - length);
+      if (nextStdoutLen > execOptions.maxBuffer) {
+        // Authenticate and terminate before mutating callback/buffer state. A
+        // passed stream listener cannot turn forged data into cleanup of the
+        // spawning principal's child.
+        if (!kill()) return;
+        const truncatedLen = execOptions.maxBuffer - stdoutLen;
+        stdoutLen = nextStdoutLen;
         ArrayPrototypePush(_stdout, slice(chunk, 0, truncatedLen));
 
         ex = new ERR_CHILD_PROCESS_STDIO_MAXBUFFER("stdout");
-        kill();
       } else {
+        stdoutLen = nextStdoutLen;
         ArrayPrototypePush(_stdout, chunk);
       }
     });
@@ -765,15 +781,17 @@ function execFile(
         ? Buffer.byteLength(chunk, encoding)
         : chunk.length;
       const slice = encoding ? StringPrototypeSlice : bufferSlice;
-      stderrLen += length;
+      const nextStderrLen = stderrLen + length;
 
-      if (stderrLen > execOptions.maxBuffer) {
-        const truncatedLen = execOptions.maxBuffer - (stderrLen - length);
+      if (nextStderrLen > execOptions.maxBuffer) {
+        if (!kill()) return;
+        const truncatedLen = execOptions.maxBuffer - stderrLen;
+        stderrLen = nextStderrLen;
         ArrayPrototypePush(_stderr, slice(chunk, 0, truncatedLen));
 
         ex = new ERR_CHILD_PROCESS_STDIO_MAXBUFFER("stderr");
-        kill();
       } else {
+        stderrLen = nextStderrLen;
         ArrayPrototypePush(_stderr, chunk);
       }
     });

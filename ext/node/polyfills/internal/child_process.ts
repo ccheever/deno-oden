@@ -957,7 +957,7 @@ class ChildProcess extends EventEmitter {
 
   [SymbolDispose]() {
     if (!this.killed) {
-      this.kill();
+      this.#killForCleanup("SIGTERM");
     }
   }
 

@@ -275,6 +275,7 @@ struct ChildResource {
   child: RefCell<AsyncChild>,
   pid: u32,
   kill_on_drop: Cell<bool>,
+  owner: deno_permissions::OdenResourceOwner,
 }
 
 impl Resource for ChildResource {
@@ -1109,7 +1110,14 @@ fn spawn_child(
     // Automatic cleanup is resource-owned and uses the retained process
     // handle. It is therefore distinct from an ambient process:signal effect.
     kill_on_drop: Cell::new(!detached),
+    owner: deno_permissions::OdenResourceOwner::capture(),
   });
+  state
+    .resource_table
+    .get::<ChildResource>(child_rid)
+    .map_err(ProcessError::Resource)?
+    .owner
+    .record_open(child_rid, "process:child");
 
   Ok(Child {
     rid: child_rid,
@@ -1179,7 +1187,14 @@ fn spawn_child_node(
     child: RefCell::new(child),
     pid,
     kill_on_drop: Cell::new(!detached),
+    owner: deno_permissions::OdenResourceOwner::capture(),
   });
+  state
+    .resource_table
+    .get::<ChildResource>(child_rid)
+    .map_err(ProcessError::Resource)?
+    .owner
+    .record_open(child_rid, "process:child");
 
   Ok(NodeChild {
     rid: child_rid,
@@ -1942,6 +1957,7 @@ fn op_spawn_kill_for_cleanup(
     if !signal.is_terminal_cleanup_signal() {
       return Err(ProcessError::InvalidChildCleanupSignal);
     }
+    child_resource.owner.check_deny_only(rid, "process:child")?;
     deprecated::kill(child_resource.pid as i32, &signal)?;
     return Ok(());
   }
