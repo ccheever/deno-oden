@@ -490,6 +490,218 @@ impl LibUvStreamWrap {
   }
 }
 
+#[cfg(test)]
+mod native_capsec_tests {
+  use std::path::Path;
+  use std::path::PathBuf;
+  use std::process::Command;
+  use std::process::Output;
+  use std::time::Duration;
+  use std::time::Instant;
+  use std::time::SystemTime;
+  use std::time::UNIX_EPOCH;
+
+  use deno_core::JsRuntime;
+  use deno_core::RuntimeOptions;
+  use deno_core::op2;
+
+  use super::*;
+
+  const NATIVE_STREAM_GUARD_CHILD: &str = "ODEN_NATIVE_STREAM_GUARD_CHILD";
+  const NATIVE_STREAM_GUARD_TEST: &str =
+    "protected_stream_read_start_native_guard_is_actor_and_tag_scoped";
+
+  struct NativeStreamTestRoot(PathBuf);
+
+  impl NativeStreamTestRoot {
+    fn new(mode: &str) -> Self {
+      let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+      let path = std::env::temp_dir()
+        .join(format!("oden-native-stream-{}-{nonce}", std::process::id()));
+      std::fs::create_dir_all(&path).unwrap();
+      std::fs::write(
+        path.join("policy.json"),
+        format!(
+          r#"{{"mode":"{mode}","grants":{{"allowed-native":"inspector:activate"}}}}"#
+        ),
+      )
+      .unwrap();
+      Self(path)
+    }
+  }
+
+  impl Drop for NativeStreamTestRoot {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn set_actor(root: &Path, relative: &str) {
+    let locator = deno_core::url::Url::from_file_path(root.join(relative))
+      .unwrap()
+      .to_string();
+    deno_permissions::prompter::set_current_oden_stacktrace(Box::new(|| {
+      Vec::new()
+    }));
+    deno_permissions::prompter::set_current_oden_cped_stack(None);
+    deno_permissions::prompter::set_current_oden_cped_locator(Some(locator));
+    deno_permissions::prompter::set_current_oden_trusted_host_actor(false);
+  }
+
+  fn run_native_stream_child(mut command: Command, root: &Path) -> Output {
+    let stdout_path = root.join("native-stream-child.stdout");
+    let stderr_path = root.join("native-stream-child.stderr");
+    command
+      .stdout(std::fs::File::create(&stdout_path).unwrap())
+      .stderr(std::fs::File::create(&stderr_path).unwrap());
+    let mut child = command.spawn().unwrap();
+    let started = Instant::now();
+    let timeout = Duration::from_secs(30);
+
+    loop {
+      if let Some(status) = child.try_wait().unwrap() {
+        return Output {
+          status,
+          stdout: std::fs::read(&stdout_path).unwrap(),
+          stderr: std::fs::read(&stderr_path).unwrap(),
+        };
+      }
+      if started.elapsed() >= timeout {
+        let _ = child.kill();
+        let status = child.wait().unwrap();
+        let stdout = std::fs::read(&stdout_path).unwrap();
+        let stderr = std::fs::read(&stderr_path).unwrap();
+        panic!(
+          "native stream guard child timed out after {timeout:?} ({status})\nstdout:\n{}\nstderr:\n{}",
+          String::from_utf8_lossy(&stdout),
+          String::from_utf8_lossy(&stderr),
+        );
+      }
+      std::thread::sleep(Duration::from_millis(10));
+    }
+  }
+
+  fn clear_native_stream_capsec_env(command: &mut Command) {
+    for (key, _) in std::env::vars_os() {
+      if key.to_string_lossy().starts_with("ODEN_CAPSEC_") {
+        command.env_remove(key);
+      }
+    }
+  }
+
+  #[op2]
+  #[cppgc]
+  fn op_native_test_stream(
+    state: &mut OpState,
+    tagged: bool,
+  ) -> LibUvStreamWrap {
+    let base = HandleWrap::create(
+      AsyncWrap::create(state, ProviderType::TcpWrap as i32),
+      None,
+    );
+    let wrap = LibUvStreamWrap::new(base, -1, std::ptr::null());
+    if tagged {
+      wrap
+        .handle_data
+        .network_peer
+        .set(Some("127.0.0.1:9229".parse().unwrap()));
+    }
+    wrap
+  }
+
+  deno_core::extension!(
+    native_stream_guard_test_ext,
+    ops = [op_native_test_stream],
+    objects = [super::AsyncWrap, super::HandleWrap, super::LibUvStreamWrap],
+    state = |state| {
+      state.put::<deno_core::uv_compat::AsyncId>(Default::default());
+    }
+  );
+
+  fn run_native_stream_guard_contract(root: &Path) {
+    let mut runtime = JsRuntime::new(RuntimeOptions {
+      extensions: vec![native_stream_guard_test_ext::init()],
+      ..Default::default()
+    });
+
+    set_actor(root, "main.ts");
+    runtime
+      .execute_script(
+        "file:///native_stream_guard_setup.js",
+        "globalThis.tagged = Deno.core.ops.op_native_test_stream(true);\n\
+         globalThis.ordinary = Deno.core.ops.op_native_test_stream(false);",
+      )
+      .unwrap();
+
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    runtime
+      .execute_script(
+        "file:///native_stream_guard_denied.js",
+        format!(
+          "{{ const result = tagged.readStart();\n\
+           if (result !== {UV_EACCES}) throw new Error(`expected UV_EACCES, got ${{result}}`); }}"
+        ),
+      )
+      .unwrap();
+
+    set_actor(root, "node_modules/allowed-native/index.cjs");
+    runtime
+      .execute_script(
+        "file:///native_stream_guard_allowed.js",
+        format!(
+          "{{ const result = tagged.readStart();\n\
+           if (result !== {UV_EBADF}) throw new Error(`expected guard pass-through to UV_EBADF, got ${{result}}`); }}"
+        ),
+      )
+      .unwrap();
+
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    runtime
+      .execute_script(
+        "file:///native_stream_guard_ordinary.js",
+        format!(
+          "{{ const result = ordinary.readStart();\n\
+           if (result !== {UV_EBADF}) throw new Error(`untagged stream was over-gated: ${{result}}`); }}"
+        ),
+      )
+      .unwrap();
+  }
+
+  // @ref LLP 0019#reachability-does-not-replace-operation-checks [tests] --
+  // Invoke the raw LibUvStreamWrap method so the JS Readable guard cannot hide
+  // removal of the native application-byte boundary.
+  #[test]
+  fn protected_stream_read_start_native_guard_is_actor_and_tag_scoped() {
+    if std::env::var_os(NATIVE_STREAM_GUARD_CHILD).is_some() {
+      let root = PathBuf::from(std::env::var_os("ODEN_CAPSEC_ROOT").unwrap());
+      run_native_stream_guard_contract(&root);
+      return;
+    }
+
+    for mode in ["permissive", "audit", "enforce"] {
+      let root = NativeStreamTestRoot::new(mode);
+      let mut command = Command::new(std::env::current_exe().unwrap());
+      clear_native_stream_capsec_env(&mut command);
+      command
+        .arg(NATIVE_STREAM_GUARD_TEST)
+        .args(["--nocapture", "--test-threads=1"])
+        .env(NATIVE_STREAM_GUARD_CHILD, "1")
+        .env("ODEN_CAPSEC_ROOT", &root.0)
+        .env("ODEN_CAPSEC_POLICY", root.0.join("policy.json"));
+      let output = run_native_stream_child(command, &root.0);
+      assert!(
+        output.status.success(),
+        "native stream guard child failed in {mode}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+      );
+    }
+  }
+}
+
 // SAFETY: LibUvStreamWrap is a cppgc-managed object; trace() correctly delegates to the base HandleWrap.
 unsafe impl GarbageCollected for LibUvStreamWrap {
   fn get_name(&self) -> &'static std::ffi::CStr {

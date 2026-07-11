@@ -4,11 +4,21 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
+use std::process::Output;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
+use deno_core::Resource;
 use deno_permissions::NetPermissionAction;
 use deno_permissions::Permissions;
 use deno_permissions::PermissionsContainer;
@@ -24,12 +34,14 @@ use http::header::HeaderValue;
 use http::header::RANGE;
 use http::header::TRANSFER_ENCODING;
 use http_body_util::BodyExt;
+use http_body_util::Full;
 use hyper_util::client::legacy::connect::dns::Name;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use super::CreateHttpClientOptions;
+use super::FetchResponseResource;
 use super::create_http_client;
 use crate::dns;
 
@@ -46,6 +58,173 @@ static BR_HELLO_FROM_SERVER: &[u8] = &[
 static EXAMPLE_CRT: &[u8] = include_bytes!("../tls/testdata/example1_cert.der");
 static EXAMPLE_KEY: &[u8] =
   include_bytes!("../tls/testdata/example1_prikey.der");
+
+const NATIVE_FETCH_GUARD_CHILD: &str = "ODEN_NATIVE_FETCH_GUARD_CHILD";
+const NATIVE_FETCH_GUARD_TEST: &str =
+  "fetch_response_native_read_guard_is_actor_and_tag_scoped";
+
+struct NativeFetchTestRoot(PathBuf);
+
+impl NativeFetchTestRoot {
+  fn new(mode: &str) -> Self {
+    let nonce = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    let path = std::env::temp_dir()
+      .join(format!("oden-native-fetch-{}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(
+      path.join("policy.json"),
+      format!(
+        r#"{{"mode":"{mode}","grants":{{"allowed-native":"inspector:activate"}}}}"#
+      ),
+    )
+    .unwrap();
+    Self(path)
+  }
+}
+
+impl Drop for NativeFetchTestRoot {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_dir_all(&self.0);
+  }
+}
+
+fn native_fetch_actor(root: &Path, package: &str) {
+  let locator = deno_core::url::Url::from_file_path(
+    root.join("node_modules").join(package).join("index.cjs"),
+  )
+  .unwrap()
+  .to_string();
+  deno_permissions::prompter::set_current_oden_stacktrace(Box::new(|| {
+    Vec::new()
+  }));
+  deno_permissions::prompter::set_current_oden_cped_stack(None);
+  deno_permissions::prompter::set_current_oden_cped_locator(Some(locator));
+  deno_permissions::prompter::set_current_oden_trusted_host_actor(false);
+}
+
+fn native_fetch_response(
+  bytes: &'static [u8],
+  network_peer: Option<SocketAddr>,
+) -> Rc<FetchResponseResource> {
+  let body = Full::new(Bytes::from_static(bytes))
+    .map_err(|never| match never {})
+    .boxed();
+  let response = http::Response::builder().body(body).unwrap();
+  Rc::new(FetchResponseResource::new(
+    response,
+    Some(bytes.len() as u64),
+    network_peer,
+  ))
+}
+
+fn run_native_fetch_child(mut command: Command, root: &Path) -> Output {
+  let stdout_path = root.join("native-fetch-child.stdout");
+  let stderr_path = root.join("native-fetch-child.stderr");
+  command
+    .stdout(std::fs::File::create(&stdout_path).unwrap())
+    .stderr(std::fs::File::create(&stderr_path).unwrap());
+  let mut child = command.spawn().unwrap();
+  let started = Instant::now();
+  let timeout = Duration::from_secs(30);
+
+  loop {
+    if let Some(status) = child.try_wait().unwrap() {
+      return Output {
+        status,
+        stdout: std::fs::read(&stdout_path).unwrap(),
+        stderr: std::fs::read(&stderr_path).unwrap(),
+      };
+    }
+    if started.elapsed() >= timeout {
+      let _ = child.kill();
+      let status = child.wait().unwrap();
+      let stdout = std::fs::read(&stdout_path).unwrap();
+      let stderr = std::fs::read(&stderr_path).unwrap();
+      panic!(
+        "native fetch guard child timed out after {timeout:?} ({status})\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr),
+      );
+    }
+    std::thread::sleep(Duration::from_millis(10));
+  }
+}
+
+fn clear_native_fetch_capsec_env(command: &mut Command) {
+  for (key, _) in std::env::vars_os() {
+    if key.to_string_lossy().starts_with("ODEN_CAPSEC_") {
+      command.env_remove(key);
+    }
+  }
+}
+
+async fn run_native_fetch_guard_contract(root: &Path) {
+  const BODY: &[u8] = b"native-fetch-body";
+  let peer: SocketAddr = "127.0.0.1:9229".parse().unwrap();
+  let protected = native_fetch_response(BODY, Some(peer));
+
+  native_fetch_actor(root, "denied-native");
+  let error = protected.clone().read(BODY.len()).await.unwrap_err();
+  let message = error.to_string();
+  assert!(
+    message.contains("protected-inspector-stream:127.0.0.1:9229")
+      && message.contains("requires an exact static inspector:activate row"),
+    "native fetch denial used the wrong boundary: {message}"
+  );
+
+  // The native guard runs before borrowing or consuming the response body.
+  // The exact static package row can therefore authorize the same retained
+  // resource after the denied actor has failed.
+  native_fetch_actor(root, "allowed-native");
+  let bytes = protected.read(BODY.len()).await.unwrap();
+  assert_eq!(&*bytes, BODY);
+
+  // A constrained package may still consume an ordinary, untagged response;
+  // the terminal inspector predicate is scoped to protected resources.
+  native_fetch_actor(root, "denied-native");
+  let ordinary = native_fetch_response(BODY, None);
+  let bytes = ordinary.read(BODY.len()).await.unwrap();
+  assert_eq!(&*bytes, BODY);
+}
+
+// @ref LLP 0019#reachability-does-not-replace-operation-checks [tests] --
+// Exercise FetchResponseResource::read directly so its native guard remains
+// load-bearing even though Web ReadableStream consumption also rechecks it.
+#[test]
+fn fetch_response_native_read_guard_is_actor_and_tag_scoped() {
+  if std::env::var_os(NATIVE_FETCH_GUARD_CHILD).is_some() {
+    tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap()
+      .block_on(run_native_fetch_guard_contract(Path::new(
+        &std::env::var_os("ODEN_CAPSEC_ROOT").unwrap(),
+      )));
+    return;
+  }
+
+  for mode in ["permissive", "audit", "enforce"] {
+    let root = NativeFetchTestRoot::new(mode);
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    clear_native_fetch_capsec_env(&mut command);
+    command
+      .arg(NATIVE_FETCH_GUARD_TEST)
+      .args(["--nocapture", "--test-threads=1"])
+      .env(NATIVE_FETCH_GUARD_CHILD, "1")
+      .env("ODEN_CAPSEC_ROOT", &root.0)
+      .env("ODEN_CAPSEC_POLICY", root.0.join("policy.json"));
+    let output = run_native_fetch_child(command, &root.0);
+    assert!(
+      output.status.success(),
+      "native fetch guard child failed in {mode}\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr),
+    );
+  }
+}
 
 #[test]
 fn test_userspace_resolver() {

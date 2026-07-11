@@ -1231,3 +1231,300 @@ fn build_report<'s>(
   wrapper.set(scope, k.into(), arr.into());
   wrapper
 }
+
+#[cfg(test)]
+mod native_capsec_tests {
+  use std::path::Path;
+  use std::path::PathBuf;
+  use std::process::Command;
+  use std::process::Output;
+  use std::sync::Arc;
+  use std::time::Duration;
+  use std::time::Instant;
+  use std::time::SystemTime;
+  use std::time::UNIX_EPOCH;
+
+  use deno_core::JsRuntime;
+  use deno_core::RuntimeOptions;
+  use deno_permissions::Permissions;
+  use deno_permissions::PermissionsContainer;
+  use deno_permissions::PermissionsOptions;
+  use deno_permissions::RuntimePermissionDescriptorParser;
+
+  use super::*;
+
+  const NATIVE_V8_GUARD_CHILD: &str = "ODEN_NATIVE_V8_GUARD_CHILD";
+  const NATIVE_V8_GUARD_TEST: &str = "native_v8_ops_recheck_actor_before_work";
+
+  struct NativeV8TestRoot(PathBuf);
+
+  impl NativeV8TestRoot {
+    fn new(mode: &str) -> Self {
+      let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+      let path = std::env::temp_dir()
+        .join(format!("oden-native-v8-{}-{nonce}", std::process::id()));
+      std::fs::create_dir_all(&path).unwrap();
+      std::fs::write(
+        path.join("policy.json"),
+        format!(r#"{{"mode":"{mode}","grants":{{}}}}"#),
+      )
+      .unwrap();
+      Self(path)
+    }
+  }
+
+  impl Drop for NativeV8TestRoot {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn set_actor(root: &Path, relative: &str) {
+    let locator = deno_core::url::Url::from_file_path(root.join(relative))
+      .unwrap()
+      .to_string();
+    deno_permissions::prompter::set_current_oden_stacktrace(Box::new(|| {
+      Vec::new()
+    }));
+    deno_permissions::prompter::set_current_oden_cped_stack(None);
+    deno_permissions::prompter::set_current_oden_cped_locator(Some(locator));
+    deno_permissions::prompter::set_current_oden_trusted_host_actor(false);
+  }
+
+  fn run_native_v8_child(mut command: Command, root: &Path) -> Output {
+    let stdout_path = root.join("native-v8-child.stdout");
+    let stderr_path = root.join("native-v8-child.stderr");
+    command
+      .stdout(std::fs::File::create(&stdout_path).unwrap())
+      .stderr(std::fs::File::create(&stderr_path).unwrap());
+    let mut child = command.spawn().unwrap();
+    let started = Instant::now();
+    let timeout = Duration::from_secs(120);
+
+    loop {
+      if let Some(status) = child.try_wait().unwrap() {
+        return Output {
+          status,
+          stdout: std::fs::read(&stdout_path).unwrap(),
+          stderr: std::fs::read(&stderr_path).unwrap(),
+        };
+      }
+      if started.elapsed() >= timeout {
+        let _ = child.kill();
+        let status = child.wait().unwrap();
+        let stdout = std::fs::read(&stdout_path).unwrap();
+        let stderr = std::fs::read(&stderr_path).unwrap();
+        panic!(
+          "native V8 guard child timed out after {timeout:?} ({status})\nstdout:\n{}\nstderr:\n{}",
+          String::from_utf8_lossy(&stdout),
+          String::from_utf8_lossy(&stderr),
+        );
+      }
+      std::thread::sleep(Duration::from_millis(10));
+    }
+  }
+
+  fn clear_native_v8_capsec_env(command: &mut Command) {
+    for (key, _) in std::env::vars_os() {
+      if key.to_string_lossy().starts_with("ODEN_CAPSEC_") {
+        command.env_remove(key);
+      }
+    }
+  }
+
+  fn native_test_permissions() -> PermissionsContainer {
+    let parser =
+      RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+    let permissions = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_write: Some(vec![]),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    PermissionsContainer::new(Arc::new(parser), permissions)
+  }
+
+  deno_core::extension!(
+    native_v8_guard_test_ext,
+    ops = [
+      super::op_v8_set_flags_from_string,
+      super::op_v8_take_heap_snapshot,
+      super::op_v8_set_heap_snapshot_near_heap_limit,
+      super::op_v8_query_objects_count,
+      super::op_v8_gc_profiler_new,
+      super::op_v8_gc_profiler_start,
+      super::op_v8_gc_profiler_stop,
+    ],
+    state = |state| {
+      state.put::<PermissionsContainer>(native_test_permissions());
+    }
+  );
+
+  fn execute(runtime: &mut JsRuntime, name: &'static str, source: String) {
+    runtime.execute_script(name, source).unwrap();
+  }
+
+  fn run_native_v8_guard_contract(root: &Path, mode: &str) {
+    EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _tokio_guard = tokio_runtime.enter();
+    let mut runtime = JsRuntime::new(RuntimeOptions {
+      extensions: vec![native_v8_guard_test_ext::init()],
+      ..Default::default()
+    });
+
+    // Create the two handles under ambient root. Package attempts below must
+    // neither start the first nor consume the already-started second handle.
+    set_actor(root, "main.ts");
+    execute(
+      &mut runtime,
+      "file:///native_v8_guard_setup.js",
+      r#"
+      {
+        const ops = Deno.core.ops;
+        globalThis.startHandle = ops.op_v8_gc_profiler_new();
+        globalThis.stopHandle = ops.op_v8_gc_profiler_new();
+        ops.op_v8_gc_profiler_start(stopHandle);
+      }
+      "#
+      .to_string(),
+    );
+
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    execute(
+      &mut runtime,
+      "file:///native_v8_guard_denied.js",
+      r#"
+      {
+        const ops = Deno.core.ops;
+        function expectDenied(name, target, operation) {
+          try {
+            operation();
+          } catch (error) {
+            const message = String(error);
+            const expected = `deny-only runtime:inspect:${target}`;
+            if (!message.includes(expected)) {
+              throw new Error(`${name} failed at the wrong boundary: ${message}`);
+            }
+            return;
+          }
+          throw new Error(`${name} reached native work`);
+        }
+        expectDenied("op_v8_set_flags_from_string", "v8:set-flags", () =>
+          ops.op_v8_set_flags_from_string("--expose-gc"));
+        expectDenied("op_v8_take_heap_snapshot", "v8:heap-snapshot", () =>
+          ops.op_v8_take_heap_snapshot());
+        expectDenied(
+          "op_v8_set_heap_snapshot_near_heap_limit",
+          "v8:near-heap-limit-snapshot",
+          () => ops.op_v8_set_heap_snapshot_near_heap_limit(0),
+        );
+        expectDenied("op_v8_query_objects_count", "v8:query-objects", () =>
+          ops.op_v8_query_objects_count("Object"));
+        expectDenied("op_v8_gc_profiler_new", "v8:gc-profiler", () =>
+          ops.op_v8_gc_profiler_new());
+        expectDenied("op_v8_gc_profiler_start", "v8:gc-profiler-start", () =>
+          ops.op_v8_gc_profiler_start(startHandle));
+        expectDenied("op_v8_gc_profiler_stop", "v8:gc-profiler-stop", () =>
+          ops.op_v8_gc_profiler_stop(stopHandle));
+      }
+      "#
+      .to_string(),
+    );
+    assert!(
+      !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+      "denied native flag mutation reached shared V8 state in {mode}"
+    );
+
+    set_actor(root, "main.ts");
+    execute(
+      &mut runtime,
+      "file:///native_v8_guard_continuity.js",
+      r#"
+      {
+        const ops = Deno.core.ops;
+        ops.op_v8_gc_profiler_start(startHandle);
+        const startReport = ops.op_v8_gc_profiler_stop(startHandle);
+        const stopReport = ops.op_v8_gc_profiler_stop(stopHandle);
+        if (startReport === null || stopReport === null) {
+          throw new Error("denied GC profiler operation mutated its native handle");
+        }
+      }
+      "#
+      .to_string(),
+    );
+
+    // One mode also proves that every raw native op remains usable by the
+    // ambient runtime. The other two children focus on mutation-sensitive
+    // package denial without paying for repeated heap snapshots.
+    if mode == "audit" {
+      execute(
+        &mut runtime,
+        "file:///native_v8_guard_positive.js",
+        r#"
+        {
+          const ops = Deno.core.ops;
+          ops.op_v8_set_flags_from_string("--expose-gc");
+          const snapshot = ops.op_v8_take_heap_snapshot();
+          if (snapshot.byteLength === 0) throw new Error("empty heap snapshot");
+          const count = ops.op_v8_query_objects_count("Object");
+          if (!Number.isInteger(count)) throw new Error("invalid object count");
+          const handle = ops.op_v8_gc_profiler_new();
+          ops.op_v8_gc_profiler_start(handle);
+          if (ops.op_v8_gc_profiler_stop(handle) === null) {
+            throw new Error("GC profiler positive control returned null");
+          }
+          ops.op_v8_set_heap_snapshot_near_heap_limit(0);
+          ops.op_v8_set_flags_from_string("--no-expose-gc");
+        }
+        "#
+        .to_string(),
+      );
+      assert!(
+        !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+        "root positive control failed to restore the shared V8 flag"
+      );
+    }
+  }
+
+  // @ref LLP 0019#runtime-and-memory-inspection [tests] -- Register only the
+  // raw native ops in a test runtime so the node:v8 guardV8 wrapper cannot
+  // mask removal or reordering of any native deny-only boundary.
+  #[test]
+  fn native_v8_ops_recheck_actor_before_work() {
+    if std::env::var_os(NATIVE_V8_GUARD_CHILD).is_some() {
+      let root = PathBuf::from(std::env::var_os("ODEN_CAPSEC_ROOT").unwrap());
+      let mode = std::env::var("ODEN_NATIVE_V8_GUARD_MODE").unwrap();
+      run_native_v8_guard_contract(&root, &mode);
+      return;
+    }
+
+    for mode in ["permissive", "audit", "enforce"] {
+      let root = NativeV8TestRoot::new(mode);
+      let mut command = Command::new(std::env::current_exe().unwrap());
+      clear_native_v8_capsec_env(&mut command);
+      command
+        .arg(NATIVE_V8_GUARD_TEST)
+        .args(["--nocapture", "--test-threads=1"])
+        .env(NATIVE_V8_GUARD_CHILD, "1")
+        .env("ODEN_NATIVE_V8_GUARD_MODE", mode)
+        .env("ODEN_CAPSEC_ROOT", &root.0)
+        .env("ODEN_CAPSEC_POLICY", root.0.join("policy.json"));
+      let output = run_native_v8_child(command, &root.0);
+      assert!(
+        output.status.success(),
+        "native V8 guard child failed in {mode}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+      );
+    }
+  }
+}
