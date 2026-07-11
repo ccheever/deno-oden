@@ -15,6 +15,15 @@ async function probe(policy, programmatic = false) {
     stdout: "piped",
     stderr: "piped",
   }).spawn();
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // The child may have exited on the timeout boundary.
+    }
+  }, 3_000);
   const reader = child.stdout.getReader();
   const decoder = new TextDecoder();
   let stdout = "";
@@ -23,7 +32,12 @@ async function probe(policy, programmatic = false) {
     if (chunk.done) break;
     stdout += decoder.decode(chunk.value, { stream: true });
   }
+  if (timedOut) {
+    await child.status;
+    return "HUNG";
+  }
   if (!stdout.includes("READY\n")) {
+    clearTimeout(timeoutId);
     throw new Error("child exited before readiness");
   }
   if (!programmatic) Deno.kill(child.pid, "SIGUSR1");
@@ -34,6 +48,8 @@ async function probe(policy, programmatic = false) {
   }
   stdout += decoder.decode();
   const status = await child.status;
+  clearTimeout(timeoutId);
+  if (timedOut) return "HUNG";
   return { success: status.success, open: stdout.includes("INSPECTOR=OPEN") };
 }
 

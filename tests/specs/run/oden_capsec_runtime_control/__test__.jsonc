@@ -44,6 +44,16 @@
       "output": "startup_driver.out",
       "exitCode": 0
     },
+    "startup_variants_and_node_options_have_explicit_outcomes": {
+      "args": "run --allow-all startup_variants_driver.js",
+      "output": "startup_variants_driver.out",
+      "exitCode": 0
+    },
+    "nonlaunchable_startup_routes_have_distinct_source_evidence": {
+      "args": "run --allow-read startup_route_evidence.js",
+      "output": "startup_route_evidence.out",
+      "exitCode": 0
+    },
     "host_signal_requires_exact_root_row": {
       "args": "run --allow-all signal_driver.js",
       "if": "unix",
@@ -53,6 +63,16 @@
     "protected_inspector_endpoint_is_nondelegable": {
       "args": "run --allow-all endpoint_driver.js",
       "output": "endpoint_driver.out",
+      "exitCode": 0
+    },
+    "structural_endpoint_guards_have_scoped_source_evidence": {
+      "args": "run --allow-read endpoint_route_evidence.js",
+      "output": "endpoint_route_evidence.out",
+      "exitCode": 0
+    },
+    "trusted_runtime_tooling_emits_exact_guard_audits": {
+      "args": "run --allow-all trusted_tooling_driver.js",
+      "output": "trusted_tooling_driver.out",
       "exitCode": 0
     }
   }

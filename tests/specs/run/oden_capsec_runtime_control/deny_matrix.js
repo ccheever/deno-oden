@@ -16,6 +16,7 @@ const rootExceptionListener = () => exceptionCount++;
 let processSignalCount = 0;
 const rootProcessSignalListener = () => processSignalCount++;
 const rootResizeListener = () => {};
+const rootMetaListener = () => {};
 Deno.addSignalListener("SIGUSR2", existingRootListener);
 const rootChild = spawn(Deno.execPath(), [
   "eval",
@@ -39,6 +40,8 @@ const rootDenoStatus = rootDenoChild.status.then((status) => {
 });
 process.on("uncaughtException", rootExceptionListener);
 process.on("SIGUSR2", rootProcessSignalListener);
+process.on("newListener", rootMetaListener);
+const artifactDir = Deno.makeTempDirSync({ prefix: "oden-runtime-control-" });
 
 try {
   let asyncHookInitCount = 0;
@@ -51,6 +54,7 @@ try {
   let rootChannelPublishes = 0;
   const rootChannelSubscriber = () => rootChannelPublishes++;
   rootChannel.subscribe(rootChannelSubscriber);
+  const rootChannelStore = new asyncHooks.AsyncLocalStorage();
   const rootInactiveChannel = diagnostics.channel("oden-stage-b-inactive");
   const consoleChannel = diagnostics.channel("console.log");
   let internalPublishes = 0;
@@ -74,12 +78,18 @@ try {
   if (rootStdoutIsTTY) process.stdout.on("resize", rootResizeListener);
   const result = await probe.run({
     cwd: Deno.cwd(),
+    artifactDir,
     umask: process.umask(),
-    identity: typeof process.geteuid === "function" ? process.geteuid() : null,
+    egid: typeof process.getegid === "function" ? process.getegid() : null,
+    euid: typeof process.geteuid === "function" ? process.geteuid() : null,
+    gid: typeof process.getgid === "function" ? process.getgid() : null,
+    uid: typeof process.getuid === "function" ? process.getuid() : null,
     priority: os.getPriority(process.pid),
     title: process.title,
     rootHook,
     rootChannel,
+    rootChannelStore,
+    rootChannelSubscriber,
     rootChild,
     rootExecChild,
     rootDenoChild,
@@ -92,8 +102,11 @@ try {
     rootGcProfilerDispose,
     rootFatalException,
     rootExceptionListener,
+    rootMetaListener,
     rootProcessSignalListener,
+    rootSignalListener: existingRootListener,
     inspectorConsole: inspector.console,
+    inspectorConsoleLog: inspector.console.log,
     rootResizeListener,
   });
 
@@ -123,6 +136,9 @@ try {
   rootChannel.publish({ root: true });
   result.diagnosticsUnchanged = result.diagnosticsPublishLaunder === "DENIED" &&
       result.diagnosticsRunStoresLaunder === "DENIED" &&
+      result.diagnosticsUnsubscribeLaunder === "DENIED" &&
+      result.diagnosticsBindStoreLaunder === "DENIED" &&
+      result.diagnosticsUnbindStoreLaunder === "DENIED" &&
       result.diagnosticsBackingRead === "ALLOWED" &&
       result.diagnosticsBackingWrite === "ALLOWED" &&
       rootChannel.hasSubscribers && rootChannelPublishes === 1 &&
@@ -157,6 +173,11 @@ try {
       result.inspectorConsoleDefine === "DENIED" &&
       result.inspectorConsoleDelete === "DENIED" &&
       result.inspectorConsolePrototype === "DENIED" &&
+      result.inspectorConsoleCall === "DENIED" &&
+      result.inspectorConsoleHas === "DENIED" &&
+      result.inspectorConsoleSetPrototype === "DENIED" &&
+      result.inspectorConsoleIsExtensible === "DENIED" &&
+      result.inspectorConsolePreventExtensions === "DENIED" &&
       typeof inspector.console.log === "function"
     ? "DENIED"
     : "LEAKED";
@@ -165,9 +186,15 @@ try {
     new Error("root state-integrity check"),
     "uncaughtException",
   );
+  result.processExceptionRootListenerCount = process.listenerCount(
+    "uncaughtException",
+    rootExceptionListener,
+  );
+  result.processExceptionRootEmissionCount = exceptionCount;
   result.processExceptionUnchanged = result.processExceptionOn === "DENIED" &&
       result.processExceptionOnce === "DENIED" &&
       result.processExceptionPrepend === "DENIED" &&
+      result.processExceptionPrependOnce === "DENIED" &&
       result.processExceptionRemove === "DENIED" &&
       result.processExceptionRemoveAll === "DENIED" &&
       result.processExceptionEmit === "DENIED" &&
@@ -177,8 +204,11 @@ try {
       result.processExceptionEventsOwnKeys === "DENIED" &&
       result.processExceptionEventsDescriptor === "DENIED" &&
       result.processEventsReplace === "DENIED" &&
-      process.listenerCount("uncaughtException", rootExceptionListener) === 1 &&
-      exceptionCount === 1
+      result.processExceptionAddListener === "DENIED" &&
+      result.processExceptionListenerCount === "DENIED" &&
+      result.processExceptionRawListeners === "DENIED" &&
+      result.processExceptionRootListenerCount === 1 &&
+      result.processExceptionRootEmissionCount === 1
     ? "DENIED"
     : "LEAKED";
   result.processSignalUnchanged = result.processSignalOn === "DENIED" &&
@@ -190,6 +220,9 @@ try {
       result.processSignalEventsRead === "DENIED" &&
       result.processSignalEventsDescriptor === "DENIED" &&
       result.processSignalEventsWrite === "DENIED" &&
+      result.processSignalAddListener === "DENIED" &&
+      result.processSignalListenerCount === "DENIED" &&
+      result.processSignalRawListeners === "DENIED" &&
       process.listenerCount("SIGUSR2", rootProcessSignalListener) === 1 &&
       processSignalCount === 1
     ? "DENIED"
@@ -199,6 +232,11 @@ try {
       result.processMetaEventsRead === "DENIED" &&
       result.processMetaEventsDescriptor === "DENIED" &&
       result.processMetaBorrowedOn === "DENIED" &&
+      result.processMetaOff === "DENIED" &&
+      result.processMetaOnce === "DENIED" &&
+      result.processMetaPrepend === "DENIED" &&
+      result.processMetaPrependOnce === "DENIED" &&
+      result.processMetaRemoveAll === "DENIED" &&
       result.processOrdinaryEvent === "ALLOWED"
     ? "DENIED"
     : "LEAKED";
@@ -234,13 +272,19 @@ try {
   await rootDenoStatus;
   process.removeListener("uncaughtException", rootExceptionListener);
   process.removeListener("SIGUSR2", rootProcessSignalListener);
+  process.removeListener("newListener", rootMetaListener);
   if (process.stdout.isTTY === true) {
     process.stdout.removeListener("resize", rootResizeListener);
   }
-  Deno.removeSignalListener("SIGUSR2", existingRootListener);
+  try {
+    Deno.removeSignalListener("SIGUSR2", existingRootListener);
+  } catch {
+    // A guard regression may already have removed it; the result records that.
+  }
   try {
     Deno.removeSignalListener("SIGHUP", laterRootListener);
   } catch {
     // The root registration may have failed for a platform-specific reason.
   }
+  await Deno.remove(artifactDir, { recursive: true });
 }
