@@ -857,7 +857,11 @@ fn send_binary(
   Ok(())
 }
 
-#[op2]
+// WebSocket resource sends and receives are principal-sensitive. Capture the
+// live caller at every entry rather than falling through to a stale scheduler
+// or the no-user sentinel.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+#[op2(stack_trace)]
 pub fn op_ws_send_binary(
   state: &mut OpState,
   #[smi] rid: ResourceId,
@@ -866,7 +870,7 @@ pub fn op_ws_send_binary(
   send_binary(state, rid, data)
 }
 
-#[op2(fast)]
+#[op2(fast, stack_trace)]
 pub fn op_ws_send_binary_ab(
   state: &mut OpState,
   #[smi] rid: ResourceId,
@@ -875,7 +879,7 @@ pub fn op_ws_send_binary_ab(
   send_binary(state, rid, data)
 }
 
-#[op2(fast)]
+#[op2(fast, stack_trace)]
 pub fn op_ws_send_text(
   state: &mut OpState,
   #[smi] rid: ResourceId,
@@ -906,7 +910,7 @@ pub fn op_ws_send_text(
 }
 
 /// Async version of send. Does not update buffered amount as we rely on the socket itself for backpressure.
-#[op2]
+#[op2(stack_trace)]
 pub async fn op_ws_send_binary_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -928,7 +932,7 @@ pub async fn op_ws_send_binary_async(
 }
 
 /// Async version of send. Does not update buffered amount as we rely on the socket itself for backpressure.
-#[op2]
+#[op2(stack_trace)]
 pub async fn op_ws_send_text_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -964,7 +968,7 @@ pub fn op_ws_get_buffered_amount(
     .get() as u32
 }
 
-#[op2]
+#[op2(stack_trace)]
 pub async fn op_ws_send_ping(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -1048,7 +1052,7 @@ pub fn op_ws_get_error(state: &mut OpState, #[smi] rid: ResourceId) -> String {
   resource.error.take().unwrap_or_default()
 }
 
-#[op2]
+#[op2(stack_trace)]
 pub async fn op_ws_next_event(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
