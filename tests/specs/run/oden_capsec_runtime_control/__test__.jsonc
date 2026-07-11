@@ -16,7 +16,12 @@
         "ODEN_CHILD_SAFE_SENTINEL": "safe",
         "ODEN_CAPSEC_CHILD_SENTINEL": "must-not-leak",
         "NODE_OPTIONS": "--trace-warnings",
-        "DENO_NODE_USE_OPENSSL_CA": "1"
+        "DENO_NODE_USE_OPENSSL_CA": "1",
+        // Cargo injects platform loader paths into its test subprocesses. An
+        // inherited loader path intentionally requires unrestricted run
+        // permission, while this fixture exercises scoped run grants.
+        "DYLD_FALLBACK_LIBRARY_PATH": "",
+        "LD_LIBRARY_PATH": ""
       },
       "output": "deny_matrix.out",
       "exitCode": 0
