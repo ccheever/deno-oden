@@ -8,6 +8,8 @@ const {
   ArrayPrototypePop,
   ArrayPrototypePush,
   ArrayPrototypeSplice,
+  PromisePrototypeThen,
+  PromiseResolve,
   ReflectApply,
   SafeWeakSet,
   SafeWeakMap,
@@ -635,6 +637,19 @@ function runCapturedCleanup(captured, receiver, args) {
   return runCapturedCallback(captured, receiver, args);
 }
 
+function runCapturedCleanupResult(captured, receiver, args, project) {
+  const invoke = () =>
+    project(invokeCapturedCallback(captured, receiver, args));
+  if (captured.context === undefined) return invoke();
+  const previous = core.getAsyncContext();
+  core.setAsyncContext(captured.context);
+  try {
+    return invoke();
+  } finally {
+    core.setAsyncContext(previous);
+  }
+}
+
 function runIterableDelivery(target, captured, receiver, args) {
   return hasStreamUseGuard(target)
     ? runCapturedDelivery(target, captured, receiver, args)
@@ -686,6 +701,24 @@ function wrapIterableDelivery(iterable, recipient) {
     deliveryAdmission ??= createStreamUseAdmission(wrapper, seedActor);
     return runWithStreamUseAdmission(wrapper, deliveryAdmission, callback);
   };
+  // Async iterator fulfillment is a delivery boundary of the original
+  // operation, so its captured actor must re-enter every live constituent
+  // guard after the producer settles and before the result becomes observable.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  const settleDeliveryOperation = (result) =>
+    PromisePrototypeThen(
+      PromiseResolve(result),
+      (value) =>
+        runWithStreamUseAdmissionRecheck(
+          wrapper,
+          deliveryAdmission,
+          () => value,
+        ),
+    );
+  const normalizedCleanupResult = () => ({
+    done: true,
+    value: undefined,
+  });
 
   wrapper[iteratorSymbol] = function deliveryIteratorFactory() {
     const factoryAdmission = createStreamUseAdmission(wrapper, seedActor);
@@ -715,7 +748,7 @@ function wrapIterableDelivery(iterable, recipient) {
       const capturedNext = captureIterableCallback(next, next);
       const wrappedIterator = {
         next(value) {
-          return runDeliveryOperation(() =>
+          const result = runDeliveryOperation(() =>
             runIterableDelivery(
               wrapper,
               capturedNext,
@@ -723,6 +756,9 @@ function wrapIterableDelivery(iterable, recipient) {
               [value],
             )
           );
+          return iteratorSymbol === SymbolAsyncIterator
+            ? settleDeliveryOperation(result)
+            : result;
         },
       };
 
@@ -732,7 +768,22 @@ function wrapIterableDelivery(iterable, recipient) {
           iteratorReturn,
         );
         wrappedIterator.return = function (value) {
-          return runCapturedCleanup(capturedReturn, iterator, [value]);
+          // `return` is a teardown request, not a delivery authorization. Run
+          // the producer's cleanup in its captured CPED, propagate failure,
+          // and discard every producer-controlled result value.
+          // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+          return runCapturedCleanupResult(
+            capturedReturn,
+            iterator,
+            [value],
+            (result) =>
+              iteratorSymbol === SymbolAsyncIterator
+                ? PromisePrototypeThen(
+                  PromiseResolve(result),
+                  normalizedCleanupResult,
+                )
+                : normalizedCleanupResult(),
+          );
         };
       }
 
@@ -742,7 +793,7 @@ function wrapIterableDelivery(iterable, recipient) {
           iteratorThrow,
         );
         wrappedIterator.throw = function (error) {
-          return runDeliveryOperation(() =>
+          const result = runDeliveryOperation(() =>
             runIterableDelivery(
               wrapper,
               capturedThrow,
@@ -750,6 +801,9 @@ function wrapIterableDelivery(iterable, recipient) {
               [error],
             )
           );
+          return iteratorSymbol === SymbolAsyncIterator
+            ? settleDeliveryOperation(result)
+            : result;
         };
       }
 
