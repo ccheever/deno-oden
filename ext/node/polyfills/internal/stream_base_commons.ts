@@ -101,7 +101,7 @@ function registerProtectedStreamBinding(
   push,
   stop,
   destroy,
-  read,
+  finish,
   updateTimer,
   writes,
   afterAsyncWrite,
@@ -114,7 +114,7 @@ function registerProtectedStreamBinding(
     push,
     stop,
     destroy,
-    read,
+    finish,
     updateTimer,
     writes,
     afterAsyncWrite,
@@ -560,8 +560,7 @@ function onStreamRead(
     // captured push/read implementations, and no reflected kMaybeDestroy
     // lookup that package code could replace before the native callback.
     if (!protectedBinding.isEndEmitted()) {
-      protectedBinding.push(stream, null);
-      protectedBinding.read();
+      protectedBinding.finish();
     }
     return;
   }

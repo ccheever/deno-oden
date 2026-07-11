@@ -50,7 +50,7 @@ try {
   const zero = Object.values(snapshot.counters).every((value) => value === 0);
   console.log(JSON.stringify({
     passedNodeNativePreloadPoison: response.includes("webSocketDebuggerUrl") &&
-        snapshot.tcpMutationRejected && zero
+        snapshot.tcpSurfaceBlocked && zero
       ? "DENIED"
       : "BROKEN",
   }));

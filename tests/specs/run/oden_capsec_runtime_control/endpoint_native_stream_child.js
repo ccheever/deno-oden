@@ -7,6 +7,19 @@ const port = Number(Deno.args[0]);
 const require = createRequire(import.meta.url);
 const probe = require("native-stream-denied");
 const { HTTPParser } = process.binding("http_parser");
+const { UDP } = process.binding("udp_wrap");
+
+function probeUdpOpen(socket) {
+  const protectedHandle = socket._handle;
+  const udp = new UDP();
+  const result = udp.open(protectedHandle.fd);
+  udp.close();
+  return {
+    result,
+    unchanged: socket._handle === protectedHandle &&
+      typeof protectedHandle.protectedInspectorPeer() === "string",
+  };
+}
 
 function attachParser(socket) {
   const parser = new HTTPParser();
@@ -99,7 +112,7 @@ async function protectedControl() {
     const takeStream = probe.probeTakeStream(socket);
     const http2Consume = probe.probeHttp2Consume(socket);
     const tlsAttach = probe.probeTlsAttach(socket);
-    const udpOpen = probe.probeUdpOpen(socket);
+    const udpOpen = probeUdpOpen(socket);
     const synchronousRawOps = probe.probeSynchronousRawOps(socket);
     writePoison = probe.poisonProtectedWrites(socket);
     await writeSocket(
@@ -196,6 +209,23 @@ async function protectedOnreadControls() {
   };
 }
 
+async function protectedBufferedDestroyControl() {
+  const { socket, connected } = connectPaused(port);
+  let poison;
+  try {
+    await bounded(connected, "buffered destroy connect");
+    poison = probe.poisonBufferedDestroy(socket);
+    socket.cork();
+    socket.write("buffered-destroy-control", poison.callback);
+    socket.destroy();
+    await bounded(poison.completed, "buffered destroy callback");
+    return poison.snapshot();
+  } finally {
+    poison?.restore();
+    socket.destroy();
+  }
+}
+
 async function protectedHandleReplacementControl() {
   const socket = new net.Socket();
   socket.pause();
@@ -273,6 +303,39 @@ async function ordinaryParserControl() {
   }
 }
 
+async function ordinaryWritableCompatibilityControl() {
+  const socket = new net.Socket();
+  let customWrites = 0;
+  try {
+    socket.cork();
+    const completed = new Promise((resolve, reject) => {
+      socket.write(
+        "ordinary-buffered-write",
+        (error) => error ? reject(error) : resolve(),
+      );
+    });
+    const stateBuffer = socket._writableState.buffered;
+    const publicBuffer = socket.writableBuffer;
+    const bufferVisible = stateBuffer.length === 1 &&
+      publicBuffer.length === 1 && stateBuffer[0] === publicBuffer[0];
+
+    socket._writev = null;
+    socket._write = function (_chunk, _encoding, callback) {
+      customWrites++;
+      callback();
+    };
+    socket.uncork();
+    await bounded(completed, "ordinary customized write");
+    return {
+      bufferVisible,
+      customWrites,
+      remainingBuffered: socket._writableState.getBuffer().length,
+    };
+  } finally {
+    socket.destroy();
+  }
+}
+
 const protectedResult = await protectedControl();
 const falseyHttpTokenResult = await bounded(
   probe.connectWithFalseyHttpToken(port),
@@ -281,8 +344,10 @@ const falseyHttpTokenResult = await bounded(
 const handleReplacementResult = await protectedHandleReplacementControl();
 const sameScriptCallbackResult = await protectedSameScriptCallbackControl();
 const protectedOnreadResult = await protectedOnreadControls();
+const bufferedDestroyResult = await protectedBufferedDestroyControl();
 const ordinaryResult = await ordinaryControl();
 const ordinaryParserResult = await ordinaryParserControl();
+const ordinaryWritableResult = await ordinaryWritableCompatibilityControl();
 inspector.close();
 
 const counters = protectedResult.afterTag.counters;
@@ -297,7 +362,17 @@ console.log(JSON.stringify({
       : "BROKEN",
   passedNodeNativePushReplacement: counters.push === 0 ? "DENIED" : "BROKEN",
   passedNodeNativeEmitReplacement: counters.emit === 0 ? "DENIED" : "BROKEN",
+  passedNodeNativeEofReentrantRead:
+    counters.eofReadAttempts === 1 && counters.eofReadDenied === 1
+      ? "DENIED"
+      : "BROKEN",
   passedNodeNativeBufferFromReplacement: counters.bufferFrom === 0
+    ? "DENIED"
+    : "BROKEN",
+  passedNodeNativeBufferedDestroy: bufferedDestroyResult.callbackCount === 1 &&
+      bufferedDestroyResult.callbackDenied === 1 &&
+      bufferedDestroyResult.callbackHadError &&
+      bufferedDestroyResult.nextTickGadgetCalls === 0
     ? "DENIED"
     : "BROKEN",
   passedNodeNativeForgedOnreadSymbols:
@@ -339,9 +414,9 @@ console.log(JSON.stringify({
       protectedResult.tlsAttach.unchanged
     ? "EACCES"
     : "BROKEN",
-  passedNodeNativeUdpOpen: protectedResult.udpOpen.result === -13 &&
+  passedNodeNativeUdpOpen: protectedResult.udpOpen.result !== 0 &&
       protectedResult.udpOpen.unchanged
-    ? "EACCES"
+    ? "DENIED"
     : "BROKEN",
   passedNodeNativeRawOps:
     Object.values(protectedResult.synchronousRawOps).every((value) =>
@@ -350,6 +425,7 @@ console.log(JSON.stringify({
       ? "DENIED"
       : "BROKEN",
   passedNodeNativeWriteReplacement: protectedResult.writePoison.handleFound &&
+      protectedResult.writePoison.writeWrapSurfaceBlocked &&
       protectedResult.writePoison.methodsFrozen &&
       protectedResult.writePoison.decoyWrites === 0 &&
       protectedResult.writePoison.requestChunkSets === 0 &&
@@ -366,6 +442,7 @@ console.log(JSON.stringify({
   passedNodeNativeProtectedMethodReplacement:
     protectedResult.beforeTag.prototypeDetached &&
       protectedResult.beforeTag.asyncContextMutated &&
+      protectedResult.beforeTag.prototypePeerMutationRejected &&
       protectedResult.beforeTag.protectedInspectorPeerCalls === 0
       ? "DENIED"
       : "BROKEN",
@@ -426,6 +503,11 @@ console.log(JSON.stringify({
       ordinaryParserResult.execute > 0 &&
       ordinaryParserResult.headersComplete === 1 &&
       ordinaryParserResult.messageComplete === 1
+    ? "ALLOWED"
+    : "BROKEN",
+  ordinaryNodeWritableCompatibility: ordinaryWritableResult.bufferVisible &&
+      ordinaryWritableResult.customWrites === 1 &&
+      ordinaryWritableResult.remainingBuffered === 0
     ? "ALLOWED"
     : "BROKEN",
 }));

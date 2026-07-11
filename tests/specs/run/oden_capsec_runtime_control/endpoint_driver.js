@@ -60,9 +60,15 @@ async function runInspectorChild(script, extraArgs, label, timeoutMs) {
   };
 }
 
-function exactInspectorAuditIndex(records, principal, port, decision) {
-  return records.findIndex((record) =>
-    record.v === 1 && record.principal === principal &&
+function exactInspectorAuditIndex(
+  records,
+  principal,
+  port,
+  decision,
+  afterIndex = -1,
+) {
+  return records.findIndex((record, index) =>
+    index > afterIndex && record.v === 1 && record.principal === principal &&
     record.capability === "inspector:activate" &&
     record.target === `protected-inspector-stream:127.0.0.1:${port}` &&
     record.decision === decision && record.suggestion === null
@@ -105,6 +111,7 @@ try {
       "root/runtime",
       isolated.port,
       "allow-ambient",
+      deniedAuditIndex,
     );
     const evidenced = isolated.result.denied === "EACCES" &&
       isolated.result.root === "ALLOWED" &&

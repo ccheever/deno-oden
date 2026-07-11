@@ -5,6 +5,9 @@
 const { core, primordials } = __bootstrap;
 const lazyProcess = core.createLazyLoader("node:process");
 const process = lazyProcess().default;
+const { nextTick: ProtectedWritableNextTick } = core.loadExtScript(
+  "ext:deno_node/_next_tick.ts",
+);
 const { EventEmitter: EE } = core.loadExtScript("ext:deno_node/_events.mjs");
 const _mod1 =
   core.loadExtScript("ext:deno_node/internal/streams/legacy.js").default;
@@ -132,6 +135,15 @@ const {
   WeakMapPrototypeGet,
   WeakMapPrototypeSet,
 } = primordials;
+
+function writableNextTick(callback, ...args) {
+  return FunctionPrototypeCall(
+    ProtectedWritableNextTick,
+    process,
+    callback,
+    ...args,
+  );
+}
 
 Writable.WritableState = WritableState;
 
@@ -1118,7 +1130,7 @@ function _write(stream, chunk, encoding, cb) {
   }
 
   if (err) {
-    process.nextTick(cb, err);
+    writableNextTick(cb, err);
     errorOrDestroy(stream, err, true);
     return err;
   }
@@ -1325,7 +1337,7 @@ function onwrite(stream, er) {
     }
 
     if (sync) {
-      process.nextTick(onwriteError, stream, state, er, cb);
+      writableNextTick(onwriteError, stream, state, er, cb);
     } else {
       onwriteError(stream, state, er, cb);
     }
@@ -1346,7 +1358,7 @@ function onwrite(stream, er) {
       // memory allocations.
       if (cb === nop) {
         if ((state[kState] & kAfterWritePending) === 0 && needTick) {
-          process.nextTick(afterWrite, stream, state, 1, cb);
+          writableNextTick(afterWrite, stream, state, 1, cb);
           state[kState] |= kAfterWritePending;
         } else {
           state.pendingcb--;
@@ -1361,7 +1373,7 @@ function onwrite(stream, er) {
         state[kAfterWriteTickInfoValue].count++;
       } else if (needTick) {
         state[kAfterWriteTickInfoValue] = { count: 1, cb, stream, state };
-        process.nextTick(afterWriteTick, state[kAfterWriteTickInfoValue]);
+        writableNextTick(afterWriteTick, state[kAfterWriteTickInfoValue]);
         state[kState] |= kAfterWritePending | kAfterWriteTickInfo;
       } else {
         state.pendingcb--;
@@ -1408,6 +1420,19 @@ function afterWrite(stream, state, count, cb) {
 
 // If there's something in the buffer waiting, then invoke callbacks.
 function errorBuffer(state) {
+  const previous = core.getAsyncContext();
+  core.setAsyncContext(undefined);
+  try {
+    errorBufferWithoutContext(state);
+  } finally {
+    core.setAsyncContext(previous);
+  }
+}
+
+// Destroy-time queue cleanup must not lend the destroying operation's
+// positive context to package callbacks or originless bound gadgets.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function errorBufferWithoutContext(state) {
   if ((state[kState] & kWriting) !== 0) {
     return;
   }
@@ -1589,11 +1614,11 @@ Writable.prototype.end = function (chunk, encoding, cb) {
 
   if (typeof cb === "function") {
     if (err) {
-      process.nextTick(cb, err);
+      writableNextTick(cb, err);
     } else if ((state[kState] & kErrored) !== 0) {
-      process.nextTick(cb, state[kErroredValue]);
+      writableNextTick(cb, state[kErroredValue]);
     } else if ((state[kState] & kFinished) !== 0) {
-      process.nextTick(cb, null);
+      writableNextTick(cb, null);
     } else {
       state[kState] |= kOnFinished;
       state[kOnFinishedValue] ??= [];
@@ -1638,7 +1663,7 @@ function onFinish(stream, state, err) {
     // Some streams assume 'finish' will be emitted
     // asynchronously relative to _final callback.
     state.pendingcb++;
-    process.nextTick(finish, stream, state);
+    writableNextTick(finish, stream, state);
   }
 }
 
@@ -1672,7 +1697,7 @@ function finishMaybe(stream, state, sync) {
     if (state.pendingcb === 0) {
       if (sync) {
         state.pendingcb++;
-        process.nextTick(
+        writableNextTick(
           (stream, state) => {
             if (needFinish(state)) {
               finish(stream, state);
@@ -1870,7 +1895,7 @@ Writable.prototype.destroy = function (err, cb) {
     (state[kState] & (kBuffered | kOnFinished)) !== 0 &&
     (state[kState] & kDestroyed) === 0
   ) {
-    process.nextTick(errorBuffer, state);
+    writableNextTick(errorBuffer, state);
   }
 
   destroy.call(this, err, cb);

@@ -1600,6 +1600,24 @@ function readGuardedReadable(stream, state, size) {
   }
 }
 
+function readProtectedReadableWithState(stream, state, size) {
+  if (
+    WeakMapPrototypeGet(protectedReadableOperationStates, stream) !==
+      undefined ||
+    WeakMapPrototypeGet(admittedReadableOperationStates, stream) !== undefined
+  ) {
+    throw new Error(
+      "protected Readable exact-call admission is already active",
+    );
+  }
+  WeakMapPrototypeSet(protectedReadableOperationStates, stream, state);
+  try {
+    return FunctionPrototypeCall(ReadablePrototypeRead, stream, size);
+  } finally {
+    WeakMapPrototypeDelete(protectedReadableOperationStates, stream);
+  }
+}
+
 function emitGuardedReadableEvent(stream, event, ...args) {
   return getStreamUseGuard(stream) === undefined
     ? stream.emit(event, ...args)
@@ -1620,12 +1638,33 @@ function readProtectedReadableZero(stream) {
   if (state === undefined) {
     throw new Error("protected native stream is missing readable state");
   }
-  WeakMapPrototypeSet(protectedReadableOperationStates, stream, state);
-  try {
-    return FunctionPrototypeCall(ReadablePrototypeRead, stream, 0);
-  } finally {
-    WeakMapPrototypeDelete(protectedReadableOperationStates, stream);
+  return readProtectedReadableWithState(stream, state, 0);
+}
+
+// Native EOF arrives after positive authority has intentionally been cleared.
+// Finish the closure-owned state with one exact admission per internal read;
+// each admission is consumed before lifecycle listeners can run, so a
+// reentrant public read still performs its own live authorization.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function finishProtectedReadable(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  if (state === undefined) {
+    throw new Error("protected native stream is missing readable state");
   }
+  if ((state[kState] & kEnded) === 0) {
+    if ((state[kState] & kDecoder) !== 0) {
+      throw new Error("protected native stream cannot finish with a decoder");
+    }
+    state[kState] |= kEnded;
+    if ((state[kState] & kSync) !== 0) {
+      emitProtectedReadable(stream, state);
+    } else {
+      state[kState] &= ~kNeedReadable;
+      state[kState] |= kEmittedReadable;
+      emitProtectedReadable_(stream, state);
+    }
+  }
+  return readProtectedReadableWithState(stream, state, 0);
 }
 
 function readAdmittedReadableChunk(
@@ -1720,6 +1759,33 @@ function emitReadable_(stream, state = getReadableOperationState(stream)) {
     ? kNeedReadable
     : 0;
   flow(stream);
+}
+
+function emitProtectedReadable(stream, state) {
+  state[kState] &= ~kNeedReadable;
+  if ((state[kState] & kEmittedReadable) === 0) {
+    state[kState] |= kEmittedReadable;
+    nextTickWithCurrent(emitProtectedReadable_, stream, state);
+  }
+}
+
+function emitProtectedReadable_(stream, state) {
+  debug("emitProtectedReadable_");
+  if (
+    (state[kState] & (kDestroyed | kErrored)) === 0 &&
+    (state.length || (state[kState] & kEnded) !== 0)
+  ) {
+    emitGuardedReadableEvent(stream, "readable");
+    state[kState] &= ~kEmittedReadable;
+  }
+  state[kState] |= (state[kState] & (kFlowing | kEnded)) === 0 &&
+      state.length <= readableStateHighWaterMark(state)
+    ? kNeedReadable
+    : 0;
+  while (
+    (state[kState] & kFlowing) !== 0 &&
+    readProtectedReadableWithState(stream, state, undefined) !== null
+  );
 }
 
 // At this point, the user has presumably seen the 'readable' event,
@@ -2916,6 +2982,7 @@ return {
   createReadableAsyncIterator,
   default: Readable,
   destroyReadableStream,
+  finishProtectedReadable,
   getProtectedReadableState,
   getReadableUseGuard,
   hasProtectedReadableDecoder,
