@@ -1,0 +1,6 @@
+{
+  "mode": "enforce",
+  "grants": {
+    "node-http-closure-probe": "fs:read:./fixture.txt"
+  }
+}

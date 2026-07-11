@@ -59,6 +59,7 @@ use deno_permissions::NetPermissionAction;
 use deno_permissions::OpenAccessKind;
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
+use deno_permissions::oden_capsec_gate_url_scheme;
 use deno_tls::Proxy;
 use deno_tls::RootCertStoreProvider;
 use deno_tls::SocketUse;
@@ -156,6 +157,7 @@ deno_core::extension!(deno_fetch,
   deps = [ deno_webidl, deno_web ],
   ops = [
     op_fetch,
+    op_fetch_oden_capsec_check_url_scheme,
     op_fetch_send,
     op_utf8_to_byte_string,
     op_fetch_custom_client,
@@ -307,6 +309,17 @@ impl FetchHandler for DefaultFileFetchHandler {
 pub struct FetchReturn {
   pub request_rid: ResourceId,
   pub cancel_handle_rid: Option<ResourceId>,
+}
+
+/// The JS fetch algorithm resolves valid blob URLs before `op_fetch`, so the
+/// shared scheme gate must run before that shortcut. The native operation
+/// remains the authority boundary; ordinary runtimes and frozen `/1` engines
+/// preserve their existing fetch behavior.
+#[op2(fast, stack_trace)]
+pub fn op_fetch_oden_capsec_check_url_scheme(
+  #[string] scheme: &str,
+) -> Result<(), PermissionCheckError> {
+  oden_capsec_gate_url_scheme(scheme, "fetch()").map(|_| ())
 }
 
 pub fn get_or_create_client_from_state(

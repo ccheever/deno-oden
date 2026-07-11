@@ -25,7 +25,10 @@
 // deno-lint-ignore-file no-this-alias no-inner-declarations
 
 import { core, internals, primordials } from "ext:core/mod.js";
-import { op_node_http_check_proxy_net } from "ext:core/ops";
+import {
+  op_node_http_check_proxy_net,
+  op_node_http_check_url_scheme,
+} from "ext:core/ops";
 const {
   ArrayIsArray,
   ArrayPrototypeIndexOf,
@@ -509,6 +512,13 @@ function ClientRequest(input, options, cb) {
   if (this.agent?.protocol) {
     expectedProtocol = this.agent.protocol;
   }
+
+  // @ref LLP 0019#fetch-versus-connect [implements] -- A custom agent cannot
+  // reinterpret blob/unknown schemes as network authority.
+  op_node_http_check_url_scheme(
+    protocol,
+    protocol === "https:" ? "node:https.request()" : "node:http.request()",
+  );
 
   if (options.path) {
     const path = String(options.path);

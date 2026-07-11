@@ -1,0 +1,31 @@
+{
+  // `/1.1` closes the old fetch-token downgrade for every socket-bearing
+  // Node HTTP route and applies one scheme classification before transport.
+  "tempDir": true,
+  "tests": {
+    "fetch_grant_cannot_reach_node_http_sockets": {
+      "args": "run --allow-all app.js routes fetch",
+      "envs": { "ODEN_CAPSEC_POLICY": "fetch.json" },
+      "output": "routes_fetch.out",
+      "exitCode": 0
+    },
+    "connect_grant_covers_explicit_node_http_socket_routes": {
+      "args": "run --allow-all app.js routes connect",
+      "envs": { "ODEN_CAPSEC_POLICY": "connect.json" },
+      "output": "routes_connect.out",
+      "exitCode": 0
+    },
+    "scheme_classifier_closes_blob_unknown_and_file_without_fs": {
+      "args": "run --allow-all app.js schemes closed",
+      "envs": { "ODEN_CAPSEC_POLICY": "fetch.json" },
+      "output": "schemes_closed.out",
+      "exitCode": 0
+    },
+    "scheme_classifier_allows_file_with_fs_and_data_without_grant": {
+      "args": "run --allow-all app.js schemes file",
+      "envs": { "ODEN_CAPSEC_POLICY": "file.json" },
+      "output": "schemes_file.out",
+      "exitCode": 0
+    }
+  }
+}

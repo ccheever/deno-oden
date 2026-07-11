@@ -26,6 +26,7 @@ use deno_core::v8;
 use deno_net::io::TcpStreamResource;
 use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
+use deno_permissions::oden_capsec_profile_is;
 use socket2::SockAddr as Socket2SockAddr;
 
 use crate::ops::handle_wrap::AsyncWrap;
@@ -372,6 +373,26 @@ impl TCPWrap {
       .as_ref()
       .and_then(|token| token.tcp_api_name(hostname, port))
       .map(str::to_string)
+  }
+
+  fn oden_net_decision(
+    &self,
+    hostname: &str,
+    port: u16,
+  ) -> (NetPermissionAction, String) {
+    match self.oden_http_api_name(hostname, port) {
+      Some(api_name) if oden_capsec_profile_is("oden/capsec/1.1") => {
+        // Node exposes the resulting Socket through request/response events,
+        // CONNECT, Upgrade, agents, and keep-alive pools. The endpoint-bound
+        // token identifies the API but cannot make it fetch-class.
+        (NetPermissionAction::Connect, api_name)
+      }
+      Some(api_name) => (NetPermissionAction::Fetch, api_name),
+      None => (
+        NetPermissionAction::Connect,
+        "node:net.connect()".to_string(),
+      ),
+    }
   }
 
   fn bind_inner(
@@ -842,19 +863,23 @@ impl TCPWrap {
     // the original hostname instead of the resolved IP address, but only
     // when `address` is one of the token's resolved IPs.
     let check_host = self.net_perm_check_host(address);
-    let http_api_name = self.oden_http_api_name(&check_host, port as u16);
-    if let Some(api_name) = &http_api_name {
-      state.borrow_mut::<PermissionsContainer>().check_net(
-        NetPermissionAction::Fetch,
-        &(check_host.as_str(), Some(port as u16)),
-        api_name,
-      )?;
-    } else {
-      state.borrow_mut::<PermissionsContainer>().check_net(
-        NetPermissionAction::Connect,
-        &(check_host.as_str(), Some(port as u16)),
-        "node:net.connect()",
-      )?;
+    let (action, api_name) = self.oden_net_decision(&check_host, port as u16);
+    match action {
+      NetPermissionAction::Fetch => {
+        state.borrow_mut::<PermissionsContainer>().check_net(
+          NetPermissionAction::Fetch,
+          &(check_host.as_str(), Some(port as u16)),
+          &api_name,
+        )?
+      }
+      NetPermissionAction::Connect => {
+        state.borrow_mut::<PermissionsContainer>().check_net(
+          NetPermissionAction::Connect,
+          &(check_host.as_str(), Some(port as u16)),
+          &api_name,
+        )?
+      }
+      NetPermissionAction::Listen => unreachable!(),
     }
 
     let addr_str = format!("{}:{}", address, port);
@@ -869,24 +894,24 @@ impl TCPWrap {
     // Post-resolution deny check: verify the resolved IP is not denied.
     // This prevents numeric hostname aliases (e.g. 2130706433, 0x7f000001)
     // from bypassing --deny-net rules that target the resolved IP.
-    if let Some(api_name) = &http_api_name {
-      state
+    match action {
+      NetPermissionAction::Fetch => state
         .borrow_mut::<PermissionsContainer>()
         .check_net_resolved(
           NetPermissionAction::Fetch,
           &socket_addr.ip(),
           socket_addr.port(),
-          api_name,
-        )?;
-    } else {
-      state
+          &api_name,
+        )?,
+      NetPermissionAction::Connect => state
         .borrow_mut::<PermissionsContainer>()
         .check_net_resolved(
           NetPermissionAction::Connect,
           &socket_addr.ip(),
           socket_addr.port(),
-          "node:net.connect()",
-        )?;
+          &api_name,
+        )?,
+      NetPermissionAction::Listen => unreachable!(),
     }
 
     let tcp = self.tcp_ptr();
@@ -937,19 +962,23 @@ impl TCPWrap {
       return Ok(uv_compat::UV_EACCES);
     }
     let check_host = self.net_perm_check_host(address);
-    let http_api_name = self.oden_http_api_name(&check_host, port as u16);
-    if let Some(api_name) = &http_api_name {
-      state.borrow_mut::<PermissionsContainer>().check_net(
-        NetPermissionAction::Fetch,
-        &(check_host.as_str(), Some(port as u16)),
-        api_name,
-      )?;
-    } else {
-      state.borrow_mut::<PermissionsContainer>().check_net(
-        NetPermissionAction::Connect,
-        &(check_host.as_str(), Some(port as u16)),
-        "node:net.connect()",
-      )?;
+    let (action, api_name) = self.oden_net_decision(&check_host, port as u16);
+    match action {
+      NetPermissionAction::Fetch => {
+        state.borrow_mut::<PermissionsContainer>().check_net(
+          NetPermissionAction::Fetch,
+          &(check_host.as_str(), Some(port as u16)),
+          &api_name,
+        )?
+      }
+      NetPermissionAction::Connect => {
+        state.borrow_mut::<PermissionsContainer>().check_net(
+          NetPermissionAction::Connect,
+          &(check_host.as_str(), Some(port as u16)),
+          &api_name,
+        )?
+      }
+      NetPermissionAction::Listen => unreachable!(),
     }
 
     let addr_str = format!("{}:{}", address, port);
@@ -962,24 +991,24 @@ impl TCPWrap {
     };
 
     // Post-resolution deny check for connect6 as well.
-    if let Some(api_name) = &http_api_name {
-      state
+    match action {
+      NetPermissionAction::Fetch => state
         .borrow_mut::<PermissionsContainer>()
         .check_net_resolved(
           NetPermissionAction::Fetch,
           &socket_addr.ip(),
           socket_addr.port(),
-          api_name,
-        )?;
-    } else {
-      state
+          &api_name,
+        )?,
+      NetPermissionAction::Connect => state
         .borrow_mut::<PermissionsContainer>()
         .check_net_resolved(
           NetPermissionAction::Connect,
           &socket_addr.ip(),
           socket_addr.port(),
-          "node:net.connect()",
-        )?;
+          &api_name,
+        )?,
+      NetPermissionAction::Listen => unreachable!(),
     }
 
     let tcp = self.tcp_ptr();

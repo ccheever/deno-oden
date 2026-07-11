@@ -7,6 +7,8 @@ use deno_core::v8;
 use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
+use deno_permissions::oden_capsec_gate_url_scheme;
+use deno_permissions::oden_capsec_profile_is;
 
 /// Opaque, endpoint-bound proof that the built-in Node HTTP agent is opening
 /// this socket for request/response traffic rather than for `node:net`.
@@ -76,6 +78,18 @@ pub fn op_node_http_net_token(
   NodeHttpNetToken { endpoint, api_name }
 }
 
+/// Classify the request protocol before Node's agent or a caller-supplied
+/// connection hook can select a transport. Protocol validation remains in the
+/// Node compatibility layer; this closes blob/unknown schemes first under the
+/// Stage-B profile so no custom agent can reinterpret them as network grants.
+#[op2(fast, stack_trace)]
+pub fn op_node_http_check_url_scheme(
+  #[string] scheme: &str,
+  #[string] api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  oden_capsec_gate_url_scheme(scheme, api_name).map(|_| ())
+}
+
 // When a node:http / node:https request is routed through a proxy, the socket
 // is connected to the proxy endpoint, so the proxy is the only host the connect
 // op permission-checks. Without this, `--allow-net=<proxy>` alone would let a
@@ -97,11 +111,19 @@ pub fn op_node_http_check_proxy_net(
   #[string] api_name: &str,
 ) -> Result<(), PermissionCheckError> {
   deno_permissions::oden_capsec_reject_forward_proxy(api_name)?;
-  state.borrow_mut::<PermissionsContainer>().check_net(
-    NetPermissionAction::Fetch,
-    &(hostname, Some(port)),
-    api_name,
-  )
+  if oden_capsec_profile_is("oden/capsec/1.1") {
+    state.borrow_mut::<PermissionsContainer>().check_net(
+      NetPermissionAction::Connect,
+      &(hostname, Some(port)),
+      api_name,
+    )
+  } else {
+    state.borrow_mut::<PermissionsContainer>().check_net(
+      NetPermissionAction::Fetch,
+      &(hostname, Some(port)),
+      api_name,
+    )
+  }
 }
 
 /// The /1.1 protected-peer patch profile cannot safely reuse a Node Agent

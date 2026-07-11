@@ -23,6 +23,7 @@ use deno_core::uv_compat::UvStream;
 use deno_core::v8;
 use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
+use deno_permissions::oden_capsec_profile_is;
 
 use crate::ops::handle_wrap::AsyncWrap;
 use crate::ops::handle_wrap::Handle;
@@ -471,11 +472,19 @@ impl PipeWrap {
     )?;
     #[cfg(unix)]
     if let Some(api_name) = self.oden_http_api_name(path) {
-      permissions.check_net_unix_socket(
-        NetPermissionAction::Fetch,
-        &checked,
-        Some(&api_name),
-      )?;
+      if oden_capsec_profile_is("oden/capsec/1.1") {
+        permissions.check_net_unix_socket(
+          NetPermissionAction::Connect,
+          &checked,
+          Some(&api_name),
+        )?;
+      } else {
+        permissions.check_net_unix_socket(
+          NetPermissionAction::Fetch,
+          &checked,
+          Some(&api_name),
+        )?;
+      }
     } else {
       permissions.check_net_unix_socket(
         NetPermissionAction::Connect,

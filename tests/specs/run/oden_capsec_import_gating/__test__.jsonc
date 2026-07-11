@@ -1,12 +1,12 @@
 {
-  // Import gating (ENG-23774), attributed to the referrer at the module loader.
-  // A dependency (sneaky-dep) dynamically importing data: code is denied under
-  // enforce; root doing the same is ambient-allowed; with capsec off both work.
+  // `/1.1` classifies data: as a non-capability because all bytes are already
+  // in the supplied URL. Blob/unknown structural closure and HTTP(S) graph
+  // admission are covered by oden_capsec_node_http_socket_closure.
   "tests": {
-    "dep_remote_import_denied_under_enforce": {
+    "dep_inline_data_import_allowed_under_1_1": {
       "args": "run --allow-all dep_app.js",
       "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json" },
-      "output": "dep_denied.out",
+      "output": "baseline.out",
       "exitCode": 0
     },
     "root_remote_import_allowed_under_enforce": {

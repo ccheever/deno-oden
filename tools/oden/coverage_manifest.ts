@@ -400,6 +400,100 @@ type NetworkSurface = {
   surface: string;
 };
 
+type NodeHttpSocketRoute = {
+  boundary: string;
+  file: string;
+  fixture: string;
+  fn: string;
+  route: string;
+};
+
+const NODE_HTTP_SOCKET_FIXTURE =
+  "tests/specs/run/oden_capsec_node_http_socket_closure/node_modules/node-http-closure-probe/index.js";
+
+// Every route in Node's request/response API that can reveal, delegate, or
+// reuse the transport must lead to a connect-class native boundary. Fixture
+// IDs are source-checked so adding a manifest-only claim cannot close a gap.
+const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
+  {
+    route: "request socket event/property",
+    boundary: "built-in agent TCP creation",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    fixture: "request-socket-event-property",
+  },
+  {
+    route: "response socket write",
+    boundary: "built-in agent TCP creation",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    fixture: "response-socket-write",
+  },
+  {
+    route: "CONNECT tunnel/socket delegation",
+    boundary: "built-in agent TCP creation",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    fixture: "connect-tunnel-raw-write",
+  },
+  {
+    route: "101 Upgrade socket delegation",
+    boundary: "built-in agent TCP creation",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    fixture: "upgrade-raw-write",
+  },
+  {
+    route: "custom Agent.createConnection",
+    boundary: "raw Node TCP creation",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    fixture: "custom-agent",
+  },
+  {
+    route: "request createConnection hook",
+    boundary: "raw Node TCP creation",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    fixture: "create-connection-hook",
+  },
+  {
+    route: "redirect hop",
+    boundary: "each built-in agent TCP creation",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    fixture: "redirect-hop",
+  },
+  {
+    route: "keep-alive reuse",
+    boundary: "original pool socket creation",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    fixture: "keepalive-reuse",
+  },
+  {
+    route: "forward-proxy target",
+    boundary: "explicit target check",
+    file: "ext/node/ops/http.rs",
+    fn: "op_node_http_check_proxy_net",
+    fixture: "forward-proxy",
+  },
+  {
+    route: "forward-proxy peer",
+    boundary: "proxy TCP creation",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "connect",
+    fixture: "forward-proxy",
+  },
+  {
+    route: "Unix-domain HTTP socket",
+    boundary: "built-in agent pipe creation",
+    file: "ext/node/ops/pipe_wrap.rs",
+    fn: "connect",
+    fixture: "unix-socket",
+  },
+];
+
 // Resource-creating and packet-originating network surfaces. Direct rows must
 // contain a classified check in the named function. Inherited rows name the
 // operation that consumes an already-authorized resource; those functions are
@@ -583,19 +677,19 @@ const NETWORK_SURFACES: NetworkSurface[] = [
   },
   {
     surface: "Node HTTP(S) direct connection",
-    action: "fetch",
+    action: "connect",
     file: "ext/node/ops/tcp_wrap.rs",
     fn: "connect",
     enforcement: "direct",
-    note: "endpoint-bound opaque HTTP token",
+    note: "socket-exposing HTTP token is connect-class in /1.1",
   },
   {
     surface: "Node HTTP(S) proxy",
-    action: "fetch",
+    action: "connect",
     file: "ext/node/ops/http.rs",
     fn: "op_node_http_check_proxy_net",
     enforcement: "direct",
-    note: "logical proxy endpoint",
+    note: "target and proxy peer are independently connect-checked",
   },
   {
     surface: "Node TCP connect",
@@ -631,11 +725,11 @@ const NETWORK_SURFACES: NetworkSurface[] = [
   },
   {
     surface: "Node HTTP(S) Unix socket",
-    action: "fetch",
+    action: "connect",
     file: "ext/node/ops/pipe_wrap.rs",
     fn: "connect",
     enforcement: "direct",
-    note: "endpoint-bound opaque HTTP token",
+    note: "socket-exposing HTTP token is connect-class in /1.1",
   },
   {
     surface: "Node Unix pipe connect",
@@ -703,6 +797,19 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
     ) {
       errors.push(
         `${row.surface}: ${row.file}:${row.fn}() has no classified ${row.action} check`,
+      );
+    }
+  }
+  const fixture = Deno.readTextFileSync(ROOT + NODE_HTTP_SOCKET_FIXTURE);
+  for (const row of NODE_HTTP_SOCKET_ROUTES) {
+    if (!direct.has(`${row.file}:${row.fn}:connect`)) {
+      errors.push(
+        `${row.route}: ${row.file}:${row.fn}() has no classified connect check`,
+      );
+    }
+    if (!fixture.includes(`\"${row.fixture}\"`)) {
+      errors.push(
+        `${row.route}: fixture ${row.fixture} missing from ${NODE_HTTP_SOCKET_FIXTURE}`,
       );
     }
   }
@@ -912,6 +1019,11 @@ function renderNetworkSurfaces(): string[] {
   for (const row of NETWORK_SURFACES) {
     out.push(
       `| ${row.surface} | ${row.action} | ${row.enforcement} | ${row.file}:${row.fn}() | ${row.note} |`,
+    );
+  }
+  for (const row of NODE_HTTP_SOCKET_ROUTES) {
+    out.push(
+      `| Node HTTP route: ${row.route} | connect | direct | ${row.file}:${row.fn}() | ${row.boundary}; raw-engine fixture ${row.fixture} |`,
     );
   }
   out.push("");

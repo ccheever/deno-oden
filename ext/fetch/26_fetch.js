@@ -4,6 +4,7 @@
 const { core, internals, primordials } = __bootstrap;
 const {
   op_fetch,
+  op_fetch_oden_capsec_check_url_scheme,
   op_fetch_promise_is_settled,
   op_fetch_send,
   op_pipe,
@@ -405,6 +406,9 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
   // TLS; it does not exempt https fetch from the list. This matches Node's
   // undici (`requestBadPort` gates on `urlIsHttpHttpsScheme`).
   const url = new URL(req.currentUrl());
+  // @ref LLP 0019#fetch-versus-connect [implements] -- Scheme closure runs
+  // before the valid-blob shortcut and before endpoint matching.
+  op_fetch_oden_capsec_check_url_scheme(url.protocol);
   if (
     (url.protocol === "http:" || url.protocol === "https:") &&
     url.port !== "" && BAD_PORTS[url.port] === true

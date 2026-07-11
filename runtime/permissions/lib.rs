@@ -103,6 +103,43 @@ impl NetPermissionAction {
   }
 }
 
+/// Closed, operation-independent classification for URL schemes that can
+/// reach package capability checks.
+///
+/// This is deliberately smaller than a URL parser. Consumers still perform
+/// their own protocol validation, but they must all agree on which authority
+/// class a recognized scheme can reach before endpoint or path matching.
+/// `data:` carries no external authority because all bytes are already in the
+/// supplied URL. `blob:` remains deny-only until ownership/delegation is
+/// modeled. A scheme outside this table is structurally closed.
+// @ref LLP 0019#fetch-versus-connect [implements] -- Schemes are classified before endpoint matching, with blob and unknown schemes closed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OdenUrlSchemeClass {
+  Network,
+  File,
+  InlineData,
+  RuntimeInternal,
+  ClosedBlob,
+  ClosedUnknown,
+}
+
+pub fn oden_capsec_classify_url_scheme(scheme: &str) -> OdenUrlSchemeClass {
+  let normalized = scheme.trim_end_matches(':').to_ascii_lowercase();
+  match normalized.as_str() {
+    "http" | "https" => OdenUrlSchemeClass::Network,
+    "file" => OdenUrlSchemeClass::File,
+    "data" => OdenUrlSchemeClass::InlineData,
+    // These names identify modules already owned by the runtime/package
+    // resolver. They are not deputy protocols and never inherit network
+    // authority merely because they have URL syntax.
+    "node" | "npm" | "jsr" | "bun" | "ext" | "deno" => {
+      OdenUrlSchemeClass::RuntimeInternal
+    }
+    "blob" => OdenUrlSchemeClass::ClosedBlob,
+    _ => OdenUrlSchemeClass::ClosedUnknown,
+  }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum BrokerResponse {
   Allow,
@@ -1498,6 +1535,63 @@ pub const ODEN_CAPSEC_PROFILE: &str = "oden/capsec/1.1";
 /// environment selector an application could use to downgrade enforcement.
 pub fn oden_capsec_profile_is(profile: &str) -> bool {
   profile == ODEN_CAPSEC_PROFILE && oden_capsec_armed()
+}
+
+/// Apply the Stage-B closed-scheme invariant at a URL-consuming boundary.
+/// The returned class tells the caller which ordinary operation check must
+/// follow. This function does not substitute a network or filesystem check;
+/// it only prevents a different or unknown scheme from borrowing either.
+pub fn oden_capsec_gate_url_scheme(
+  scheme: &str,
+  api_name: &str,
+) -> Result<OdenUrlSchemeClass, PermissionCheckError> {
+  oden_capsec_gate_url_scheme_inner(scheme, api_name, None)
+}
+
+fn oden_capsec_gate_url_scheme_inner(
+  scheme: &str,
+  api_name: &str,
+  explicit_principal: Option<OdenPrincipal>,
+) -> Result<OdenUrlSchemeClass, PermissionCheckError> {
+  let class = oden_capsec_classify_url_scheme(scheme);
+  if !oden_capsec_profile_is("oden/capsec/1.1")
+    || !matches!(
+      class,
+      OdenUrlSchemeClass::ClosedBlob | OdenUrlSchemeClass::ClosedUnknown
+    )
+  {
+    return Ok(class);
+  }
+
+  oden_capsec_readiness_gate()?;
+  let principal = explicit_principal.unwrap_or_else(oden_capsec_principal);
+  let label = principal.label();
+  let normalized = scheme.trim_end_matches(':').to_ascii_lowercase();
+  let reason = match class {
+    OdenUrlSchemeClass::ClosedBlob => {
+      "blob ownership and cross-principal delegation are not modeled"
+    }
+    OdenUrlSchemeClass::ClosedUnknown => "the URL scheme is not modeled",
+    _ => unreachable!(),
+  };
+  oden_capsec_audit_record(
+    &label,
+    "protocol",
+    "classify",
+    &normalized,
+    &format!("DENY(closed scheme: {reason})"),
+    None,
+  );
+  Err(PermissionCheckError::PermissionDenied(
+    PermissionDeniedError {
+      access: format!("{api_name} URL scheme {normalized:?}"),
+      name: "capsec",
+      custom_message: Some(format!(
+        "oden capsec: {api_name} cannot use {normalized}: ({reason})"
+      )),
+      state: PermissionState::Denied,
+    },
+  ))
 }
 
 /// Snapshot every shipping handoff before user code starts, initialize the
@@ -3598,12 +3692,13 @@ fn oden_handle_inactive() -> PermissionCheckError {
 // boundary, so a package importing remote code cannot be seen there; the
 // referrer can. A package pulling least-attested code — a remote (`http(s):`)
 // or dynamically-minted (`data:`/`blob:`) specifier — is the runtime
-// supply-chain vector the import graph gates, so such imports by a package
-// principal are default-denied under enforce. Root/runtime (ambient) and
-// graph-internal schemes (file/npm/jsr/node) are unaffected — the fs and require
-// layers gate those. Both static and dynamic imports are gated: the referrer
-// makes attribution sound either way, and a dependency's *static* remote import
-// is as much a supply-chain reach as a dynamic one.
+// supply-chain vector the import graph gates. Frozen `/1` default-denied
+// remote/data/blob imports from packages. `/1.1` first applies the shared URL
+// classification: HTTP(S) stays behind this graph gate, data is a reasoned
+// non-capability, blob/unknown schemes close structurally, and recognized
+// runtime/file schemes continue to their own operation boundaries. Both static
+// and dynamic imports are attributed to the referrer: a dependency's *static*
+// remote import is as much a supply-chain reach as a dynamic one.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md (Import gating; Principals; Loader principal index)
 pub fn oden_capsec_gate_import(
   specifier: &Url,
@@ -3614,10 +3709,27 @@ pub fn oden_capsec_gate_import(
     return Ok(());
   }
   let scheme = specifier.scheme();
-  if !matches!(scheme, "data" | "blob" | "http" | "https") {
+  let principal = oden_principal_index::resolve_locator(referrer.as_str());
+  if oden_capsec_profile_is("oden/capsec/1.1") {
+    match oden_capsec_gate_url_scheme_inner(
+      scheme,
+      "module import",
+      Some(principal.clone()),
+    )? {
+      OdenUrlSchemeClass::Network => {}
+      OdenUrlSchemeClass::File
+      | OdenUrlSchemeClass::InlineData
+      | OdenUrlSchemeClass::RuntimeInternal => return Ok(()),
+      // Closed classes returned as an error above.
+      OdenUrlSchemeClass::ClosedBlob | OdenUrlSchemeClass::ClosedUnknown => {
+        unreachable!()
+      }
+    }
+  } else if !matches!(scheme, "data" | "blob" | "http" | "https") {
+    // Frozen Revision-1 behavior. In particular, its data/blob import rule is
+    // preserved for engines that still advertise oden/capsec/1.
     return Ok(());
   }
-  let principal = oden_principal_index::resolve_locator(referrer.as_str());
   // Ambient referrers (root/runtime) may import freely. A non-ambient referrer
   // — a package, or the quarantine/no-user sentinels — is gated.
   if principal.is_ambient() {
@@ -10461,6 +10573,24 @@ mod tests {
     prompter::set_current_oden_trusted_host_actor(false);
     assert_eq!(oden_capsec_principal(), OdenPrincipal::NoUser);
     assert_eq!(oden_capsec_principal_set(), vec![OdenPrincipal::NoUser]);
+  }
+
+  #[test]
+  fn oden_url_scheme_classification_is_closed_and_action_independent() {
+    use OdenUrlSchemeClass::*;
+
+    assert_eq!(oden_capsec_classify_url_scheme("http"), Network);
+    assert_eq!(oden_capsec_classify_url_scheme("HTTPS:"), Network);
+    assert_eq!(oden_capsec_classify_url_scheme("file:"), File);
+    assert_eq!(oden_capsec_classify_url_scheme("data"), InlineData);
+    assert_eq!(oden_capsec_classify_url_scheme("node:"), RuntimeInternal);
+    assert_eq!(oden_capsec_classify_url_scheme("ext:"), RuntimeInternal);
+    assert_eq!(oden_capsec_classify_url_scheme("deno:"), RuntimeInternal);
+    assert_eq!(oden_capsec_classify_url_scheme("blob:"), ClosedBlob);
+    assert_eq!(
+      oden_capsec_classify_url_scheme("future-transport:"),
+      ClosedUnknown
+    );
   }
 
   #[test]

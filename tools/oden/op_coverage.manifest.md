@@ -62,11 +62,11 @@ allowed only at the two audited typed helpers named by the generator.
 | --- | --- | --- | --- | --- |
 | connect | check_net_resolved | check_resolved() | ext/fetch/dns.rs:315 | propagated |
 | fetch | check_net_resolved | check_resolved() | ext/fetch/dns.rs:315 | propagated |
-| fetch | check_net_url | op_fetch() | ext/fetch/lib.rs:474 | explicit |
-| fetch | check_net_url | op_fetch_custom_client() | ext/fetch/lib.rs:927 | explicit |
-| fetch | check_net | op_fetch_custom_client() | ext/fetch/lib.rs:934 | explicit |
-| fetch | check_net_unix_socket | op_fetch_custom_client() | ext/fetch/lib.rs:954 | explicit |
-| fetch | check_net_vsock | op_fetch_custom_client() | ext/fetch/lib.rs:965 | explicit |
+| fetch | check_net_url | op_fetch() | ext/fetch/lib.rs:487 | explicit |
+| fetch | check_net_url | op_fetch_custom_client() | ext/fetch/lib.rs:940 | explicit |
+| fetch | check_net | op_fetch_custom_client() | ext/fetch/lib.rs:947 | explicit |
+| fetch | check_net_unix_socket | op_fetch_custom_client() | ext/fetch/lib.rs:967 | explicit |
+| fetch | check_net_vsock | op_fetch_custom_client() | ext/fetch/lib.rs:978 | explicit |
 | fetch | check_net_url | check_net_url() | ext/kv/remote.rs:75 | explicit |
 | fetch | check_net_url | open() | ext/kv/remote.rs:160 | explicit |
 | connect | check_net | op_net_connect_tls() | ext/net/ops_tls.rs:425 | explicit |
@@ -76,63 +76,65 @@ allowed only at the two audited typed helpers named by the generator.
 | connect | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
 | fetch | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
 | listen | check_net_unix_socket | check_unix_socket_path() | ext/net/ops_unix.rs:382 | propagated |
-| connect | check_net | op_net_send_udp() | ext/net/ops.rs:285 | explicit |
-| connect | check_net_resolved | op_net_send_udp() | ext/net/ops.rs:300 | explicit |
-| connect | check_net | op_net_connect_tcp_inner() | ext/net/ops.rs:560 | explicit |
-| connect | check_net_resolved | op_net_connect_tcp_inner() | ext/net/ops.rs:611 | explicit |
-| listen | check_net | op_net_listen_tcp() | ext/net/ops.rs:698 | explicit |
-| listen | check_net_resolved | op_net_listen_tcp() | ext/net/ops.rs:708 | explicit |
-| listen | check_net | net_listen_udp() | ext/net/ops.rs:733 | explicit |
-| listen | check_net_resolved | net_listen_udp() | ext/net/ops.rs:743 | explicit |
-| connect | check_net_vsock | op_net_connect_vsock() | ext/net/ops.rs:843 | explicit |
-| listen | check_net_vsock | op_net_listen_vsock() | ext/net/ops.rs:897 | explicit |
-| fetch | check_net | op_dns_resolve() | ext/net/ops.rs:1144 | explicit |
+| connect | check_net | op_net_send_udp() | ext/net/ops.rs:289 | explicit |
+| connect | check_net_resolved | op_net_send_udp() | ext/net/ops.rs:304 | explicit |
+| connect | check_net | op_net_connect_tcp_inner() | ext/net/ops.rs:564 | explicit |
+| connect | check_net_resolved | op_net_connect_tcp_inner() | ext/net/ops.rs:615 | explicit |
+| listen | check_net | op_net_listen_tcp() | ext/net/ops.rs:708 | explicit |
+| listen | check_net_resolved | op_net_listen_tcp() | ext/net/ops.rs:718 | explicit |
+| listen | check_net | net_listen_udp() | ext/net/ops.rs:743 | explicit |
+| listen | check_net_resolved | net_listen_udp() | ext/net/ops.rs:753 | explicit |
+| connect | check_net_vsock | op_net_connect_vsock() | ext/net/ops.rs:853 | explicit |
+| listen | check_net_vsock | op_net_listen_vsock() | ext/net/ops.rs:907 | explicit |
+| fetch | check_net | op_dns_resolve() | ext/net/ops.rs:1154 | explicit |
 | listen | check_net | op_quic_endpoint_create() | ext/net/quic.rs:263 | explicit |
 | connect | check_net | op_quic_endpoint_connect() | ext/net/quic.rs:570 | explicit |
 | connect | check_net_resolved | op_quic_endpoint_connect() | ext/net/quic.rs:582 | explicit |
 | fetch | check_net | op_node_getaddrinfo() | ext/node/ops/dns.rs:71 | explicit |
 | fetch | check_net | op_node_getnameinfo() | ext/node/ops/dns.rs:274 | explicit |
-| fetch | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:100 | explicit |
+| connect | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:115 | explicit |
+| fetch | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:121 | explicit |
 | listen | check_net | op_inspector_open() | ext/node/ops/inspector.rs:106 | explicit |
 | listen | check_net | op_inspector_open() | ext/node/ops/inspector.rs:151 | explicit |
-| listen | check_net_unix_socket | bind() | ext/node/ops/pipe_wrap.rs:389 | explicit |
-| listen | check_net_unix_socket | listen() | ext/node/ops/pipe_wrap.rs:424 | explicit |
-| fetch | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:466 | explicit |
-| connect | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:472 | explicit |
-| listen | check_net | bind_inner() | ext/node/ops/tcp_wrap.rs:339 | explicit |
-| listen | check_net | bind6() | ext/node/ops/tcp_wrap.rs:595 | explicit |
-| fetch | check_net | connect() | ext/node/ops/tcp_wrap.rs:768 | explicit |
-| connect | check_net | connect() | ext/node/ops/tcp_wrap.rs:774 | explicit |
-| fetch | check_net_resolved | connect() | ext/node/ops/tcp_wrap.rs:796 | explicit |
-| connect | check_net_resolved | connect() | ext/node/ops/tcp_wrap.rs:805 | explicit |
-| fetch | check_net | connect6() | ext/node/ops/tcp_wrap.rs:860 | explicit |
-| connect | check_net | connect6() | ext/node/ops/tcp_wrap.rs:866 | explicit |
-| fetch | check_net_resolved | connect6() | ext/node/ops/tcp_wrap.rs:886 | explicit |
-| connect | check_net_resolved | connect6() | ext/node/ops/tcp_wrap.rs:895 | explicit |
+| listen | check_net_unix_socket | bind() | ext/node/ops/pipe_wrap.rs:398 | explicit |
+| listen | check_net_unix_socket | listen() | ext/node/ops/pipe_wrap.rs:433 | explicit |
+| connect | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:476 | explicit |
+| fetch | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:482 | explicit |
+| connect | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:489 | explicit |
+| listen | check_net | bind_inner() | ext/node/ops/tcp_wrap.rs:405 | explicit |
+| listen | check_net | bind6() | ext/node/ops/tcp_wrap.rs:680 | explicit |
+| fetch | check_net | connect() | ext/node/ops/tcp_wrap.rs:869 | explicit |
+| connect | check_net | connect() | ext/node/ops/tcp_wrap.rs:876 | explicit |
+| fetch | check_net_resolved | connect() | ext/node/ops/tcp_wrap.rs:900 | explicit |
+| connect | check_net_resolved | connect() | ext/node/ops/tcp_wrap.rs:908 | explicit |
+| fetch | check_net | connect6() | ext/node/ops/tcp_wrap.rs:968 | explicit |
+| connect | check_net | connect6() | ext/node/ops/tcp_wrap.rs:975 | explicit |
+| fetch | check_net_resolved | connect6() | ext/node/ops/tcp_wrap.rs:997 | explicit |
+| connect | check_net_resolved | connect6() | ext/node/ops/tcp_wrap.rs:1005 | explicit |
 | listen | check_net | op_node_udp_bind() | ext/node/ops/udp.rs:76 | explicit |
 | listen | check_net_resolved | op_node_udp_bind() | ext/node/ops/udp.rs:87 | explicit |
 | connect | check_net | op_node_udp_send() | ext/node/ops/udp.rs:584 | explicit |
 | connect | check_net_resolved | op_node_udp_send() | ext/node/ops/udp.rs:604 | explicit |
 | connect | check_net_url | op_ws_check_permission_and_cancel_handle() | ext/websocket/lib.rs:134 | explicit |
 | connect | check_net_url | op_ws_create() | ext/websocket/lib.rs:524 | explicit |
-| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:11108 | explicit |
-| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:12365 | explicit |
-| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:12395 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12422 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12428 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12438 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12444 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12462 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12467 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12491 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12500 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12510 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:15598 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:15607 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:15621 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:15628 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:15635 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:15643 | explicit |
+| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:11665 | explicit |
+| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:12922 | explicit |
+| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:12952 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12979 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12985 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12995 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13001 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13019 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13024 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13048 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13057 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13067 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16155 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16164 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16178 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16185 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16192 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16200 | explicit |
 
 ## Network resource/API action matrix
 
@@ -164,19 +166,30 @@ consume a resource authorized by the operation named in the note.
 | Deno QUIC listener | listen | inherited | ext/net/quic.rs:op_quic_endpoint_listen() | authorized can-listen endpoint |
 | Deno QUIC connect | connect | direct | ext/net/quic.rs:op_quic_endpoint_connect() | logical host plus resolved IP |
 | WebTransport connect | connect | inherited | ext/net/quic.rs:op_webtransport_connect() | authorized QUIC connection |
-| Node HTTP(S) direct connection | fetch | direct | ext/node/ops/tcp_wrap.rs:connect() | endpoint-bound opaque HTTP token |
-| Node HTTP(S) proxy | fetch | direct | ext/node/ops/http.rs:op_node_http_check_proxy_net() | logical proxy endpoint |
+| Node HTTP(S) direct connection | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | socket-exposing HTTP token is connect-class in /1.1 |
+| Node HTTP(S) proxy | connect | direct | ext/node/ops/http.rs:op_node_http_check_proxy_net() | target and proxy peer are independently connect-checked |
 | Node TCP connect | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | untokenized raw socket |
 | Node TCP bind/listen | listen | direct | ext/node/ops/tcp_wrap.rs:bind_inner() | bind before listener creation |
 | Node UDP send | connect | direct | ext/node/ops/udp.rs:op_node_udp_send() | destination plus resolved IP |
 | Node UDP bind | listen | direct | ext/node/ops/udp.rs:op_node_udp_bind() | bind host plus resolved IP |
-| Node HTTP(S) Unix socket | fetch | direct | ext/node/ops/pipe_wrap.rs:connect() | endpoint-bound opaque HTTP token |
+| Node HTTP(S) Unix socket | connect | direct | ext/node/ops/pipe_wrap.rs:connect() | socket-exposing HTTP token is connect-class in /1.1 |
 | Node Unix pipe connect | connect | direct | ext/node/ops/pipe_wrap.rs:connect() | untokenized raw pipe |
 | Node Unix pipe bind | listen | direct | ext/node/ops/pipe_wrap.rs:bind() | bind path |
 | Node Unix pipe listen | listen | direct | ext/node/ops/pipe_wrap.rs:listen() | bound path recheck |
 | Node DNS lookup/reverse lookup | fetch | direct | ext/node/ops/dns.rs:op_node_getaddrinfo() | query target |
 | Node DNS reverse lookup (v1 resolve fold) | fetch | direct | ext/node/ops/dns.rs:op_node_getnameinfo() | query target |
 | Node inspector listener | listen | direct | ext/node/ops/inspector.rs:op_inspector_open() | inspector bind host/port |
+| Node HTTP route: request socket event/property | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; raw-engine fixture request-socket-event-property |
+| Node HTTP route: response socket write | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; raw-engine fixture response-socket-write |
+| Node HTTP route: CONNECT tunnel/socket delegation | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; raw-engine fixture connect-tunnel-raw-write |
+| Node HTTP route: 101 Upgrade socket delegation | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; raw-engine fixture upgrade-raw-write |
+| Node HTTP route: custom Agent.createConnection | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | raw Node TCP creation; raw-engine fixture custom-agent |
+| Node HTTP route: request createConnection hook | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | raw Node TCP creation; raw-engine fixture create-connection-hook |
+| Node HTTP route: redirect hop | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | each built-in agent TCP creation; raw-engine fixture redirect-hop |
+| Node HTTP route: keep-alive reuse | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | original pool socket creation; raw-engine fixture keepalive-reuse |
+| Node HTTP route: forward-proxy target | connect | direct | ext/node/ops/http.rs:op_node_http_check_proxy_net() | explicit target check; raw-engine fixture forward-proxy |
+| Node HTTP route: forward-proxy peer | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | proxy TCP creation; raw-engine fixture forward-proxy |
+| Node HTTP route: Unix-domain HTTP socket | connect | direct | ext/node/ops/pipe_wrap.rs:connect() | built-in agent pipe creation; raw-engine fixture unix-socket |
 
 ## Permission methods (closed inventory)
 
@@ -214,13 +227,13 @@ consume a resource authorized by the operation named in the note.
 
 - ext/cache/lib.rs:381
 - ext/cron/lib.rs:122
-- ext/fetch/lib.rs:1017
-- ext/fetch/lib.rs:465
-- ext/fetch/lib.rs:468
-- ext/fetch/lib.rs:552
-- ext/fetch/lib.rs:558
-- ext/fetch/lib.rs:578
-- ext/fetch/lib.rs:706
+- ext/fetch/lib.rs:1030
+- ext/fetch/lib.rs:478
+- ext/fetch/lib.rs:481
+- ext/fetch/lib.rs:565
+- ext/fetch/lib.rs:571
+- ext/fetch/lib.rs:591
+- ext/fetch/lib.rs:719
 - ext/ffi/callback.rs:651
 - ext/ffi/dlfcn.rs:242
 - ext/fs/ops.rs:243
@@ -237,16 +250,16 @@ consume a resource authorized by the operation named in the note.
 - ext/kv/lib.rs:230
 - ext/kv/lib.rs:460
 - ext/kv/lib.rs:493
-- ext/net/ops.rs:1008
-- ext/net/ops.rs:1695
-- ext/net/ops.rs:242
-- ext/net/ops.rs:663
-- ext/net/ops.rs:722
-- ext/net/ops.rs:796
-- ext/net/ops.rs:858
-- ext/net/ops.rs:908
-- ext/net/ops.rs:949
-- ext/net/ops.rs:980
+- ext/net/ops.rs:1018
+- ext/net/ops.rs:1705
+- ext/net/ops.rs:249
+- ext/net/ops.rs:672
+- ext/net/ops.rs:732
+- ext/net/ops.rs:806
+- ext/net/ops.rs:868
+- ext/net/ops.rs:918
+- ext/net/ops.rs:959
+- ext/net/ops.rs:990
 - ext/net/ops_tls.rs:398
 - ext/net/ops_tls.rs:547
 - ext/net/ops_tls.rs:632
@@ -269,31 +282,31 @@ consume a resource authorized by the operation named in the note.
 - ext/net/quic.rs:987
 - ext/node/ops/ipc.rs:201
 - ext/node/ops/ipc.rs:212
-- ext/node/ops/tcp_wrap.rs:690
+- ext/node/ops/tcp_wrap.rs:784
 - ext/node/ops/tls.rs:773
 - ext/node/ops/tls.rs:774
 - ext/node/ops/udp.rs:125
-- ext/node/ops/udp.rs:705
+- ext/node/ops/udp.rs:732
 - ext/node_crypto/lib.rs:657
 - ext/node_crypto/lib.rs:736
 - ext/os/ops/signal.rs:94
-- ext/process/lib.rs:1053
-- ext/process/lib.rs:1061
-- ext/process/lib.rs:1067
-- ext/process/lib.rs:1075
-- ext/process/lib.rs:1081
-- ext/process/lib.rs:1089
+- ext/process/lib.rs:1086
+- ext/process/lib.rs:1094
 - ext/process/lib.rs:1100
-- ext/process/lib.rs:1107
-- ext/process/lib.rs:1186
-- ext/process/lib.rs:2133
-- ext/process/lib.rs:2145
-- ext/process/lib.rs:2157
-- ext/process/lib.rs:2167
-- ext/process/lib.rs:749
-- ext/process/lib.rs:755
-- ext/process/lib.rs:866
-- ext/process/lib.rs:872
+- ext/process/lib.rs:1108
+- ext/process/lib.rs:1114
+- ext/process/lib.rs:1122
+- ext/process/lib.rs:1133
+- ext/process/lib.rs:1140
+- ext/process/lib.rs:1219
+- ext/process/lib.rs:2174
+- ext/process/lib.rs:2186
+- ext/process/lib.rs:2198
+- ext/process/lib.rs:2208
+- ext/process/lib.rs:772
+- ext/process/lib.rs:778
+- ext/process/lib.rs:896
+- ext/process/lib.rs:902
 - ext/web/broadcast_channel.rs:110
 - ext/web/locks.rs:249
 - ext/web/locks.rs:254
@@ -305,8 +318,8 @@ consume a resource authorized by the operation named in the note.
 - ext/websocket/lib.rs:142
 - ext/websocket/lib.rs:596
 - ext/websocket/lib.rs:836
-- libs/core/ops_builtin.rs:577
-- libs/core/ops_builtin_v8.rs:1420
+- libs/core/ops_builtin.rs:578
+- libs/core/ops_builtin_v8.rs:1434
 - libs/core_testing/checkin/runner/ops_io.rs:122
 - libs/core_testing/checkin/runner/ops_io.rs:64
 - libs/core_testing/checkin/runner/ops_io.rs:68
@@ -321,5 +334,5 @@ covered by the layer-2-independence proof.
 
 - query_read_all	ext/node/ops/require.rs:45
 - query_read_all	ext/node/ops/worker_threads.rs:38
-- query_run_all	ext/process/lib.rs:1449
+- query_run_all	ext/process/lib.rs:1482
 
