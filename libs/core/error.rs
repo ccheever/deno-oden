@@ -1151,8 +1151,12 @@ pub fn oden_build_callback_context<'s>(
       locators.push(locator);
     }
   }
+  // A callable Proxy is a distinct recipient whose `apply` trap can observe
+  // every argument before the target function runs.  V8 may expose the
+  // target's script identity through Function APIs, so never let a proxy
+  // inherit that identity at a delivery boundary.
   let script_id = callback.script_id();
-  let callback_locator = if script_id >= 0 {
+  let callback_locator = if !callback.is_proxy() && script_id >= 0 {
     // SAFETY: `scope` is active for this lookup; the pointer is retained only
     // as the isolate-scoped registry key used throughout CPED attribution.
     let isolate = unsafe { scope.as_raw_isolate_ptr() };
