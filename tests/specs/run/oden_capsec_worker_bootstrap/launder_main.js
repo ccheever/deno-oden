@@ -18,6 +18,7 @@ const results = probe.run(() => {
     finishTimer("DENIED");
   }
 });
+results.actorRecovery = await probe.tryRecoverActorAuthority();
 results.rootRid = await probe.tryReadRootRid("root-rid-secret");
 rootFile.close();
 results.timer = await timerResult;
