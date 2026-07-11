@@ -1395,6 +1395,7 @@ pub fn create_permissions_stack_trace_callback()
       deno_permissions::prompter::set_current_oden_cped_stack(
         (!schedule_stack.is_empty()).then_some(schedule_stack),
       );
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- Copy the opaque continuation marker into dispatch-local Rust state without overriding frame or scheduler provenance.
       deno_permissions::prompter::set_current_oden_trusted_host_actor(
         trusted_host_actor,
       );

@@ -178,6 +178,7 @@ deno_core::extension!(
 // Backward-compat alias used by cli/tools/test/mod.rs
 pub use deno_jupyter_repl_for_test as deno_jupyter_for_test;
 
+// @ref LLP 0010#revision-11-patch-profile [implements] -- OpState retains the REPL bootstrap closure without a package-visible Deno.internal lookup.
 #[op2]
 fn op_jupyter_register_repl_host_callback(
   state: &mut OpState,
@@ -186,6 +187,7 @@ fn op_jupyter_register_repl_host_callback(
   state.put(JupyterReplHostCallback(callback));
 }
 
+// @ref LLP 0010#revision-11-patch-profile [implements] -- OpState retains the kernel bootstrap closure for the Rust-owned startup path.
 #[op2]
 fn op_jupyter_register_kernel_host_callback(
   state: &mut OpState,

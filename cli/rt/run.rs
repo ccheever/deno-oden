@@ -1817,6 +1817,7 @@ pub async fn run_with_options(
   }
 
   // Initialize desktop APIs (Deno.desktop.*).
+  // @ref LLP 0010#revision-11-patch-profile [implements] -- Desktop bootstrap evaluates trusted side modules before user code without exposing their core bindings.
   if has_desktop {
     worker
       .execute_side_module_from_code(

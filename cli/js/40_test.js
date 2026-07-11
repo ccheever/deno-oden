@@ -917,6 +917,7 @@ function closeTestHostIdleConnections() {
   internals.closeIdleConnections?.();
 }
 
+// @ref LLP 0010#revision-11-patch-profile [implements] -- Register test-control closures for the non-exported Rust host path.
 op_test_register_host_callbacks?.(
   configureTestHost,
   flushTestHostSnapshots,

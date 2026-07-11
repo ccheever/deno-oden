@@ -1207,4 +1207,5 @@ async function startJupyterKernel() {
 }
 
 internals.startJupyterKernel = startJupyterKernel;
+// @ref LLP 0010#revision-11-patch-profile [implements] -- Register the kernel closure for the non-exported Rust host path.
 core.ops.op_jupyter_register_kernel_host_callback?.(startJupyterKernel);

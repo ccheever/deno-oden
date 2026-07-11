@@ -971,6 +971,7 @@ pub fn oden_enter_trusted_host_actor(
 
 /// Restore the continuation context returned by
 /// [`oden_enter_trusted_host_actor`].
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [constrained-by] -- Unrelated synchronous work resumes with the exact prior actor context.
 pub fn oden_exit_trusted_host_actor(
   scope: &mut v8::PinScope,
   previous: Option<v8::Global<v8::Value>>,
@@ -983,6 +984,7 @@ pub fn oden_exit_trusted_host_actor(
 
 /// Whether the currently dispatched continuation carries the opaque
 /// Rust-owned host actor.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- The host marker is read only from the current continuation and is inaccessible to JavaScript.
 pub fn oden_read_trusted_host_actor(scope: &mut v8::PinScope) -> bool {
   if !oden_capsec_armed() {
     return false;

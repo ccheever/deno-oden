@@ -584,4 +584,5 @@ function enableJupyter() {
 }
 
 internals.enableJupyter = enableJupyter;
+// @ref LLP 0010#revision-11-patch-profile [implements] -- Register the extension closure for the non-exported Rust host path.
 core.ops.op_jupyter_register_repl_host_callback?.(enableJupyter);

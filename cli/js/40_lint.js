@@ -1595,6 +1595,7 @@ function _dump(ctx) {
 internals.installPlugins = installPlugins;
 internals.runPluginsForFile = runPluginsForFile;
 internals.resetState = resetState;
+// @ref LLP 0010#revision-11-patch-profile [implements] -- Register bound lint closures without exposing them through package-visible internals.
 core.ops.op_lint_register_host_callbacks?.(installPlugins, runPluginsForFile);
 
 /**

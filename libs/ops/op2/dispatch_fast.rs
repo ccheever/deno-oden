@@ -510,6 +510,7 @@ pub(crate) fn generate_dispatch_fast(
       // callback), read for the row-3 intersection. Empty for synchronous ops.
       let oden_sched = deno_core::error::oden_read_schedule_slot(&mut #scope);
       let oden_cped = deno_core::error::oden_capture_stamp_and_read(&mut #scope, &frames, &oden_sched);
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- Read the unforgeable host marker from this exact continuation at effect dispatch.
       let oden_trusted_host = deno_core::error::oden_read_trusted_host_actor(&mut #scope);
       let display_frames = if deno_core::error::oden_trace_display_enabled() {
         let stack_trace_msg = deno_core::v8::String::empty(&mut #scope);

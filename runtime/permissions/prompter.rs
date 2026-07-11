@@ -85,6 +85,7 @@ pub(crate) static MAYBE_CURRENT_ODEN_CPED_STACK: Lazy<
 
 // Opaque Rust-owned host actor carried by the current CPED continuation. It is
 // a fallback only: live and scheduled package actors remain authoritative.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- Dispatch-local host provenance cannot replace a constrained operation actor.
 thread_local! {
   static CURRENT_ODEN_TRUSTED_HOST_ACTOR: Cell<bool> = const { Cell::new(false) };
 }

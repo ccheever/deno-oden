@@ -4087,6 +4087,7 @@ where
   root
 }
 
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- Runtime is selected only after live and scheduled package actors have been exhausted.
 fn oden_capsec_unattributed_principal(
   trusted_host_actor: bool,
 ) -> OdenPrincipal {

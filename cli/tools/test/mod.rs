@@ -815,6 +815,7 @@ async fn configure_main_worker(
       sanitize_ops: options.sanitize_ops,
       sanitize_resources: options.sanitize_resources,
     });
+  // @ref LLP 0010#revision-11-patch-profile [implements] -- Test setup invokes a captured extension closure instead of package-visible Deno.internal.
   let configure_test_host = worker
     .op_state()
     .borrow()
@@ -1249,6 +1250,7 @@ pub async fn run_tests_for_worker(
       .put(ops::testing::TestHostFlushOptions {
         allow_stale_snapshot_removal: allow_stale_removal,
       });
+    // @ref LLP 0010#revision-11-patch-profile [implements] -- Snapshot flush uses the captured test-control closure, not a mutable public runtime object.
     let flush_snapshots = state_rc
       .borrow()
       .borrow::<ops::testing::TestHostCallbacks>()
@@ -1589,6 +1591,7 @@ async fn run_tests_for_worker_inner(
         // Close idle Node.js HTTP Agent connections to prevent cross-test
         // pollution and false positive resource leak detection from pooled
         // keepAlive connections. Defined in ext/node/polyfills/01_require.js.
+        // @ref LLP 0010#revision-11-patch-profile [implements] -- Cleanup reaches the bound extension closure through OpState rather than package-visible internals.
         let close_idle_connections = worker
           .js_runtime
           .op_state()

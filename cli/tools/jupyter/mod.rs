@@ -144,6 +144,7 @@ pub async fn kernel(
         .await?;
 
       worker.setup_repl().await?;
+      // @ref LLP 0010#revision-11-patch-profile [implements] -- Rust invokes the captured extension closure without traversing Deno.internal.
       let enable_jupyter = worker
         .op_state()
         .borrow()
@@ -248,6 +249,8 @@ pub async fn kernel(
   }
 
   // Bootstrap the JS ZMQ kernel then run the event loop.
+  // @ref LLP 0010#revision-11-patch-profile [implements] -- Kernel startup enters through the captured, non-exported host callback.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [constrained-by] -- Host provenance follows only this callback's continuation and cannot replace a package actor.
   let start_jupyter_kernel = kernel_worker
     .op_state()
     .borrow()

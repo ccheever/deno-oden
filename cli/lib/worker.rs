@@ -972,6 +972,7 @@ impl LibMainWorker {
   /// Evaluate an embedder-provided side module before the user entrypoint.
   /// Unlike an injected script, a side module can capture trusted extension
   /// imports without routing them through the public `Deno.internal` facade.
+  // @ref LLP 0010#revision-11-patch-profile [implements] -- Embedder bootstrap captures trusted extension bindings without exposing them through Deno.internal.
   pub async fn execute_side_module_from_code(
     &mut self,
     module_specifier: &ModuleSpecifier,

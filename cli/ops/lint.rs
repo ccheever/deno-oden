@@ -64,6 +64,7 @@ pub struct LintHostCallbacks {
   pub run_plugins_for_file: v8::Global<v8::Function>,
 }
 
+// @ref LLP 0010#revision-11-patch-profile [implements] -- OpState retains lint extension closures without consulting package-visible runtime internals.
 #[op2]
 fn op_lint_register_host_callbacks(
   state: &mut OpState,

@@ -523,6 +523,8 @@ impl CliMainWorker {
     self.worker.js_runtime().call(function).await
   }
 
+  // @ref LLP 0010#revision-11-patch-profile [implements] -- Trusted host startup uses a separate, non-exported entry point.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [constrained-by] -- The opaque Runtime actor is only a fallback to live or scheduled package actors.
   pub fn start_trusted_host_function(
     &mut self,
     function: &v8::Global<v8::Function>,

@@ -145,6 +145,7 @@ pub fn op_restore_test_permissions(
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
+// @ref LLP 0010#revision-11-patch-profile [implements] -- OpState retains test-control closures on a separate, non-exported host path.
 #[op2]
 fn op_test_register_host_callbacks(
   state: &mut OpState,

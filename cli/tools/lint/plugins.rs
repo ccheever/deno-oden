@@ -167,6 +167,7 @@ async fn create_plugin_runner_inner(
 
   let worker = worker.into_main_worker();
   log::debug!("Lint plugins loaded, capturing default exports");
+  // @ref LLP 0010#revision-11-patch-profile [implements] -- The host captures extension closures from OpState, not package-visible Deno.internal.
   let (install_plugins_fn, run_plugins_for_file_fn) = {
     let op_state = worker.js_runtime.op_state();
     let state = op_state.borrow();
@@ -324,6 +325,7 @@ impl PluginHost {
       v8::Local::new(scope, &self.run_plugins_for_file_fn);
     let undefined = v8::undefined(scope);
 
+    // @ref LLP 0010#revision-11-patch-profile [implements] -- Lint execution calls the previously captured extension closure directly.
     let _run_plugins_result = {
       v8::tc_scope!(tc_scope, scope);
       let _run_plugins_result = run_plugins_for_file.call(
@@ -417,6 +419,7 @@ impl PluginHost {
 
     log::debug!("Installing lint plugins...");
 
+    // @ref LLP 0010#revision-11-patch-profile [implements] -- Plugin installation calls the previously captured extension closure directly.
     let plugins_info_result = {
       v8::tc_scope!(tc_scope, scope);
       let plugins_info_result =
