@@ -59,6 +59,11 @@ const cjsBreakNext = section(
   "pub fn op_require_break_on_next_statement(",
   "pub fn op_require_can_parse_as_esm(",
 );
+const cjsBreakAuthorization = section(
+  requireOps,
+  "fn with_require_break_authorization<T>(",
+  "pub fn op_require_can_parse_as_esm(",
+);
 const nodeReplConnect = section(
   inspectorOps,
   "pub fn op_node_repl_inspector_connect<'s>(",
@@ -109,12 +114,14 @@ const evidenced = {
     '"startup:worker-wait-for-debugger"',
     "wait_for_debugger_enabled_for_worker_message(",
   ),
-  cjsBreakNext: ordered(
-    cjsBreakNext,
-    "oden_capsec_check_inspector_activation(",
-    '"node:require.break-on-next-statement"',
-    "wait_for_session_and_break_on_next_statement(",
-  ),
+  cjsBreakNext: cjsBreakNext.includes("with_require_break_authorization(||") &&
+    cjsBreakNext.includes("wait_for_session_and_break_on_next_statement(") &&
+    ordered(
+      cjsBreakAuthorization,
+      "oden_capsec_check_inspector_activation(",
+      '"node:require.break-on-next-statement"',
+      "Ok(effect())",
+    ),
   nodeReplConnect: ordered(
     nodeReplConnect,
     "oden_capsec_check_inspector_activation(",
