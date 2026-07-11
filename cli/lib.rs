@@ -794,6 +794,9 @@ pub fn main() {
   init_logging(None, None);
   boot_phase("after panic+logging");
 
+  // @ref LLP 0019#system-information-and-process-mutation [constrained-by] —
+  // The host-only FD-limit mutation runs before any user isolate exists; no
+  // package-facing route may reuse it as ambient process:limit authority.
   util::unix::raise_fd_limit();
   util::windows::ensure_stdio_open();
   #[cfg(windows)]
