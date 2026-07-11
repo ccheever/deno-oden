@@ -24,6 +24,10 @@ const { destroyer } = core.loadExtScript(
 import Duplex from "node:_stream_duplex";
 import Readable from "node:_stream_readable";
 import Writable from "node:_stream_writable";
+const {
+  getReadableUseGuard,
+  setReadableUseGuard,
+} = core.loadExtScript("ext:deno_node/internal/streams/readable.js");
 import from from "ext:deno_node/internal/streams/from.js";
 const { isBlob } = core.loadExtScript("ext:deno_web/09_file.js");
 const { AbortController } = core.loadExtScript(
@@ -46,6 +50,15 @@ const {
 } = primordials;
 
 let _Duplexify;
+
+function propagateReadableUseGuard(source, readable) {
+  const sourceGuard = getReadableUseGuard(source);
+  if (sourceGuard !== undefined) {
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    setReadableUseGuard(readable, sourceGuard);
+  }
+  return readable;
+}
 
 export default function duplexify(body, name) {
   // This is needed for pre node 17.
@@ -105,13 +118,13 @@ export default function duplexify(body, name) {
     }
 
     if (isIterable(value)) {
-      return from(Duplexify, value, {
+      return propagateReadableUseGuard(value, from(Duplexify, value, {
         // TODO (ronag): highWaterMark?
         objectMode: true,
         write,
         final,
         destroy,
-      });
+      }));
     }
 
     const then = value?.then;
@@ -162,11 +175,11 @@ export default function duplexify(body, name) {
   }
 
   if (isIterable(body)) {
-    return from(Duplexify, body, {
+    return propagateReadableUseGuard(body, from(Duplexify, body, {
       // TODO (ronag): highWaterMark?
       objectMode: true,
       writable: false,
-    });
+    }));
   }
 
   if (
@@ -314,6 +327,14 @@ function _duplexify(pair) {
     readable,
     writable,
   });
+
+  const sourceGuard = getReadableUseGuard(r);
+  if (sourceGuard !== undefined) {
+    // Every readable _duplexify branch creates a new buffering destination;
+    // object passage and conversion do not replace the original actor set.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    setReadableUseGuard(d, sourceGuard);
+  }
 
   if (writable) {
     eos(w, (err) => {

@@ -119,9 +119,18 @@ const nop = () => {};
 
 // Protected native sockets can otherwise prefetch into this module's JS
 // buffer under the creator's context and later expose those bytes through a
-// passed Readable. Keep a closure-private per-consumer guard and run it before
+// passed Readable. Keep closure-private per-consumer guards and run them before
 // any public operation can start flow or dequeue buffered data.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
 const readableUseGuards = new SafeWeakMap();
+const readableIteratorUseGuards = new SafeWeakMap();
+
+function getReadableUseGuard(source) {
+  const streamGuard = WeakMapPrototypeGet(readableUseGuards, source);
+  return streamGuard === undefined
+    ? WeakMapPrototypeGet(readableIteratorUseGuards, source)
+    : streamGuard;
+}
 
 function setReadableUseGuard(stream, guard) {
   const existing = WeakMapPrototypeGet(readableUseGuards, stream);
@@ -1018,6 +1027,14 @@ Readable.prototype._read = function (n) {
 
 Readable.prototype.pipe = function (dest, pipeOpts) {
   runReadableUseGuard(this);
+  const sourceGuard = getReadableUseGuard(this);
+  if (sourceGuard !== undefined && dest?._readableState !== undefined) {
+    // A readable Duplex/Transform/PassThrough is a destination transition,
+    // not an authority boundary. The destination may buffer bytes while root
+    // owns the pipe, so later consumers must retain the source guard.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    setReadableUseGuard(dest, sourceGuard);
+  }
   const src = this;
   const state = this._readableState;
 
@@ -1493,6 +1510,10 @@ function streamToAsyncIterator(stream, options) {
 
   const iter = createAsyncIterator(stream, options);
   iter.stream = stream;
+  const sourceGuard = getReadableUseGuard(stream);
+  if (sourceGuard !== undefined) {
+    WeakMapPrototypeSet(readableIteratorUseGuards, iter, sourceGuard);
+  }
   return iter;
 }
 
@@ -1878,7 +1899,7 @@ function endWritableNT(stream) {
 
 Readable.from = function (iterable, opts) {
   const readable = lazyFrom().default(Readable, iterable, opts);
-  const sourceGuard = WeakMapPrototypeGet(readableUseGuards, iterable);
+  const sourceGuard = getReadableUseGuard(iterable);
   if (sourceGuard !== undefined) {
     setReadableUseGuard(readable, sourceGuard);
   }
@@ -1938,8 +1959,7 @@ Readable.wrap = function (src, options) {
 
 return {
   default: Readable,
-  getReadableUseGuard: (stream) =>
-    WeakMapPrototypeGet(readableUseGuards, stream),
+  getReadableUseGuard,
   Readable,
   setReadableUseGuard,
 };

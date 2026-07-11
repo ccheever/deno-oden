@@ -30,9 +30,13 @@
 const { core, primordials } = __bootstrap;
 const _mod1 =
   core.loadExtScript("ext:deno_node/internal/streams/legacy.js").default;
-const Readable = core.loadExtScript(
+const {
+  default: Readable,
+  getReadableUseGuard,
+  setReadableUseGuard,
+} = core.loadExtScript(
   "ext:deno_node/internal/streams/readable.js",
-).default;
+);
 const Writable = core.loadExtScript(
   "ext:deno_node/internal/streams/writable.js",
 ).default;
@@ -230,14 +234,44 @@ function lazyWebStreams() {
 }
 
 Duplex.fromWeb = function (pair, options) {
-  return lazyWebStreams().newStreamDuplexFromReadableWritablePair(
+  let readableStream;
+  if (pair !== null && typeof pair === "object") {
+    // Capture each accessor once. A caller-controlled pair must not make the
+    // adapter consume one readable while guard propagation inspects another.
+    readableStream = pair.readable;
+    pair = { readable: readableStream, writable: pair.writable };
+  }
+  const duplex = lazyWebStreams().newStreamDuplexFromReadableWritablePair(
     pair,
     options,
   );
+  const { getReadableStreamUseGuard } = core.loadExtScript(
+    "ext:deno_web/06_streams.js",
+  );
+  const sourceGuard = getReadableStreamUseGuard(readableStream);
+  if (sourceGuard !== undefined) {
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    setReadableUseGuard(duplex, sourceGuard);
+  }
+  return duplex;
 };
 
 Duplex.toWeb = function (duplex, options) {
-  return lazyWebStreams().newReadableWritablePairFromDuplex(duplex, options);
+  const pair = lazyWebStreams().newReadableWritablePairFromDuplex(
+    duplex,
+    options,
+  );
+  const sourceGuard = getReadableUseGuard(duplex);
+  if (sourceGuard !== undefined) {
+    const { setReadableStreamUseGuard } = core.loadExtScript(
+      "ext:deno_web/06_streams.js",
+    );
+    // Only the readable half carries protected bytes; the writable half is not
+    // readable authority and deliberately remains untagged.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    setReadableStreamUseGuard(pair.readable, sourceGuard);
+  }
+  return pair;
 };
 
 let duplexify;

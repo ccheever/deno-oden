@@ -4,6 +4,10 @@
 import process from "node:process";
 import { core, primordials } from "ext:core/mod.js";
 import { Duplex } from "node:stream";
+const {
+  getReadableUseGuard,
+  setReadableUseGuard,
+} = core.loadExtScript("ext:deno_node/internal/streams/readable.js");
 const assert = core.loadExtScript(
   "ext:deno_node/internal/assert.mjs",
 );
@@ -44,6 +48,13 @@ class DuplexSide extends Duplex {
   _write(chunk, encoding, callback) {
     assert(this.#otherSide !== null);
     assert(this.#otherSide[kCallback] === null);
+    const sourceGuard = getReadableUseGuard(this);
+    if (sourceGuard !== undefined) {
+      // A duplex-pair write crosses into the distinct readable counterpart;
+      // the pair is a destination transition, not an authority transfer.
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+      setReadableUseGuard(this.#otherSide, sourceGuard);
+    }
     if (chunk.length === 0) {
       process.nextTick(callback);
     } else {

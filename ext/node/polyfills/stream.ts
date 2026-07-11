@@ -70,6 +70,10 @@ import Duplex from "node:_stream_duplex";
 import Transform from "node:_stream_transform";
 import PassThrough from "node:_stream_passthrough";
 import duplexPair from "ext:deno_node/internal/streams/duplexpair.js";
+const {
+  getReadableUseGuard,
+  setReadableUseGuard,
+} = core.loadExtScript("ext:deno_node/internal/streams/readable.js");
 const { addAbortSignal } = core.loadExtScript(
   "ext:deno_node/internal/streams/add-abort-signal.js",
 );
@@ -92,7 +96,15 @@ for (let i = 0; i < streamKeys.length; i++) {
     if (new.target) {
       throw new ERR_ILLEGAL_CONSTRUCTOR();
     }
-    return Stream.Readable.from(ReflectApply(op, this, args));
+    const readable = Stream.Readable.from(ReflectApply(op, this, args));
+    const sourceGuard = getReadableUseGuard(this);
+    if (sourceGuard !== undefined) {
+      // map/filter/flatMap/drop/take/compose return fresh Readables, but
+      // transforming or buffering bytes does not transfer their authority.
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+      setReadableUseGuard(readable, sourceGuard);
+    }
+    return readable;
   }
   ObjectDefineProperty(fn, "name", { __proto__: null, value: op.name });
   ObjectDefineProperty(fn, "length", { __proto__: null, value: op.length });

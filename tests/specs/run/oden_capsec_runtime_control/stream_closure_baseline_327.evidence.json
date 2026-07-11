@@ -1,0 +1,20 @@
+{
+  "kind": "open-red-team-baseline",
+  "engine": "327298073a8be64605a065203740bb68d1ece45a",
+  "registeredGolden": false,
+  "command": "deno run --allow-all stream_closure_driver.js",
+  "result": {
+    "webPublicRead": "DENIED",
+    "webDirectQueueReflection": "LEAK",
+    "nodePublicRead": "DENIED",
+    "rootAfterNodePublicDenial": "ALLOWED",
+    "nodeDirectStateReflection": "LEAK",
+    "pipePrearmedDataListener": "LEAK",
+    "borrowedEventEmitterDataListener": "LEAK",
+    "nativeOnreadReplacement": "LEAK",
+    "nativeUseUserBuffer": "LEAK",
+    "pipelineWebToNodeDestination": "ROOT_REFUSED",
+    "composeWebToNodeDestination": "ROOT_REFUSED",
+    "rootAfterComposeDenial": "NOT_APPLICABLE"
+  }
+}

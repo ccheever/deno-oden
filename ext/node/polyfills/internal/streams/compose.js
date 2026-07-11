@@ -4,6 +4,13 @@
 import { core, primordials } from "ext:core/mod.js";
 import { pipeline } from "ext:deno_node/internal/streams/pipeline.js";
 import Duplex from "node:_stream_duplex";
+const {
+  getReadableUseGuard,
+  setReadableUseGuard,
+} = core.loadExtScript("ext:deno_node/internal/streams/readable.js");
+const { getReadableStreamUseGuard } = core.loadExtScript(
+  "ext:deno_web/06_streams.js",
+);
 const { destroyer } = core.loadExtScript(
   "ext:deno_node/internal/streams/destroy.js",
 );
@@ -134,6 +141,20 @@ export default function compose(...streams) {
     writable,
     readable,
   });
+
+  const guardedSources = [head, tail];
+  for (const source of guardedSources) {
+    const readableSource = isTransformStream(source) ? source.readable : source;
+    const sourceGuard = isReadableStream(readableSource)
+      ? getReadableStreamUseGuard(readableSource)
+      : getReadableUseGuard(readableSource);
+    if (sourceGuard !== undefined) {
+      // The pipeline may have copied protected bytes through one or more
+      // Node or Web readable destinations before exposing this final Duplex.
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+      setReadableUseGuard(d, sourceGuard);
+    }
+  }
 
   if (writable) {
     if (isNodeStream(head)) {
