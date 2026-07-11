@@ -1000,9 +1000,19 @@ pub fn oden_capsec_check_protected_inspector_stream_use_for_actor(
   let current_actor_keys = oden_capsec_integrity_actor_keys();
   if current_actor_keys.as_slice() != actor.actor_keys.as_ref() {
     let target = format!("protected-inspector-stream:{}", actor.endpoint);
-    for principal in oden_capsec_principal_set() {
+    let constrained =
+      OdenPolicy::constrained_principals(&oden_capsec_principal_set());
+    let labels = if constrained.is_empty() {
+      vec!["root/runtime".to_string()]
+    } else {
+      constrained
+        .iter()
+        .map(OdenPrincipal::label)
+        .collect::<Vec<_>>()
+    };
+    for label in labels {
       oden_capsec_audit_record(
-        &principal.label(),
+        &label,
         "inspector",
         "activate",
         &target,
