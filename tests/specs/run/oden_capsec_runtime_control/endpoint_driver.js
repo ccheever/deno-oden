@@ -60,8 +60,8 @@ async function runInspectorChild(script, extraArgs, label, timeoutMs) {
   };
 }
 
-function exactInspectorAudit(records, principal, port, decision) {
-  return records.some((record) =>
+function exactInspectorAuditIndex(records, principal, port, decision) {
+  return records.findIndex((record) =>
     record.v === 1 && record.principal === principal &&
     record.capability === "inspector:activate" &&
     record.target === `protected-inspector-stream:127.0.0.1:${port}` &&
@@ -95,20 +95,21 @@ try {
       `node-${method}`,
       5_000,
     );
+    const deniedAuditIndex = exactInspectorAuditIndex(
+      isolated.records,
+      "endpoint-denied",
+      isolated.port,
+      "deny",
+    );
+    const rootAuditIndex = exactInspectorAuditIndex(
+      isolated.records,
+      "root/runtime",
+      isolated.port,
+      "allow-ambient",
+    );
     const evidenced = isolated.result.denied === "EACCES" &&
       isolated.result.root === "ALLOWED" &&
-      exactInspectorAudit(
-        isolated.records,
-        "endpoint-denied",
-        isolated.port,
-        "deny",
-      ) &&
-      exactInspectorAudit(
-        isolated.records,
-        "root/runtime",
-        isolated.port,
-        "allow-ambient",
-      );
+      deniedAuditIndex >= 0 && rootAuditIndex > deniedAuditIndex;
     result[deniedField] = evidenced ? "DENIED" : "BROKEN";
     result[rootField] = isolated.result.root;
     allNodeWritesEvidenced &&= evidenced;

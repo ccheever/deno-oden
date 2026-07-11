@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { AsyncResource } from "node:async_hooks";
 import net from "node:net";
 
 const port = Number(Deno.args[0]);
@@ -112,9 +113,9 @@ function rootWrite(method, socket) {
 }
 
 const deniedSocket = await openSocket();
-const rootSocket = await openSocket();
+const rootScope = new AsyncResource("oden-endpoint-node-write-root-control");
+let rootSocket;
 try {
-  const root = await rootWrite(method, rootSocket);
   const { denied } = await endpointProbe({
     nodeWrite: {
       httpUrl: `http://127.0.0.1:${port}/json/list`,
@@ -122,8 +123,16 @@ try {
       socket: deniedSocket,
     },
   });
+  // The same method must regain the root actor after the package promise
+  // settles; a positive control before the call cannot detect sticky actor
+  // attribution on the return edge.
+  const root = await rootScope.runInAsyncScope(async () => {
+    rootSocket = await openSocket();
+    return await rootWrite(method, rootSocket);
+  });
   console.log(JSON.stringify({ denied, root }));
 } finally {
+  rootScope.emitDestroy();
   deniedSocket.destroy();
-  rootSocket.destroy();
+  rootSocket?.destroy();
 }
