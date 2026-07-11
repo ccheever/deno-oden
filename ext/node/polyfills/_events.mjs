@@ -40,6 +40,8 @@ const {
   FunctionPrototypeApply,
   FunctionPrototypeBind,
   FunctionPrototypeCall,
+  MapPrototypeGet,
+  MapPrototypeSet,
   MathMin,
   NumberMAX_SAFE_INTEGER,
   ObjectCreate,
@@ -139,13 +141,18 @@ function runWithoutAsyncContext(run) {
   }
 }
 
-function trackEventListener(target, listener, delivery) {
+function trackEventListener(target, type, listener, delivery) {
   let tracked = WeakMapPrototypeGet(trackedEventListeners, target);
   if (tracked === undefined) {
     tracked = new SafeWeakMap();
     WeakMapPrototypeSet(trackedEventListeners, target, tracked);
   }
-  WeakMapPrototypeSet(tracked, listener, delivery);
+  let deliveries = WeakMapPrototypeGet(tracked, listener);
+  if (deliveries === undefined) {
+    deliveries = new SafeMap();
+    WeakMapPrototypeSet(tracked, listener, deliveries);
+  }
+  MapPrototypeSet(deliveries, type, delivery);
 }
 
 function listenerMatches(stored, listener) {
@@ -160,9 +167,12 @@ function captureEventListenerDeliveries(target, type, listeners) {
   const deliveries = [];
   for (let i = 0; i < listeners.length; i++) {
     const listener = listeners[i];
-    let delivery = tracked === undefined
+    const trackedDeliveries = tracked === undefined
       ? undefined
       : WeakMapPrototypeGet(tracked, listener);
+    let delivery = trackedDeliveries === undefined
+      ? undefined
+      : MapPrototypeGet(trackedDeliveries, type);
     if (delivery === undefined) {
       // A direct `_events` entry is exactly the callable we will invoke. Its
       // public `.listener` property is attacker-forgeable and must not supply
@@ -179,10 +189,6 @@ function captureEventListenerDeliveries(target, type, listeners) {
     }
     ArrayPrototypePush(deliveries, delivery);
   }
-  // Authorize the complete exact snapshot before any recipient runs.
-  for (let i = 0; i < deliveries.length; i++) {
-    deliveries[i]?.preflight();
-  }
   return deliveries;
 }
 
@@ -197,7 +203,6 @@ function prepareCapturedEventDelivery(target, type, listeners) {
   const rejectionDelivery = captureRejections === true
     ? captureRejectionDelivery(target)
     : undefined;
-  rejectionDelivery?.preflight();
   return {
     deliveries: captureEventListenerDeliveries(target, type, listeners),
     listeners,
@@ -207,20 +212,45 @@ function prepareCapturedEventDelivery(target, type, listeners) {
   };
 }
 
+function preflightPreparedEventDelivery(prepared) {
+  if (prepared === undefined) return undefined;
+  const { deliveries, rejectionDelivery } = prepared;
+  // Authorize the complete exact snapshot before any recipient runs.
+  for (let i = 0; i < (deliveries?.length ?? 0); i++) {
+    deliveries[i]?.preflight();
+  }
+  rejectionDelivery?.preflight();
+  return prepared;
+}
+
 function captureRejectionDelivery(target) {
   const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
   return deliveryHook?.captureRejection?.();
 }
 
-function prepareEventListenerDelivery(target, type) {
+function snapshotEventListeners(target, type) {
   const events = target._events;
   if (events === undefined) return undefined;
   const handler = events[type];
   if (handler === undefined) return undefined;
-  const listeners = typeof handler === "function"
-    ? [handler]
-    : arrayClone(handler);
-  return prepareCapturedEventDelivery(target, type, listeners);
+  return typeof handler === "function" ? [handler] : arrayClone(handler);
+}
+
+function prepareCapturedEventDeliveryForTarget(target, type, listeners) {
+  const prepare = () => prepareCapturedEventDelivery(target, type, listeners);
+  const prepared = isProtectedEventEmitter(target)
+    ? runWithoutAsyncContext(prepare)
+    : prepare();
+  return preflightPreparedEventDelivery(prepared);
+}
+
+function prepareEventListenerDelivery(target, type) {
+  const snapshot = () => snapshotEventListeners(target, type);
+  const listeners = isProtectedEventEmitter(target)
+    ? runWithoutAsyncContext(snapshot)
+    : snapshot();
+  if (listeners === undefined) return undefined;
+  return prepareCapturedEventDeliveryForTarget(target, type, listeners);
 }
 
 function emitPreparedEvent(target, type, args, prepared) {
@@ -242,15 +272,18 @@ function emitPreparedEvent(target, type, args, prepared) {
       ? FunctionPrototypeApply(listeners[i], target, args)
       : delivery.invoke(target, args);
     if (result !== undefined && result !== null) {
-      addCatch(
-        target,
-        result,
-        type,
-        rejectionDelivery === null ? [] : args,
-        rejectionDelivery,
-        protectedDelivery ? captureRejections : Boolean(target[kCapture]),
-        protectedDelivery,
-      );
+      const captureResult = () =>
+        addCatch(
+          target,
+          result,
+          type,
+          rejectionDelivery === null ? [] : args,
+          rejectionDelivery,
+          protectedDelivery ? captureRejections : Boolean(target[kCapture]),
+          protectedDelivery,
+        );
+      if (protectedDelivery) runWithoutAsyncContext(captureResult);
+      else captureResult();
     }
   }
   return true;
@@ -359,7 +392,9 @@ function setMaxListeners(
   } else {
     for (let i = 0; i < eventTargets.length; i++) {
       const target = eventTargets[i];
-      if (ObjectPrototypeIsPrototypeOf(EventTarget.prototype, target)) {
+      if (isProtectedEventEmitter(target)) {
+        FunctionPrototypeCall(EventEmitterPublicSetMaxListeners, target, n);
+      } else if (ObjectPrototypeIsPrototypeOf(EventTarget.prototype, target)) {
         target[kMaxEventTargetListeners] = n;
         target[kMaxEventTargetListenersWarned] = false;
       } else if (typeof target.setMaxListeners === "function") {
@@ -430,7 +465,11 @@ function addCatch(
       });
     }
   } catch (err) {
-    that.emit("error", err);
+    if (protectedDelivery) {
+      FunctionPrototypeCall(EventEmitterPublicEmit, that, "error", err);
+    } else {
+      that.emit("error", err);
+    }
   }
 }
 
@@ -460,7 +499,11 @@ function emitUnhandledRejectionOrErr(
     // and the exception is handled.
     try {
       ee[kCapture] = false;
-      ee.emit("error", err);
+      if (protectedDelivery) {
+        FunctionPrototypeCall(EventEmitterPublicEmit, ee, "error", err);
+      } else {
+        ee.emit("error", err);
+      }
     } finally {
       ee[kCapture] = prev;
     }
@@ -474,9 +517,17 @@ function emitUnhandledRejectionOrErr(
  */
 EventEmitter.prototype.setMaxListeners = function setMaxListeners(n) {
   validateNumber(n, "setMaxListeners", 0);
-  this._maxListeners = n;
+  if (isProtectedEventEmitter(this)) {
+    runWithoutAsyncContext(() => {
+      this._maxListeners = n;
+    });
+  } else {
+    this._maxListeners = n;
+  }
   return this;
 };
+const EventEmitterPublicSetMaxListeners =
+  EventEmitter.prototype.setMaxListeners;
 
 /**
  * Returns the max listeners set.
@@ -484,7 +535,9 @@ EventEmitter.prototype.setMaxListeners = function setMaxListeners(n) {
  * @returns {number}
  */
 function getMaxListeners(emitterOrTarget) {
-  if (typeof emitterOrTarget?.getMaxListeners === "function") {
+  if (isProtectedEventEmitter(emitterOrTarget)) {
+    return runWithoutAsyncContext(() => _getMaxListeners(emitterOrTarget));
+  } else if (typeof emitterOrTarget?.getMaxListeners === "function") {
     return _getMaxListeners(emitterOrTarget);
   } else if (
     typeof emitterOrTarget?.[kMaxEventTargetListeners] === "number"
@@ -519,7 +572,9 @@ function _getMaxListeners(that) {
  * @returns {number}
  */
 EventEmitter.prototype.getMaxListeners = function getMaxListeners() {
-  return _getMaxListeners(this);
+  return isProtectedEventEmitter(this)
+    ? runWithoutAsyncContext(() => _getMaxListeners(this))
+    : _getMaxListeners(this);
 };
 
 // Returns the length and line number of the first sequence of `a` that fully
@@ -582,6 +637,91 @@ function enhanceStackTrace(err, own) {
   return err.stack + sep + ArrayPrototypeJoin(ownStack, "\n");
 }
 
+function throwUnhandledErrorEvent(args) {
+  let er;
+  if (args.length > 0) {
+    er = args[0];
+  }
+  if (ObjectPrototypeIsPrototypeOf(ErrorPrototype, er)) {
+    try {
+      const capture = {};
+      ErrorCaptureStackTrace(capture, EventEmitter.prototype.emit);
+      // ObjectDefineProperty(er, kEnhanceStackBeforeInspector, {
+      //   value: enhanceStackTrace.bind(this, er, capture),
+      //   configurable: true
+      // });
+    } catch {
+      // pass
+    }
+
+    // Note: The comments on the `throw` lines are intentional, they show
+    // up in Node's output if this results in an unhandled exception.
+    throw er; // Unhandled 'error' event
+  }
+
+  let stringifiedEr;
+  try {
+    stringifiedEr = inspect(er);
+  } catch {
+    stringifiedEr = er;
+  }
+
+  // At least give some kind of context to the user
+  const err = new ERR_UNHANDLED_ERROR(stringifiedEr);
+  err.context = er;
+  throw err; // Unhandled 'error' event
+}
+
+function snapshotProtectedEventState(target, type) {
+  const events = target._events;
+  if (events === undefined) {
+    return {
+      errorMonitor: false,
+      hasErrorListener: false,
+      listeners: undefined,
+    };
+  }
+  const handler = events[type];
+  return {
+    errorMonitor: type === "error" && events[kErrorMonitor] !== undefined,
+    hasErrorListener: type === "error" && handler !== undefined,
+    listeners: handler === undefined
+      ? undefined
+      : typeof handler === "function"
+      ? [handler]
+      : arrayClone(handler),
+  };
+}
+
+function emitProtectedEvent(target, type, args) {
+  // Mutable `_events` getters, handler arrays, and Proxies are compatibility
+  // surfaces, not authority carriers. Snapshot them without ambient authority,
+  // then restore the admitting operation only for the exact recipient-set
+  // preflight before any listener can observe bytes.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  const state = runWithoutAsyncContext(() =>
+    snapshotProtectedEventState(target, type)
+  );
+  if (state.errorMonitor) {
+    FunctionPrototypeCall(
+      EventEmitterPublicEmit,
+      target,
+      kErrorMonitor,
+      ...new SafeArrayIterator(args),
+    );
+  }
+  if (type === "error" && !state.hasErrorListener) {
+    return runWithoutAsyncContext(() => throwUnhandledErrorEvent(args));
+  }
+  if (state.listeners === undefined) return false;
+  return emitPreparedEvent(
+    target,
+    type,
+    args,
+    prepareCapturedEventDeliveryForTarget(target, type, state.listeners),
+  );
+}
+
 /**
  * Synchronously calls each of the listeners registered
  * for the event.
@@ -590,6 +730,9 @@ function enhanceStackTrace(err, own) {
  * @returns {boolean}
  */
 EventEmitter.prototype.emit = function emit(type, ...args) {
+  if (isProtectedEventEmitter(this)) {
+    return emitProtectedEvent(this, type, args);
+  }
   let doError = type === "error";
 
   const events = this._events;
@@ -604,38 +747,7 @@ EventEmitter.prototype.emit = function emit(type, ...args) {
 
   // If there is no 'error' event listener then throw.
   if (doError) {
-    let er;
-    if (args.length > 0) {
-      er = args[0];
-    }
-    if (ObjectPrototypeIsPrototypeOf(ErrorPrototype, er)) {
-      try {
-        const capture = {};
-        ErrorCaptureStackTrace(capture, EventEmitter.prototype.emit);
-        // ObjectDefineProperty(er, kEnhanceStackBeforeInspector, {
-        //   value: enhanceStackTrace.bind(this, er, capture),
-        //   configurable: true
-        // });
-      } catch {
-        // pass
-      }
-
-      // Note: The comments on the `throw` lines are intentional, they show
-      // up in Node's output if this results in an unhandled exception.
-      throw er; // Unhandled 'error' event
-    }
-
-    let stringifiedEr;
-    try {
-      stringifiedEr = inspect(er);
-    } catch {
-      stringifiedEr = er;
-    }
-
-    // At least give some kind of context to the user
-    const err = new ERR_UNHANDLED_ERROR(stringifiedEr);
-    err.context = er;
-    throw err; // Unhandled 'error' event
+    return throwUnhandledErrorEvent(args);
   }
 
   const handler = events[type];
@@ -654,7 +766,7 @@ EventEmitter.prototype.emit = function emit(type, ...args) {
     this,
     type,
     args,
-    prepareCapturedEventDelivery(this, type, listeners),
+    prepareCapturedEventDeliveryForTarget(this, type, listeners),
   );
 };
 const EventEmitterPublicEmit = EventEmitter.prototype.emit;
@@ -667,12 +779,38 @@ function emitLifecycleMetaEvent(target, type, ...args) {
   return target.emit(type, ...args);
 }
 
-function _addListener(target, type, listener, prepend) {
+// Authorize the exact listener before protected EventEmitter mutation clears
+// ambient authority. The prepared record never escapes this module and is
+// identity-checked at the mutation boundary, so a `newListener` callback
+// cannot swap the recipient between admission and insertion.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function prepareEventListenerRegistration(target, type, listener) {
+  checkListener(listener);
+  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  const onceListener = WeakMapPrototypeGet(genuineOnceWrappers, listener);
+  const delivery = deliveryHook?.capture(
+    type,
+    onceListener ?? listener,
+    listener,
+    false,
+  );
+  delivery?.preflight();
+  return { delivery, listener, target, type };
+}
+
+function _addListener(target, type, listener, prepend, prepared = undefined) {
   let m;
   let events;
   let existing;
 
   checkListener(listener);
+  if (
+    prepared !== undefined &&
+    (prepared.target !== target || prepared.type !== type ||
+      prepared.listener !== listener)
+  ) {
+    throw new Error("prepared EventEmitter listener identity changed");
+  }
 
   events = target._events;
   if (events === undefined) {
@@ -701,19 +839,25 @@ function _addListener(target, type, listener, prepend) {
     existing = events[type];
   }
 
-  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
-  if (deliveryHook !== undefined) {
-    const onceListener = WeakMapPrototypeGet(genuineOnceWrappers, listener);
-    const delivery = deliveryHook.capture(
-      type,
-      onceListener ?? listener,
-      listener,
-      false,
+  let delivery = prepared?.delivery;
+  if (prepared === undefined) {
+    const deliveryHook = WeakMapPrototypeGet(
+      eventListenerDeliveryHooks,
+      target,
     );
-    if (delivery !== undefined) {
-      delivery.preflight();
-      trackEventListener(target, listener, delivery);
+    const onceListener = WeakMapPrototypeGet(genuineOnceWrappers, listener);
+    if (deliveryHook !== undefined) {
+      delivery = deliveryHook.capture(
+        type,
+        onceListener ?? listener,
+        listener,
+        false,
+      );
+      delivery?.preflight();
     }
+  }
+  if (delivery !== undefined) {
+    trackEventListener(target, type, listener, delivery);
   }
 
   if (existing === undefined) {
@@ -765,8 +909,9 @@ function _addListener(target, type, listener, prepend) {
  */
 EventEmitter.prototype.addListener = function addListener(type, listener) {
   if (isProtectedEventEmitter(this)) {
+    const prepared = prepareEventListenerRegistration(this, type, listener);
     return runWithoutAsyncContext(() =>
-      _addListener(this, type, listener, false)
+      _addListener(this, type, listener, false, prepared)
     );
   }
   return _addListener(this, type, listener, false);
@@ -786,8 +931,9 @@ EventEmitter.prototype.prependListener = function prependListener(
   listener,
 ) {
   if (isProtectedEventEmitter(this)) {
+    const prepared = prepareEventListenerRegistration(this, type, listener);
     return runWithoutAsyncContext(() =>
-      _addListener(this, type, listener, true)
+      _addListener(this, type, listener, true, prepared)
     );
   }
   return _addListener(this, type, listener, true);
@@ -799,9 +945,17 @@ function onceWrapper() {
       // A protected emitter can outlive the code that registered this wrapper.
       // Never redispatch through a package-replaceable lifecycle method while
       // running with the original listener's captured context.
-      runWithoutAsyncContext(() =>
-        removeEventEmitterListener(this.target, this.type, this.wrapFn)
-      );
+      runWithoutAsyncContext(() => {
+        const deliveryHook = WeakMapPrototypeGet(
+          eventListenerDeliveryHooks,
+          this.target,
+        );
+        if (typeof deliveryHook?.removeOnceListener === "function") {
+          deliveryHook.removeOnceListener(this.type, this.wrapFn);
+        } else {
+          removeEventEmitterListener(this.target, this.type, this.wrapFn);
+        }
+      });
     } else {
       this.target.removeListener(this.type, this.wrapFn);
     }
@@ -832,11 +986,18 @@ EventEmitter.prototype.once = function once(type, listener) {
   checkListener(listener);
 
   if (isProtectedEventEmitter(this)) {
-    // Keep the protected lifecycle path closure-owned. Calling `this.on()`
-    // here lets a late bound/native replacement run with the caller's CPED.
-    runWithoutAsyncContext(() =>
-      _addListener(this, type, _onceWrap(this, type, listener), false)
-    );
+    const wrapped = _onceWrap(this, type, listener);
+    const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, this);
+    if (typeof deliveryHook?.addOnceListener === "function") {
+      // Readable.once() normally dispatches through Readable.on(), whose
+      // flow/listening bookkeeping is security-relevant for exact delivery.
+      deliveryHook.addOnceListener(type, wrapped);
+    } else {
+      const prepared = prepareEventListenerRegistration(this, type, wrapped);
+      runWithoutAsyncContext(() =>
+        _addListener(this, type, wrapped, false, prepared)
+      );
+    }
   } else {
     this.on(type, _onceWrap(this, type, listener));
   }
@@ -857,8 +1018,10 @@ EventEmitter.prototype.prependOnceListener = function prependOnceListener(
   checkListener(listener);
 
   if (isProtectedEventEmitter(this)) {
+    const wrapped = _onceWrap(this, type, listener);
+    const prepared = prepareEventListenerRegistration(this, type, wrapped);
     runWithoutAsyncContext(() =>
-      _addListener(this, type, _onceWrap(this, type, listener), true)
+      _addListener(this, type, wrapped, true, prepared)
     );
   } else {
     this.prependListener(type, _onceWrap(this, type, listener));
@@ -960,7 +1123,7 @@ function isEventEmitterPublicEmit(callback) {
 }
 
 function isEventEmitterPublicListenerCount(callback) {
-  return callback === protectedEventEmitterListenerCount;
+  return callback === EventEmitterPublicListenerCount;
 }
 
 function isEventEmitterPublicLifecycleMethod(callback) {
@@ -968,6 +1131,7 @@ function isEventEmitterPublicLifecycleMethod(callback) {
     callback === EventEmitterPublicOn ||
     callback === EventEmitterPublicOnce ||
     callback === EventEmitterPublicPrependListener ||
+    callback === EventEmitterPublicRemoveAllListeners ||
     callback === EventEmitterPublicRemoveListener;
 }
 
@@ -994,6 +1158,12 @@ function removeEventEmitterListener(target, type, listener) {
 EventEmitter.prototype.removeAllListeners = function removeAllListeners(
   type,
 ) {
+  if (isProtectedEventEmitter(this)) {
+    const hasType = arguments.length !== 0;
+    return runWithoutAsyncContext(() =>
+      removeAllListenersProtected(this, type, hasType)
+    );
+  }
   const events = this._events;
   if (events === undefined) {
     return this;
@@ -1039,24 +1209,82 @@ EventEmitter.prototype.removeAllListeners = function removeAllListeners(
 
   return this;
 };
+const EventEmitterPublicRemoveAllListeners =
+  EventEmitter.prototype.removeAllListeners;
+
+function removeAllListenersProtected(target, type, hasType) {
+  const events = target._events;
+  if (events === undefined) return target;
+
+  if (events.removeListener === undefined) {
+    if (!hasType) {
+      target._events = ObjectCreate(null);
+      target._eventsCount = 0;
+    } else if (events[type] !== undefined) {
+      if (--target._eventsCount === 0) {
+        target._events = ObjectCreate(null);
+      } else {
+        delete events[type];
+      }
+    }
+    return target;
+  }
+
+  if (!hasType) {
+    for (const key of new SafeArrayIterator(ReflectOwnKeys(events))) {
+      if (key === "removeListener") continue;
+      removeAllListenersProtected(target, key, true);
+    }
+    removeAllListenersProtected(target, "removeListener", true);
+    target._events = ObjectCreate(null);
+    target._eventsCount = 0;
+    return target;
+  }
+
+  const listeners = events[type];
+  if (typeof listeners === "function") {
+    removeListenerExact(target, type, listeners);
+  } else if (listeners !== undefined) {
+    for (let i = listeners.length - 1; i >= 0; i--) {
+      removeListenerExact(target, type, listeners[i]);
+    }
+  }
+  return target;
+}
+
+function removeAllEventEmitterListeners(target, type, hasType = true) {
+  if (isProtectedEventEmitter(target)) {
+    return runWithoutAsyncContext(() =>
+      removeAllListenersProtected(target, type, hasType)
+    );
+  }
+  return hasType
+    ? FunctionPrototypeCall(EventEmitterPublicRemoveAllListeners, target, type)
+    : FunctionPrototypeCall(EventEmitterPublicRemoveAllListeners, target);
+}
 
 function _listeners(target, type, unwrap) {
-  const events = target._events;
+  const read = () => {
+    const events = target._events;
 
-  if (events === undefined) {
-    return [];
-  }
+    if (events === undefined) {
+      return [];
+    }
 
-  const evlistener = events[type];
-  if (evlistener === undefined) {
-    return [];
-  }
+    const evlistener = events[type];
+    if (evlistener === undefined) {
+      return [];
+    }
 
-  if (typeof evlistener === "function") {
-    return unwrap ? [evlistener.listener || evlistener] : [evlistener];
-  }
+    if (typeof evlistener === "function") {
+      return unwrap ? [evlistener.listener || evlistener] : [evlistener];
+    }
 
-  return unwrap ? unwrapListeners(evlistener) : arrayClone(evlistener);
+    return unwrap ? unwrapListeners(evlistener) : arrayClone(evlistener);
+  };
+  return isProtectedEventEmitter(target)
+    ? runWithoutAsyncContext(read)
+    : read();
 }
 
 /**
@@ -1120,7 +1348,12 @@ const _listenerCount = function listenerCount(type, listener) {
   return 0;
 };
 
-EventEmitter.prototype.listenerCount = _listenerCount;
+EventEmitter.prototype.listenerCount = function listenerCount(type, listener) {
+  const read = () =>
+    FunctionPrototypeCall(_listenerCount, this, type, listener);
+  return isProtectedEventEmitter(this) ? runWithoutAsyncContext(read) : read();
+};
+const EventEmitterPublicListenerCount = EventEmitter.prototype.listenerCount;
 
 /**
  * Returns the number of listeners listening to the event name
@@ -1131,6 +1364,11 @@ EventEmitter.prototype.listenerCount = _listenerCount;
  * @returns {number}
  */
 function listenerCount(emitter, type) {
+  if (isProtectedEventEmitter(emitter)) {
+    return runWithoutAsyncContext(() =>
+      FunctionPrototypeCall(_listenerCount, emitter, type)
+    );
+  }
   if (typeof emitter.listenerCount === "function") {
     return emitter.listenerCount(type);
   }
@@ -1146,7 +1384,8 @@ function listenerCount(emitter, type) {
  * @returns {any[]}
  */
 EventEmitter.prototype.eventNames = function eventNames() {
-  return this._eventsCount > 0 ? ReflectOwnKeys(this._events) : [];
+  const read = () => this._eventsCount > 0 ? ReflectOwnKeys(this._events) : [];
+  return isProtectedEventEmitter(this) ? runWithoutAsyncContext(read) : read();
 };
 
 function arrayClone(arr) {
@@ -1187,6 +1426,9 @@ function unwrapListeners(arr) {
  */
 function getEventListeners(emitterOrTarget, type) {
   // First check if EventEmitter
+  if (isProtectedEventEmitter(emitterOrTarget)) {
+    return _listeners(emitterOrTarget, type, true);
+  }
   if (typeof emitterOrTarget.listeners === "function") {
     return emitterOrTarget.listeners(type);
   }
@@ -1228,16 +1470,18 @@ async function once(emitter, name, options = kEmptyObject) {
   }
 
   return new Promise((resolve, reject) => {
+    const hasErrorListener = name !== "error" &&
+      (isProtectedEventEmitter(emitter) || typeof emitter.once === "function");
     const errorListener = (err) => {
-      emitter.removeListener(name, resolver);
+      eventTargetAgnosticRemoveListener(emitter, name, resolver);
       if (signal != null) {
         eventTargetAgnosticRemoveListener(signal, "abort", abortListener);
       }
       reject(err);
     };
     const resolver = (...args) => {
-      if (typeof emitter.removeListener === "function") {
-        emitter.removeListener("error", errorListener);
+      if (hasErrorListener) {
+        eventTargetAgnosticRemoveListener(emitter, "error", errorListener);
       }
       if (signal != null) {
         eventTargetAgnosticRemoveListener(signal, "abort", abortListener);
@@ -1245,8 +1489,13 @@ async function once(emitter, name, options = kEmptyObject) {
       resolve(args);
     };
     eventTargetAgnosticAddListener(emitter, name, resolver, { once: true });
-    if (name !== "error" && typeof emitter.once === "function") {
-      emitter.once("error", errorListener);
+    if (hasErrorListener) {
+      eventTargetAgnosticAddListener(
+        emitter,
+        "error",
+        errorListener,
+        { once: true },
+      );
     }
     function abortListener() {
       eventTargetAgnosticRemoveListener(emitter, name, resolver);
@@ -1273,6 +1522,18 @@ function createIterResult(value, done) {
 }
 
 function eventTargetAgnosticRemoveListener(emitter, name, listener, flags) {
+  if (isProtectedEventEmitter(emitter)) {
+    const deliveryHook = WeakMapPrototypeGet(
+      eventListenerDeliveryHooks,
+      emitter,
+    );
+    if (typeof deliveryHook?.removeListener === "function") {
+      deliveryHook.removeListener(name, listener);
+    } else {
+      removeEventEmitterListener(emitter, name, listener);
+    }
+    return;
+  }
   if (typeof emitter.removeListener === "function") {
     emitter.removeListener(name, listener);
   } else if (typeof emitter.removeEventListener === "function") {
@@ -1283,6 +1544,22 @@ function eventTargetAgnosticRemoveListener(emitter, name, listener, flags) {
 }
 
 function eventTargetAgnosticAddListener(emitter, name, listener, flags) {
+  if (isProtectedEventEmitter(emitter)) {
+    if (flags?.once) {
+      FunctionPrototypeCall(EventEmitterPublicOnce, emitter, name, listener);
+    } else {
+      const deliveryHook = WeakMapPrototypeGet(
+        eventListenerDeliveryHooks,
+        emitter,
+      );
+      if (typeof deliveryHook?.addListener === "function") {
+        deliveryHook.addListener(name, listener);
+      } else {
+        addEventEmitterListener(emitter, name, listener);
+      }
+    }
+    return;
+  }
   if (typeof emitter.on === "function") {
     if (flags?.once) {
       emitter.once(name, listener);
@@ -1360,7 +1637,7 @@ function on(emitter, event, options = kEmptyObject) {
         const value = ArrayPrototypeShift(unconsumedEvents);
         size--;
         if (paused && size < lowWatermark) {
-          emitter.resume();
+          resumeEventEmitter(emitter);
           paused = false;
         }
         return PromiseResolve(createIterResult(value, false));
@@ -1428,7 +1705,10 @@ function on(emitter, event, options = kEmptyObject) {
       return eventHandler(args);
     },
   );
-  if (event !== "error" && typeof emitter.on === "function") {
+  if (
+    event !== "error" &&
+    (isProtectedEventEmitter(emitter) || typeof emitter.on === "function")
+  ) {
     addEventListener(emitter, "error", errorHandler);
   }
 
@@ -1454,7 +1734,7 @@ function on(emitter, event, options = kEmptyObject) {
       size++;
       if (!paused && size > highWatermark) {
         paused = true;
-        emitter.pause();
+        pauseEventEmitter(emitter);
       }
       ArrayPrototypePush(unconsumedEvents, value);
     } else {
@@ -1485,6 +1765,32 @@ function on(emitter, event, options = kEmptyObject) {
 
     return PromiseResolve(doneResult);
   }
+}
+
+function pauseEventEmitter(emitter) {
+  if (isProtectedEventEmitter(emitter)) {
+    const deliveryHook = WeakMapPrototypeGet(
+      eventListenerDeliveryHooks,
+      emitter,
+    );
+    if (typeof deliveryHook?.pause === "function") {
+      return deliveryHook.pause();
+    }
+  }
+  return emitter.pause();
+}
+
+function resumeEventEmitter(emitter) {
+  if (isProtectedEventEmitter(emitter)) {
+    const deliveryHook = WeakMapPrototypeGet(
+      eventListenerDeliveryHooks,
+      emitter,
+    );
+    if (typeof deliveryHook?.resume === "function") {
+      return deliveryHook.resume();
+    }
+  }
+  return emitter.resume();
 }
 
 function listenersController() {
@@ -1606,7 +1912,16 @@ ObjectDefineProperty(EventEmitter, "EventEmitterAsyncResource", {
 // package code. Protected stream adapters must not bless a poisoned public
 // EventEmitter.prototype when they load later.
 const protectedEventEmitterEmit = EventEmitterPublicEmit;
-const protectedEventEmitterListenerCount = _listenerCount;
+function protectedEventEmitterListenerCount(type, listener) {
+  return runWithoutAsyncContext(() =>
+    FunctionPrototypeCall(
+      EventEmitterPublicListenerCount,
+      this,
+      type,
+      listener,
+    )
+  );
+}
 const protectedEventEmitterOff = EventEmitter.prototype.off;
 const protectedEventEmitterOnce = EventEmitter.prototype.once;
 
@@ -1639,6 +1954,7 @@ return {
   setMaxListeners,
   emitPreparedEvent,
   prepareEventListenerDelivery,
+  removeAllEventEmitterListeners,
   removeEventEmitterListener,
   setDefaultEventListenerDeliveryHook,
   setEventListenerDeliveryHook,

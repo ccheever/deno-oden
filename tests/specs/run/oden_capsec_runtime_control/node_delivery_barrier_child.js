@@ -160,6 +160,15 @@ try {
   result.directListenerCalls = directProbe.calls();
   result.forgedListenerRootCalls = forgedRootCalls;
 
+  const transplanted = await protectedNodeBuffer("transplanted listener");
+  const transplantedProbe = deniedProbe.makeDeliveryProbe();
+  result.lifecycleRegisteredPackageListener = attempt(() =>
+    transplanted.on("end", transplantedProbe.callback)
+  );
+  transplanted._events.data = transplantedProbe.callback;
+  result.lifecycleToDataTransplant = attempt(() => transplanted.read());
+  result.lifecycleToDataTransplantCalls = transplantedProbe.calls();
+
   const ordered = await protectedNodeBuffer("ordered listeners");
   const orderedProbe = deniedProbe.makeDeliveryProbe();
   let orderedRootCalls = 0;
@@ -185,6 +194,70 @@ try {
   result.switchingEventsReads = switchingReads;
   result.switchingEventsRootCalls = switchingRootCalls;
   result.switchingEventsPackageCalls = switchingProbe.calls();
+
+  const eventsGetterTarget = await protectedNodeBuffer("events getter target");
+  const eventsGetterGadget = await protectedNodeBuffer("events getter gadget");
+  const eventsGetterGadgetBefore = eventsGetterGadget.readableLength;
+  const eventsGetterProbe = deniedProbe.poisonEventsGetter(
+    eventsGetterTarget,
+    eventsGetterGadget,
+  );
+  try {
+    result.boundEventsGetter = attempt(() => eventsGetterTarget.read());
+    result.boundEventsGetterCalls = eventsGetterProbe.calls() > 0
+      ? "CALLED"
+      : "MISSING";
+    result.boundEventsGetterRetainsGadget =
+      eventsGetterGadget.readableLength ===
+          eventsGetterGadgetBefore
+        ? "YES"
+        : "NO";
+  } finally {
+    eventsGetterProbe.restore();
+  }
+
+  const eventsProxyTarget = await protectedNodeBuffer("events proxy target");
+  const eventsProxyGadget = await protectedNodeBuffer("events proxy gadget");
+  const eventsProxyGadgetBefore = eventsProxyGadget.readableLength;
+  const eventsProxyProbe = deniedProbe.poisonEventsProxy(
+    eventsProxyTarget,
+    eventsProxyGadget,
+  );
+  try {
+    result.boundEventsProxy = attempt(() => eventsProxyTarget.read());
+    result.boundEventsProxyCalls = eventsProxyProbe.calls() > 0
+      ? "CALLED"
+      : "MISSING";
+    result.boundEventsProxyRetainsGadget = eventsProxyGadget.readableLength ===
+        eventsProxyGadgetBefore
+      ? "YES"
+      : "NO";
+  } finally {
+    eventsProxyProbe.restore();
+  }
+
+  const listenerProxyTarget = await protectedNodeBuffer(
+    "listener proxy target",
+  );
+  const listenerProxyGadget = await protectedNodeBuffer(
+    "listener proxy gadget",
+  );
+  const listenerProxyGadgetBefore = listenerProxyGadget.readableLength;
+  let listenerProxyRootCalls = 0;
+  const listenerProxyProbe = deniedProbe.proxyListenerArray(
+    [() => listenerProxyRootCalls++, () => listenerProxyRootCalls++],
+    listenerProxyGadget,
+  );
+  listenerProxyTarget._events.data = listenerProxyProbe.listeners;
+  result.boundListenerArrayProxy = attempt(() => listenerProxyTarget.read());
+  result.boundListenerArrayProxyCalls = listenerProxyProbe.calls() > 0
+    ? "CALLED"
+    : "MISSING";
+  result.boundListenerArrayProxyRootCalls = listenerProxyRootCalls;
+  result.boundListenerArrayProxyRetainsGadget =
+    listenerProxyGadget.readableLength === listenerProxyGadgetBefore
+      ? "YES"
+      : "NO";
 
   const scheduledSource = await protectedNodeBuffer("scheduled listener");
   const scheduledTarget = await protectedNodeBuffer("scheduled target");
@@ -297,6 +370,55 @@ try {
   result.switchingCaptureHandlerCalls = captureSwitchProbe.calls();
   captureSwitch.removeAllListeners("data");
   captureSwitch.destroy();
+
+  EventEmitter.captureRejections = true;
+  const boundCapture = await protectedNodeBuffer("bound capture flag");
+  EventEmitter.captureRejections = previousCapture;
+  const boundCaptureGadget = await protectedNodeBuffer(
+    "bound capture flag gadget",
+  );
+  const boundCaptureGadgetBefore = boundCaptureGadget.readableLength;
+  const boundCaptureKey = Reflect.ownKeys(boundCapture).find((key) =>
+    typeof key === "symbol" && key.description === "kCapture"
+  );
+  if (boundCaptureKey === undefined) throw new Error("bound kCapture missing");
+  let boundCaptureRootCalls = 0;
+  boundCapture.on("data", () => boundCaptureRootCalls++);
+  const boundCaptureProbe = deniedProbe.poisonPropertyGetter(
+    boundCapture,
+    boundCaptureKey,
+    true,
+    boundCaptureGadget,
+  );
+  try {
+    result.boundCaptureFlag = attempt(() => boundCapture.read());
+    result.boundCaptureFlagCalls = boundCaptureProbe.calls() > 0
+      ? "CALLED"
+      : "MISSING";
+    result.boundCaptureFlagRootCalls = boundCaptureRootCalls;
+  result.boundCaptureFlagRetainsGadget = boundCaptureGadget.readableLength ===
+        boundCaptureGadgetBefore
+      ? "YES"
+      : "NO";
+  } finally {
+    boundCaptureProbe.restore();
+  }
+
+  EventEmitter.captureRejections = true;
+  const thenableTarget = await protectedNodeBuffer("thenable target");
+  EventEmitter.captureRejections = previousCapture;
+  const thenableGadget = await protectedNodeBuffer("thenable gadget");
+  const thenableGadgetBefore = thenableGadget.readableLength;
+  const thenableProbe = deniedProbe.makeThenableGetterProbe(thenableGadget);
+  thenableTarget.on("oden-thenable", thenableProbe.listener);
+  result.boundThenableGetter = attempt(() =>
+    thenableTarget.emit("oden-thenable")
+  );
+  result.boundThenableGetterCalls = thenableProbe.calls();
+  result.boundThenableGetterRetainsGadget = thenableGadget.readableLength ===
+      thenableGadgetBefore
+    ? "YES"
+    : "NO";
 
   phase("rejections-done");
   phase("controls");

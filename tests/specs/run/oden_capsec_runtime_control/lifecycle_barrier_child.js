@@ -117,6 +117,61 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 20));
   result.webCleanupCalls = webCleanupCalls;
 
+  const toWebSource = await protectedNode("toWeb registration");
+  const toWeb = Readable.toWeb(toWebSource);
+  webStreams.add(toWeb);
+  const toWebReader = toWeb.getReader();
+  try {
+    const { done, value } = await bounded(
+      toWebReader.read(),
+      "toWeb prepared registration",
+    );
+    result.toWebPreparedRegistration = !done && value?.byteLength > 0
+      ? "DELIVERED"
+      : "BROKEN";
+  } finally {
+    toWebReader.releaseLock();
+  }
+
+  const onceData = await protectedNode("once data");
+  const poisonedResume = denied.poisonResume(onceData);
+  let onceDataCalls = 0;
+  try {
+    const chunk = await bounded(
+      new Promise((resolve, reject) => {
+        onceData.once("error", reject);
+        onceData.once("data", (value) => {
+          onceDataCalls++;
+          resolve(value);
+        });
+      }),
+      "once data flow",
+    );
+    result.onceDataFlow = chunk?.byteLength > 0 ? "DELIVERED" : "BROKEN";
+    result.onceDataCalls = onceDataCalls;
+    result.onceResumeGadgetCalls = poisonedResume.calls();
+  } finally {
+    poisonedResume.restore();
+  }
+
+  const onceReadable = await protectedNode("once readable");
+  let onceReadableCalls = 0;
+  await bounded(
+    new Promise((resolve) => {
+      onceReadable.once("readable", () => {
+        onceReadableCalls++;
+        resolve();
+      });
+    }),
+    "once readable flow",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  result.onceReadableCalls = onceReadableCalls;
+  result.onceReadableBookkeeping = onceReadable._readableState
+      .readableListening === false
+    ? "CLEAN"
+    : "STALE";
+
   const onceStream = await protectedNode("once wrapper");
   const onceBefore = onceStream.readableLength;
   let onceRootCalls = 0;
@@ -131,6 +186,40 @@ try {
   }
   result.onceBoundRemove = retained(onceStream, onceBefore);
   result.onceRootCalls = onceRootCalls;
+
+  const removeAllTarget = await protectedNode("removeAll target");
+  const removeAllGadget = await protectedNode("removeAll gadget");
+  const removeAllGadgetBefore = removeAllGadget.readableLength;
+  removeAllTarget.on("oden-remove-all", () => {});
+  const restoreRemoveAll = denied.poisonStreamRemoveAll(removeAllGadget);
+  try {
+    removeAllTarget.removeAllListeners("oden-remove-all");
+  } finally {
+    restoreRemoveAll();
+  }
+  result.removeAllPrototypeGadget = removeAllGadget.readableLength ===
+      removeAllGadgetBefore
+    ? "CLOSED"
+    : "LEAK";
+  result.removeAllListenerCount = removeAllTarget.listenerCount(
+    "oden-remove-all",
+  );
+
+  const errorTarget = await protectedNode("error proxy target");
+  const errorGadget = await protectedNode("error proxy gadget");
+  const errorGadgetBefore = errorGadget.readableLength;
+  const errorProbe = denied.makeErrorProxy(errorGadget);
+  let exactErrorThrown = false;
+  try {
+    errorTarget.emit("error", errorProbe.error);
+  } catch (error) {
+    exactErrorThrown = error === errorProbe.error;
+  }
+  result.errorProxyTrapCalls = errorProbe.calls() > 0 ? "CALLED" : "MISSING";
+  result.errorProxyExactThrow = exactErrorThrown ? "YES" : "NO";
+  result.errorProxyGadget = errorGadget.readableLength === errorGadgetBefore
+    ? "CLOSED"
+    : "LEAK";
 
   const writableCarrier = await protectedNode("writable carrier");
   const writableOnly = new Writable({

@@ -18,6 +18,7 @@ const {
   prepareEventListenerDelivery,
   protectedEventEmitterEmit,
   protectedEventEmitterListenerCount,
+  removeAllEventEmitterListeners,
   removeEventEmitterListener,
   setEventListenerDeliveryHook,
 } = core.loadExtScript("ext:deno_node/_events.mjs");
@@ -595,8 +596,25 @@ function protectReadableState(stream, guard = undefined) {
 
 function installReadableDeliveryHook(stream) {
   setEventListenerDeliveryHook(stream, {
+    addListener(type, listener) {
+      return FunctionPrototypeCall(ReadablePublicOn, stream, type, listener);
+    },
+    addOnceListener(type, listener) {
+      return FunctionPrototypeCall(ReadablePublicOn, stream, type, listener);
+    },
     isProtected() {
       return getStreamUseGuard(stream) !== undefined;
+    },
+    pause() {
+      return FunctionPrototypeCall(ReadablePrototypePause, stream);
+    },
+    removeListener(type, listener) {
+      return FunctionPrototypeCall(
+        ReadablePublicRemoveListener,
+        stream,
+        type,
+        listener,
+      );
     },
     capture(type, recipient, listener = recipient, direct = false) {
       const captured = captureDeliveryCallback(
@@ -641,6 +659,17 @@ function installReadableDeliveryHook(stream) {
           preflightCapturedDelivery(stream, captured);
         },
       };
+    },
+    removeOnceListener(type, listener) {
+      return FunctionPrototypeCall(
+        ReadablePublicRemoveListener,
+        stream,
+        type,
+        listener,
+      );
+    },
+    resume() {
+      return FunctionPrototypeCall(ReadablePrototypeResume, stream);
     },
   });
 }
@@ -2110,7 +2139,8 @@ Readable.prototype.on = function (ev, fn) {
 
     // Try start flowing on next tick if stream isn't explicitly paused.
     if ((state[kState] & (kHasFlowing | kFlowing)) !== kHasFlowing) {
-      this.resume();
+      if (getStreamUseGuard(this) === undefined) this.resume();
+      else resumeReadable(this);
     }
   } else if (ev === "readable") {
     if ((state[kState] & (kEndEmitted | kReadableListening)) === 0) {
@@ -2158,7 +2188,9 @@ Readable.prototype.off = Readable.prototype.removeListener;
 ReadablePublicOff = Readable.prototype.off;
 
 Readable.prototype.removeAllListeners = function (ev) {
-  const res = Stream.prototype.removeAllListeners.apply(this, arguments);
+  const res = getStreamUseGuard(this) === undefined
+    ? Stream.prototype.removeAllListeners.apply(this, arguments)
+    : removeAllEventEmitterListeners(this, ev, arguments.length !== 0);
 
   if (ev === "readable" || ev === undefined) {
     // We need to check if there is someone still listening to
