@@ -53,6 +53,13 @@ function fakeSocketFacade(socketPrototype, tcpPrototype, rawFd) {
 }
 
 async function probeIpcFakeFacade(socketPrototype, tcpPrototype, rawFd) {
+  // Protected TCPWrap now refuses descriptor export at the source. Retain the
+  // downstream forged-facade probe for compatibility paths that do return a
+  // duplicate, but distinguish the exact libuv EACCES refusal from a broken
+  // or already-closed handle.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [tests]
+  if (rawFd < 0) return rawFd === -13 ? "REFUSED" : "BROKEN";
+
   const receiver = fork(
     new URL("fd_transfer_receiver.cjs", here).pathname,
     [],
@@ -70,7 +77,6 @@ async function probeIpcFakeFacade(socketPrototype, tcpPrototype, rawFd) {
     receivedHandle ||= message?.receivedHandle === true;
   });
 
-  if (rawFd < 0) throw new Error("failed to duplicate inspector fd");
   const fakeSocket = fakeSocketFacade(socketPrototype, tcpPrototype, rawFd);
   const outcome = await bounded(
     new Promise((resolve) => {
@@ -108,7 +114,7 @@ async function probeIpcFakeFacade(socketPrototype, tcpPrototype, rawFd) {
 }
 
 async function probeNumericStdio(rawFd) {
-  if (rawFd < 0) throw new Error("failed to duplicate inspector fd");
+  if (rawFd < 0) return rawFd === -13 ? "REFUSED" : "BROKEN";
 
   return await bounded(
     new Promise((resolve) => {
@@ -175,8 +181,6 @@ try {
   const tcpPrototype = Object.getPrototypeOf(socket._handle);
   const openIpcFd = socket._handle.fdForIpc();
   const openSpawnFd = socket._handle.fdForIpc();
-  const retainedIpcFd = socket._handle.fdForIpc();
-  const retainedSpawnFd = socket._handle.fdForIpc();
   const ipcFakeFacade = await probeIpcFakeFacade(
     socketPrototype,
     tcpPrototype,
@@ -184,16 +188,19 @@ try {
   );
   const spawnNumericStdio = await probeNumericStdio(openSpawnFd);
 
-  // Unregister and stop the inspector listener while duplicated connected
-  // descriptors remain live. The raw-fd barrier must not consult that mutable
-  // endpoint registry or declassify the retained file descriptions.
+  // Unregister and stop the inspector listener, then probe export again. The
+  // immutable connection tag must keep refusing source export; a compatibility
+  // path that still returns a duplicate must remain closed downstream without
+  // consulting the now-empty endpoint registry.
   inspector.close();
+  const postCloseIpcFd = socket._handle.fdForIpc();
+  const postCloseSpawnFd = socket._handle.fdForIpc();
   const ipcAfterInspectorClose = await probeIpcFakeFacade(
     socketPrototype,
     tcpPrototype,
-    retainedIpcFd,
+    postCloseIpcFd,
   );
-  const spawnAfterInspectorClose = await probeNumericStdio(retainedSpawnFd);
+  const spawnAfterInspectorClose = await probeNumericStdio(postCloseSpawnFd);
   const ordinaryFileStdio = await probeOrdinaryFileStdio();
 
   console.log(JSON.stringify({
