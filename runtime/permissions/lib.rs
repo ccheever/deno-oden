@@ -452,6 +452,448 @@ pub fn oden_capsec_reject_forward_proxy(
   ))
 }
 
+/// Enforce a Rev1.1 deny-only safety row before any ambient/mode fallback,
+/// static/session authority, or active handle can rescue the operation.
+/// Frozen `oden/capsec/1` binaries never enter this branch.
+// @ref LLP 0019#system-information-and-process-mutation [implements]
+pub fn oden_capsec_guard_deny_only_surface(
+  family: &str,
+  action: &str,
+  target: &str,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  let constrained =
+    OdenPolicy::constrained_principals(&oden_capsec_principal_set());
+  if constrained.is_empty() {
+    return Ok(());
+  }
+  let labels = constrained
+    .iter()
+    .map(OdenPrincipal::label)
+    .collect::<Vec<_>>();
+  for label in &labels {
+    oden_capsec_audit_record(
+      label,
+      family,
+      action,
+      target,
+      "DENY(deny-only surface)",
+      None,
+    );
+  }
+  let label = labels.join(",");
+  Err(PermissionCheckError::PermissionDenied(
+    PermissionDeniedError {
+      access: format!("{api_name} access to {target:?}"),
+      name: "capsec",
+      custom_message: Some(format!(
+        "oden capsec: principal set [{label}] may not use deny-only {family}:{action}:{target}"
+      )),
+      state: PermissionState::Denied,
+    },
+  ))
+}
+
+/// Authorize an inspector activation route from the exact Rev1.1 static floor.
+/// Programmatic package callers must each hold `inspector:activate`; session
+/// overlays and handles cannot satisfy this terminal predicate. Startup and
+/// host-signal routes additionally require the exact root row, even though the
+/// runtime-control principal is otherwise ambient.
+// @ref LLP 0019#inspector [implements]
+pub fn oden_capsec_check_inspector_activation(
+  target: &str,
+  api_name: &str,
+  exact_root_static_row: bool,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  let req = OdenRequest {
+    family: OdenFamily::Inspector,
+    action: "activate".to_string(),
+    target: String::new(),
+  };
+  let policy = oden_capsec_policy();
+  let (allowed, labels) = if exact_root_static_row {
+    (
+      oden_capsec_root_static_grants(&req),
+      vec!["root/runtime-control".to_string()],
+    )
+  } else {
+    let constrained =
+      OdenPolicy::constrained_principals(&oden_capsec_principal_set());
+    let labels = constrained
+      .iter()
+      .map(OdenPrincipal::label)
+      .collect::<Vec<_>>();
+    (
+      constrained.is_empty()
+        || constrained.iter().all(|p| policy.static_grants(p, &req)),
+      labels,
+    )
+  };
+  let audit_labels = if labels.is_empty() {
+    vec!["root/runtime".to_string()]
+  } else {
+    labels
+  };
+  let verdict = if allowed {
+    "allow(exact-static inspector row)"
+  } else {
+    "DENY(exact-static inspector row required)"
+  };
+  for label in &audit_labels {
+    oden_capsec_audit_record(
+      label,
+      "inspector",
+      "activate",
+      target,
+      verdict,
+      (!allowed).then_some("inspector:activate"),
+    );
+  }
+  if allowed {
+    return Ok(());
+  }
+  Err(PermissionCheckError::PermissionDenied(
+    PermissionDeniedError {
+      access: format!("{api_name} access to {target:?}"),
+      name: "capsec",
+      custom_message: Some(format!(
+        "oden capsec: inspector activation at {target:?} requires an exact static inspector:activate row"
+      )),
+      state: PermissionState::Denied,
+    },
+  ))
+}
+
+/// Evaluate the network half of an inspector conjunction over every
+/// constrained principal, independent of the optional deputyClasses posture.
+/// Inspector authority and its transport must have the same actor set.
+pub fn oden_capsec_check_inspector_network_effect(
+  action: NetPermissionAction,
+  host: &str,
+  port: u16,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return Ok(());
+  }
+  let hostname = Host::parse_for_query(host)?;
+  let descriptor = NetDescriptor(hostname, Some(port.into()));
+  let target = descriptor.display_name().into_owned();
+  for principal in
+    OdenPolicy::constrained_principals(&oden_capsec_principal_set())
+  {
+    oden_capsec_decide_inner(
+      OdenFamily::Network,
+      action.as_str(),
+      &target,
+      Some(api_name),
+      false,
+      Some(principal),
+    )?;
+  }
+  Ok(())
+}
+
+/// Runtime-control listener activation is a conjunctive edge: the exact root
+/// inspector row is mandatory, while the root principal supplies ambient
+/// network-listen authority. Record both decisions before creating the socket.
+// @ref LLP 0019#inspector [implements]
+pub fn oden_capsec_check_inspector_listener_startup(
+  target: &str,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  oden_capsec_check_inspector_activation(target, api_name, true)?;
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return Ok(());
+  }
+  oden_capsec_audit_record(
+    "root/runtime-control",
+    "network",
+    "listen",
+    target,
+    "allow(ambient)",
+    None,
+  );
+  Ok(())
+}
+
+/// Record a trusted runtime-control network effect that is part of an
+/// inspector activation but occurs outside a PermissionsContainer (for
+/// example the desktop DevTools multiplexer).
+pub fn oden_capsec_record_inspector_root_network_effect(
+  action: &str,
+  target: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  oden_capsec_audit_record(
+    "root/runtime-control",
+    "network",
+    action,
+    target,
+    "allow(ambient)",
+    None,
+  );
+  Ok(())
+}
+
+#[derive(Default)]
+struct OdenProtectedInspectorEndpoints {
+  exact: std::collections::HashMap<SocketAddr, usize>,
+  pending: std::collections::HashMap<IpAddr, usize>,
+}
+
+fn oden_protected_inspector_endpoints(
+) -> &'static Mutex<OdenProtectedInspectorEndpoints> {
+  static ENDPOINTS: OnceLock<Mutex<OdenProtectedInspectorEndpoints>> =
+    OnceLock::new();
+  ENDPOINTS.get_or_init(Default::default)
+}
+
+/// Reserve an inspector endpoint before the listener is bound. Port-zero
+/// reservations temporarily protect the whole address so another worker
+/// cannot win the bind-to-registration race.
+pub struct OdenInspectorEndpointReservation {
+  requested: Option<SocketAddr>,
+}
+
+impl OdenInspectorEndpointReservation {
+  pub fn commit(mut self, actual: SocketAddr) {
+    if let Some(requested) = self.requested.take() {
+      let mut endpoints = oden_protected_inspector_endpoints().lock();
+      if requested.port() == 0 {
+        if let Some(count) = endpoints.pending.get_mut(&requested.ip()) {
+          *count -= 1;
+          if *count == 0 {
+            endpoints.pending.remove(&requested.ip());
+          }
+        }
+      } else {
+        if let Some(count) = endpoints.exact.get_mut(&requested) {
+          *count -= 1;
+          if *count == 0 {
+            endpoints.exact.remove(&requested);
+          }
+        }
+      }
+      *endpoints.exact.entry(actual).or_default() += 1;
+    }
+  }
+}
+
+impl Drop for OdenInspectorEndpointReservation {
+  fn drop(&mut self) {
+    let Some(requested) = self.requested.take() else {
+      return;
+    };
+    let mut endpoints = oden_protected_inspector_endpoints().lock();
+    if requested.port() == 0 {
+      if let Some(count) = endpoints.pending.get_mut(&requested.ip()) {
+        *count -= 1;
+        if *count == 0 {
+          endpoints.pending.remove(&requested.ip());
+        }
+      }
+    } else {
+      if let Some(count) = endpoints.exact.get_mut(&requested) {
+        *count -= 1;
+        if *count == 0 {
+          endpoints.exact.remove(&requested);
+        }
+      }
+    }
+  }
+}
+
+pub fn oden_capsec_reserve_inspector_endpoint(
+  requested: SocketAddr,
+) -> OdenInspectorEndpointReservation {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return OdenInspectorEndpointReservation { requested: None };
+  }
+  let mut endpoints = oden_protected_inspector_endpoints().lock();
+  if requested.port() == 0 {
+    *endpoints.pending.entry(requested.ip()).or_default() += 1;
+  } else {
+    *endpoints.exact.entry(requested).or_default() += 1;
+  }
+  OdenInspectorEndpointReservation {
+    requested: Some(requested),
+  }
+}
+
+pub fn oden_capsec_unprotect_inspector_endpoint(endpoint: SocketAddr) {
+  if oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    let mut endpoints = oden_protected_inspector_endpoints().lock();
+    if let Some(count) = endpoints.exact.get_mut(&endpoint) {
+      *count -= 1;
+      if *count == 0 {
+        endpoints.exact.remove(&endpoint);
+      }
+    }
+  }
+}
+
+fn oden_capsec_check_protected_inspector_endpoint(
+  action: NetPermissionAction,
+  ip: IpAddr,
+  port: u16,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE)
+    || action == NetPermissionAction::Listen
+  {
+    return Ok(());
+  }
+  let protected = oden_capsec_is_protected_inspector_endpoint(ip, port);
+  if protected {
+    oden_capsec_check_inspector_activation(
+      &format!("protected-inspector:{ip}:{port}"),
+      api_name,
+      false,
+    )?;
+  }
+  Ok(())
+}
+
+fn oden_capsec_is_protected_inspector_endpoint(ip: IpAddr, port: u16) -> bool {
+  let endpoints = oden_protected_inspector_endpoints().lock();
+  endpoints.pending.keys().any(|pending_ip| {
+    pending_ip.is_unspecified() || *pending_ip == ip
+  }) || endpoints.exact.keys().any(|endpoint| {
+    endpoint.port() == port
+      && (endpoint.ip().is_unspecified() || endpoint.ip() == ip)
+  })
+}
+
+/// Recheck a protected inspector endpoint when an already-connected stream is
+/// used. Connection possession, pooling, or object passage cannot delegate a
+/// terminal inspector row.
+pub fn oden_capsec_check_protected_inspector_stream_use(
+  endpoint: SocketAddr,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE)
+    || !oden_capsec_is_protected_inspector_endpoint(
+      endpoint.ip(),
+      endpoint.port(),
+    )
+  {
+    return Ok(());
+  }
+  oden_capsec_check_inspector_activation(
+    &format!("protected-inspector-stream:{endpoint}"),
+    api_name,
+    false,
+  )
+}
+
+/// Preflight a signal as one conjunctive effect set. SIGUSR1 is not merely a
+/// process-control effect: it can activate the inspector, so both rows are
+/// evaluated and audited before delivery. There is no current-PID exemption.
+// @ref LLP 0019#system-information-and-process-mutation [implements]
+pub fn oden_capsec_check_process_signal(
+  pid: i32,
+  signal: &str,
+  inspector_trigger: bool,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  let constrained =
+    OdenPolicy::constrained_principals(&oden_capsec_principal_set());
+  let labels = if constrained.is_empty() {
+    vec!["root/runtime".to_string()]
+  } else {
+    constrained
+      .iter()
+      .map(OdenPrincipal::label)
+      .collect::<Vec<_>>()
+  };
+  let target_class = if pid == std::process::id() as i32 {
+    "self".to_string()
+  } else {
+    format!("pid:{pid}")
+  };
+  let signal_target = format!("{target_class}:{signal}");
+  let signal_allowed = constrained.is_empty();
+  for label in &labels {
+    oden_capsec_audit_record(
+      label,
+      "process",
+      "signal",
+      &signal_target,
+      if signal_allowed {
+        "allow(ambient)"
+      } else {
+        "DENY(deny-only surface)"
+      },
+      None,
+    );
+  }
+
+  let inspector_allowed = if inspector_trigger {
+    let req = OdenRequest {
+      family: OdenFamily::Inspector,
+      action: "activate".to_string(),
+      target: String::new(),
+    };
+    constrained.is_empty()
+      || constrained
+        .iter()
+        .all(|principal| oden_capsec_policy().static_grants(principal, &req))
+  } else {
+    true
+  };
+  if inspector_trigger {
+    for label in &labels {
+      oden_capsec_audit_record(
+        label,
+        "inspector",
+        "activate",
+        &format!("signal:{signal_target}"),
+        if inspector_allowed {
+          "allow(exact-static inspector row)"
+        } else {
+          "DENY(exact-static inspector row required)"
+        },
+        (!inspector_allowed).then_some("inspector:activate"),
+      );
+    }
+  }
+
+  if signal_allowed && inspector_allowed {
+    return Ok(());
+  }
+  Err(PermissionCheckError::PermissionDenied(
+    PermissionDeniedError {
+      access: format!("{api_name} access to {signal_target:?}"),
+      name: "capsec",
+      custom_message: Some(format!(
+        "oden capsec: signal delivery at {signal_target:?} failed the complete process:signal{} preflight",
+        if inspector_trigger {
+          " + inspector:activate"
+        } else {
+          ""
+        }
+      )),
+      state: PermissionState::Denied,
+    },
+  ))
+}
+
 /// Apply LLP 0019's built-in metadata stratum at the concrete peer selected
 /// for a connection or datagram. This is deliberately a negative-only
 /// continuation: matching the exact annotation does not return success until
@@ -1115,6 +1557,7 @@ fn oden_suggested_grant_token(
       format!("network:{action}:{}", oden_host_of(target))
     }
     OdenFamily::Sys => format!("sys:{target}"),
+    OdenFamily::Inspector => "inspector:activate".to_string(),
   };
   Some(token)
 }
@@ -2914,6 +3357,11 @@ struct OdenPolicyFile {
   mode: Option<String>,
   #[serde(default)]
   grants: std::collections::HashMap<String, String>,
+  // Runtime-control authority has a separate namespace from package selectors.
+  // In particular, an npm package literally named `root` must never satisfy an
+  // exact-root startup predicate by occupying `grants["root"]`.
+  #[serde(default, rename = "rootGrants")]
+  root_grants: String,
   // Config-only dynamic-permission ceilings (LLP 0015). The string shorthand
   // defaults to `prompt`; the object form selects prompt/auto/deny.
   #[serde(default)]
@@ -3003,6 +3451,18 @@ fn oden_capsec_policy_file() -> Option<&'static OdenPolicyFile> {
   FILE.as_ref()
 }
 
+fn oden_capsec_root_static_grants(req: &OdenRequest) -> bool {
+  oden_capsec_policy_file()
+    .and_then(|file| {
+      OdenGrant::parse_many_for_profile(
+        &file.root_grants,
+        ODEN_CAPSEC_PROFILE,
+      )
+      .ok()
+    })
+    .is_some_and(|grants| self::oden_policy::covers(&grants, req))
+}
+
 #[allow(
   clippy::disallowed_methods,
   reason = "bootstrap reads the explicit capsec policy handoff once; the sys-traits resolver is staged separately"
@@ -3078,6 +3538,24 @@ fn oden_parse_policy_file(
       path.display()
     ));
   }
+  let root_grants =
+    OdenGrant::parse_many_for_profile(&file.root_grants, ODEN_CAPSEC_PROFILE)
+      .map_err(|err| {
+        format!(
+          "{}#rootGrants: invalid capsec grant: {err}",
+          path.display()
+        )
+      })?;
+  if root_grants
+    .iter()
+    .any(|grant| grant.family != OdenFamily::Inspector)
+  {
+    return Err(format!(
+      "{}#rootGrants: only the exact static inspector:activate row is supported in {}",
+      path.display(),
+      ODEN_CAPSEC_PROFILE
+    ));
+  }
   for (selector, grant_str) in &file.grants {
     if selector.trim().is_empty() {
       return Err(format!(
@@ -3085,7 +3563,7 @@ fn oden_parse_policy_file(
         path.display()
       ));
     }
-    OdenGrant::parse_many(grant_str).map_err(|err| {
+    OdenGrant::parse_many_for_profile(grant_str, ODEN_CAPSEC_PROFILE).map_err(|err| {
       format!(
         "{}#grants[{:?}]: invalid capsec grant: {err}",
         path.display(),
@@ -3178,7 +3656,9 @@ fn oden_policy_unreadable_reason() -> Option<&'static str> {
   reason = "resolves fs grant scopes against $HOME to match the userland policy format"
 )]
 fn oden_resolve_grant_scopes(grant_str: &str, root: &str) -> String {
-  let Ok(mut grants) = OdenGrant::parse_many(grant_str) else {
+  let Ok(mut grants) =
+    OdenGrant::parse_many_for_profile(grant_str, ODEN_CAPSEC_PROFILE)
+  else {
     return grant_str.to_string();
   };
   for grant in &mut grants {
@@ -3286,7 +3766,11 @@ fn oden_capsec_policy() -> &'static OdenPolicy {
           // non-empty key here could accidentally turn `" dep "` into authority
           // for the real `dep` principal when the other policy planes do not.
           if policy
-            .grant(selector, &oden_resolve_grant_scopes(grant_str, root))
+            .grant_for_profile(
+              selector,
+              &oden_resolve_grant_scopes(grant_str, root),
+              ODEN_CAPSEC_PROFILE,
+            )
             .is_err()
           {
             oden_policy_unreadable_latch(format!(
@@ -8186,6 +8670,12 @@ impl PermissionsContainer {
     // application bytes. Every caller repeats this for redirects, reconnects,
     // Happy-Eyeballs candidates, and UDP destinations.
     oden_capsec_check_protected_metadata(action, *resolved_ip, port, api_name)?;
+    oden_capsec_check_protected_inspector_endpoint(
+      action,
+      *resolved_ip,
+      port,
+      api_name,
+    )?;
     let mut inner = self.inner.lock();
     let desc = NetDescriptor(Host::Ip(*resolved_ip), Some(port.into()));
     inner.net.check_resolved_ip_deny(&desc, Some(api_name))?;

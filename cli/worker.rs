@@ -202,16 +202,35 @@ impl CliMainWorker {
         return;
       };
       while sigusr1.recv().await.is_some() {
+        // A host signal has no package stack to attribute. Rev1.1 therefore
+        // requires the exact root-scoped static row before creating a listener
+        // or holding an inspector session.
+        // @ref LLP 0019#inspector [implements]
+        if deno_runtime::deno_permissions::oden_capsec_check_inspector_listener_startup(
+          "host-signal:SIGUSR1:127.0.0.1:9229",
+          "SIGUSR1 inspector activation",
+        )
+        .is_err()
+        {
+          continue;
+        }
         // The runtime is gone (the program finished); stop listening.
         let Some(inspector) = inspector.upgrade() else {
           return;
         };
+        let endpoint = deno_runtime::deno_inspector_server::default_inspector_host();
+        let reservation = deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
+          endpoint,
+        );
         if let Some(url) = activate_default_inspector_server(
           deno_lib::version::DENO_VERSION_INFO.user_agent,
           main_module.clone(),
           inspector,
           false,
         ) {
+          if let Some(server) = deno_runtime::deno_inspector_server::get_inspector_server() {
+            reservation.commit(server.host);
+          }
           op_state.borrow_mut().put(url);
         }
       }

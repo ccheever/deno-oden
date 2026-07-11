@@ -28,6 +28,7 @@ deno_core::extension!(
     op_oden_handle_revoke,
     op_oden_compartment_endowments,
     op_oden_guard_surface,
+    op_oden_guard_deny_only_surface,
     op_oden_attestation,
   ],
 );
@@ -52,6 +53,20 @@ pub fn op_oden_guard_surface(
   #[string] api_name: String,
 ) -> Result<(), PermissionCheckError> {
   deno_permissions::oden_capsec_guard_surface(
+    &family, &action, &target, &api_name,
+  )
+}
+
+/// Rev1.1 native decision op for process-global and diagnostic rows whose
+/// initial disposition is deny-only in every mode for package principals.
+#[op2(fast, stack_trace)]
+pub fn op_oden_guard_deny_only_surface(
+  #[string] family: String,
+  #[string] action: String,
+  #[string] target: String,
+  #[string] api_name: String,
+) -> Result<(), PermissionCheckError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
     &family, &action, &target, &api_name,
   )
 }

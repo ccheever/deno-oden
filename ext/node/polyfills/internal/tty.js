@@ -269,6 +269,10 @@ export function getColorDepth(env = process.env) {
 // dependency with node:process.
 const sigwinchStreams = new SafeSet();
 let sigwinchRegistered = false;
+const {
+  addSignalListenerInternal,
+  removeSignalListenerInternal,
+} = core.loadExtScript("ext:deno_os/40_signals.js");
 
 function onSigwinch() {
   for (const stream of new SafeSetIterator(sigwinchStreams)) {
@@ -280,7 +284,7 @@ function addSigwinchListener(stream) {
   SetPrototypeAdd(sigwinchStreams, stream);
   if (!sigwinchRegistered) {
     sigwinchRegistered = true;
-    Deno.addSignalListener("SIGWINCH", onSigwinch);
+    addSignalListenerInternal("SIGWINCH", onSigwinch);
   }
 }
 
@@ -288,7 +292,7 @@ function removeSigwinchListener(stream) {
   SetPrototypeDelete(sigwinchStreams, stream);
   if (SetPrototypeGetSize(sigwinchStreams) === 0 && sigwinchRegistered) {
     sigwinchRegistered = false;
-    Deno.removeSignalListener("SIGWINCH", onSigwinch);
+    removeSignalListenerInternal("SIGWINCH", onSigwinch);
   }
 }
 

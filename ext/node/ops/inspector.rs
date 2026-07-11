@@ -22,10 +22,26 @@ use deno_inspector_server::stop_inspector_server;
 use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionsContainer;
 
-#[op2(fast)]
-pub fn op_inspector_enabled(state: &OpState) -> bool {
+#[op2(fast, stack_trace)]
+pub fn op_inspector_enabled(
+  state: &OpState,
+) -> Result<bool, deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "node:inspector.enabled",
+    "inspector.enabled",
+    false,
+  )?;
   // If there's `InspectorServerUrl` then inspector is enabled, this
   // will change once `op_inspector_open` will be implemented
+  Ok(state.try_borrow::<InspectorServerUrl>().is_some())
+}
+
+/// Bootstrap-only probe for the fetch/HTTP instrumentation bridge. This is not
+/// exposed by `node:inspector`; it observes whether an already-authorized
+/// runtime-control listener exists and must not charge the package whose
+/// ordinary network operation is being instrumented.
+#[op2(fast)]
+pub fn op_inspector_enabled_internal(state: &OpState) -> bool {
   state.try_borrow::<InspectorServerUrl>().is_some()
 }
 
@@ -33,24 +49,31 @@ pub fn op_inspector_enabled(state: &OpState) -> bool {
 /// inspector server has not been started. Used to back Node.js'
 /// `process.debugPort` so it reflects the actual bound port (which is
 /// important when `--inspect=...:0` requests an ephemeral port).
-#[op2(fast)]
-pub fn op_inspector_port(state: &OpState) -> u32 {
+#[op2(fast, stack_trace)]
+pub fn op_inspector_port(
+  state: &OpState,
+) -> Result<u32, deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "node:process.debugPort",
+    "process.debugPort",
+    false,
+  )?;
   let Some(url) = state.try_borrow::<InspectorServerUrl>() else {
-    return 0;
+    return Ok(0);
   };
   // URL looks like `ws://host:port/<uuid>` (or `wss://...`). Parse out
   // the port. We don't depend on the `url` crate here to keep the op
   // tiny; the format is fixed by `get_websocket_debugger_url`.
   let s = url.0.as_str();
   let Some(after_scheme) = s.split_once("://").map(|(_, rest)| rest) else {
-    return 0;
+    return Ok(0);
   };
   let host_and_port = after_scheme.split('/').next().unwrap_or("");
   let port_str = match host_and_port.rsplit_once(':') {
     Some((_, p)) => p,
-    None => return 0,
+    None => return Ok(0),
   };
-  port_str.parse::<u16>().map(|p| p as u32).unwrap_or(0)
+  Ok(port_str.parse::<u16>().map(|p| p as u32).unwrap_or(0))
 }
 
 #[op2(stack_trace)]
@@ -60,9 +83,31 @@ pub fn op_inspector_open(
   #[string] host: Option<String>,
   wait_for_session: bool,
 ) -> Result<(), InspectorOpenError> {
+  // @ref LLP 0019#inspector [implements] — Activation is authorized before DNS or listener creation; the endpoint check remains conjunctive below.
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "node:inspector.open",
+    "inspector.open",
+    false,
+  )?;
   const DEFAULT_HOST: IpAddr =
     IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
   const DEFAULT_PORT: u16 = 9229;
+  let port = port.unwrap_or(DEFAULT_PORT);
+
+  // Authorize the caller-authored endpoint before hostname resolution. DNS is
+  // itself observable network work and must not precede the listen preflight.
+  let authored_host = host.as_deref().unwrap_or("127.0.0.1");
+  deno_permissions::oden_capsec_check_inspector_network_effect(
+    NetPermissionAction::Listen,
+    authored_host,
+    port,
+    "inspector.open",
+  )?;
+  state.borrow_mut::<PermissionsContainer>().check_net(
+    NetPermissionAction::Listen,
+    &(authored_host, Some(port)),
+    "inspector.open",
+  )?;
 
   let host_ip: IpAddr = match &host {
     Some(h) => {
@@ -95,17 +140,25 @@ pub fn op_inspector_open(
     }
     None => DEFAULT_HOST,
   };
-  let port = port.unwrap_or(DEFAULT_PORT);
   let addr = SocketAddr::new(host_ip, port);
 
+  deno_permissions::oden_capsec_check_inspector_network_effect(
+    NetPermissionAction::Listen,
+    &host_ip.to_string(),
+    port,
+    "inspector.open",
+  )?;
   state.borrow_mut::<PermissionsContainer>().check_net(
     NetPermissionAction::Listen,
     &(host_ip.to_string(), Some(port)),
     "inspector.open",
   )?;
 
+  let reservation =
+    deno_permissions::oden_capsec_reserve_inspector_endpoint(addr);
   let server =
     create_inspector_server(addr, "deno", InspectPublishUid::default())?;
+  reservation.commit(server.host);
 
   let inspector = state.borrow::<Rc<JsRuntimeInspector>>().clone();
   let main_module = state.borrow::<ModuleSpecifier>().to_string();
@@ -117,10 +170,21 @@ pub fn op_inspector_open(
   Ok(())
 }
 
-#[op2(fast)]
-pub fn op_inspector_close(state: &mut OpState) {
+#[op2(fast, stack_trace)]
+pub fn op_inspector_close(
+  state: &mut OpState,
+) -> Result<(), deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "node:inspector.close",
+    "inspector.close",
+    false,
+  )?;
+  if let Some(server) = deno_inspector_server::get_inspector_server() {
+    deno_permissions::oden_capsec_unprotect_inspector_endpoint(server.host);
+  }
   stop_inspector_server();
   state.try_take::<InspectorServerUrl>();
+  Ok(())
 }
 
 #[op2(stack_trace)]
@@ -128,9 +192,17 @@ pub fn op_inspector_close(state: &mut OpState) {
 pub fn op_inspector_url(
   state: &mut OpState,
 ) -> Result<Option<String>, InspectorConnectError> {
-  state
-    .borrow_mut::<PermissionsContainer>()
-    .check_sys("inspector", "inspector.url")?;
+  if deno_permissions::oden_capsec_profile_is("oden/capsec/1.1") {
+    deno_permissions::oden_capsec_check_inspector_activation(
+      "node:inspector.url",
+      "inspector.url",
+      false,
+    )?;
+  } else {
+    state
+      .borrow_mut::<PermissionsContainer>()
+      .check_sys("inspector", "inspector.url")?;
+  }
 
   Ok(
     state
@@ -139,9 +211,16 @@ pub fn op_inspector_url(
   )
 }
 
-#[op2(fast)]
-pub fn op_inspector_wait(state: &OpState) -> bool {
-  match state.try_borrow::<Rc<JsRuntimeInspector>>() {
+#[op2(fast, stack_trace)]
+pub fn op_inspector_wait(
+  state: &OpState,
+) -> Result<bool, deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "node:inspector.waitForDebugger",
+    "inspector.waitForDebugger",
+    false,
+  )?;
+  Ok(match state.try_borrow::<Rc<JsRuntimeInspector>>() {
     Some(inspector) => {
       // Node's inspector.waitForDebugger() blocks until a session sends
       // Runtime.runIfWaitingForDebugger and then resumes execution as-is;
@@ -152,15 +231,43 @@ pub fn op_inspector_wait(state: &OpState) -> bool {
       true
     }
     None => false,
-  }
+  })
 }
 
-#[op2(nofast, reentrant)]
+#[op2(nofast, reentrant, stack_trace)]
 pub fn op_inspector_emit_protocol_event(
   state: Rc<RefCell<OpState>>,
   scope: &mut v8::PinScope<'_, '_>,
   #[string] event_name: String,
   #[string] params: String,
+) -> Result<(), deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "node:inspector.protocol-event",
+    "inspector protocol event",
+    false,
+  )?;
+  inspector_emit_protocol_event(state, scope, event_name, params);
+  Ok(())
+}
+
+/// Runtime-only counterpart used by the eager network instrumentation bridge.
+/// The bridge emits observations into an existing authorized inspector; it
+/// does not let the package being observed activate or command a session.
+#[op2(nofast, reentrant)]
+pub fn op_inspector_emit_protocol_event_internal(
+  state: Rc<RefCell<OpState>>,
+  scope: &mut v8::PinScope<'_, '_>,
+  #[string] event_name: String,
+  #[string] params: String,
+) {
+  inspector_emit_protocol_event(state, scope, event_name, params);
+}
+
+fn inspector_emit_protocol_event(
+  state: Rc<RefCell<OpState>>,
+  scope: &mut v8::PinScope<'_, '_>,
+  event_name: String,
+  params: String,
 ) {
   let inspector = {
     let state = state.borrow();
@@ -347,9 +454,17 @@ pub fn op_inspector_connect<'s>(
   connect_to_main_thread: bool,
   callback: v8::Local<'s, v8::Function>,
 ) -> Result<JSInspectorSession, InspectorConnectError> {
-  state
-    .borrow_mut::<PermissionsContainer>()
-    .check_sys("inspector", "inspector.Session.connect")?;
+  if deno_permissions::oden_capsec_profile_is("oden/capsec/1.1") {
+    deno_permissions::oden_capsec_check_inspector_activation(
+      "node:inspector.Session.connect",
+      "inspector.Session.connect",
+      false,
+    )?;
+  } else {
+    state
+      .borrow_mut::<PermissionsContainer>()
+      .check_sys("inspector", "inspector.Session.connect")?;
+  }
 
   if connect_to_main_thread {
     return Err(InspectorConnectError::ConnectToMainThreadUnsupported);
@@ -398,20 +513,25 @@ pub fn op_inspector_connect<'s>(
   })
 }
 
-/// Like `op_inspector_connect`, but skips the `--allow-sys=inspector`
+/// Like `op_inspector_connect`, but skips the legacy `--allow-sys=inspector`
 /// permission check. Only intended for the `node:repl` polyfill, which
 /// uses a private inspector session to evaluate the in-flight input with
 /// `Runtime.evaluate({ throwOnSideEffect: true })` for the inline preview.
 /// The session can only inspect the current runtime, which user code can
 /// already do via other JS APIs, so no permission is required.
-#[op2]
+#[op2(stack_trace)]
 #[cppgc]
 pub fn op_node_repl_inspector_connect<'s>(
   isolate: &v8::Isolate,
   scope: &mut v8::PinScope<'s, '_>,
   state: &mut OpState,
   callback: v8::Local<'s, v8::Function>,
-) -> JSInspectorSession {
+) -> Result<JSInspectorSession, InspectorConnectError> {
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "node:repl.inspector-preview",
+    "node:repl inspector preview",
+    false,
+  )?;
   let context = scope.get_current_context();
   let context = v8::Global::new(scope, context);
   let callback = v8::Global::new(scope, callback);
@@ -445,22 +565,36 @@ pub fn op_node_repl_inspector_connect<'s>(
     },
   );
 
-  JSInspectorSession {
+  Ok(JSInspectorSession {
     session: RefCell::new(Some(session)),
-  }
+  })
 }
 
-#[op2(fast, reentrant)]
+#[op2(fast, reentrant, stack_trace)]
 pub fn op_inspector_dispatch(
   #[cppgc] inspector: &JSInspectorSession,
   #[string] message: String,
-) {
+) -> Result<(), deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "node:inspector.Session.post",
+    "inspector.Session.post",
+    false,
+  )?;
   if let Some(session) = &mut *inspector.session.borrow_mut() {
     session.dispatch(message);
   }
+  Ok(())
 }
 
-#[op2(fast)]
-pub fn op_inspector_disconnect(#[cppgc] inspector: &JSInspectorSession) {
+#[op2(fast, stack_trace)]
+pub fn op_inspector_disconnect(
+  #[cppgc] inspector: &JSInspectorSession,
+) -> Result<(), deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "node:inspector.Session.disconnect",
+    "inspector.Session.disconnect",
+    false,
+  )?;
   inspector.session.borrow_mut().take();
+  Ok(())
 }

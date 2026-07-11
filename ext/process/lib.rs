@@ -12,6 +12,8 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::prelude::ExitStatusExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -21,8 +23,6 @@ use std::process::ExitStatus;
 use std::process::Stdio as StdStdio;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::Condvar;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
@@ -363,6 +363,28 @@ pub struct SpawnArgs {
 enum KillSignal {
   String(String),
   Number(i32),
+}
+
+#[cfg(unix)]
+impl KillSignal {
+  fn is_terminal_cleanup_signal(&self) -> bool {
+    match self {
+      Self::String(signal) => {
+        signal.eq_ignore_ascii_case("SIGTERM")
+          || signal.eq_ignore_ascii_case("SIGKILL")
+      }
+      Self::Number(signal) => {
+        *signal == libc::SIGTERM || *signal == libc::SIGKILL
+      }
+    }
+  }
+
+  fn display(&self) -> String {
+    match self {
+      Self::String(signal) => signal.clone(),
+      Self::Number(signal) => signal.to_string(),
+    }
+  }
 }
 
 #[derive(Clone, Deserialize)]
@@ -1084,7 +1106,14 @@ fn spawn_child(
   let child_rid = state.resource_table.add(ChildResource {
     child: RefCell::new(child),
     pid,
-    kill_on_drop: Cell::new(!detached),
+    // Rev1.1 never performs a package-triggerable bare-PID signal from Drop.
+    // Root may explicitly re-enable its own cleanup through ref().
+    kill_on_drop: Cell::new(
+      !detached
+        && !deno_permissions::oden_capsec_profile_is(
+          deno_permissions::ODEN_CAPSEC_PROFILE,
+        ),
+    ),
   });
 
   Ok(Child {
@@ -1154,7 +1183,12 @@ fn spawn_child_node(
   let child_rid = state.resource_table.add(ChildResource {
     child: RefCell::new(child),
     pid,
-    kill_on_drop: Cell::new(!detached),
+    kill_on_drop: Cell::new(
+      !detached
+        && !deno_permissions::oden_capsec_profile_is(
+          deno_permissions::ODEN_CAPSEC_PROFILE,
+        ),
+    ),
   });
 
   Ok(NodeChild {
@@ -1538,6 +1572,9 @@ async fn op_spawn_wait(
     .wait()
     .await?
     .try_into()?;
+  // The process has been reaped; never let Resource::close -> Drop send a
+  // bare-PID cleanup signal that could hit a subsequently reused PID.
+  resource.kill_on_drop.set(false);
   if let Ok(resource) = state.borrow_mut().resource_table.take_any(rid) {
     resource.close();
   }
@@ -1558,6 +1595,21 @@ fn op_spawn_sync(
   let kill_signal = args.kill_signal.clone();
   #[cfg(unix)]
   let retry_args = args.clone();
+  #[cfg(unix)]
+  if (timeout.is_some_and(|value| value > 0) || max_buffer.is_some())
+    && let Some(signal) = &kill_signal
+    && !signal.is_terminal_cleanup_signal()
+  {
+    // A configurable nonterminal signal is arbitrary process behavior, not
+    // owned-child cleanup. Authorize it while the initiating principal is
+    // still on-stack, before spawning or starting watchdog threads.
+    deno_permissions::oden_capsec_guard_deny_only_surface(
+      "process",
+      "signal",
+      &format!("spawnSync-watchdog:{}", signal.display()),
+      "spawnSync timeout/maxBuffer killSignal",
+    )?;
+  }
   let (mut command, _, _, _) = create_command(
     state,
     args,
@@ -1636,61 +1688,6 @@ fn op_spawn_sync(
     None => libc::SIGTERM,
   };
 
-  #[cfg(unix)]
-  let child_pid_for_kill = child.id();
-  #[cfg(windows)]
-  let child_pid_for_kill = child.id().expect("Process ID should be set.");
-
-  // How far the kill should reach.
-  enum KillScope {
-    // Signal the child's whole process group. Only valid on the timeout path,
-    // where `process_group(0)` above made the child a group leader; this also
-    // reaps shell-wrapped subprocesses.
-    ProcessGroup,
-    // Signal only the direct child. Used by the maxBuffer path, matching Node,
-    // which never moves the child into a new group for `maxBuffer`.
-    Child,
-  }
-
-  // Kill the spawned child with the requested scope.
-  let kill_child: Arc<dyn Fn(KillScope) + Send + Sync> =
-    Arc::new(move |scope: KillScope| {
-      #[cfg(unix)]
-      {
-        // A negative PID targets the process group. There is a minor race
-        // window if the child has already exited and the PID was recycled; in
-        // practice the watchdog and readers race against EOF / wait()
-        // returning so this window is negligible.
-        let pid = child_pid_for_kill as i32;
-        let target = match scope {
-          KillScope::ProcessGroup => -pid,
-          KillScope::Child => pid,
-        };
-        // SAFETY: `target` references the just-spawned child (or its group).
-        unsafe {
-          libc::kill(target, kill_signal_int);
-        }
-      }
-      #[cfg(windows)]
-      {
-        // Windows has no process groups here; both scopes terminate the direct
-        // child.
-        let _ = scope;
-        // SAFETY: standard Win32 calls; child_pid_for_kill is a valid PID.
-        unsafe {
-          let handle = windows_sys::Win32::System::Threading::OpenProcess(
-            windows_sys::Win32::System::Threading::PROCESS_TERMINATE,
-            false.into(),
-            child_pid_for_kill,
-          );
-          if !handle.is_null() {
-            windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
-            windows_sys::Win32::Foundation::CloseHandle(handle);
-          }
-        }
-      }
-    });
-
   // Take stdout/stderr pipes from child so we can read them in background
   // threads. This lets us drop the pipes on timeout to unblock the readers
   // (matching libuv's behavior of stopping pipe reads after process kill).
@@ -1706,7 +1703,6 @@ fn op_spawn_sync(
     mut pipe: R,
     max_buffer: Option<u64>,
     killed_by_max_buffer: Arc<AtomicBool>,
-    kill_child: Arc<dyn Fn(KillScope) + Send + Sync>,
   ) -> Vec<u8> {
     let mut buf = Vec::new();
     // No limit: fall back to read_to_end so we don't waste cycles checking.
@@ -1724,11 +1720,7 @@ fn op_spawn_sync(
             buf.extend_from_slice(&tmp[..n]);
             if buf.len() as u64 > limit {
               overflowed = true;
-              if !killed_by_max_buffer.swap(true, Ordering::SeqCst) {
-                // Kill only the direct child (matching Node); no process
-                // group is created for the maxBuffer path.
-                kill_child(KillScope::Child);
-              }
+              killed_by_max_buffer.store(true, Ordering::SeqCst);
             }
           }
           // After overflow, drain the pipe without buffering further so
@@ -1742,72 +1734,68 @@ fn op_spawn_sync(
 
   let stdout_handle = child_stdout.map(|pipe| {
     let killed = killed_by_max_buffer.clone();
-    let kill_child = kill_child.clone();
-    std::thread::spawn(move || {
-      read_with_limit(pipe, max_buffer, killed, kill_child)
-    })
+    std::thread::spawn(move || read_with_limit(pipe, max_buffer, killed))
   });
   let stderr_handle = child_stderr.map(|pipe| {
     let killed = killed_by_max_buffer.clone();
-    let kill_child = kill_child.clone();
-    std::thread::spawn(move || {
-      read_with_limit(pipe, max_buffer, killed, kill_child)
-    })
+    std::thread::spawn(move || read_with_limit(pipe, max_buffer, killed))
   });
 
-  // If timeout is specified, spawn a thread that will kill the child
-  // after the timeout expires. Uses a condvar so the timer thread can be
-  // cancelled promptly when the child exits before the deadline.
-  let killed_by_timeout = Arc::new(AtomicBool::new(false));
-  let cancel = Arc::new((Mutex::new(false), Condvar::new()));
-  if let Some(timeout_ms) = timeout
-    && timeout_ms > 0
-  {
-    let killed = killed_by_timeout.clone();
-    let cancel2 = cancel.clone();
-    let kill_child = kill_child.clone();
-    std::thread::spawn(move || {
-      let (lock, cvar) = &*cancel2;
-      let guard = lock.lock().unwrap();
-      let timeout = std::time::Duration::from_millis(timeout_ms);
-      let (guard, wait_result) = cvar
-        .wait_timeout_while(guard, timeout, |cancelled| !*cancelled)
-        .unwrap();
-      // If cancelled or woken before the timeout, the child already exited.
-      if *guard || !wait_result.timed_out() {
-        return;
+  // Poll and cancel on this thread. The child is not reaped until after any
+  // signal, so its PID cannot be recycled between the liveness check and the
+  // cleanup action. Reader threads only publish overflow state; they never
+  // signal a bare PID.
+  let started = std::time::Instant::now();
+  let deadline = timeout
+    .filter(|value| *value > 0)
+    .map(std::time::Duration::from_millis);
+  let command_name = command.get_program().to_string_lossy().into_owned();
+  let wait_error = |error: std::io::Error| ProcessError::SpawnFailed {
+    command: command_name.clone(),
+    error: Box::new(error.into()),
+  };
+  let mut timed_out = false;
+  let status = loop {
+    #[cfg(unix)]
+    let maybe_status = child.try_wait().map_err(&wait_error)?;
+    #[cfg(windows)]
+    let maybe_status = child
+      .try_wait()
+      .map_err(&wait_error)?
+      .map(|code| ExitStatus::from_raw(code as u32));
+    if let Some(status) = maybe_status {
+      break status;
+    }
+
+    let overflow = killed_by_max_buffer.load(Ordering::SeqCst);
+    let deadline_reached = deadline.is_some_and(|limit| started.elapsed() >= limit);
+    if overflow || deadline_reached {
+      timed_out = deadline_reached;
+      #[cfg(unix)]
+      {
+        let child_pid = child.id() as i32;
+        let target = if deadline_reached {
+          -child_pid
+        } else {
+          child_pid
+        };
+        // SAFETY: try_wait just proved this exact, unreaped child is live. An
+        // unreaped child retains its PID, so it cannot alias a new process.
+        unsafe {
+          libc::kill(target, kill_signal_int);
+        }
       }
-      killed.store(true, Ordering::SeqCst);
-      // Kill the whole process group: a new group was created above when a
-      // timeout is set, so this also reaps shell-wrapped subprocesses.
-      kill_child(KillScope::ProcessGroup);
-    });
-  }
-  drop(kill_child);
+      #[cfg(windows)]
+      child.kill_blocking().map_err(&wait_error)?;
 
-  #[cfg(unix)]
-  let status = child.wait().map_err(|e| ProcessError::SpawnFailed {
-    command: command.get_program().to_string_lossy().into_owned(),
-    error: Box::new(e.into()),
-  })?;
-  #[cfg(windows)]
-  let status =
-    child
-      .wait_blocking()
-      .map_err(|e| ProcessError::SpawnFailed {
-        command: command.get_program().to_string_lossy().into_owned(),
-        error: Box::new(e.into()),
-      })?;
+      #[cfg(unix)]
+      break child.wait().map_err(&wait_error)?;
+      #[cfg(windows)]
+      break child.wait_blocking().map_err(&wait_error)?;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(2));
+  };
 
-  // Cancel the timeout thread if it's still waiting.
-  {
-    let (lock, cvar) = &*cancel;
-    let mut cancelled = lock.lock().unwrap();
-    *cancelled = true;
-    cvar.notify_one();
-  }
-
-  let timed_out = killed_by_timeout.load(Ordering::SeqCst);
   let buffered_overflow = killed_by_max_buffer.load(Ordering::SeqCst);
 
   // Collect stdout/stderr from background reader threads.
@@ -1870,6 +1858,32 @@ enum SignalArg {
   Int(i32),
 }
 
+impl SignalArg {
+  fn display(&self) -> String {
+    match self {
+      Self::String(signal) => signal.clone(),
+      Self::Int(signal) => signal.to_string(),
+    }
+  }
+
+  fn triggers_inspector(&self) -> bool {
+    match self {
+      Self::String(signal) => signal.eq_ignore_ascii_case("SIGUSR1"),
+      Self::Int(signal) => {
+        #[cfg(unix)]
+        {
+          *signal == libc::SIGUSR1
+        }
+        #[cfg(not(unix))]
+        {
+          let _ = signal;
+          false
+        }
+      }
+    }
+  }
+}
+
 #[op2(stack_trace)]
 fn op_spawn_kill(
   state: &mut OpState,
@@ -1877,6 +1891,13 @@ fn op_spawn_kill(
   #[serde] signal: SignalArg,
 ) -> Result<(), ProcessError> {
   if let Ok(child_resource) = state.resource_table.get::<ChildResource>(rid) {
+    // @ref LLP 0019#system-information-and-process-mutation [implements] — Possession of a child handle cannot rescue a deny-only signal effect.
+    deno_permissions::oden_capsec_check_process_signal(
+      child_resource.pid as i32,
+      &signal.display(),
+      signal.triggers_inspector(),
+      "ChildProcess.kill",
+    )?;
     deprecated::kill(child_resource.pid as i32, &signal)?;
     return Ok(());
   }
@@ -1901,8 +1922,17 @@ fn op_spawn_child_unref(
 fn op_spawn_child_ref(
   state: &mut OpState,
   #[smi] rid: ResourceId,
-) -> Result<(), deno_core::error::ResourceError> {
-  let resource = state.resource_table.get::<ChildResource>(rid)?;
+) -> Result<(), ProcessError> {
+  let resource = state
+    .resource_table
+    .get::<ChildResource>(rid)
+    .map_err(ProcessError::Resource)?;
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "signal",
+    &format!("pid:{}:kill-on-drop", resource.pid),
+    "ChildProcess.ref cleanup signal",
+  )?;
   resource.kill_on_drop.set(true);
   Ok(())
 }
@@ -2256,6 +2286,12 @@ mod deprecated {
     #[serde] signal: SignalArg,
     #[string] api_name: String,
   ) -> Result<(), ProcessError> {
+    deno_permissions::oden_capsec_check_process_signal(
+      pid,
+      &signal.display(),
+      signal.triggers_inspector(),
+      &api_name,
+    )?;
     if pid != std::process::id() as i32 {
       state
         .borrow_mut::<PermissionsContainer>()

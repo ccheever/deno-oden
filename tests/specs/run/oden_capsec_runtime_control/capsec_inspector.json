@@ -1,0 +1,7 @@
+{
+  "mode": "permissive",
+  "grants": {
+    "inspector-no-listen": "inspector:activate",
+    "inspector-allowed": "inspector:activate,network:listen:127.0.0.1"
+  }
+}

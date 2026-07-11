@@ -3,7 +3,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { op_oden_guard_surface } = core.ops;
+const { op_oden_guard_deny_only_surface } = core.ops;
 const {
   validateFunction,
   validateObject,
@@ -221,9 +221,10 @@ function triggerAsyncId() {
 }
 
 function executionAsyncResource() {
-  op_oden_guard_surface(
-    "inspector",
-    "observe",
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
     "async-resource",
     "node:async_hooks.executionAsyncResource",
   );
@@ -310,9 +311,11 @@ function createHook(callbacks: {
   destroy?: (asyncId: number) => void;
   promiseResolve?: (asyncId: number) => void;
 }) {
-  op_oden_guard_surface(
-    "inspector",
-    "observe",
+  // Async hook callbacks observe activity across every principal in the shared
+  // isolate, so the initial profile closes registration as runtime inspection.
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
     "async-hooks",
     "node:async_hooks.createHook",
   );

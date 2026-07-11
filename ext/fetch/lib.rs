@@ -664,6 +664,17 @@ pub async fn op_fetch_send(
   };
 
   let status = res.status();
+  let network_peer = request.url.host().and_then(|host| {
+    let ip = match host {
+      url::Host::Ipv4(ip) => std::net::IpAddr::V4(ip),
+      url::Host::Ipv6(ip) => std::net::IpAddr::V6(ip),
+      url::Host::Domain(_) => return None,
+    };
+    request
+      .url
+      .port_or_known_default()
+      .map(|port| std::net::SocketAddr::new(ip, port))
+  });
   let url = request.url.into();
   let mut res_headers = Vec::new();
   for (key, val) in res.headers().iter() {
@@ -676,7 +687,11 @@ pub async fn op_fetch_send(
   let response_rid = state
     .borrow_mut()
     .resource_table
-    .add(FetchResponseResource::new(res, content_length));
+    .add(FetchResponseResource::new(
+      res,
+      content_length,
+      network_peer,
+    ));
 
   Ok(FetchResponse {
     status: status.as_u16(),
@@ -735,14 +750,20 @@ pub struct FetchResponseResource {
   pub response_reader: AsyncRefCell<FetchResponseReader>,
   pub cancel: CancelHandle,
   pub size: Option<u64>,
+  pub network_peer: Option<std::net::SocketAddr>,
 }
 
 impl FetchResponseResource {
-  pub fn new(response: http::Response<ResBody>, size: Option<u64>) -> Self {
+  pub fn new(
+    response: http::Response<ResBody>,
+    size: Option<u64>,
+    network_peer: Option<std::net::SocketAddr>,
+  ) -> Self {
     Self {
       response_reader: AsyncRefCell::new(FetchResponseReader::Start(response)),
       cancel: CancelHandle::default(),
       size,
+      network_peer,
     }
   }
 
@@ -762,6 +783,13 @@ impl Resource for FetchResponseResource {
 
   fn read(self: Rc<Self>, limit: usize) -> AsyncResult<BufView> {
     Box::pin(async move {
+      if let Some(peer) = self.network_peer {
+        deno_permissions::oden_capsec_check_protected_inspector_stream_use(
+          peer,
+          "fetch response body read",
+        )
+        .map_err(JsErrorBox::from_err)?;
+      }
       let mut reader =
         RcRef::map(&self, |r| &r.response_reader).borrow_mut().await;
 

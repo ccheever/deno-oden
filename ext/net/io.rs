@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::borrow::Cow;
+use std::net::SocketAddr;
 use std::rc::Rc;
 
 use deno_core::AsyncMutFuture;
@@ -31,6 +32,7 @@ pub struct FullDuplexResource<R, W> {
   // canceled, while 'write' ops are allowed to complete. Therefore only
   // 'read' futures should be attached to this cancel handle.
   cancel_handle: CancelHandle,
+  network_peer: Option<SocketAddr>,
 }
 
 impl<R, W> FullDuplexResource<R, W>
@@ -43,6 +45,16 @@ where
       rd: rd.into(),
       wr: wr.into(),
       cancel_handle: Default::default(),
+      network_peer: None,
+    }
+  }
+
+  pub fn new_with_network_peer((rd, wr): (R, W), peer: SocketAddr) -> Self {
+    Self {
+      rd: rd.into(),
+      wr: wr.into(),
+      cancel_handle: Default::default(),
+      network_peer: Some(peer),
     }
   }
 
@@ -70,6 +82,15 @@ where
     self: Rc<Self>,
     data: &mut [u8],
   ) -> Result<usize, std::io::Error> {
+    if let Some(peer) = self.network_peer {
+      deno_permissions::oden_capsec_check_protected_inspector_stream_use(
+        peer,
+        "connected TCP stream read",
+      )
+      .map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, error)
+      })?;
+    }
     let mut rd = self.rd_borrow_mut().await;
     let nread = rd.read(data).try_or_cancel(self.cancel_handle()).await?;
     Ok(nread)
@@ -79,6 +100,15 @@ where
     self: Rc<Self>,
     data: &[u8],
   ) -> Result<usize, std::io::Error> {
+    if let Some(peer) = self.network_peer {
+      deno_permissions::oden_capsec_check_protected_inspector_stream_use(
+        peer,
+        "connected TCP stream write",
+      )
+      .map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, error)
+      })?;
+    }
     let mut wr = self.wr_borrow_mut().await;
     let nwritten = wr.write(data).await?;
     Ok(nwritten)

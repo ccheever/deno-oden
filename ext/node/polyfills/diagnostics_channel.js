@@ -5,7 +5,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { op_oden_guard_surface } = core.ops;
+const { op_oden_guard_deny_only_surface } = core.ops;
 const { ERR_INVALID_ARG_TYPE } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
@@ -114,9 +114,10 @@ function wrapStoreRun(store, data, next, transform = defaultTransform) {
 
 class ActiveChannel {
   subscribe(subscription) {
-    op_oden_guard_surface(
-      "ipc",
-      "broadcast",
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
       String(this.name),
       "node:diagnostics_channel.subscribe",
     );
@@ -130,6 +131,12 @@ class ActiveChannel {
   }
 
   unsubscribe(subscription) {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      String(this.name),
+      "node:diagnostics_channel.unsubscribe",
+    );
     const index = ArrayPrototypeIndexOf(this._subscribers, subscription);
     if (index === -1) return false;
 
@@ -149,9 +156,9 @@ class ActiveChannel {
   }
 
   bindStore(store, transform) {
-    op_oden_guard_surface(
-      "ipc",
-      "broadcast",
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
       String(this.name),
       "node:diagnostics_channel.bindStore",
     );
@@ -161,6 +168,12 @@ class ActiveChannel {
   }
 
   unbindStore(store) {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      String(this.name),
+      "node:diagnostics_channel.unbindStore",
+    );
     if (!this._stores.has(store)) {
       return false;
     }
@@ -229,6 +242,13 @@ class Channel {
   }
 
   subscribe(subscription) {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      String(this.name),
+      "node:diagnostics_channel.subscribe",
+    );
+    validateFunction(subscription, "subscription");
     markActive(this);
     this.subscribe(subscription);
   }
@@ -238,6 +258,12 @@ class Channel {
   }
 
   bindStore(store, transform) {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      String(this.name),
+      "node:diagnostics_channel.bindStore",
+    );
     markActive(this);
     this.bindStore(store, transform);
   }

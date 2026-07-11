@@ -1028,11 +1028,20 @@ impl CliFactory {
     if let Some((host, name, publish_uid)) =
       cli_options.resolve_inspector_server_options()
     {
-      deno_runtime::deno_inspector_server::create_inspector_server(
+      // @ref LLP 0019#inspector [implements] — Runtime-control startup is an exact-root static edge, evaluated before the listener is created.
+      deno_runtime::deno_permissions::oden_capsec_check_inspector_listener_startup(
+        &format!("startup:--inspect:{host}"),
+        "inspector startup flag",
+      )?;
+      let reservation = deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
+        host,
+      );
+      let server = deno_runtime::deno_inspector_server::create_inspector_server(
         host,
         name,
         publish_uid,
       )?;
+      reservation.commit(server.host);
     }
     Ok(())
   }

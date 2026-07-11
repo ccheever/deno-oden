@@ -1658,8 +1658,42 @@ async fn run_desktop(
   };
   let inspect_brk = env::var("DENO_DESKTOP_INSPECT_BRK").is_ok();
   let inspect_wait = env::var("DENO_DESKTOP_INSPECT_WAIT").is_ok();
+
+  // The parent-side mux and CEF debugger live in other processes, so protect
+  // their concrete endpoints in this child before application code can use
+  // ordinary loopback network authority to reach either debugger.
+  if let Ok(mux_ws) = env::var("DENO_DESKTOP_MUX_WS") {
+    let address = mux_ws
+      .strip_prefix("ws://")
+      .unwrap_or(&mux_ws)
+      .split('/')
+      .next()
+      .unwrap_or("");
+    if let Ok(addr) = address.parse::<std::net::SocketAddr>() {
+      deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
+        addr,
+      )
+      .commit(addr);
+    }
+  }
+  if let Ok(port) = env::var("LAUFEY_REMOTE_DEBUGGING_PORT")
+    && let Ok(port) = port.parse::<u16>()
+  {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
+      addr,
+    )
+    .commit(addr);
+  }
   if let Some(addr) = inspect_internal_port {
-    deno_runtime::deno_inspector_server::create_inspector_server(
+    deno_runtime::deno_permissions::oden_capsec_check_inspector_listener_startup(
+      &format!("startup:desktop-inspector:{addr}"),
+      "desktop inspector startup",
+    )?;
+    let reservation = deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
+      addr,
+    );
+    let server = deno_runtime::deno_inspector_server::create_inspector_server(
       addr,
       "deno-desktop",
       // Don't print the ws:// URL ourselves — DevTools attaches via the
@@ -1669,6 +1703,7 @@ async fn run_desktop(
         http: true,
       },
     )?;
+    reservation.commit(server.host);
     log::debug!("[desktop] inspector server bound on {addr}");
   }
 

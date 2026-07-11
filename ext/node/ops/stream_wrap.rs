@@ -11,6 +11,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::cell::UnsafeCell;
 use std::ffi::c_char;
+use std::net::SocketAddr;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -21,6 +22,7 @@ use deno_core::OpState;
 use deno_core::error::ResourceError;
 use deno_core::op2;
 use deno_core::uv_compat;
+use deno_core::uv_compat::UV_EACCES;
 use deno_core::uv_compat::UV_EBADF;
 use deno_core::uv_compat::uv_buf_t;
 use deno_core::uv_compat::uv_shutdown_t;
@@ -60,6 +62,9 @@ pub(crate) struct StreamHandleData {
   pub desired_read_interceptor: Cell<Option<ReadInterceptor>>,
   pub read_callbacks: RefCell<ReadCallbackRegistry>,
   pub active_read: Cell<Option<ReadCallbackKey>>,
+  /// Concrete peer retained across object passage so protected inspector
+  /// endpoints are rechecked at application-byte delivery.
+  pub network_peer: Cell<Option<SocketAddr>>,
   pub request_callbacks: RefCell<RequestCallbackRegistry>,
   /// User-supplied static read buffer (Node's `onread.buffer` option).
   /// When set, `on_uv_alloc` directs libuv to read into this buffer and
@@ -237,6 +242,7 @@ impl LibUvStreamWrap {
         desired_read_interceptor: Cell::new(None),
         read_callbacks: RefCell::new(ReadCallbackRegistry::default()),
         active_read: Cell::new(None),
+        network_peer: Cell::new(None),
         request_callbacks: RefCell::new(RequestCallbackRegistry::default()),
         user_buffer: RefCell::new(None),
       }),
@@ -265,6 +271,23 @@ impl LibUvStreamWrap {
     (&*self.handle_data as *const StreamHandleData)
       .cast_mut()
       .cast()
+  }
+
+  pub(crate) fn set_network_peer(&self, peer: SocketAddr) {
+    self.handle_data.network_peer.set(Some(peer));
+  }
+
+  pub(crate) fn network_peer(&self) -> Option<SocketAddr> {
+    self.handle_data.network_peer.get()
+  }
+
+  fn check_protected_network_peer(&self, api_name: &str) -> bool {
+    self.handle_data.network_peer.get().is_none_or(|peer| {
+      deno_permissions::oden_capsec_check_protected_inspector_stream_use(
+        peer, api_name,
+      )
+      .is_ok()
+    })
   }
 
   pub(crate) fn js_handle_global(
@@ -1240,6 +1263,9 @@ impl LibUvStreamWrap {
     scope: &mut v8::PinScope,
     op_state: &mut OpState,
   ) -> i32 {
+    if !self.check_protected_network_peer("Node connected stream read") {
+      return UV_EACCES;
+    }
     let this = if let Some(handle) = self.js_handle_global(scope) {
       v8::Local::new(scope, handle)
     } else {
@@ -1340,6 +1366,9 @@ impl LibUvStreamWrap {
     scope: &mut v8::PinScope,
     op_state: &mut OpState,
   ) -> i32 {
+    if !self.check_protected_network_peer("Node connected stream write") {
+      return UV_EACCES;
+    }
     let stream = self.stream_ptr();
     if stream.is_null() {
       return UV_EBADF;
@@ -1472,6 +1501,9 @@ impl LibUvStreamWrap {
     scope: &mut v8::PinScope,
     op_state: &mut OpState,
   ) -> i32 {
+    if !self.check_protected_network_peer("Node connected stream writev") {
+      return UV_EACCES;
+    }
     let stream = self.stream_ptr();
     if stream.is_null() {
       return UV_EBADF;
@@ -1809,6 +1841,11 @@ impl LibUvStreamWrap {
     state_array: v8::Local<v8::Int32Array>,
     encoding: StringEncoding,
   ) -> i32 {
+    if !self.check_protected_network_peer(
+      "Node connected stream string write",
+    ) {
+      return UV_EACCES;
+    }
     let stream = self.stream_ptr();
     if stream.is_null() {
       return UV_EBADF;

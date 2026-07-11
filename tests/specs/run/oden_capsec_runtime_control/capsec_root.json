@@ -1,0 +1,5 @@
+{
+  "mode": "permissive",
+  "grants": {},
+  "rootGrants": "inspector:activate"
+}

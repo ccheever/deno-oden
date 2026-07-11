@@ -125,6 +125,12 @@ fn open_options_to_access_kind(open_options: &OpenOptions) -> OpenAccessKind {
 #[op2]
 #[string]
 pub fn op_fs_cwd(state: &mut OpState) -> Result<String, FsOpsError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "cwd",
+    "Deno.cwd()/process.cwd()",
+  )?;
   let fs = state.borrow::<FileSystemRc>();
   let path = fs.cwd()?;
   let path_str = path_into_string(path.into_os_string())?;
@@ -136,6 +142,13 @@ pub fn op_fs_chdir(
   state: &mut OpState,
   #[string] directory: &str,
 ) -> Result<(), FsOpsError> {
+  // @ref LLP 0019#system-information-and-process-mutation [implements] — A package cannot mutate the process-wide cwd, even if it can read the target directory.
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "cwd",
+    directory,
+    "Deno.chdir()/process.chdir()",
+  )?;
   let d = state
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
@@ -149,13 +162,25 @@ pub fn op_fs_chdir(
     .context_path("chdir", &d)
 }
 
-#[op2]
+#[op2(stack_trace)]
 pub fn op_fs_umask(
   state: &mut OpState,
   mask: Option<u32>,
 ) -> Result<u32, FsOpsError>
 where
 {
+  // The query form is implemented as umask(0) followed by restoration and is
+  // therefore also a process-wide mutation with a cross-thread race window.
+  // @ref LLP 0019#system-information-and-process-mutation [implements]
+  let target = mask
+    .map(|value| format!("{value:#o}"))
+    .unwrap_or_else(|| "query".to_string());
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "umask",
+    &target,
+    "Deno.umask()/process.umask()",
+  )?;
   state.borrow::<FileSystemRc>().umask(mask).context("umask")
 }
 

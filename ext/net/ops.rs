@@ -240,7 +240,10 @@ pub async fn op_net_accept_tcp(
   let mut state = state.borrow_mut();
   let rid = state
     .resource_table
-    .add(TcpStreamResource::new(tcp_stream.into_split()));
+    .add(TcpStreamResource::new_with_network_peer(
+      tcp_stream.into_split(),
+      remote_addr,
+    ));
   Ok((
     rid,
     IpAddr::from(local_addr),
@@ -657,7 +660,10 @@ pub async fn op_net_connect_tcp_inner(
   let mut state_ = state.borrow_mut();
   let rid = state_
     .resource_table
-    .add(TcpStreamResource::new(tcp_stream.into_split()));
+    .add(TcpStreamResource::new_with_network_peer(
+      tcp_stream.into_split(),
+      remote_addr,
+    ));
 
   Ok((rid, IpAddr::from(local_addr), IpAddr::from(remote_addr)))
 }

@@ -3,7 +3,8 @@
 // deno-lint-ignore-file no-explicit-any
 
 (function () {
-const { primordials } = __bootstrap;
+const { core, primordials } = __bootstrap;
+const { op_oden_guard_deny_only_surface } = core.ops;
 const {
   ArrayPrototypePush,
   SafeSet,
@@ -58,6 +59,15 @@ function createFSReqCallback() {
 }
 
 function getActiveRequests() {
+  // Resource snapshots reveal handles and operations owned by other package
+  // principals in the shared isolate.
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "process:active-requests",
+    "process._getActiveRequests",
+  );
   return snapshot(activeRequests);
 }
 
@@ -75,12 +85,24 @@ function unregisterActiveHandle(handle: any) {
 }
 
 function getActiveHandles() {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "process:active-handles",
+    "process._getActiveHandles",
+  );
   return snapshot(activeHandles);
 }
 
 // The wrap names of every tracked handle and request, for
 // `process.getActiveResourcesInfo()`.
 function getActiveResourceNames() {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "process:active-resources",
+    "process.getActiveResourcesInfo",
+  );
   const names: string[] = [];
   for (const handle of new SafeSetIterator(activeHandles)) {
     ArrayPrototypePush(names, resourceTypeName(handle));

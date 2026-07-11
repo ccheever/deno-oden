@@ -8,7 +8,7 @@ const { core, primordials } = __bootstrap;
 const { ERR_UNHANDLED_ERROR } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
-const { AsyncHook } = core.loadExtScript(
+const { AsyncHook, internalHookToken } = core.loadExtScript(
   "ext:deno_node/internal/async_hooks.ts",
 );
 const {
@@ -70,7 +70,7 @@ const asyncHook = new AsyncHook({
   destroy(asyncId) {
     pairing.delete(asyncId);
   },
-});
+}, internalHookToken);
 
 function create() {
   return new Domain();

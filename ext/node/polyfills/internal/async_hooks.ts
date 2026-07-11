@@ -3,6 +3,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_oden_guard_deny_only_surface } = core.ops;
 // deno-lint-ignore camelcase
 const async_wrap = core.loadExtScript(
   "ext:deno_node/internal_binding/async_wrap.ts",
@@ -405,12 +406,18 @@ function hasAsyncIdStack() {
 
 type Fn = (...args: unknown[]) => unknown;
 
+// Domain tracking is an implementation detail of the Node compatibility
+// layer. Keep its hook on a closure-private path so a user-created AsyncHook
+// cannot be enabled later by a less-trusted principal without a fresh check.
+const internalHookToken = { __proto__: null };
+
 class AsyncHook {
   [init_symbol]: Fn;
   [before_symbol]: Fn;
   [after_symbol]: Fn;
   [destroy_symbol]: Fn;
   [promise_resolve_symbol]: Fn;
+  #trustedInternal: boolean;
 
   constructor({
     init,
@@ -424,7 +431,7 @@ class AsyncHook {
     after: Fn;
     destroy: Fn;
     promiseResolve: Fn;
-  }) {
+  }, trustedToken?: object) {
     if (init !== undefined && typeof init !== "function") {
       throw new ERR_ASYNC_CALLBACK("hook.init");
     }
@@ -446,9 +453,19 @@ class AsyncHook {
     this[after_symbol] = after;
     this[destroy_symbol] = destroy;
     this[promise_resolve_symbol] = promiseResolve;
+    this.#trustedInternal = trustedToken === internalHookToken;
   }
 
   enable() {
+    if (!this.#trustedInternal) {
+      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        "async-hooks",
+        "node:async_hooks.AsyncHook.enable",
+      );
+    }
+
     // The set of callbacks for a hook should be the same regardless of whether
     // enable()/disable() are run during their execution. The following
     // references are reassigned to the tmp arrays if a hook is currently being
@@ -533,6 +550,7 @@ return {
   enabledHooksExist,
   hasAsyncIdStack,
   AsyncHook,
+  internalHookToken,
   registerDestroyHook,
   async_id_symbol,
   trigger_async_id_symbol,

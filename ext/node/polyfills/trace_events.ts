@@ -2,6 +2,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_oden_guard_deny_only_surface } = core.ops;
 const {
   ArrayFrom,
   ArrayIsArray,
@@ -139,6 +140,13 @@ class Tracing {
   }
 
   enable() {
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "node:trace_events.enable",
+      "node:trace_events.Tracing.enable",
+    );
     if (!this[kEnabled]) {
       this[kEnabled] = true;
       for (const category of new SafeArrayIterator(this[kCategories])) {
@@ -187,6 +195,12 @@ function createTracing(options) {
 }
 
 function getEnabledCategories() {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "node:trace_events.categories",
+    "node:trace_events.getEnabledCategories",
+  );
   const seen = new SafeSet();
   for (const tracing of new SafeSetIterator(enabledTracingObjects)) {
     for (const category of new SafeArrayIterator(tracing[kCategories])) {

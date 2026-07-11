@@ -32,8 +32,17 @@ pub fn op_v8_cached_data_version_tag() -> u32 {
   v8::script_compiler::cached_data_version_tag()
 }
 
-#[op2(fast)]
-pub fn op_v8_set_flags_from_string(#[string] flags: &str) {
+#[op2(fast, stack_trace)]
+pub fn op_v8_set_flags_from_string(
+  #[string] flags: &str,
+) -> Result<(), deno_permissions::PermissionCheckError> {
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "v8:set-flags",
+    "node:v8.setFlagsFromString",
+  )?;
   for flag in flags.split_ascii_whitespace() {
     match flag {
       "--expose_gc" | "--expose-gc" => {
@@ -45,6 +54,7 @@ pub fn op_v8_set_flags_from_string(#[string] flags: &str) {
       _ => {}
     }
   }
+  Ok(())
 }
 
 fn gc_callback(
@@ -117,15 +127,23 @@ pub fn op_v8_update_heap_space_statistics(
   Some(stats.space_name().to_string_lossy().into_owned())
 }
 
-#[op2]
+#[op2(stack_trace)]
 #[buffer]
-pub fn op_v8_take_heap_snapshot(scope: &mut v8::PinScope<'_, '_>) -> Vec<u8> {
+pub fn op_v8_take_heap_snapshot(
+  scope: &mut v8::PinScope<'_, '_>,
+) -> Result<Vec<u8>, deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "v8:heap-snapshot",
+    "node:v8.getHeapSnapshot/writeHeapSnapshot",
+  )?;
   let mut buf = Vec::new();
   scope.take_heap_snapshot(|chunk| {
     buf.extend_from_slice(chunk);
     true
   });
-  buf
+  Ok(buf)
 }
 
 // --- setHeapSnapshotNearHeapLimit -----------------------------------------
@@ -297,6 +315,12 @@ pub fn op_v8_set_heap_snapshot_near_heap_limit(
   scope: &mut v8::PinScope<'_, '_>,
   #[smi] limit: u32,
 ) -> Result<(), deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "v8:near-heap-limit-snapshot",
+    "node:v8.setHeapSnapshotNearHeapLimit",
+  )?;
   let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
   let dir = state
     .borrow_mut::<PermissionsContainer>()
@@ -329,12 +353,18 @@ pub fn op_v8_set_heap_snapshot_near_heap_limit(
 // Limitation: matches by the immediate constructor name only, so instances of
 // subclasses of `ctor` won't be counted. This is sufficient for Node's leak
 // tests (which check direct instances of `Channel`, `SourceTextModule`, ...).
-#[op2(nofast)]
+#[op2(nofast, stack_trace)]
 #[smi]
 pub fn op_v8_query_objects_count(
   scope: &mut v8::PinScope<'_, '_>,
   #[string] ctor_name: &str,
-) -> u32 {
+) -> Result<u32, deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "v8:query-objects",
+    "node:v8.queryObjects",
+  )?;
   use deno_core::serde_json;
   use deno_core::serde_json::Value;
 
@@ -344,32 +374,32 @@ pub fn op_v8_query_objects_count(
     true
   });
   if buf.is_empty() {
-    return 0;
+    return Ok(0);
   }
 
   let snapshot: Value = match serde_json::from_slice(&buf) {
     Ok(v) => v,
-    Err(_) => return 0,
+    Err(_) => return Ok(0),
   };
 
   let meta = match snapshot.get("snapshot").and_then(|s| s.get("meta")) {
     Some(m) => m,
-    None => return 0,
+    None => return Ok(0),
   };
   let node_fields = match meta.get("node_fields").and_then(|f| f.as_array()) {
     Some(a) => a,
-    None => return 0,
+    None => return Ok(0),
   };
   let node_field_count = node_fields.len();
   if node_field_count == 0 {
-    return 0;
+    return Ok(0);
   }
   let type_field_index = node_fields.iter().position(|f| f == "type");
   let name_field_index = node_fields.iter().position(|f| f == "name");
   let (Some(type_field_index), Some(name_field_index)) =
     (type_field_index, name_field_index)
   else {
-    return 0;
+    return Ok(0);
   };
 
   // `node_types` is an array where the entry at `type_field_index` is the
@@ -382,18 +412,18 @@ pub fn op_v8_query_objects_count(
   {
     Some(types) => match types.iter().position(|t| t == "object") {
       Some(i) => i as u64,
-      None => return 0,
+      None => return Ok(0),
     },
-    None => return 0,
+    None => return Ok(0),
   };
 
   let nodes = match snapshot.get("nodes").and_then(|n| n.as_array()) {
     Some(a) => a,
-    None => return 0,
+    None => return Ok(0),
   };
   let strings = match snapshot.get("strings").and_then(|s| s.as_array()) {
     Some(a) => a,
-    None => return 0,
+    None => return Ok(0),
   };
 
   let mut count: u32 = 0;
@@ -415,7 +445,7 @@ pub fn op_v8_query_objects_count(
       count = count.saturating_add(1);
     }
   }
-  count
+  Ok(count)
 }
 
 #[op2(fast)]
@@ -1041,21 +1071,34 @@ unsafe impl GarbageCollected for GcProfilerHandle {
   }
 }
 
-#[op2]
+#[op2(stack_trace)]
 #[cppgc]
-pub fn op_v8_gc_profiler_new() -> GcProfilerHandle {
-  GcProfilerHandle {
+pub fn op_v8_gc_profiler_new()
+-> Result<GcProfilerHandle, deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "v8:gc-profiler",
+    "node:v8.GCProfiler",
+  )?;
+  Ok(GcProfilerHandle {
     id: std::cell::Cell::new(None),
-  }
+  })
 }
 
-#[op2(fast)]
+#[op2(fast, stack_trace)]
 pub fn op_v8_gc_profiler_start(
   scope: &mut v8::PinScope<'_, '_>,
   #[cppgc] handle: &GcProfilerHandle,
-) {
+) -> Result<(), deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "v8:gc-profiler-start",
+    "node:v8.GCProfiler.start",
+  )?;
   if handle.id.get().is_some() {
-    return;
+    return Ok(());
   }
   let inner = ensure_registry(scope);
   ensure_callbacks_registered(scope, &inner);
@@ -1074,27 +1117,34 @@ pub fn op_v8_gc_profiler_start(
     id
   };
   handle.id.set(Some(id));
+  Ok(())
 }
 
-#[op2]
+#[op2(stack_trace)]
 pub fn op_v8_gc_profiler_stop<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   #[cppgc] handle: &GcProfilerHandle,
-) -> v8::Local<'s, v8::Value> {
+) -> Result<v8::Local<'s, v8::Value>, deno_permissions::PermissionCheckError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "v8:gc-profiler-stop",
+    "node:v8.GCProfiler.stop",
+  )?;
   let Some(id) = handle.id.take() else {
-    return v8::null(scope).into();
+    return Ok(v8::null(scope).into());
   };
   let Some(inner) = scope
     .get_slot::<GcProfilerRegistry>()
     .map(|r| r.inner.clone())
   else {
-    return v8::null(scope).into();
+    return Ok(v8::null(scope).into());
   };
   let state = inner.borrow_mut().profilers.remove(&id);
   let Some(state) = state else {
-    return v8::null(scope).into();
+    return Ok(v8::null(scope).into());
   };
-  build_report(scope, &state.statistics).into()
+  Ok(build_report(scope, &state.statistics).into())
 }
 
 const HEAP_KEYS: &[&str] = &[

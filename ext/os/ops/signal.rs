@@ -13,6 +13,9 @@ use deno_core::op2;
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum SignalError {
+  #[class(inherit)]
+  #[error(transparent)]
+  Permission(#[from] deno_permissions::PermissionCheckError),
   #[class(type)]
   #[error(transparent)]
   InvalidSignalStr(#[from] deno_signals::InvalidSignalStrError),
@@ -43,12 +46,34 @@ impl Resource for SignalStreamResource {
   }
 }
 
-#[op2(fast)]
+#[op2(fast, stack_trace)]
 #[smi]
 pub fn op_signal_bind(
   state: &mut OpState,
   #[string] sig: &str,
 ) -> Result<ResourceId, SignalError> {
+  // Registering a handler mutates the process-wide signal disposition shared
+  // by every principal; it is distinct from polling an already-created stream.
+  // @ref LLP 0019#system-information-and-process-mutation [implements]
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "signal",
+    &format!("listen:{sig}"),
+    "Deno.addSignalListener/process.on(signal)",
+  )?;
+  bind_signal(state, sig)
+}
+
+#[op2(fast)]
+#[smi]
+pub fn op_signal_bind_internal(
+  state: &mut OpState,
+  #[string] sig: &str,
+) -> Result<ResourceId, SignalError> {
+  bind_signal(state, sig)
+}
+
+fn bind_signal(state: &mut OpState, sig: &str) -> Result<ResourceId, SignalError> {
   let signo = deno_signals::signal_str_to_int(sig)?;
   if deno_signals::is_forbidden(signo) {
     return Err(SignalError::SignalNotAllowed(sig.to_string()));

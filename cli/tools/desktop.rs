@@ -1239,6 +1239,23 @@ async fn run_desktop_hmr(
   flags: &Flags,
   desktop_flags: &DesktopFlags,
 ) -> Result<(), AnyError> {
+  let user_inspect = flags.inspect.or(flags.inspect_brk).or(flags.inspect_wait);
+  if let Some(user_addr) = user_inspect {
+    // Gate the complete debugger effect set before framework startup, random
+    // port allocation, or mux listener creation performs observable work.
+    deno_runtime::deno_permissions::oden_capsec_check_inspector_listener_startup(
+      &format!("startup:desktop-mux:{user_addr}"),
+      "desktop DevTools multiplexer startup",
+    )?;
+    deno_runtime::deno_permissions::oden_capsec_record_inspector_root_network_effect(
+      "listen",
+      "desktop-mux-internal-port-allocation",
+    )?;
+    deno_runtime::deno_permissions::oden_capsec_record_inspector_root_network_effect(
+      "connect",
+      "desktop-mux-deno-and-cef-upstreams",
+    )?;
+  }
   let laufey_backend = laufey_resolver
     .find_binary(backend, LAUFEY_NATIVE_TARGET)
     .await?;
@@ -1347,8 +1364,11 @@ async fn run_desktop_hmr(
   // (in CEF's child process). We allocate two internal ports here, hand
   // them to the subprocess via env vars, and bind the user-visible port
   // for DevTools to attach to.
-  let user_inspect = flags.inspect.or(flags.inspect_brk).or(flags.inspect_wait);
   let mux_handle = if let Some(user_addr) = user_inspect {
+    let mux_reservation =
+      deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
+        user_addr,
+      );
     let deno_internal: SocketAddr = format!(
       "127.0.0.1:{}",
       crate::tools::desktop_devtools::allocate_random_port()?
@@ -1376,6 +1396,7 @@ async fn run_desktop_hmr(
       },
     )
     .await?;
+    mux_reservation.commit(handle.listen);
 
     log::info!(
       "{} DevTools on ws://{}  (open chrome://inspect)",

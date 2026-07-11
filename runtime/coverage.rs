@@ -117,6 +117,24 @@ pub struct CoverageCollector {
 
 impl CoverageCollector {
   pub fn new(js_runtime: &mut JsRuntime, coverage_dir: PathBuf) -> Self {
+    // Coverage is implemented through a local inspector protocol session and
+    // observes code from every principal in the isolate. Runtime tooling is an
+    // ambient root caller, but both effects are still evaluated before session
+    // construction so no indirect helper bypass exists.
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    deno_permissions::oden_capsec_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "coverage:precise",
+      "coverage collector",
+    )
+    .unwrap_or_else(|error| panic!("capsec refused coverage collector: {error}"));
+    deno_permissions::oden_capsec_check_inspector_activation(
+      "runtime:coverage-session",
+      "coverage inspector session",
+      false,
+    )
+    .unwrap_or_else(|error| panic!("capsec refused coverage inspector session: {error}"));
     let state = CoverageCollectorState::new(coverage_dir);
 
     js_runtime.maybe_init_inspector();

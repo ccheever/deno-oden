@@ -471,15 +471,27 @@ impl TsJsServer {
             })
             .ok()
         })
+        .filter(|addr| {
+          deno_runtime::deno_permissions::oden_capsec_check_inspector_listener_startup(
+            &format!("startup:lsp-tsc-inspector:{addr}"),
+            "LSP TypeScript inspector startup",
+          )
+          .is_ok()
+        })
         .map(|addr| {
-          Arc::new(
+          let reservation = deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
+            addr,
+          );
+          let server = Arc::new(
             InspectorServer::new(
               addr,
               "deno-lsp-tsc",
               InspectPublishUid::default(),
             )
             .unwrap(),
-          )
+          );
+          reservation.commit(server.host);
+          server
         });
       self
         .inspector_server

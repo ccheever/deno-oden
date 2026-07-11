@@ -12,8 +12,8 @@
 const { core, internals, primordials } = __bootstrap;
 const {
   op_base64_encode_from_buffer,
-  op_inspector_emit_protocol_event,
-  op_inspector_enabled,
+  op_inspector_emit_protocol_event_internal,
+  op_inspector_enabled_internal,
 } = core.ops;
 const {
   ArrayBufferPrototype,
@@ -57,7 +57,10 @@ function encodeNetworkData(data) {
 }
 
 function emit(eventName, params) {
-  op_inspector_emit_protocol_event(eventName, JSONStringify(params ?? {}));
+  op_inspector_emit_protocol_event_internal(
+    eventName,
+    JSONStringify(params ?? {}),
+  );
 }
 
 function emitWithData(eventName, params) {
@@ -101,7 +104,7 @@ function emitFrame(eventName, params) {
 
 let networkRequestIdCounter = 0;
 internals.__inspectorNetwork = {
-  isEnabled: () => op_inspector_enabled(),
+  isEnabled: () => op_inspector_enabled_internal(),
   nextRequestId: () => `node-network-event-${++networkRequestIdCounter}`,
   requestWillBeSent: (p) => emit("Network.requestWillBeSent", p),
   responseReceived: (p) => emit("Network.responseReceived", p),

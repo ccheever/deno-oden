@@ -196,9 +196,21 @@ fn set_process_title(_title: &str) {
   // No-op on unsupported platforms
 }
 
-#[op2(fast)]
-pub fn op_node_process_set_title(#[string] title: &str) {
+#[op2(fast, stack_trace)]
+pub fn op_node_process_set_title(
+  #[string] title: &str,
+) -> Result<(), deno_permissions::PermissionCheckError> {
+  // The visible process title is shared host identity, not a per-principal JS
+  // label. Gate before mutating argv/console state.
+  // @ref LLP 0019#system-information-and-process-mutation [implements]
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "identity",
+    "title",
+    "node:process.title",
+  )?;
   set_process_title(title);
+  Ok(())
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -256,6 +268,17 @@ pub fn op_node_process_kill(
   #[smi] pid: i32,
   #[smi] sig: i32,
 ) -> Result<i32, deno_permissions::PermissionCheckError> {
+  #[cfg(unix)]
+  let inspector_trigger = sig == libc::SIGUSR1;
+  #[cfg(not(unix))]
+  let inspector_trigger = false;
+  // @ref LLP 0019#system-information-and-process-mutation [implements] — Self-signals are not exempt; SIGUSR1 carries the conjunctive inspector effect.
+  deno_permissions::oden_capsec_check_process_signal(
+    pid,
+    &sig.to_string(),
+    inspector_trigger,
+    "process.kill",
+  )?;
   if pid != std::process::id() as i32 {
     state
       .borrow_mut::<PermissionsContainer>()
@@ -264,8 +287,18 @@ pub fn op_node_process_kill(
   Ok(kill(pid, sig))
 }
 
-#[op2(fast)]
-pub fn op_process_abort() {
+#[op2(fast, stack_trace)]
+pub fn op_process_abort() -> Result<(), deno_permissions::PermissionCheckError>
+{
+  // Abort may emit a core/report artifact containing every principal's memory.
+  // Plain process.exit remains outside the capability model.
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "process.abort/core",
+    "process.abort",
+  )?;
   std::process::abort();
 }
 
@@ -314,6 +347,12 @@ pub fn op_node_process_setegid<'a>(
   state: &mut OpState,
   id: v8::Local<'a, v8::Value>,
 ) -> Result<(), ProcessError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "identity",
+    "egid",
+    "node:process.setegid",
+  )?;
   {
     let permissions = state.borrow_mut::<PermissionsContainer>();
     permissions.check_sys("setegid", "node:process.setegid")?;
@@ -360,6 +399,12 @@ pub fn op_node_process_seteuid<'a>(
   state: &mut OpState,
   id: v8::Local<'a, v8::Value>,
 ) -> Result<(), ProcessError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "identity",
+    "euid",
+    "node:process.seteuid",
+  )?;
   {
     let permissions = state.borrow_mut::<PermissionsContainer>();
     permissions.check_sys("seteuid", "node:process.seteuid")?;
@@ -392,6 +437,12 @@ pub fn op_node_process_setgid<'a>(
   state: &mut OpState,
   id: v8::Local<'a, v8::Value>,
 ) -> Result<(), ProcessError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "identity",
+    "gid",
+    "node:process.setgid",
+  )?;
   {
     let permissions = state.borrow_mut::<PermissionsContainer>();
     permissions.check_sys("setgid", "node:process.setgid")?;
@@ -424,6 +475,12 @@ pub fn op_node_process_setuid<'a>(
   state: &mut OpState,
   id: v8::Local<'a, v8::Value>,
 ) -> Result<(), ProcessError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "identity",
+    "uid",
+    "node:process.setuid",
+  )?;
   {
     let permissions = state.borrow_mut::<PermissionsContainer>();
     permissions.check_sys("setuid", "node:process.setuid")?;

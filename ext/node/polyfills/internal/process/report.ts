@@ -2,6 +2,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_oden_guard_deny_only_surface } = core.ops;
 const {
   StringPrototypeToUpperCase,
   StringPrototypeCharAt,
@@ -16,6 +17,12 @@ const { arch, versions } = core.loadExtScript(
 const lazyOs = core.createLazyLoader("node:os");
 
 function writeReport(_filename, _err) {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "node:process.report.writeReport",
+    "process.report.writeReport",
+  );
   return "";
 }
 
@@ -34,6 +41,13 @@ function getGlibcVersions() {
 }
 
 function getReport(_err) {
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "node:process.report.getReport",
+    "process.report.getReport",
+  );
   const os = lazyOs();
   const dumpEventTime = new Date();
   return {

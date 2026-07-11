@@ -76,11 +76,16 @@ const {
   op_v8_gc_profiler_new,
   op_v8_gc_profiler_start,
   op_v8_gc_profiler_stop,
-  op_oden_guard_surface,
+  op_oden_guard_deny_only_surface,
 } = core.ops;
 
 function guardV8(name: string) {
-  op_oden_guard_surface("inspector", "activate", `node:v8.${name}`, `node:v8.${name}`);
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    `node:v8.${name}`,
+    `node:v8.${name}`,
+  );
 }
 
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");

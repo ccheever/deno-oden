@@ -59,6 +59,13 @@ pub fn op_node_os_set_priority(
   pid: u32,
   priority: i32,
 ) -> Result<(), OsError> {
+  // @ref LLP 0019#system-information-and-process-mutation [implements]
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "priority",
+    &format!("pid:{pid}"),
+    "node:os.setPriority()",
+  )?;
   {
     let permissions = state.borrow_mut::<PermissionsContainer>();
     permissions.check_sys("setPriority", "node:os.setPriority()")?;

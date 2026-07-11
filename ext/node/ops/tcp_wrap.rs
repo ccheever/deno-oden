@@ -524,11 +524,15 @@ impl TCPWrap {
       .get::<TcpStreamResource>(rid)
       .ok()
       .and_then(|r| r.dup_raw_fd());
-    match fd {
+    let result = match fd {
       // SAFETY: tcp is valid (null-checked above); fd is a valid dup'd descriptor.
       Some(fd) => unsafe { uv_compat::uv_tcp_open(tcp, fd) },
       None => -1,
+    };
+    if result == 0 {
+      self.refresh_network_peer();
     }
+    result
   }
 
   #[nofast]
@@ -618,11 +622,36 @@ impl TCPWrap {
     }
     // SAFETY: both tcp pointers are valid (null-checked above); cast to
     // uv_stream_t is safe per uv_tcp_t layout.
-    unsafe {
+    let result = unsafe {
       uv_compat::uv_accept(
         server_tcp as *mut UvStream,
         client_tcp as *mut UvStream,
       )
+    };
+    if result == 0 {
+      client.refresh_network_peer();
+    }
+    result
+  }
+
+  fn refresh_network_peer(&self) {
+    let tcp = self.tcp_ptr();
+    if tcp.is_null() {
+      return;
+    }
+    // SAFETY: tcp is live and storage follows uv_tcp_getpeername's contract.
+    unsafe {
+      let mut storage = std::mem::MaybeUninit::<socket2::SockAddr>::uninit();
+      let mut len = std::mem::size_of::<socket2::SockAddr>() as i32;
+      if uv_compat::uv_tcp_getpeername(
+        tcp,
+        storage.as_mut_ptr() as *mut _,
+        &mut len,
+      ) == 0
+        && let Some(peer) = storage.assume_init().as_socket()
+      {
+        self.base.set_network_peer(peer);
+      }
     }
   }
 
@@ -645,7 +674,13 @@ impl TCPWrap {
       )
     })?;
     let (read_half, write_half) = tcp_stream.into_split();
-    let resource = TcpStreamResource::new((read_half, write_half));
+    let resource = match self.base.network_peer() {
+      Some(peer) => TcpStreamResource::new_with_network_peer(
+        (read_half, write_half),
+        peer,
+      ),
+      None => TcpStreamResource::new((read_half, write_half)),
+    };
     Ok(state.resource_table.add(resource))
   }
 
@@ -772,6 +807,7 @@ impl TCPWrap {
     if tcp.is_null() {
       return Ok(-1);
     }
+    self.base.set_network_peer(socket_addr);
     let sock_addr = Socket2SockAddr::from(socket_addr);
     let js_req_global = v8::Global::new(scope, js_req);
     let mut connect_req = Box::new(ConnectReqData {
@@ -860,6 +896,7 @@ impl TCPWrap {
     if tcp.is_null() {
       return Ok(-1);
     }
+    self.base.set_network_peer(socket_addr);
     let sock_addr = Socket2SockAddr::from(socket_addr);
     let js_req_global = v8::Global::new(scope, js_req);
     let mut connect_req = Box::new(ConnectReqData {

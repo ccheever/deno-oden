@@ -86,22 +86,36 @@ fn op_worker_recv_message_sync(
 }
 
 #[op2(fast)]
-fn op_worker_maybe_wait_for_debugger(state: &mut OpState) {
+fn op_worker_maybe_wait_for_debugger(
+  state: &mut OpState,
+) -> Result<(), deno_permissions::PermissionCheckError> {
   let should_wait = state
-    .try_borrow_mut::<WaitForWorkerDebuggerOnMessage>()
-    .map(|wait| {
-      let should_wait = wait.0;
-      wait.0 = false;
-      should_wait
-    })
+    .try_borrow::<WaitForWorkerDebuggerOnMessage>()
+    .map(|wait| wait.0)
     .unwrap_or(false);
   if !should_wait {
-    return;
+    return Ok(());
+  }
+
+  // The worker helper is a delayed startup edge with no package caller. It
+  // consumes the same exact root static row as the server/startup route before
+  // mutating wait state or touching the inspector session.
+  // @ref LLP 0019#inspector [implements]
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "startup:worker-wait-for-debugger",
+    "worker debugger wait helper",
+    true,
+  )?;
+  if let Some(mut wait) =
+    state.try_borrow_mut::<WaitForWorkerDebuggerOnMessage>()
+  {
+    wait.0 = false;
   }
 
   if let Some(inspector) = state.try_borrow::<Rc<JsRuntimeInspector>>() {
     inspector.wait_for_debugger_enabled_for_worker_message();
   }
+  Ok(())
 }
 
 #[op2(fast)]

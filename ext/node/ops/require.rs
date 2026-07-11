@@ -749,10 +749,19 @@ pub fn op_require_package_imports_resolve<
   }
 }
 
-#[op2(fast, reentrant)]
-pub fn op_require_break_on_next_statement(state: Rc<RefCell<OpState>>) {
+#[op2(fast, reentrant, stack_trace)]
+pub fn op_require_break_on_next_statement(
+  state: Rc<RefCell<OpState>>,
+) -> Result<(), deno_permissions::PermissionCheckError> {
+  // @ref LLP 0019#inspector [implements]
+  deno_permissions::oden_capsec_check_inspector_activation(
+    "node:require.break-on-next-statement",
+    "require break on next statement",
+    true,
+  )?;
   let inspector = { state.borrow().borrow::<Rc<JsRuntimeInspector>>().clone() };
-  inspector.wait_for_session_and_break_on_next_statement()
+  inspector.wait_for_session_and_break_on_next_statement();
+  Ok(())
 }
 
 #[op2(fast)]

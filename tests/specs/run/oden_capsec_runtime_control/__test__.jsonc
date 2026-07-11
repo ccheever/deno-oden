@@ -1,0 +1,36 @@
+{
+  // Rev1.1 Stage-B control edges. Deny-only rows stay closed in every mode;
+  // inspector authority is exact/static; startup and host-signal activation
+  // require the root row rather than ambient fallback.
+  "tests": {
+    "deny_only_rows_ignore_mode": {
+      "args": "run --allow-all deny_matrix.js",
+      "if": "unix",
+      "variants": {
+        "enforce": { "POLICY": "capsec_enforce.json" },
+        "audit": { "POLICY": "capsec_audit.json" },
+        "permissive": { "POLICY": "capsec_permissive.json" }
+      },
+      "envs": { "ODEN_CAPSEC_POLICY": "${POLICY}" },
+      "output": "deny_matrix.out",
+      "exitCode": 0
+    },
+    "inspector_requires_exact_static_package_row": {
+      "args": "run --allow-all inspector_matrix.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_inspector.json" },
+      "output": "inspector_matrix.out",
+      "exitCode": 0
+    },
+    "startup_flag_requires_exact_root_row": {
+      "args": "run --allow-all startup_driver.js",
+      "output": "startup_driver.out",
+      "exitCode": 0
+    },
+    "host_signal_requires_exact_root_row": {
+      "args": "run --allow-all signal_driver.js",
+      "if": "unix",
+      "output": "signal_driver.out",
+      "exitCode": 0
+    }
+  }
+}

@@ -209,6 +209,14 @@ impl Child {
     }
   }
 
+  /// Terminate this exact retained process handle without reopening by PID.
+  pub fn kill_blocking(&mut self) -> Result<(), std::io::Error> {
+    match &mut self.inner {
+      FusedChild::Done(_) => Ok(()),
+      FusedChild::Child(child) => child.kill(),
+    }
+  }
+
   pub async fn wait(&mut self) -> io::Result<ExitStatus> {
     // Ensure stdin is closed so the child isn't stuck waiting on
     // input while the parent is waiting for it to exit.

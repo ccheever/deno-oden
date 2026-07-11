@@ -1022,6 +1022,24 @@ impl MainWorker {
     &mut self,
     cb: deno_core::InspectorSessionSend,
   ) -> LocalInspectorSession {
+    // HMR, REPL, desktop tooling, and other local helpers must cross the same
+    // native predicates as public session routes before obtaining a protocol
+    // channel. They execute as trusted runtime/root, not as the package later
+    // observed through the session.
+    // @ref LLP 0019#inspector [implements]
+    deno_permissions::oden_capsec_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "inspector:local-session",
+      "runtime local inspector session",
+    )
+    .unwrap_or_else(|error| panic!("capsec refused local inspector session: {error}"));
+    deno_permissions::oden_capsec_check_inspector_activation(
+      "runtime:local-session",
+      "runtime local inspector session",
+      false,
+    )
+    .unwrap_or_else(|error| panic!("capsec refused local inspector session: {error}"));
     self.js_runtime.maybe_init_inspector();
     let insp = self.js_runtime.inspector();
 

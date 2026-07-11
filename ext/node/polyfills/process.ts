@@ -22,6 +22,7 @@ import {
   op_inspector_enabled,
   op_inspector_port,
   op_node_load_env_file,
+  op_oden_guard_deny_only_surface,
   op_node_process_constrained_memory,
   op_node_process_kill,
   op_node_process_resource_usage,
@@ -698,7 +699,7 @@ function uncaughtExceptionHandler(err: any, origin: string): boolean {
   // CommonJS implementation; sync throws in the entry CJS module are
   // dispatched up-front via Module._load (see ext/node/polyfills/01_require.js)
   // so this path only fires for real unhandled promise rejections.
-  return process._fatalException(err, origin === "unhandledRejection");
+  return fatalExceptionHandler(err, origin === "unhandledRejection");
 }
 
 export let execPath: string = "";
@@ -1086,8 +1087,9 @@ ObjectDefineProperty(process, "title", {
     return processTitle;
   },
   set(value) {
-    processTitle = `${value}`;
-    op_node_process_set_title(processTitle);
+    const nextTitle = `${value}`;
+    op_node_process_set_title(nextTitle);
+    processTitle = nextTitle;
   },
 });
 
@@ -1272,7 +1274,7 @@ process._exiting = _exiting;
 let _uncaughtExceptionCaptureFn: ((err: any) => void) | null = null;
 
 // deno-lint-ignore no-explicit-any
-process.setUncaughtExceptionCaptureCallback = function (fn: any) {
+function setUncaughtExceptionCaptureCallbackImpl(fn: any) {
   if (fn === null) {
     _uncaughtExceptionCaptureFn = null;
     synchronizeListeners();
@@ -1286,6 +1288,22 @@ process.setUncaughtExceptionCaptureCallback = function (fn: any) {
   }
   _uncaughtExceptionCaptureFn = fn;
   synchronizeListeners();
+}
+
+// Domain and the REPL are trusted compatibility-runtime consumers. Their
+// registration must not be reattributed to a package whose code caused the
+// runtime to enter those helpers.
+internals.nodeProcessSetUncaughtExceptionCaptureCallback =
+  setUncaughtExceptionCaptureCallbackImpl;
+
+process.setUncaughtExceptionCaptureCallback = function (fn: any) {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "uncaught-exception-capture",
+    "process.setUncaughtExceptionCaptureCallback",
+  );
+  return setUncaughtExceptionCaptureCallbackImpl(fn);
 };
 
 process.hasUncaughtExceptionCaptureCallback = function () {
@@ -1293,7 +1311,7 @@ process.hasUncaughtExceptionCaptureCallback = function () {
 };
 
 // deno-lint-ignore no-explicit-any
-process._fatalException = function (err: any, fromPromise?: boolean) {
+function fatalExceptionImpl(err: any, fromPromise?: boolean) {
   const origin = fromPromise ? "unhandledRejection" : "uncaughtException";
   process.emit("uncaughtExceptionMonitor", err, origin);
   if (_uncaughtExceptionCaptureFn !== null) {
@@ -1305,7 +1323,43 @@ process._fatalException = function (err: any, fromPromise?: boolean) {
     return true;
   }
   return false;
+}
+
+// Root may replace Node's private hook for compatibility, but packages cannot
+// mutate or invoke the process-global handler. Internal exception dispatch
+// uses the separately retained trusted value.
+// deno-lint-ignore no-explicit-any
+let fatalExceptionHandler: any = fatalExceptionImpl;
+// deno-lint-ignore no-explicit-any
+const guardedFatalException = function (err: any, fromPromise?: boolean) {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "fatal-exception-dispatch",
+    "process._fatalException",
+  );
+  return fatalExceptionHandler(err, fromPromise);
 };
+ObjectDefineProperty(process, "_fatalException", {
+  __proto__: null,
+  configurable: true,
+  enumerable: true,
+  get() {
+    return typeof fatalExceptionHandler === "function"
+      ? guardedFatalException
+      : fatalExceptionHandler;
+  },
+  // deno-lint-ignore no-explicit-any
+  set(value: any) {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "fatal-exception-handler",
+      "process._fatalException=set",
+    );
+    fatalExceptionHandler = value;
+  },
+});
 
 /** https://nodejs.org/api/process.html#processexitcode_1 */
 ObjectDefineProperty(process, "exitCode", {
@@ -1443,6 +1497,12 @@ process.versions = versions;
 process.emitWarning = emitWarning;
 
 process.binding = (name: BindingName) => {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    String(name),
+    "process.binding",
+  );
   return getBinding(name);
 };
 
@@ -1679,8 +1739,8 @@ process.on("removeListener", (event: string) => {
 });
 
 function processOnError(event: ErrorEvent) {
-  if (typeof process._fatalException === "function") {
-    if (process._fatalException(event.error)) {
+  if (typeof fatalExceptionHandler === "function") {
+    if (fatalExceptionHandler(event.error)) {
       event.preventDefault();
     }
   } else {

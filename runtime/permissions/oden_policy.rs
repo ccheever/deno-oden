@@ -20,6 +20,7 @@ pub enum Family {
   Run,
   Ffi,
   Sys,
+  Inspector,
 }
 
 impl Family {
@@ -35,6 +36,13 @@ impl Family {
     }
   }
 
+  fn parse_for_profile(s: &str, profile: &str) -> Option<Family> {
+    if profile == "oden/capsec/1.1" && s.eq_ignore_ascii_case("inspector") {
+      return Some(Family::Inspector);
+    }
+    Self::parse(s)
+  }
+
   pub fn name(self) -> &'static str {
     match self {
       Family::Fs => "fs",
@@ -43,6 +51,7 @@ impl Family {
       Family::Run => "run",
       Family::Ffi => "ffi",
       Family::Sys => "sys",
+      Family::Inspector => "inspector",
     }
   }
 }
@@ -221,19 +230,22 @@ impl Grant {
   // @ref LLP 0010#the-grammar [implements]
   pub fn parse(s: &str) -> Result<Grant, GrantParseError> {
     let token = s.trim();
-    Self::parse_token(token).map_err(|reason| {
+    Self::parse_token_for_profile(token, "oden/capsec/1").map_err(|reason| {
       let leading = s.len() - s.trim_start().len();
       GrantParseError::new(token, 0, leading, reason)
     })
   }
 
-  fn parse_token(token: &str) -> Result<Grant, String> {
+  fn parse_token_for_profile(
+    token: &str,
+    profile: &str,
+  ) -> Result<Grant, String> {
     if token.is_empty() {
       return Err("grant entry is empty".into());
     }
     let parts: Vec<&str> = token.split(':').collect();
     let family_token = parts.first().copied().unwrap_or("").trim();
-    let family = Family::parse(family_token)
+    let family = Family::parse_for_profile(family_token, profile)
       .ok_or_else(|| format!("unknown family {family_token:?}"))?;
     match family {
       Family::Ffi => {
@@ -315,6 +327,20 @@ impl Grant {
           scope,
         })
       }
+      Family::Inspector => {
+        if parts.len() != 2 || !parts[1].trim().eq_ignore_ascii_case("activate")
+        {
+          return Err(
+            "inspector takes exactly the static terminal token inspector:activate"
+              .into(),
+          );
+        }
+        Ok(Grant {
+          family,
+          action: "activate".into(),
+          scope: String::new(),
+        })
+      }
       Family::Fs | Family::Network => {
         if parts.len() < 3 {
           return Err(format!(
@@ -351,6 +377,13 @@ impl Grant {
   }
 
   pub fn parse_many(s: &str) -> Result<Vec<Grant>, GrantParseError> {
+    Self::parse_many_for_profile(s, "oden/capsec/1")
+  }
+
+  pub fn parse_many_for_profile(
+    s: &str,
+    profile: &str,
+  ) -> Result<Vec<Grant>, GrantParseError> {
     if s.trim().is_empty() {
       return Ok(Vec::new());
     }
@@ -359,9 +392,10 @@ impl Grant {
     for (token_index, raw) in s.split(',').enumerate() {
       let leading = raw.len() - raw.trim_start().len();
       let token = raw.trim();
-      let grant = Self::parse_token(token).map_err(|reason| {
-        GrantParseError::new(token, token_index, offset + leading, reason)
-      })?;
+      let grant =
+        Self::parse_token_for_profile(token, profile).map_err(|reason| {
+          GrantParseError::new(token, token_index, offset + leading, reason)
+        })?;
       grants.push(grant);
       offset += raw.len() + 1;
     }
@@ -384,6 +418,7 @@ impl Grant {
       Family::Network => {
         format!("network:{}:{}", self.action, self.scope)
       }
+      Family::Inspector => "inspector:activate".into(),
     }
   }
 
@@ -429,6 +464,7 @@ fn covers_one(g: &Grant, req: &Request) -> bool {
         || g.scope == basename(&req.target)
     }
     Family::Ffi => true,
+    Family::Inspector => g.action == "activate" && req.action == "activate",
   }
 }
 
@@ -440,6 +476,7 @@ pub fn grants_intersect(a: &Grant, b: &Grant) -> bool {
     a.action == "*" || b.action == "*" || a.action == b.action;
   match a.family {
     Family::Ffi => true,
+    Family::Inspector => actions_overlap,
     Family::Fs => {
       actions_overlap
         && !a.scope.is_empty()
@@ -757,6 +794,15 @@ impl Policy {
     selector: &str,
     grant_str: &str,
   ) -> Result<(), GrantParseError> {
+    self.grant_for_profile(selector, grant_str, "oden/capsec/1")
+  }
+
+  pub fn grant_for_profile(
+    &mut self,
+    selector: &str,
+    grant_str: &str,
+    profile: &str,
+  ) -> Result<(), GrantParseError> {
     if selector.trim().is_empty() {
       return Err(GrantParseError::new(
         selector,
@@ -767,7 +813,7 @@ impl Policy {
     }
     // Parse before mutation: one malformed token rejects the whole authored
     // value instead of leaving earlier grants applied.
-    let grants = Grant::parse_many(grant_str)?;
+    let grants = Grant::parse_many_for_profile(grant_str, profile)?;
     self
       .packages
       .entry(selector.to_string())
@@ -797,6 +843,24 @@ impl Policy {
       .read()
       .unwrap()
       .effective(&selector, req, floor)
+  }
+
+  /// Static floor only. Stage-B terminal predicates must not be satisfied by
+  /// a live overlay or handle; the ordinary `grants` method intentionally
+  /// includes the session layer for dynamic-compatible families.
+  pub fn static_grants(&self, principal: &Principal, req: &Request) -> bool {
+    let Some(selector) = principal.selector() else {
+      return false;
+    };
+    self.static_grants_selector(&selector, req)
+  }
+
+  pub fn static_grants_selector(&self, selector: &str, req: &Request) -> bool {
+    self
+      .packages
+      .get(selector)
+      .map(|grants| covers(grants, req))
+      .unwrap_or(false)
   }
 
   /// Pure `endow(principal, policy)` derivation used by the bootstrap-captured
@@ -972,6 +1036,51 @@ mod tests {
         target: "169.254.169.254:443".into(),
       }
     ));
+  }
+
+  #[test]
+  fn patch_profile_adds_only_the_exact_static_inspector_token() {
+    assert!(Grant::parse("inspector:activate").is_err());
+
+    let grants =
+      Grant::parse_many_for_profile(" InSpEcToR:AcTiVaTe ", "oden/capsec/1.1")
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].family, Family::Inspector);
+    assert_eq!(grants[0].to_string_canonical(), "inspector:activate");
+    assert!(covers(
+      &grants,
+      &Request {
+        family: Family::Inspector,
+        action: "activate".into(),
+        target: "inspector".into(),
+      }
+    ));
+
+    for invalid in [
+      "inspector",
+      "inspector:*",
+      "inspector:observe",
+      "inspector:activate:session",
+    ] {
+      assert!(
+        Grant::parse_many_for_profile(invalid, "oden/capsec/1.1").is_err(),
+        "patch profile accepted invalid inspector grant {invalid:?}"
+      );
+    }
+
+    let mut policy = Policy::new(Mode::Enforce);
+    policy
+      .grant_for_profile("dep", "inspector:activate", "oden/capsec/1.1")
+      .unwrap();
+    let request = Request {
+      family: Family::Inspector,
+      action: "activate".into(),
+      target: "inspector".into(),
+    };
+    assert!(policy.static_grants(&pkg("dep"), &request));
+    assert!(!policy.static_grants(&pkg("other"), &request));
+    assert!(!policy.static_grants(&Principal::Root, &request));
   }
 
   #[test]

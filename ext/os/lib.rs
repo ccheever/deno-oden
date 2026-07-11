@@ -111,6 +111,7 @@ deno_core::extension!(
     op_runtime_cpu_usage,
     op_runtime_memory_usage,
     ops::signal::op_signal_bind,
+    ops::signal::op_signal_bind_internal,
     ops::signal::op_signal_unbind,
     ops::signal::op_signal_poll,
   ],
@@ -196,6 +197,13 @@ fn op_set_env(
   #[string] key: &str,
   #[string] value: &str,
 ) -> Result<(), OsError> {
+  // @ref LLP 0019#system-information-and-process-mutation [implements] — Rev1.1 does not let a package mutate the real shared environment; later profiles may virtualize this behind a principal overlay.
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "env",
+    "process-write",
+    key,
+    "Deno.env.set/process.env",
+  )?;
   if check_env_with_maybe_exit(state, key, "write")?.is_break() {
     return Ok(());
   }
@@ -340,6 +348,12 @@ fn op_delete_env(
   state: &mut OpState,
   #[string] key: &str,
 ) -> Result<(), OsError> {
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "env",
+    "process-write",
+    key,
+    "Deno.env.delete/process.env",
+  )?;
   if check_env_with_maybe_exit(state, key, "write")?.is_break() {
     return Ok(());
   }

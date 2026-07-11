@@ -142,6 +142,16 @@ fn op_node_load_env_file(
   state: &mut OpState,
   #[string] path: &str,
 ) -> Result<(), DotEnvLoadErr> {
+  // The file may name many variables. Deny the aggregate process-environment
+  // mutation before reading or applying any entry, so the operation remains
+  // atomic and no early key can escape before a later denial.
+  // @ref LLP 0019#system-information-and-process-mutation [implements]
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "env",
+    "process-write",
+    "*",
+    "process.loadEnvFile",
+  )?;
   let fs = state.borrow::<deno_fs::FileSystemRc>().clone();
   let permissions = state.borrow::<PermissionsContainer>().clone();
   permissions
@@ -421,7 +431,9 @@ deno_core::extension!(deno_node,
     ops::inspector::op_inspector_dispatch,
     ops::inspector::op_inspector_disconnect,
     ops::inspector::op_inspector_emit_protocol_event,
+    ops::inspector::op_inspector_emit_protocol_event_internal,
     ops::inspector::op_inspector_enabled,
+    ops::inspector::op_inspector_enabled_internal,
     ops::inspector::op_inspector_port,
     ops::udp::op_node_udp_bind,
     ops::udp::op_node_udp_join_multi_v4,

@@ -2,7 +2,13 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { op_signal_bind, op_signal_poll, op_signal_unbind } = core.ops;
+const {
+  op_oden_guard_deny_only_surface,
+  op_signal_bind,
+  op_signal_bind_internal,
+  op_signal_poll,
+  op_signal_unbind,
+} = core.ops;
 const {
   SafeSet,
   SafeSetIterator,
@@ -11,8 +17,8 @@ const {
   TypeError,
 } = primordials;
 
-function bindSignal(signo) {
-  return op_signal_bind(signo);
+function bindSignal(signo, trustedInternal) {
+  return trustedInternal ? op_signal_bind_internal(signo) : op_signal_bind(signo);
 }
 
 function pollSignal(rid) {
@@ -43,22 +49,37 @@ function checkSignalListenerType(listener) {
   }
 }
 
-function addSignalListener(signo, listener) {
+function addSignalListenerImpl(signo, listener, trustedInternal) {
   checkSignalListenerType(listener);
+  if (!trustedInternal) {
+    op_oden_guard_deny_only_surface(
+      "process",
+      "signal",
+      `listen:${signo}`,
+      "Deno.addSignalListener/process.on(signal)",
+    );
+  }
 
   const sigData = getSignalData(signo);
-  SetPrototypeAdd(sigData.listeners, listener);
-
   if (!sigData.rid) {
-    // If signal resource doesn't exist, create it.
-    // The program starts listening to the signal
-    sigData.rid = bindSignal(signo);
+    // Bind before publishing the callback into shared state. A failed bind
+    // must not leave a callback that a later trusted bind can activate.
+    sigData.rid = bindSignal(signo, trustedInternal);
     loop(sigData);
   }
+  SetPrototypeAdd(sigData.listeners, listener);
 }
 
-function removeSignalListener(signo, listener) {
+function removeSignalListenerImpl(signo, listener, trustedInternal) {
   checkSignalListenerType(listener);
+  if (!trustedInternal) {
+    op_oden_guard_deny_only_surface(
+      "process",
+      "signal",
+      `unlisten:${signo}`,
+      "Deno.removeSignalListener/process.off(signal)",
+    );
+  }
 
   const sigData = getSignalData(signo);
   SetPrototypeDelete(sigData.listeners, listener);
@@ -67,6 +88,22 @@ function removeSignalListener(signo, listener) {
     unbindSignal(sigData.rid);
     sigData.rid = undefined;
   }
+}
+
+function addSignalListener(signo, listener) {
+  return addSignalListenerImpl(signo, listener, false);
+}
+
+function removeSignalListener(signo, listener) {
+  return removeSignalListenerImpl(signo, listener, false);
+}
+
+function addSignalListenerInternal(signo, listener) {
+  return addSignalListenerImpl(signo, listener, true);
+}
+
+function removeSignalListenerInternal(signo, listener) {
+  return removeSignalListenerImpl(signo, listener, true);
 }
 
 async function loop(sigData) {
@@ -80,5 +117,10 @@ async function loop(sigData) {
   }
 }
 
-return { addSignalListener, removeSignalListener };
+return {
+  addSignalListener,
+  removeSignalListener,
+  addSignalListenerInternal,
+  removeSignalListenerInternal,
+};
 })();

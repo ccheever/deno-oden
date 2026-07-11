@@ -455,12 +455,23 @@ pub async fn op_ws_create(
   unsafely_ignore_certificate_errors: bool,
   #[smi] client_rid: Option<u32>,
 ) -> Result<CreateResponse, WebsocketError> {
+  let parsed_url = url::Url::parse(&url).map_err(WebsocketError::Url)?;
+  let network_peer = parsed_url.host().and_then(|host| {
+    let ip = match host {
+      url::Host::Ipv4(ip) => std::net::IpAddr::V4(ip),
+      url::Host::Ipv6(ip) => std::net::IpAddr::V6(ip),
+      url::Host::Domain(_) => return None,
+    };
+    parsed_url
+      .port_or_known_default()
+      .map(|port| std::net::SocketAddr::new(ip, port))
+  });
   let (client, allow_host) = {
     let mut s = state.borrow_mut();
     s.borrow_mut::<PermissionsContainer>()
       .check_net_url(
         NetPermissionAction::Connect,
-        &url::Url::parse(&url).map_err(WebsocketError::Url)?,
+        &parsed_url,
         &api_name,
       )
       .expect(
@@ -532,7 +543,9 @@ pub async fn op_ws_create(
     .collect();
 
   let mut state = state.borrow_mut();
-  let rid = state.resource_table.add(ServerWebSocket::new(stream));
+  let rid = state
+    .resource_table
+    .add(ServerWebSocket::new_client(stream, network_peer));
 
   let protocol = response
     .get("Sec-WebSocket-Protocol")
@@ -582,16 +595,32 @@ pub struct ServerWebSocket {
   /// when the websocket resource is dropped lets a graceful shutdown
   /// observe that this websocket is gone.
   lifetime_guard: Cell<Option<Box<dyn Any>>>,
+  network_peer: Option<std::net::SocketAddr>,
 }
 
 impl ServerWebSocket {
   fn new(ws: WebSocket<WebSocketStream>) -> Self {
-    Self::new_with_guard(ws, None)
+    Self::new_with_guard_and_peer(ws, None, None)
+  }
+
+  fn new_client(
+    ws: WebSocket<WebSocketStream>,
+    network_peer: Option<std::net::SocketAddr>,
+  ) -> Self {
+    Self::new_with_guard_and_peer(ws, None, network_peer)
   }
 
   fn new_with_guard(
     ws: WebSocket<WebSocketStream>,
     lifetime_guard: Option<Box<dyn Any>>,
+  ) -> Self {
+    Self::new_with_guard_and_peer(ws, lifetime_guard, None)
+  }
+
+  fn new_with_guard_and_peer(
+    ws: WebSocket<WebSocketStream>,
+    lifetime_guard: Option<Box<dyn Any>>,
+    network_peer: Option<std::net::SocketAddr>,
   ) -> Self {
     let (ws_read, ws_write) = ws.split(tokio::io::split);
     Self {
@@ -605,7 +634,20 @@ impl ServerWebSocket {
       ws_write: AsyncRefCell::new(ws_write),
       read_cancel: CancelHandle::new_rc(),
       lifetime_guard: Cell::new(lifetime_guard),
+      network_peer,
     }
+  }
+
+  fn check_protected_inspector_use(
+    &self,
+    api_name: &str,
+  ) -> Result<(), WebsocketError> {
+    if let Some(peer) = self.network_peer {
+      deno_permissions::oden_capsec_check_protected_inspector_stream_use(
+        peer, api_name,
+      )?;
+    }
+    Ok(())
   }
 
   /// Initiate a server-side graceful shutdown of this websocket. Cancels the
@@ -743,8 +785,13 @@ pub fn ws_create_server_stream_with_guard(
     .add(ServerWebSocket::new_with_guard(ws, lifetime_guard))
 }
 
-fn send_binary(state: &mut OpState, rid: ResourceId, data: &[u8]) {
+fn send_binary(
+  state: &mut OpState,
+  rid: ResourceId,
+  data: &[u8],
+) -> Result<(), WebsocketError> {
   let resource = state.resource_table.get::<ServerWebSocket>(rid).unwrap();
+  resource.check_protected_inspector_use("WebSocket.send")?;
   let data = data.to_vec();
   let len = data.len();
   resource.buffered.set(resource.buffered.get() + len);
@@ -762,6 +809,7 @@ fn send_binary(state: &mut OpState, rid: ResourceId, data: &[u8]) {
       }
     }
   });
+  Ok(())
 }
 
 #[op2]
@@ -769,7 +817,7 @@ pub fn op_ws_send_binary(
   state: &mut OpState,
   #[smi] rid: ResourceId,
   #[anybuffer] data: &[u8],
-) {
+) -> Result<(), WebsocketError> {
   send_binary(state, rid, data)
 }
 
@@ -778,7 +826,7 @@ pub fn op_ws_send_binary_ab(
   state: &mut OpState,
   #[smi] rid: ResourceId,
   #[arraybuffer] data: &[u8],
-) {
+) -> Result<(), WebsocketError> {
   send_binary(state, rid, data)
 }
 
@@ -787,8 +835,9 @@ pub fn op_ws_send_text(
   state: &mut OpState,
   #[smi] rid: ResourceId,
   #[string] data: String,
-) {
+) -> Result<(), WebsocketError> {
   let resource = state.resource_table.get::<ServerWebSocket>(rid).unwrap();
+  resource.check_protected_inspector_use("WebSocket.send")?;
   let len = data.len();
   resource.buffered.set(resource.buffered.get() + len);
   let lock = resource.reserve_lock();
@@ -808,6 +857,7 @@ pub fn op_ws_send_text(
       }
     }
   });
+  Ok(())
 }
 
 /// Async version of send. Does not update buffered amount as we rely on the socket itself for backpressure.
@@ -821,6 +871,7 @@ pub async fn op_ws_send_binary_async(
     .borrow_mut()
     .resource_table
     .get::<ServerWebSocket>(rid)?;
+  resource.check_protected_inspector_use("WebSocket.send")?;
   let data = data.0;
   let lock = resource.reserve_lock();
   resource
@@ -842,6 +893,7 @@ pub async fn op_ws_send_text_async(
     .borrow_mut()
     .resource_table
     .get::<ServerWebSocket>(rid)?;
+  resource.check_protected_inspector_use("WebSocket.send")?;
   let lock = resource.reserve_lock();
   resource
     .write_frame(
@@ -876,6 +928,7 @@ pub async fn op_ws_send_ping(
     .borrow_mut()
     .resource_table
     .get::<ServerWebSocket>(rid)?;
+  resource.check_protected_inspector_use("WebSocket.ping")?;
   let lock = resource.reserve_lock();
   resource
     .write_frame(
@@ -963,6 +1016,13 @@ pub async fn op_ws_next_event(
     // op_ws_get_error will correctly handle a bad resource
     return MessageKind::Error as u16;
   };
+
+  if let Err(error) =
+    resource.check_protected_inspector_use("WebSocket receive")
+  {
+    resource.set_error(Some(error.to_string()));
+    return MessageKind::Error as u16;
+  }
 
   // If there's a pending error, this always returns error
   if resource.errored.get() {
