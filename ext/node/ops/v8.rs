@@ -36,10 +36,16 @@ static TAKE_HEAP_SNAPSHOT_CHUNK_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
+static NEAR_HEAP_LIMIT_CURRENT_DIR_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
 static NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT: AtomicUsize =
   AtomicUsize::new(0);
+#[cfg(test)]
+static GC_PROFILER_START_WORK_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GC_PROFILER_CALLBACK_INSTALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[op2(fast)]
 pub fn op_v8_cached_data_version_tag() -> u32 {
@@ -337,6 +343,8 @@ pub fn op_v8_set_heap_snapshot_near_heap_limit(
     "v8:near-heap-limit-snapshot",
     "node:v8.setHeapSnapshotNearHeapLimit",
   )?;
+  #[cfg(test)]
+  NEAR_HEAP_LIMIT_CURRENT_DIR_COUNT.fetch_add(1, Ordering::SeqCst);
   let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
   #[cfg(test)]
   NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -1078,6 +1086,8 @@ fn ensure_callbacks_registered(
     v8::GCType::kGCTypeAll,
   );
   inner.borrow_mut().callbacks_registered = true;
+  #[cfg(test)]
+  GC_PROFILER_CALLBACK_INSTALL_COUNT.fetch_add(1, Ordering::SeqCst);
 }
 
 pub struct GcProfilerHandle {
@@ -1122,6 +1132,8 @@ pub fn op_v8_gc_profiler_start(
   if handle.id.get().is_some() {
     return Ok(());
   }
+  #[cfg(test)]
+  GC_PROFILER_START_WORK_COUNT.fetch_add(1, Ordering::SeqCst);
   let inner = ensure_registry(scope);
   ensure_callbacks_registered(scope, &inner);
   let id = {
@@ -1391,8 +1403,11 @@ mod native_capsec_tests {
     EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
     TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
     QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
+    NEAR_HEAP_LIMIT_CURRENT_DIR_COUNT.store(0, Ordering::SeqCst);
     NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT.store(0, Ordering::SeqCst);
     NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT.store(0, Ordering::SeqCst);
+    GC_PROFILER_START_WORK_COUNT.store(0, Ordering::SeqCst);
+    GC_PROFILER_CALLBACK_INSTALL_COUNT.store(0, Ordering::SeqCst);
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -1403,8 +1418,9 @@ mod native_capsec_tests {
       ..Default::default()
     });
 
-    // Create the two handles under ambient root. Package attempts below must
-    // neither start the first nor consume the already-started second handle.
+    // Create an unstarted handle under ambient root. The package's denied
+    // start below is deliberately the first GC-profiler start in this fresh
+    // isolate, so registry/callback initialization cannot be hidden by setup.
     set_actor(root, "main.ts");
     execute(
       &mut runtime,
@@ -1413,8 +1429,6 @@ mod native_capsec_tests {
       {
         const ops = Deno.core.ops;
         globalThis.startHandle = ops.op_v8_gc_profiler_new();
-        globalThis.stopHandle = ops.op_v8_gc_profiler_new();
-        ops.op_v8_gc_profiler_start(stopHandle);
       }
       "#
       .to_string(),
@@ -1456,8 +1470,6 @@ mod native_capsec_tests {
           ops.op_v8_gc_profiler_new());
         expectDenied("op_v8_gc_profiler_start", "v8:gc-profiler-start", () =>
           ops.op_v8_gc_profiler_start(startHandle));
-        expectDenied("op_v8_gc_profiler_stop", "v8:gc-profiler-stop", () =>
-          ops.op_v8_gc_profiler_stop(stopHandle));
       }
       "#
       .to_string(),
@@ -1477,6 +1489,11 @@ mod native_capsec_tests {
       "denied queryObjects reached native snapshot work in {mode}"
     );
     assert_eq!(
+      NEAR_HEAP_LIMIT_CURRENT_DIR_COUNT.load(Ordering::SeqCst),
+      0,
+      "near-heap guard ran after current_dir in {mode}"
+    );
+    assert_eq!(
       NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT.load(Ordering::SeqCst),
       0,
       "near-heap guard ran after check_write in {mode}"
@@ -1486,11 +1503,21 @@ mod native_capsec_tests {
       0,
       "denied near-heap operation installed its callback in {mode}"
     );
+    assert_eq!(
+      GC_PROFILER_START_WORK_COUNT.load(Ordering::SeqCst),
+      0,
+      "denied fresh-runtime GC profiler start reached registry work in {mode}"
+    );
+    assert_eq!(
+      GC_PROFILER_CALLBACK_INSTALL_COUNT.load(Ordering::SeqCst),
+      0,
+      "denied fresh-runtime GC profiler start registered callbacks in {mode}"
+    );
 
     // The denied near-heap attempt above ran with write permission denied, so
-    // its exact capsec error plus a zero check_write counter proves the native
-    // deny-only gate precedes both the substrate permission check and callback
-    // installation. Ambient-root positive controls may use the filesystem.
+    // its exact capsec error plus zero current_dir/check_write counters proves
+    // the native deny-only gate precedes cwd lookup, the substrate permission
+    // check, and callback installation. Root controls may use the filesystem.
     runtime
       .op_state()
       .borrow_mut()
@@ -1510,10 +1537,70 @@ mod native_capsec_tests {
         const positiveHandle = ops.op_v8_gc_profiler_new();
         ops.op_v8_gc_profiler_start(positiveHandle);
         const positiveReport = ops.op_v8_gc_profiler_stop(positiveHandle);
-        const stopReport = ops.op_v8_gc_profiler_stop(stopHandle);
         if (positiveReport === null) {
           throw new Error("fresh root GC profiler start/stop returned null");
         }
+      }
+      "#
+      .to_string(),
+    );
+    assert!(
+      GC_PROFILER_START_WORK_COUNT.load(Ordering::SeqCst) > 0,
+      "fresh root GC profiler start did not reach registry work"
+    );
+    assert!(
+      GC_PROFILER_CALLBACK_INSTALL_COUNT.load(Ordering::SeqCst) > 0,
+      "fresh root GC profiler start did not install callbacks"
+    );
+
+    // Prepare a distinct, live handle only after the fresh-runtime start proof
+    // above. The package stop must not consume it before root can collect it.
+    execute(
+      &mut runtime,
+      "file:///native_v8_guard_prepare_stop.js",
+      r#"
+      {
+        const ops = Deno.core.ops;
+        globalThis.stopHandle = ops.op_v8_gc_profiler_new();
+        ops.op_v8_gc_profiler_start(stopHandle);
+      }
+      "#
+      .to_string(),
+    );
+
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    execute(
+      &mut runtime,
+      "file:///native_v8_guard_denied_stop.js",
+      r#"
+      {
+        const ops = Deno.core.ops;
+        try {
+          ops.op_v8_gc_profiler_stop(stopHandle);
+        } catch (error) {
+          const message = String(error);
+          const expected =
+            "principal set [denied-native] may not use deny-only runtime:inspect:v8:gc-profiler-stop";
+          if (!message.includes(expected)) {
+            throw new Error(`op_v8_gc_profiler_stop used the wrong actor or boundary: ${message}`);
+          }
+          globalThis.stopDenied = true;
+        }
+        if (!globalThis.stopDenied) {
+          throw new Error("op_v8_gc_profiler_stop reached native work");
+        }
+      }
+      "#
+      .to_string(),
+    );
+
+    set_actor(root, "main.ts");
+    execute(
+      &mut runtime,
+      "file:///native_v8_guard_stop_continuity.js",
+      r#"
+      {
+        const stopReport = Deno.core.ops.op_v8_gc_profiler_stop(stopHandle);
         if (stopReport === null) {
           throw new Error("denied GC profiler stop consumed its native handle");
         }
@@ -1554,6 +1641,11 @@ mod native_capsec_tests {
       assert!(
         QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT.load(Ordering::SeqCst) > 0,
         "root queryObjects positive control did no native snapshot work"
+      );
+      assert_eq!(
+        NEAR_HEAP_LIMIT_CURRENT_DIR_COUNT.load(Ordering::SeqCst),
+        1,
+        "root near-heap positive control did not reach current_dir exactly once"
       );
       assert_eq!(
         NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT.load(Ordering::SeqCst),
