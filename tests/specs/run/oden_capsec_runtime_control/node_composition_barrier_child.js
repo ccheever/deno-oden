@@ -2,8 +2,8 @@ import inspector from "node:inspector";
 import { createRequire } from "node:module";
 import {
   compose,
-  duplexPair,
   Duplex,
+  duplexPair,
   PassThrough,
   pipeline,
   Readable,
@@ -61,16 +61,19 @@ async function attemptAsync(operation) {
 }
 
 async function pipelineOutcome(stages, label) {
-  return await bounded(new Promise((resolve) => {
-    try {
-      const output = pipeline(...stages, (error) => {
-        resolve(error == null ? "ALLOWED" : permissionOutcome(error));
-      });
-      if (output?.destroy) streams.add(output);
-    } catch (error) {
-      resolve(permissionOutcome(error));
-    }
-  }), label);
+  return await bounded(
+    new Promise((resolve) => {
+      try {
+        const output = pipeline(...stages, (error) => {
+          resolve(error == null ? "ALLOWED" : permissionOutcome(error));
+        });
+        if (output?.destroy) streams.add(output);
+      } catch (error) {
+        resolve(permissionOutcome(error));
+      }
+    }),
+    label,
+  );
 }
 
 function webQueue(readable) {
@@ -92,20 +95,26 @@ async function protectedNodeBuffer(label) {
     new TransformStream(undefined, undefined, { highWaterMark: 16 }),
   );
   webStreams.add(web);
-  await bounded((async () => {
-    while ((webQueue(web)?.size ?? 0) === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-  })(), `${label} Web buffer`);
+  await bounded(
+    (async () => {
+      while ((webQueue(web)?.size ?? 0) === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    })(),
+    `${label} Web buffer`,
+  );
 
   const node = Readable.fromWeb(web);
   streams.add(node);
   node._read(0);
-  await bounded((async () => {
-    while (node.readableLength === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-  })(), `${label} Node buffer`);
+  await bounded(
+    (async () => {
+      while (node.readableLength === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    })(),
+    `${label} Node buffer`,
+  );
   for (let attempt = 0; !node._readableState.ended && attempt < 20; attempt++) {
     node._read(0);
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -554,6 +563,13 @@ try {
     : "BROKEN";
   result.ordinaryPackageMapCalls = ordinaryProbe.calls();
 
+  const ordinaryNativeSource = Readable.from([
+    new URL(import.meta.url).pathname,
+  ]);
+  result.ordinaryBoundNativeMap = await attemptAsync(() =>
+    ordinaryNativeSource.map(deniedProbe.boundReadTextFile).toArray()
+  );
+
   const lifecycleSource = await protectedNodeBuffer("lifecycle callback");
   const lifecycleProbe = deniedProbe.makeDeliveryProbe(
     "scheduled",
@@ -581,9 +597,7 @@ try {
   result.preActivationWrite = preActivationProbe.outcome();
   result.preActivationWriteCalls = preActivationProbe.calls();
   await attachGuardWithoutDelivery(preActivationSource, preActivationSink);
-  result.preActivationRootUncork = attempt(() =>
-    preActivationSink.uncork()
-  );
+  result.preActivationRootUncork = attempt(() => preActivationSink.uncork());
   result.preActivationFlushedWrites = preActivationCounter.writes;
   result.preActivationRetained = rootReadOutcome(preActivationSource);
 

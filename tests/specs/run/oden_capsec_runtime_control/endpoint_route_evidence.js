@@ -68,8 +68,8 @@ const nodePipe = section(
 );
 const nodeIterator = section(
   nodeReadable,
-  "function streamToAsyncIterator(stream, options)",
-  "async function* createAsyncIterator(stream, options)",
+  "function streamToAsyncIterator(stream, options, admittedOperation)",
+  "async function* createAsyncIterator(stream, options, admittedOperation)",
 );
 const nodeFrom = section(
   nodeReadable,
@@ -90,11 +90,6 @@ const nodeDuplexifyFunction = section(
   nodeDuplexify,
   'if (typeof body === "function")',
   "if (isBlob(body))",
-);
-const nodeDuplexifyIterable = section(
-  nodeDuplexify,
-  "if (isIterable(body))",
-  "if (\n    isReadableStream(body?.readable)",
 );
 const nodeDuplexifyPair = section(
   nodeDuplexify,
@@ -158,15 +153,15 @@ const evidence = {
     "getReadableStreamResourceBacking(stream) ||\n    getReadableStreamResourceBackingUnrefable(stream)",
   ),
   nodeIteratorCarrierPropagation: nodeIterator.includes(
-    "WeakMapPrototypeSet(readableIteratorUseGuards, iter, sourceGuard)",
-  ) && nodeFrom.includes("getReadableUseGuard(iterable)"),
+    "linkStreamUseGuard(stream, iter);",
+  ) && nodeFrom.includes("linkStreamUseGuard(iterable, readable);"),
   nodePipeReadableDestinationPropagation: ordered(
     nodePipe,
     "runReadableUseGuard(this);",
-    "setStreamUseGuard(dest, sourceGuard);",
+    "linkStreamUseGuard(this, dest);",
   ) && ordered(
     nodePipe,
-    "setStreamUseGuard(dest, sourceGuard);",
+    "linkStreamUseGuard(this, dest);",
     "state.pipes.push(dest);",
   ),
   nodeStreamOperatorPropagation: nodeOperators.includes(
@@ -180,18 +175,16 @@ const evidence = {
     "setReadableStreamUseGuard(pair.readable, sourceGuard);",
   ),
   nodeDuplexifyPropagation: nodeDuplexifyFunction.includes(
-    "propagateReadableUseGuard(value, from(Duplexify, value",
-  ) && nodeDuplexifyIterable.includes(
-    "propagateReadableUseGuard(body, from(Duplexify, body",
-  ) && nodeDuplexifyPair.includes("setReadableUseGuard(d, sourceGuard);"),
+    "linkStreamUseGuard(carrier, guardedValue);",
+  ) && nodeDuplexify.includes("linkStreamUseGuard(stream, carrier);") &&
+    nodeDuplexifyPair.includes("linkStreamUseGuard(r, d);") &&
+    nodeDuplexifyPair.includes("linkStreamUseGuard(w, d);"),
   nodeComposeNodeAndWebPropagation: nodeCompose.includes(
-    "const guardedSources = [head, tail];",
-  ) && nodeCompose.includes("getReadableStreamUseGuard(readableSource)") &&
-    nodeCompose.includes("setReadableUseGuard(d, sourceGuard);"),
+    "function connectGuardEndpoints(left, right)",
+  ) && nodeCompose.includes("connectGuardEndpoints(head, d);") &&
+    nodeCompose.includes("connectGuardEndpoints(tail, d);"),
   nodeDuplexPairCounterpartPropagation: nodeDuplexPair.includes(
-    "const sourceGuard = getReadableUseGuard(this);",
-  ) && nodeDuplexPair.includes(
-    "setReadableUseGuard(this.#otherSide, sourceGuard);",
+    "linkStreamUseGuard(this, otherSide);",
   ),
   webReaderFastDequeueGuardOrder: ordered(
     webReaderFastPath,

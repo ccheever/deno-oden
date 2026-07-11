@@ -76,13 +76,11 @@ const kEof = Symbol("kEof");
 const pendingPromiseOperatorIterators = new SafeWeakMap();
 
 function operationIterable(source, iterator) {
-  return iterator === undefined
-    ? source
-    : {
-      [SymbolAsyncIterator]() {
-        return iterator;
-      },
-    };
+  return iterator === undefined ? source : {
+    [SymbolAsyncIterator]() {
+      return iterator;
+    },
+  };
 }
 
 function takePromiseOperatorIterator(source) {
@@ -261,11 +259,12 @@ function map(fn, options, operationIterator = undefined) {
             val = runWithStreamUseAdmissionRecheck(
               carrier,
               callbackAdmission,
-              () => ReflectApply(
-                capturedFn.callback,
-                undefined,
-                [val, signalOpt],
-              ),
+              () =>
+                ReflectApply(
+                  capturedFn.callback,
+                  undefined,
+                  [val, signalOpt],
+                ),
             );
 
             if (val === kEmpty) {

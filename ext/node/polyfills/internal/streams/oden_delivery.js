@@ -281,7 +281,9 @@ function createStreamUseAdmission(stream, requestedContext = undefined) {
   const parts = [];
   const contexts = [];
   const operationContext = requestedContext ??
-    activeStreamUseAdmissionContexts[activeStreamUseAdmissionContexts.length - 1] ??
+    activeStreamUseAdmissionContexts[
+      activeStreamUseAdmissionContexts.length - 1
+    ] ??
     core.ops.op_oden_schedule_context();
   if (current !== undefined) {
     const previous = operationContext === undefined
@@ -305,7 +307,7 @@ function createStreamUseAdmission(stream, requestedContext = undefined) {
       if (operationContext !== undefined) core.setAsyncContext(previous);
     }
   }
-  return { contexts, stream, parts };
+  return { context: operationContext, contexts, stream, parts };
 }
 
 function streamUseAdmissionContext(stream, admission) {
@@ -322,13 +324,7 @@ function streamUseAdmissionContext(stream, admission) {
       throw new TypeError("stream use admission constituents changed");
     }
   }
-  let admittedContext;
-  for (let i = 0; i < admission.contexts.length; i++) {
-    if (admission.contexts[i] !== undefined) {
-      admittedContext = admission.contexts[i];
-    }
-  }
-  return admittedContext;
+  return admission.context;
 }
 
 function runWithStreamUseAdmission(stream, admission, callback) {
