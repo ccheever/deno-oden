@@ -60,6 +60,7 @@ const {
 
 const KEEP_ALIVE_TIMEOUT_RE = new SafeRegExp("^timeout=(\\d+)");
 const odenCapsecNoReuseAgents = new SafeWeakSet();
+const odenCapsecUsedSockets = new SafeWeakSet();
 
 const kOnKeylog = Symbol("onkeylog");
 const kRequestOptions = Symbol("requestOptions");
@@ -214,7 +215,10 @@ export function Agent(options) {
 
     // Never assign a protected-profile socket to a queued or later request:
     // doing so would skip DNS/final-peer mediation for the new principal.
-    if (odenCapsecNoReuseAgents.has(this)) {
+    if (
+      odenCapsecNoReuseAgents.has(this) &&
+      odenCapsecUsedSockets.has(socket)
+    ) {
       socket.destroy();
       return;
     }
@@ -732,6 +736,13 @@ Agent.prototype.destroy = function destroy() {
 };
 
 function setRequestSocket(agent, req, socket) {
+  if (odenCapsecNoReuseAgents.has(agent)) {
+    // A replacement socket created for a queued request reaches the `free`
+    // handler before it has served anything. Brand only at assignment so that
+    // handler may assign the fresh socket once, while every later free event
+    // destroys it instead of reusing it.
+    odenCapsecUsedSockets.add(socket);
+  }
   req.onSocket(socket);
   const agentTimeout = agent.options.timeout || 0;
   if (req.timeout === undefined || req.timeout === agentTimeout) {

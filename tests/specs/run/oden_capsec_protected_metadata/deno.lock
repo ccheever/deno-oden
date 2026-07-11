@@ -1,0 +1,8 @@
+{
+  "version": "5",
+  "npm": {
+    "protected-dep@1.0.0": {
+      "integrity": "sha512-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc=="
+    }
+  }
+}

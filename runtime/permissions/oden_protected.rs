@@ -556,5 +556,20 @@ mod tests {
       ProtectedMetadataPolicy::compile(&[row], Some(computed), &grants(), "")
         .unwrap();
     assert_eq!(policy.receipt_set_digest(), Some(computed));
+
+    // Cross-plane IPv6 vector used by the raw-engine fixture and the parent
+    // snapshot compiler. Keep NUL-delimited canonical IP encoding identical.
+    let ipv6 = ProtectedMetadataRow {
+      principal: "root".to_string(),
+      action: "connect".to_string(),
+      ip: "fd00:ec2::254".parse().unwrap(),
+      port: 1,
+      reason_digest: reason(),
+      receipt_digest: Some("b".repeat(64)),
+    };
+    assert_eq!(
+      receipt_set_digest_for(&[ipv6]),
+      "260cedec1913d7d3da2c4edc4cf3eb5b276e14068cb89eb4877fd3a3b7d2606c"
+    );
   }
 }

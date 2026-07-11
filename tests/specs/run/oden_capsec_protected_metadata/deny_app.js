@@ -1,7 +1,15 @@
 function protectedDenial(error) {
-  return error?.name === "NotCapable" &&
-    (String(error?.message).includes("protected metadata denied") ||
-      String(error?.message).includes("forward proxies are closed"));
+  for (let current = error, depth = 0; current && depth < 4; depth++) {
+    const message = String(current?.message);
+    if (
+      message.includes("protected metadata denied") ||
+      message.includes("forward proxies are closed")
+    ) {
+      return true;
+    }
+    current = current?.cause;
+  }
+  return false;
 }
 
 async function report(label, operation) {

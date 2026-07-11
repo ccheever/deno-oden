@@ -34,7 +34,7 @@
       "exitCode": 0
     },
     "each_udp_destination_is_guarded": {
-      "args": "run --allow-all deny_app.js udp",
+      "args": "run --unstable-net --allow-all deny_app.js udp",
       "envs": { "ODEN_CAPSEC_POLICY": "permissive.json" },
       "output": "udp.out",
       "exitCode": 0
