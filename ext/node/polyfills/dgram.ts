@@ -78,7 +78,7 @@ const { os } = core.loadExtScript(
 );
 const { nextTick } = core.loadExtScript("ext:deno_node/_next_tick.ts");
 const { deprecate } = core.loadExtScript("ext:deno_node/util.ts");
-const { channel } = core.loadExtScript(
+const { channelInternal } = core.loadExtScript(
   "ext:deno_node/diagnostics_channel.js",
 );
 const { isArrayBufferView } = core.loadExtScript(
@@ -87,7 +87,7 @@ const { isArrayBufferView } = core.loadExtScript(
 
 const { UV_UDP_REUSEADDR, UV_UDP_IPV6ONLY } = os;
 
-const udpSocketChannel = channel("udp.socket");
+const udpSocketChannel = channelInternal("udp.socket");
 
 const BIND_STATE_UNBOUND = 0;
 const BIND_STATE_BINDING = 1;

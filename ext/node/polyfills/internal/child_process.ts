@@ -130,7 +130,10 @@ const {
   TCP,
 } = core.loadExtScript("ext:deno_node/internal_binding/tcp_wrap.ts");
 const lazyNet = core.createLazyLoader("node:net");
-const { channel: createDiagnosticsChannel, tracingChannel } = core
+const {
+  channelInternal: createDiagnosticsChannel,
+  tracingChannelInternal: tracingChannel,
+} = core
   .loadExtScript(
     "ext:deno_node/diagnostics_channel.js",
   );

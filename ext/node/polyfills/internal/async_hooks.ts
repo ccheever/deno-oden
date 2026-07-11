@@ -23,6 +23,7 @@ const {
   ArrayPrototypeSplice,
   FunctionPrototypeApply,
   ObjectKeys,
+  SafeWeakMap,
   Symbol,
 } = primordials;
 const {
@@ -149,8 +150,9 @@ function emitBefore(asyncId: number): void {
   try {
     for (let i = 0; i < hooks.length; i++) {
       const hook = hooks[i];
-      if (hook[before_symbol]) {
-        hook[before_symbol](asyncId);
+      const before = hookStates.get(hook).before;
+      if (before) {
+        FunctionPrototypeApply(before, hook, [asyncId]);
       }
     }
   } catch (e) {
@@ -168,8 +170,9 @@ function emitAfter(asyncId: number): void {
   try {
     for (let i = 0; i < hooks.length; i++) {
       const hook = hooks[i];
-      if (hook[after_symbol]) {
-        hook[after_symbol](asyncId);
+      const after = hookStates.get(hook).after;
+      if (after) {
+        FunctionPrototypeApply(after, hook, [asyncId]);
       }
     }
   } finally {
@@ -185,8 +188,9 @@ function emitDestroy(asyncId: number): void {
   const hooks = active_hooks.array;
   for (let i = 0; i < hooks.length; i++) {
     const hook = hooks[i];
-    if (hook[destroy_symbol]) {
-      hook[destroy_symbol](asyncId);
+    const destroy = hookStates.get(hook).destroy;
+    if (destroy) {
+      FunctionPrototypeApply(destroy, hook, [asyncId]);
     }
   }
 }
@@ -268,12 +272,13 @@ function emitInitNative(
   // Use a single try/catch for all hooks to avoid setting up one per iteration.
   try {
     for (let i = 0; i < active_hooks.array.length; i++) {
-      if (typeof active_hooks.array[i][init_symbol] === "function") {
-        active_hooks.array[i][init_symbol](
-          asyncId,
-          type,
-          triggerAsyncId,
-          resource,
+      const hook = active_hooks.array[i];
+      const init = hookStates.get(hook).init;
+      if (typeof init === "function") {
+        FunctionPrototypeApply(
+          init,
+          hook,
+          [asyncId, type, triggerAsyncId, resource],
         );
       }
     }
@@ -410,15 +415,9 @@ type Fn = (...args: unknown[]) => unknown;
 // layer. Keep its hook on a closure-private path so a user-created AsyncHook
 // cannot be enabled later by a less-trusted principal without a fresh check.
 const internalHookToken = { __proto__: null };
+const hookStates = new SafeWeakMap();
 
 class AsyncHook {
-  [init_symbol]: Fn;
-  [before_symbol]: Fn;
-  [after_symbol]: Fn;
-  [destroy_symbol]: Fn;
-  [promise_resolve_symbol]: Fn;
-  #trustedInternal: boolean;
-
   constructor({
     init,
     before,
@@ -448,16 +447,20 @@ class AsyncHook {
       throw new ERR_ASYNC_CALLBACK("hook.promiseResolve");
     }
 
-    this[init_symbol] = init;
-    this[before_symbol] = before;
-    this[after_symbol] = after;
-    this[destroy_symbol] = destroy;
-    this[promise_resolve_symbol] = promiseResolve;
-    this.#trustedInternal = trustedToken === internalHookToken;
+    hookStates.set(this, {
+      __proto__: null,
+      init,
+      before,
+      after,
+      destroy,
+      promiseResolve,
+      trustedInternal: trustedToken === internalHookToken,
+    });
   }
 
   enable() {
-    if (!this.#trustedInternal) {
+    const state = hookStates.get(this);
+    if (!state.trustedInternal) {
       op_oden_guard_deny_only_surface(
         "runtime",
         "inspect",
@@ -484,12 +487,12 @@ class AsyncHook {
     // createHook() has already enforced that the callbacks are all functions,
     // so here simply increment the count of whether each callbacks exists or
     // not.
-    hook_fields[kTotals] = hook_fields[kInit] += +!!this[init_symbol];
-    hook_fields[kTotals] += hook_fields[kBefore] += +!!this[before_symbol];
-    hook_fields[kTotals] += hook_fields[kAfter] += +!!this[after_symbol];
-    hook_fields[kTotals] += hook_fields[kDestroy] += +!!this[destroy_symbol];
+    hook_fields[kTotals] = hook_fields[kInit] += +!!state.init;
+    hook_fields[kTotals] += hook_fields[kBefore] += +!!state.before;
+    hook_fields[kTotals] += hook_fields[kAfter] += +!!state.after;
+    hook_fields[kTotals] += hook_fields[kDestroy] += +!!state.destroy;
     hook_fields[kTotals] += hook_fields[kPromiseResolve] +=
-      +!!this[promise_resolve_symbol];
+      +!!state.promiseResolve;
     ArrayPrototypePush(hooks_array, this);
 
     if (prev_kTotals === 0 && hook_fields[kTotals] > 0) {
@@ -503,6 +506,16 @@ class AsyncHook {
   }
 
   disable() {
+    const state = hookStates.get(this);
+    if (!state.trustedInternal) {
+      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        "async-hooks",
+        "node:async_hooks.AsyncHook.disable",
+      );
+    }
+
     // deno-lint-ignore camelcase
     const { 0: hooks_array, 1: hook_fields } = getHookArrays();
 
@@ -514,12 +527,12 @@ class AsyncHook {
     // deno-lint-ignore camelcase
     const prev_kTotals = hook_fields[kTotals];
 
-    hook_fields[kTotals] = hook_fields[kInit] -= +!!this[init_symbol];
-    hook_fields[kTotals] += hook_fields[kBefore] -= +!!this[before_symbol];
-    hook_fields[kTotals] += hook_fields[kAfter] -= +!!this[after_symbol];
-    hook_fields[kTotals] += hook_fields[kDestroy] -= +!!this[destroy_symbol];
+    hook_fields[kTotals] = hook_fields[kInit] -= +!!state.init;
+    hook_fields[kTotals] += hook_fields[kBefore] -= +!!state.before;
+    hook_fields[kTotals] += hook_fields[kAfter] -= +!!state.after;
+    hook_fields[kTotals] += hook_fields[kDestroy] -= +!!state.destroy;
     hook_fields[kTotals] += hook_fields[kPromiseResolve] -=
-      +!!this[promise_resolve_symbol];
+      +!!state.promiseResolve;
     ArrayPrototypeSplice(hooks_array, index, 1);
 
     if (prev_kTotals > 0 && hook_fields[kTotals] === 0) {

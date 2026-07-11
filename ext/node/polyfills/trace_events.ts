@@ -20,10 +20,10 @@ const {
   SafeMap,
   SafeSet,
   SafeSetIterator,
+  SafeWeakMap,
   StringFromCharCode,
   StringPrototypeEndsWith,
   StringPrototypeStartsWith,
-  Symbol,
   Uint8Array,
 } = primordials;
 const { ERR_TRACE_EVENTS_CATEGORY_REQUIRED } = core.loadExtScript(
@@ -76,9 +76,6 @@ function workerSliceFilename(pid, tid) {
   return `.deno_trace_events_${pid}_t${tid}.json`;
 }
 
-const kCategories = Symbol("categories");
-const kEnabled = Symbol("enabled");
-
 const kMaxTracingCount = 10;
 
 // Phase codes per V8/Chrome trace format.
@@ -86,6 +83,7 @@ const PHASE_NESTABLE_ASYNC_BEGIN = 98; // 'b'
 const PHASE_NESTABLE_ASYNC_END = 101; // 'e'
 
 const enabledTracingObjects = new SafeSet();
+const tracingStates = new SafeWeakMap();
 const categoryBuffers = new SafeMap();
 const categoryRefCounts = new SafeMap();
 const recordedEvents = [];
@@ -135,8 +133,11 @@ function decrementCategory(category) {
 
 class Tracing {
   constructor(categories) {
-    this[kCategories] = categories;
-    this[kEnabled] = false;
+    tracingStates.set(this, {
+      __proto__: null,
+      categories,
+      enabled: false,
+    });
   }
 
   enable() {
@@ -147,9 +148,10 @@ class Tracing {
       "node:trace_events.enable",
       "node:trace_events.Tracing.enable",
     );
-    if (!this[kEnabled]) {
-      this[kEnabled] = true;
-      for (const category of new SafeArrayIterator(this[kCategories])) {
+    const state = tracingStates.get(this);
+    if (!state.enabled) {
+      state.enabled = true;
+      for (const category of new SafeArrayIterator(state.categories)) {
         incrementCategory(category);
       }
       enabledTracingObjects.add(this);
@@ -167,9 +169,17 @@ class Tracing {
   }
 
   disable() {
-    if (this[kEnabled]) {
-      this[kEnabled] = false;
-      for (const category of new SafeArrayIterator(this[kCategories])) {
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "node:trace_events.disable",
+      "node:trace_events.Tracing.disable",
+    );
+    const state = tracingStates.get(this);
+    if (state.enabled) {
+      state.enabled = false;
+      for (const category of new SafeArrayIterator(state.categories)) {
         decrementCategory(category);
       }
       enabledTracingObjects.delete(this);
@@ -177,11 +187,23 @@ class Tracing {
   }
 
   get enabled() {
-    return this[kEnabled];
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "node:trace_events.enabled",
+      "node:trace_events.Tracing.enabled",
+    );
+    return tracingStates.get(this).enabled;
   }
 
   get categories() {
-    return ArrayPrototypeJoin(this[kCategories], ",");
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "node:trace_events.categories",
+      "node:trace_events.Tracing.categories",
+    );
+    return ArrayPrototypeJoin(tracingStates.get(this).categories, ",");
   }
 }
 
@@ -203,7 +225,11 @@ function getEnabledCategories() {
   );
   const seen = new SafeSet();
   for (const tracing of new SafeSetIterator(enabledTracingObjects)) {
-    for (const category of new SafeArrayIterator(tracing[kCategories])) {
+    for (
+      const category of new SafeArrayIterator(
+        tracingStates.get(tracing).categories,
+      )
+    ) {
       seen.add(category);
     }
   }

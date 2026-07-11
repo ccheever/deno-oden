@@ -15,6 +15,7 @@ const {
   op_inspector_open,
   op_inspector_url,
   op_inspector_wait,
+  op_oden_guard_deny_only_surface,
 } = core.ops;
 const lazyProcess = core.createLazyLoader("node:process");
 const lazyWorkerThreads = core.createLazyLoader("node:worker_threads");
@@ -52,7 +53,17 @@ const {
   ArrayPrototypePush,
   ArrayPrototypeShift,
   ObjectAssign,
+  ObjectCreate,
+  ObjectDefineProperty,
+  ObjectFreeze,
   ObjectPrototypeIsPrototypeOf,
+  Proxy,
+  ReflectApply,
+  ReflectGet,
+  ReflectGetOwnPropertyDescriptor,
+  ReflectHas,
+  ReflectOwnKeys,
+  SafeArrayIterator,
   SymbolDispose,
   JSONParse,
   JSONStringify,
@@ -334,18 +345,95 @@ const DOMStorage = {
 };
 
 const inspectorConsoleTarget = op_get_extras_binding_object().console;
-const inspectorConsole = new Proxy(inspectorConsoleTarget, {
-  get(target, property, receiver) {
-    // `op_inspector_enabled` performs the terminal inspector check. Wrap the
-    // returned methods too so a root-obtained reference cannot be passed to an
-    // ungranted package and invoked later.
-    op_inspector_enabled();
-    const value = ReflectGet(target, property, receiver);
-    if (typeof value !== "function") return value;
-    return function (...args) {
-      op_inspector_enabled();
-      return ReflectApply(value, target, args);
-    };
+const inspectorConsoleFacadeTarget = ObjectCreate(null);
+const inspectorConsoleMethods = new SafeMap();
+
+function guardInspectorConsole(property, action) {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    `node:inspector.console.${String(property)}`,
+    `node:inspector.console.${action}`,
+  );
+}
+
+for (
+  const property of new SafeArrayIterator(
+    ReflectOwnKeys(inspectorConsoleTarget),
+  )
+) {
+  const descriptor = ReflectGetOwnPropertyDescriptor(
+    inspectorConsoleTarget,
+    property,
+  );
+  ObjectDefineProperty(inspectorConsoleFacadeTarget, property, {
+    __proto__: null,
+    configurable: false,
+    enumerable: descriptor?.enumerable ?? false,
+    get() {
+      guardInspectorConsole(property, "get");
+      const value = ReflectGet(
+        inspectorConsoleTarget,
+        property,
+        inspectorConsoleTarget,
+      );
+      if (typeof value !== "function") return value;
+      const cached = inspectorConsoleMethods.get(property);
+      if (cached?.source === value) return cached.wrapper;
+      const wrapper = function (...args) {
+        guardInspectorConsole(property, "call");
+        return ReflectApply(value, inspectorConsoleTarget, args);
+      };
+      inspectorConsoleMethods.set(property, { source: value, wrapper });
+      return wrapper;
+    },
+  });
+}
+ObjectFreeze(inspectorConsoleFacadeTarget);
+
+const inspectorConsole = new Proxy(inspectorConsoleFacadeTarget, {
+  get(target, property) {
+    return ReflectGet(target, property, target);
+  },
+  set(_target, property) {
+    guardInspectorConsole(property, "set");
+    return false;
+  },
+  defineProperty(_target, property) {
+    guardInspectorConsole(property, "defineProperty");
+    return false;
+  },
+  deleteProperty(_target, property) {
+    guardInspectorConsole(property, "deleteProperty");
+    return false;
+  },
+  has(target, property) {
+    guardInspectorConsole(property, "has");
+    return ReflectHas(target, property);
+  },
+  ownKeys(target) {
+    guardInspectorConsole("*", "ownKeys");
+    return ReflectOwnKeys(target);
+  },
+  getOwnPropertyDescriptor(target, property) {
+    guardInspectorConsole(property, "getOwnPropertyDescriptor");
+    return ReflectGetOwnPropertyDescriptor(target, property);
+  },
+  getPrototypeOf() {
+    guardInspectorConsole("*", "getPrototypeOf");
+    return null;
+  },
+  setPrototypeOf() {
+    guardInspectorConsole("*", "setPrototypeOf");
+    return false;
+  },
+  isExtensible() {
+    guardInspectorConsole("*", "isExtensible");
+    return false;
+  },
+  preventExtensions() {
+    guardInspectorConsole("*", "preventExtensions");
+    return true;
   },
 });
 

@@ -61,7 +61,7 @@ const {
   validateObject,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
-const { channel: createDiagnosticsChannel } = core.loadExtScript(
+const { channelInternal: createDiagnosticsChannel } = core.loadExtScript(
   "ext:deno_node/diagnostics_channel.js",
 );
 const workerThreadsChannel = createDiagnosticsChannel("worker_threads");

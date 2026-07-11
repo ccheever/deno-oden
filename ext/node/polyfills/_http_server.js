@@ -124,7 +124,9 @@ const {
   ContextManager,
   telemetry,
 } = core.loadExtScript("ext:deno_telemetry/telemetry.ts");
-const { channel } = core.loadExtScript("ext:deno_node/diagnostics_channel.js");
+const { channelInternal: channel } = core.loadExtScript(
+  "ext:deno_node/diagnostics_channel.js",
+);
 
 const onServerRequestStartChannel = channel("http.server.request.start");
 const onServerResponseCreatedChannel = channel("http.server.response.created");

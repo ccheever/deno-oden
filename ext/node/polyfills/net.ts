@@ -133,7 +133,7 @@ const { debuglog } = core.loadExtScript(
 type DuplexOptions = any;
 type BufferEncoding = any;
 type Abortable = any;
-const { channel, tracingChannel } = core.loadExtScript(
+const { channelInternal, tracingChannelInternal } = core.loadExtScript(
   "ext:deno_node/diagnostics_channel.js",
 );
 const {
@@ -428,9 +428,9 @@ const _noop = (_arrayBuffer: Uint8Array, _nread: number): undefined => {
   return;
 };
 
-const netClientSocketChannel = channel("net.client.socket");
-const netServerSocketChannel = channel("net.server.socket");
-const netServerListenChannel = tracingChannel("net.server.listen");
+const netClientSocketChannel = channelInternal("net.client.socket");
+const netServerSocketChannel = channelInternal("net.server.socket");
+const netServerListenChannel = tracingChannelInternal("net.server.listen");
 
 function _toNumber(x: unknown): number | false {
   return (x = Number(x)) >= 0 ? (x as number) : false;

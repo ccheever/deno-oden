@@ -85,7 +85,9 @@ const { Duplex } = core.createLazyLoader("node:stream")();
 const lazyTls = core.createLazyLoader("node:tls");
 const tls = lazyTls().default;
 const { deprecate } = core.loadExtScript("ext:deno_node/util.ts");
-const dc = core.loadExtScript("ext:deno_node/diagnostics_channel.js").default;
+const { channelInternal } = core.loadExtScript(
+  "ext:deno_node/diagnostics_channel.js",
+);
 const { utcDate } = core.loadExtScript("ext:deno_node/internal/http.ts");
 const {
   kLastWriteWasAsync,
@@ -246,22 +248,42 @@ const {
   ContextManager,
   SPAN_KEY,
 } = core.loadExtScript("ext:deno_telemetry/telemetry.ts");
-const onClientStreamCreatedChannel = dc.channel("http2.client.stream.created");
-const onClientStreamStartChannel = dc.channel("http2.client.stream.start");
-const onClientStreamErrorChannel = dc.channel("http2.client.stream.error");
-const onClientStreamFinishChannel = dc.channel("http2.client.stream.finish");
-const onClientStreamCloseChannel = dc.channel("http2.client.stream.close");
-const onClientStreamBodyChunkSentChannel = dc.channel(
+const onClientStreamCreatedChannel = channelInternal(
+  "http2.client.stream.created",
+);
+const onClientStreamStartChannel = channelInternal(
+  "http2.client.stream.start",
+);
+const onClientStreamErrorChannel = channelInternal(
+  "http2.client.stream.error",
+);
+const onClientStreamFinishChannel = channelInternal(
+  "http2.client.stream.finish",
+);
+const onClientStreamCloseChannel = channelInternal(
+  "http2.client.stream.close",
+);
+const onClientStreamBodyChunkSentChannel = channelInternal(
   "http2.client.stream.bodyChunkSent",
 );
-const onClientStreamBodySentChannel = dc.channel(
+const onClientStreamBodySentChannel = channelInternal(
   "http2.client.stream.bodySent",
 );
-const onServerStreamCreatedChannel = dc.channel("http2.server.stream.created");
-const onServerStreamStartChannel = dc.channel("http2.server.stream.start");
-const onServerStreamErrorChannel = dc.channel("http2.server.stream.error");
-const onServerStreamFinishChannel = dc.channel("http2.server.stream.finish");
-const onServerStreamCloseChannel = dc.channel("http2.server.stream.close");
+const onServerStreamCreatedChannel = channelInternal(
+  "http2.server.stream.created",
+);
+const onServerStreamStartChannel = channelInternal(
+  "http2.server.stream.start",
+);
+const onServerStreamErrorChannel = channelInternal(
+  "http2.server.stream.error",
+);
+const onServerStreamFinishChannel = channelInternal(
+  "http2.server.stream.finish",
+);
+const onServerStreamCloseChannel = channelInternal(
+  "http2.server.stream.close",
+);
 
 const { debuglog } = core.loadExtScript(
   "ext:deno_node/internal/util/debuglog.ts",

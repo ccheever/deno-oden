@@ -52,6 +52,7 @@ const { onWarning } = core.loadExtScript(
 const {
   parseFileMode,
   validateBoolean,
+  validateFunction,
   validateNumber,
   validateObject,
   validateString,
@@ -174,11 +175,16 @@ const {
   Proxy,
   RangeError,
   ReflectApply,
+  ReflectConstruct,
+  ReflectDeleteProperty,
+  ReflectDefineProperty,
   ReflectGet,
   ReflectGetOwnPropertyDescriptor,
   ReflectGetPrototypeOf,
   ReflectHas,
   ReflectOwnKeys,
+  ReflectSet,
+  ReflectSetPrototypeOf,
   SafeArrayIterator,
   SafeMap,
   SafeWeakMap,
@@ -186,6 +192,7 @@ const {
   String,
   StringPrototypeStartsWith,
   SymbolToStringTag,
+  TypeError,
 } = primordials;
 
 export const argv: string[] = ["", ""];
@@ -799,6 +806,142 @@ function _findSignalListener(
   return undefined;
 }
 
+function isProtectedProcessExceptionEvent(event: unknown): boolean {
+  return event === "uncaughtException" ||
+    event === "uncaughtExceptionMonitor" ||
+    event === "unhandledRejection" ||
+    event === "rejectionHandled" ||
+    event === "multipleResolves";
+}
+
+function isProtectedProcessMetaEvent(event: unknown): boolean {
+  return event === "newListener" || event === "removeListener";
+}
+
+function guardProcessExceptionEvent(event: unknown, api: string) {
+  if (isProtectedProcessExceptionEvent(event)) {
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      String(event),
+      api,
+    );
+  }
+}
+
+function guardProcessMetaEvent(event: unknown, api: string) {
+  if (isProtectedProcessMetaEvent(event)) {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      String(event),
+      api,
+    );
+  }
+}
+
+function guardProcessSignalEvent(
+  event: unknown,
+  action: string,
+  api: string,
+) {
+  if (typeof event === "string" && StringPrototypeStartsWith(event, "SIG")) {
+    op_oden_guard_deny_only_surface(
+      "process",
+      "signal",
+      `${action}:${event}`,
+      api,
+    );
+  }
+}
+
+function guardProcessEventObservation(event: unknown, api: string) {
+  guardProcessExceptionEvent(event, api);
+  guardProcessMetaEvent(event, api);
+  guardProcessSignalEvent(event, "inspect", api);
+}
+
+let trustedProcessEventAccess: unknown;
+let trustedProcessMetaTableAccess: unknown;
+let trustedProcessMetaEmission;
+
+function withTrustedProcessEventAccess(
+  event: unknown,
+  // deno-lint-ignore no-explicit-any
+  operation: () => any,
+) {
+  const previous = trustedProcessEventAccess;
+  trustedProcessEventAccess = event;
+  try {
+    return operation();
+  } finally {
+    trustedProcessEventAccess = previous;
+  }
+}
+
+function withTrustedProcessMetaEmission(
+  metaEvent: "newListener" | "removeListener",
+  targetEvent: unknown,
+  listener: unknown,
+  // deno-lint-ignore no-explicit-any
+  operation: () => any,
+) {
+  const previousTableAccess = trustedProcessMetaTableAccess;
+  const previousEmission = trustedProcessMetaEmission;
+  trustedProcessMetaTableAccess = {
+    __proto__: null,
+    metaEvent,
+    targetEvent,
+  };
+  trustedProcessMetaEmission = {
+    __proto__: null,
+    metaEvent,
+    targetEvent,
+    listener,
+  };
+  try {
+    return operation();
+  } finally {
+    trustedProcessMetaTableAccess = previousTableAccess;
+    trustedProcessMetaEmission = previousEmission;
+  }
+}
+
+function addProcessListenerInternal(target, event, listener, prepend) {
+  validateFunction(listener, "listener");
+  return withTrustedProcessMetaEmission(
+    "newListener",
+    event,
+    listener.listener ?? listener,
+    () =>
+      FunctionPrototypeCall(
+        prepend
+          ? EventEmitter.prototype.prependListener
+          : EventEmitter.prototype.on,
+        target,
+        event,
+        listener,
+      ),
+  );
+}
+
+function removeProcessListenerInternal(target, event, listener) {
+  validateFunction(listener, "listener");
+  return withTrustedProcessMetaEmission(
+    "removeListener",
+    event,
+    listener.listener ?? listener,
+    () =>
+      FunctionPrototypeCall(
+        EventEmitter.prototype.removeListener,
+        target,
+        event,
+        listener,
+      ),
+  );
+}
+
 /** https://nodejs.org/api/process.html#process_process_events */
 Process.prototype.on = function (
   // deno-lint-ignore no-explicit-any
@@ -807,6 +950,8 @@ Process.prototype.on = function (
   // deno-lint-ignore no-explicit-any
   listener: (...args: any[]) => void,
 ) {
+  guardProcessExceptionEvent(event, "process.on");
+  guardProcessMetaEvent(event, "process.on");
   if (typeof event === "string" && StringPrototypeStartsWith(event, "SIG")) {
     if (event === "SIGBREAK" && Deno.build.os !== "windows") {
       // Ignores SIGBREAK if the platform is not windows.
@@ -818,14 +963,15 @@ Process.prototype.on = function (
     ) {
       // TODO(#26331): Ignores all signals except SIGBREAK, SIGINT, and SIGWINCH on windows.
     } else {
-      FunctionPrototypeCall(EventEmitter.prototype.on, this, event, listener);
+      guardProcessSignalEvent(event, "listen", "process.on");
+      addProcessListenerInternal(this, event, listener, false);
       Deno.addSignalListener(
         event as Deno.Signal,
         _wrapSignalListener(event, listener),
       );
     }
   } else {
-    FunctionPrototypeCall(EventEmitter.prototype.on, this, event, listener);
+    addProcessListenerInternal(this, event, listener, false);
   }
 
   return this;
@@ -838,6 +984,8 @@ Process.prototype.off = function (
   // deno-lint-ignore no-explicit-any
   listener: (...args: any[]) => void,
 ) {
+  guardProcessExceptionEvent(event, "process.off");
+  guardProcessMetaEvent(event, "process.off");
   if (typeof event === "string" && StringPrototypeStartsWith(event, "SIG")) {
     if (event === "SIGBREAK" && Deno.build.os !== "windows") {
       // Ignores SIGBREAK if the platform is not windows.
@@ -847,12 +995,13 @@ Process.prototype.off = function (
     ) {
       // Ignores all signals except SIGBREAK, SIGINT, and SIGWINCH on windows.
     } else {
+      guardProcessSignalEvent(event, "unlisten", "process.off");
       // Find the actual registered listener before EventEmitter removes it.
       // When using `once()`, EventEmitter wraps the original listener in a
       // wrapper with a `.listener` property pointing to the original. We need
       // to pass the wrapper (not the original) to Deno.removeSignalListener.
       const registered = _findSignalListener(this, event, listener);
-      FunctionPrototypeCall(EventEmitter.prototype.off, this, event, listener);
+      removeProcessListenerInternal(this, event, listener);
       const unwrapped = _unwrapSignalListener(event, registered ?? listener);
       Deno.removeSignalListener(
         event as Deno.Signal,
@@ -860,7 +1009,7 @@ Process.prototype.off = function (
       );
     }
   } else {
-    FunctionPrototypeCall(EventEmitter.prototype.off, this, event, listener);
+    removeProcessListenerInternal(this, event, listener);
   }
 
   return this;
@@ -873,11 +1022,37 @@ Process.prototype.emit = function (
   // deno-lint-ignore no-explicit-any
   ...args: any[]
 ): boolean {
-  return ReflectApply(
-    EventEmitter.prototype.emit,
-    this,
-    ArrayPrototypeConcat([event], args),
-  );
+  guardProcessSignalEvent(event, "emit", "process.emit");
+  let trustedMetaEmission = false;
+  let trustedMetaExpected;
+  if (isProtectedProcessMetaEvent(event)) {
+    const expected = trustedProcessMetaEmission;
+    if (
+      expected?.metaEvent === event &&
+      expected.targetEvent === args[0] &&
+      (event === "removeListener" || expected.listener === args[1])
+    ) {
+      trustedProcessMetaEmission = undefined;
+      trustedMetaEmission = true;
+      trustedMetaExpected = expected;
+      trustedProcessMetaTableAccess = undefined;
+    } else {
+      guardProcessMetaEvent(event, `process.emit(${event})`);
+    }
+  }
+  guardProcessExceptionEvent(event, "process.emit");
+  const emit = () =>
+    ReflectApply(
+      EventEmitter.prototype.emit,
+      this,
+      ArrayPrototypeConcat([event], args),
+    );
+  if (!trustedMetaEmission) return emit();
+  const result = withTrustedProcessEventAccess(event, emit);
+  if (isProtectedProcessMetaEvent(trustedMetaExpected.targetEvent)) {
+    trustedProcessMetaTableAccess = trustedMetaExpected.targetEvent;
+  }
+  return result;
 };
 
 Process.prototype.prependListener = function (
@@ -887,31 +1062,82 @@ Process.prototype.prependListener = function (
   // deno-lint-ignore no-explicit-any
   listener: (...args: any[]) => void,
 ) {
+  guardProcessExceptionEvent(event, "process.prependListener");
+  guardProcessMetaEvent(event, "process.prependListener");
   if (typeof event === "string" && StringPrototypeStartsWith(event, "SIG")) {
     if (event === "SIGBREAK" && Deno.build.os !== "windows") {
       // Ignores SIGBREAK if the platform is not windows.
     } else {
-      FunctionPrototypeCall(
-        EventEmitter.prototype.prependListener,
-        this,
-        event,
-        listener,
-      );
+      guardProcessSignalEvent(event, "listen", "process.prependListener");
+      addProcessListenerInternal(this, event, listener, true);
       Deno.addSignalListener(
         event as Deno.Signal,
         _wrapSignalListener(event, listener),
       );
     }
   } else {
-    FunctionPrototypeCall(
-      EventEmitter.prototype.prependListener,
+    addProcessListenerInternal(this, event, listener, true);
+  }
+
+  return this;
+};
+
+function addProcessOnceListener(
+  // deno-lint-ignore no-explicit-any
+  target: any,
+  event: string,
+  // deno-lint-ignore no-explicit-any
+  listener: (...args: any[]) => void,
+  prepend: boolean,
+) {
+  validateFunction(listener, "listener");
+  let fired = false;
+  // deno-lint-ignore no-explicit-any
+  const wrapped: any = function (this: any, ...args: any[]) {
+    if (fired) return;
+    fired = true;
+    withTrustedProcessEventAccess(
+      event,
+      () => removeProcessListenerInternal(target, event, wrapped),
+    );
+    return ReflectApply(listener, this, args);
+  };
+  wrapped.listener = listener;
+  addProcessListenerInternal(target, event, wrapped, prepend);
+  return target;
+}
+
+Process.prototype.once = function (
+  // deno-lint-ignore no-explicit-any
+  this: any,
+  event: string,
+  // deno-lint-ignore no-explicit-any
+  listener: (...args: any[]) => void,
+) {
+  guardProcessExceptionEvent(event, "process.once");
+  guardProcessMetaEvent(event, "process.once");
+  return isProtectedProcessExceptionEvent(event)
+    ? addProcessOnceListener(this, event, listener, false)
+    : FunctionPrototypeCall(EventEmitter.prototype.once, this, event, listener);
+};
+
+Process.prototype.prependOnceListener = function (
+  // deno-lint-ignore no-explicit-any
+  this: any,
+  event: string,
+  // deno-lint-ignore no-explicit-any
+  listener: (...args: any[]) => void,
+) {
+  guardProcessExceptionEvent(event, "process.prependOnceListener");
+  guardProcessMetaEvent(event, "process.prependOnceListener");
+  return isProtectedProcessExceptionEvent(event)
+    ? addProcessOnceListener(this, event, listener, true)
+    : FunctionPrototypeCall(
+      EventEmitter.prototype.prependOnceListener,
       this,
       event,
       listener,
     );
-  }
-
-  return this;
 };
 
 Process.prototype.addListener = function (
@@ -938,6 +1164,17 @@ Process.prototype.removeAllListeners = function (
   event?: string | any,
 ) {
   if (arguments.length === 0) {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "process-exception-listeners",
+      "process.removeAllListeners",
+    );
+  } else {
+    guardProcessExceptionEvent(event, "process.removeAllListeners");
+    guardProcessMetaEvent(event, "process.removeAllListeners");
+  }
+  if (arguments.length === 0) {
     // Remove all listeners for all events - find all signal events and
     // unregister their Deno signal listeners before clearing.
     const events = this._events;
@@ -956,12 +1193,41 @@ Process.prototype.removeAllListeners = function (
     );
   }
   if (typeof event === "string" && StringPrototypeStartsWith(event, "SIG")) {
+    guardProcessSignalEvent(event, "unlisten", "process.removeAllListeners");
     _removeAllSignalListeners(this, event);
   }
   return FunctionPrototypeCall(
     EventEmitter.prototype.removeAllListeners,
     this,
     event,
+  );
+};
+
+Process.prototype.listeners = function (event: string) {
+  guardProcessEventObservation(event, "process.listeners");
+  return FunctionPrototypeCall(EventEmitter.prototype.listeners, this, event);
+};
+
+Process.prototype.rawListeners = function (event: string) {
+  guardProcessEventObservation(event, "process.rawListeners");
+  return FunctionPrototypeCall(
+    EventEmitter.prototype.rawListeners,
+    this,
+    event,
+  );
+};
+
+Process.prototype.listenerCount = function (
+  event: string,
+  // deno-lint-ignore no-explicit-any
+  listener?: (...args: any[]) => void,
+) {
+  guardProcessEventObservation(event, "process.listenerCount");
+  return FunctionPrototypeCall(
+    EventEmitter.prototype.listenerCount,
+    this,
+    event,
+    listener,
   );
 };
 
@@ -988,6 +1254,169 @@ function _removeAllSignalListeners(
 /** https://nodejs.org/api/process.html#process_process */
 // @ts-ignore TS doesn't work well with ES5 classes
 const process = new Process();
+
+internals.nodeProcessAddListenerInternal = function (
+  event: string,
+  // deno-lint-ignore no-explicit-any
+  listener: (...args: any[]) => void,
+  prepend = false,
+) {
+  return addProcessListenerInternal(process, event, listener, prepend);
+};
+internals.nodeProcessRemoveListenerInternal = function (
+  event: string,
+  // deno-lint-ignore no-explicit-any
+  listener: (...args: any[]) => void,
+) {
+  return removeProcessListenerInternal(process, event, listener);
+};
+
+// Borrowing EventEmitter.prototype must not bypass the process-specific
+// guards. Protect the sensitive keys in the backing event table as the final
+// check; ordinary process events retain normal EventEmitter behavior.
+// deno-lint-ignore no-explicit-any
+let processEventsStore: any = process._events;
+// deno-lint-ignore no-explicit-any
+let guardedProcessEvents: any;
+
+// deno-lint-ignore no-explicit-any
+function wrapProcessEvents(store: any) {
+  function hasTrustedMetaTableAccess(property) {
+    const access = trustedProcessMetaTableAccess;
+    return access === property ||
+      access?.metaEvent === property ||
+      access?.targetEvent === property;
+  }
+  return new Proxy(store, {
+    get(target, property) {
+      if (trustedProcessEventAccess === property) {
+        trustedProcessEventAccess = undefined;
+        return ReflectGet(target, property, target);
+      }
+      if (hasTrustedMetaTableAccess(property)) {
+        return ReflectGet(target, property, target);
+      }
+      guardProcessExceptionEvent(property, "process._events.get");
+      guardProcessMetaEvent(property, "process._events.get");
+      guardProcessSignalEvent(property, "inspect", "process._events.get");
+      return ReflectGet(target, property, target);
+    },
+    set(target, property, value) {
+      if (hasTrustedMetaTableAccess(property)) {
+        return ReflectSet(target, property, value, target);
+      }
+      guardProcessExceptionEvent(property, "process._events.set");
+      guardProcessMetaEvent(property, "process._events.set");
+      guardProcessSignalEvent(property, "control", "process._events.set");
+      return ReflectSet(target, property, value, target);
+    },
+    defineProperty(target, property, descriptor) {
+      if (hasTrustedMetaTableAccess(property)) {
+        return ReflectDefineProperty(target, property, descriptor);
+      }
+      guardProcessExceptionEvent(property, "process._events.defineProperty");
+      guardProcessMetaEvent(property, "process._events.defineProperty");
+      guardProcessSignalEvent(
+        property,
+        "control",
+        "process._events.defineProperty",
+      );
+      return ReflectDefineProperty(target, property, descriptor);
+    },
+    deleteProperty(target, property) {
+      if (hasTrustedMetaTableAccess(property)) {
+        return ReflectDeleteProperty(target, property);
+      }
+      guardProcessExceptionEvent(property, "process._events.deleteProperty");
+      guardProcessMetaEvent(property, "process._events.deleteProperty");
+      guardProcessSignalEvent(
+        property,
+        "control",
+        "process._events.deleteProperty",
+      );
+      return ReflectDeleteProperty(target, property);
+    },
+    has(target, property) {
+      if (hasTrustedMetaTableAccess(property)) {
+        return ReflectHas(target, property);
+      }
+      guardProcessExceptionEvent(property, "process._events.has");
+      guardProcessMetaEvent(property, "process._events.has");
+      guardProcessSignalEvent(property, "inspect", "process._events.has");
+      return ReflectHas(target, property);
+    },
+    ownKeys(target) {
+      let protectedEvent;
+      if (ReflectHas(target, "uncaughtException")) {
+        protectedEvent = "uncaughtException";
+      } else if (ReflectHas(target, "uncaughtExceptionMonitor")) {
+        protectedEvent = "uncaughtExceptionMonitor";
+      } else if (ReflectHas(target, "unhandledRejection")) {
+        protectedEvent = "unhandledRejection";
+      } else if (ReflectHas(target, "rejectionHandled")) {
+        protectedEvent = "rejectionHandled";
+      } else if (ReflectHas(target, "multipleResolves")) {
+        protectedEvent = "multipleResolves";
+      }
+      if (protectedEvent !== undefined) {
+        guardProcessExceptionEvent(
+          protectedEvent,
+          "process._events.ownKeys",
+        );
+      }
+      if (
+        ReflectHas(target, "newListener") ||
+        ReflectHas(target, "removeListener")
+      ) {
+        guardProcessMetaEvent("newListener", "process._events.ownKeys");
+      }
+      const keys = ReflectOwnKeys(target);
+      for (const key of new SafeArrayIterator(keys)) {
+        if (typeof key === "string" && StringPrototypeStartsWith(key, "SIG")) {
+          guardProcessSignalEvent(key, "inspect", "process._events.ownKeys");
+          break;
+        }
+      }
+      return keys;
+    },
+    getOwnPropertyDescriptor(target, property) {
+      guardProcessExceptionEvent(
+        property,
+        "process._events.getOwnPropertyDescriptor",
+      );
+      guardProcessMetaEvent(
+        property,
+        "process._events.getOwnPropertyDescriptor",
+      );
+      guardProcessSignalEvent(
+        property,
+        "inspect",
+        "process._events.getOwnPropertyDescriptor",
+      );
+      return ReflectGetOwnPropertyDescriptor(target, property);
+    },
+  });
+}
+
+guardedProcessEvents = wrapProcessEvents(processEventsStore);
+ObjectDefineProperty(process, "_events", {
+  __proto__: null,
+  configurable: false,
+  enumerable: true,
+  get() {
+    return guardedProcessEvents;
+  },
+  set(value) {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "process-events",
+      "process._events=set",
+    );
+    processEventsStore = value;
+    guardedProcessEvents = wrapProcessEvents(value);
+  },
+});
 
 // `node:process` exposes `stdin`/`stdout`/`stderr` as ESM named exports. The
 // underlying streams are constructed lazily via accessor properties installed
@@ -1293,6 +1722,7 @@ function setUncaughtExceptionCaptureCallbackImpl(fn: any) {
 internals.nodeProcessSetUncaughtExceptionCaptureCallback =
   setUncaughtExceptionCaptureCallbackImpl;
 
+// deno-lint-ignore no-explicit-any
 process.setUncaughtExceptionCaptureCallback = function (fn: any) {
   op_oden_guard_deny_only_surface(
     "runtime",
@@ -1304,19 +1734,52 @@ process.setUncaughtExceptionCaptureCallback = function (fn: any) {
 };
 
 process.hasUncaughtExceptionCaptureCallback = function () {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "uncaught-exception-capture",
+    "process.hasUncaughtExceptionCaptureCallback",
+  );
   return _uncaughtExceptionCaptureFn !== null;
 };
+
+// Exception dispatch is a runtime responsibility. It must reach listeners
+// installed by root even when the exception originated in package code, while
+// the public process.emit/listenerCount routes still re-check the caller.
+function emitProcessExceptionInternal(event: string, ...args: unknown[]) {
+  return withTrustedProcessEventAccess(
+    event,
+    () =>
+      ReflectApply(
+        EventEmitter.prototype.emit,
+        process,
+        ArrayPrototypeConcat([event], args),
+      ),
+  );
+}
+
+function processExceptionListenerCountInternal(event: string) {
+  return withTrustedProcessEventAccess(
+    event,
+    () =>
+      FunctionPrototypeCall(
+        EventEmitter.prototype.listenerCount,
+        process,
+        event,
+      ),
+  );
+}
 
 // deno-lint-ignore no-explicit-any
 function fatalExceptionImpl(err: any, fromPromise?: boolean) {
   const origin = fromPromise ? "unhandledRejection" : "uncaughtException";
-  process.emit("uncaughtExceptionMonitor", err, origin);
+  emitProcessExceptionInternal("uncaughtExceptionMonitor", err, origin);
   if (_uncaughtExceptionCaptureFn !== null) {
     _uncaughtExceptionCaptureFn(err);
     return true;
   }
-  if (process.listenerCount("uncaughtException") > 0) {
-    process.emit("uncaughtException", err, origin);
+  if (processExceptionListenerCountInternal("uncaughtException") > 0) {
+    emitProcessExceptionInternal("uncaughtException", err, origin);
     return true;
   }
   return false;
@@ -1337,11 +1800,25 @@ const guardedFatalException = function (err: any, fromPromise?: boolean) {
   );
   return fatalExceptionHandler(err, fromPromise);
 };
+internals.nodeProcessFatalException = function (
+  err: unknown,
+  fromPromise?: boolean,
+) {
+  return typeof fatalExceptionHandler === "function"
+    ? fatalExceptionHandler(err, fromPromise)
+    : false;
+};
 ObjectDefineProperty(process, "_fatalException", {
   __proto__: null,
   configurable: true,
   enumerable: true,
   get() {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "fatal-exception-handler",
+      "process._fatalException=get",
+    );
     return typeof fatalExceptionHandler === "function"
       ? guardedFatalException
       : fatalExceptionHandler;
@@ -1493,6 +1970,163 @@ process.versions = versions;
 /** https://nodejs.org/api/process.html#process_process_emitwarning_warning_options */
 process.emitWarning = emitWarning;
 
+const guardedBindingValues = new SafeWeakMap<object, object>();
+const guardedBindingTargets = new SafeWeakMap<object, object>();
+
+function guardBindingUse(path: string, api: string) {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    path,
+    api,
+  );
+}
+
+// A binding object obtained by root must not become ambient authority merely
+// because it is later passed into package code. Recursively guard every use,
+// including typed-array element access and extracted binding functions.
+// deno-lint-ignore no-explicit-any
+function guardBindingValue(value: any, path: string): any {
+  if (
+    value === null ||
+    (typeof value !== "object" && typeof value !== "function")
+  ) {
+    return value;
+  }
+  const cached = guardedBindingValues.get(value);
+  if (cached !== undefined) return cached;
+
+  const proxy = new Proxy(value, {
+    get(target, property) {
+      const targetPath = `${path}.${String(property)}`;
+      guardBindingUse(targetPath, "process.binding.get");
+      return guardBindingValue(
+        ReflectGet(target, property, target),
+        targetPath,
+      );
+    },
+    set(target, property, nextValue) {
+      const targetPath = `${path}.${String(property)}`;
+      guardBindingUse(targetPath, "process.binding.set");
+      return ReflectSet(
+        target,
+        property,
+        guardedBindingTargets.get(nextValue) ?? nextValue,
+        target,
+      );
+    },
+    apply(target, thisArg, args) {
+      guardBindingUse(path, "process.binding.call");
+      const rawThis = guardedBindingTargets.get(thisArg) ?? thisArg;
+      const rawArgs = [];
+      for (let i = 0; i < args.length; i++) {
+        ArrayPrototypePush(
+          rawArgs,
+          guardedBindingTargets.get(args[i]) ?? args[i],
+        );
+      }
+      return guardBindingValue(ReflectApply(target, rawThis, rawArgs), path);
+    },
+    construct(target, args, newTarget) {
+      guardBindingUse(path, "process.binding.construct");
+      const rawArgs = [];
+      for (let i = 0; i < args.length; i++) {
+        ArrayPrototypePush(
+          rawArgs,
+          guardedBindingTargets.get(args[i]) ?? args[i],
+        );
+      }
+      return guardBindingValue(
+        ReflectConstruct(
+          target,
+          rawArgs,
+          guardedBindingTargets.get(newTarget) ?? newTarget,
+        ),
+        path,
+      );
+    },
+    defineProperty(target, property, descriptor) {
+      guardBindingUse(
+        `${path}.${String(property)}`,
+        "process.binding.defineProperty",
+      );
+      return ReflectDefineProperty(target, property, descriptor);
+    },
+    deleteProperty(target, property) {
+      guardBindingUse(
+        `${path}.${String(property)}`,
+        "process.binding.deleteProperty",
+      );
+      return ReflectDeleteProperty(target, property);
+    },
+    has(target, property) {
+      guardBindingUse(`${path}.${String(property)}`, "process.binding.has");
+      return ReflectHas(target, property);
+    },
+    ownKeys(target) {
+      guardBindingUse(path, "process.binding.ownKeys");
+      return ReflectOwnKeys(target);
+    },
+    getOwnPropertyDescriptor(target, property) {
+      const targetPath = `${path}.${String(property)}`;
+      guardBindingUse(targetPath, "process.binding.getOwnPropertyDescriptor");
+      const descriptor = ReflectGetOwnPropertyDescriptor(target, property);
+      if (descriptor === undefined) return undefined;
+      // deno-lint-ignore no-explicit-any
+      const wrappedDescriptor: any = {
+        __proto__: null,
+        configurable: descriptor.configurable,
+        enumerable: descriptor.enumerable,
+      };
+      if (ReflectHas(descriptor, "value")) {
+        if (
+          descriptor.configurable === false &&
+          descriptor.writable === false &&
+          descriptor.value !== null &&
+          (typeof descriptor.value === "object" ||
+            typeof descriptor.value === "function")
+        ) {
+          throw new TypeError(
+            `Cannot safely expose non-configurable binding property ${targetPath}`,
+          );
+        }
+        wrappedDescriptor.value = guardBindingValue(
+          descriptor.value,
+          targetPath,
+        );
+        wrappedDescriptor.writable = descriptor.writable;
+      } else {
+        wrappedDescriptor.get = guardBindingValue(
+          descriptor.get,
+          `${targetPath}.get`,
+        );
+        wrappedDescriptor.set = guardBindingValue(
+          descriptor.set,
+          `${targetPath}.set`,
+        );
+      }
+      return wrappedDescriptor;
+    },
+    getPrototypeOf(target) {
+      guardBindingUse(path, "process.binding.getPrototypeOf");
+      return guardBindingValue(
+        ReflectGetPrototypeOf(target),
+        `${path}.[[Prototype]]`,
+      );
+    },
+    setPrototypeOf(target, prototype) {
+      guardBindingUse(path, "process.binding.setPrototypeOf");
+      return ReflectSetPrototypeOf(
+        target,
+        guardedBindingTargets.get(prototype) ?? prototype,
+      );
+    },
+  });
+  guardedBindingValues.set(value, proxy);
+  guardedBindingTargets.set(proxy, value);
+  return proxy;
+}
+
 process.binding = (name: BindingName) => {
   op_oden_guard_deny_only_surface(
     "runtime",
@@ -1500,7 +2134,7 @@ process.binding = (name: BindingName) => {
     String(name),
     "process.binding",
   );
-  return getBinding(name);
+  return guardBindingValue(getBinding(name), `binding:${String(name)}`);
 };
 
 /** https://nodejs.org/api/process.html#processumaskmask */
@@ -1683,7 +2317,7 @@ let uncaughtExceptionMonitorListenerCount = 0;
 let beforeExitListenerCount = 0;
 let exitListenerCount = 0;
 
-process.on("newListener", (event: string) => {
+addProcessListenerInternal(process, "newListener", (event: string) => {
   switch (event) {
     case "unhandledRejection":
       unhandledRejectionListenerCount++;
@@ -1707,9 +2341,9 @@ process.on("newListener", (event: string) => {
       return;
   }
   synchronizeListeners();
-});
+}, false);
 
-process.on("removeListener", (event: string) => {
+addProcessListenerInternal(process, "removeListener", (event: string) => {
   switch (event) {
     case "unhandledRejection":
       unhandledRejectionListenerCount--;
@@ -1733,7 +2367,7 @@ process.on("removeListener", (event: string) => {
       return;
   }
   synchronizeListeners();
-});
+}, false);
 
 function processOnError(event: ErrorEvent) {
   if (typeof fatalExceptionHandler === "function") {
@@ -1831,7 +2465,11 @@ function synchronizeListeners() {
       }
 
       event.preventDefault();
-      process.emit("unhandledRejection", event.reason, event.promise);
+      emitProcessExceptionInternal(
+        "unhandledRejection",
+        event.reason,
+        event.promise,
+      );
     };
   } else {
     internals.nodeProcessUnhandledRejectionCallback = undefined;
@@ -1841,7 +2479,11 @@ function synchronizeListeners() {
   // last.
   if (rejectionHandledListenerCount > 0) {
     internals.nodeProcessRejectionHandledCallback = (event) => {
-      process.emit("rejectionHandled", event.reason, event.promise);
+      emitProcessExceptionInternal(
+        "rejectionHandled",
+        event.reason,
+        event.promise,
+      );
     };
   } else {
     internals.nodeProcessRejectionHandledCallback = undefined;
@@ -1936,7 +2578,7 @@ internals.__bootstrapNodeProcess = function (
     const makeStdioWriteStream = (fd, ioStream, name) => {
       let s;
       if (ioStream.isTerminal()) {
-        const { WriteStream, addSigwinchListener } = lazyTtyMod();
+        const { WriteStream } = lazyTtyMod();
         s = new WriteStream(fd);
         // For supporting legacy API we put the FD here.
         s.fd = fd;
@@ -1953,7 +2595,6 @@ internals.__bootstrapNodeProcess = function (
             nextTick(() => this.emit("close"));
           }
         };
-        addSigwinchListener(s);
       } else {
         s = lazyStreamsMod().createWritableStdioStream(ioStream, name);
       }

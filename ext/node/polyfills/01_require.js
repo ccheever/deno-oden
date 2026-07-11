@@ -118,8 +118,10 @@ const buffer = core.loadExtScript("ext:deno_node/internal/buffer.mjs").default;
 const cluster = core.loadExtScript("ext:deno_node/cluster.ts").default;
 import console from "node:console";
 const constants = core.loadExtScript("ext:deno_node/constants.ts").default;
-const diagnosticsChannel =
-  core.loadExtScript("ext:deno_node/diagnostics_channel.js").default;
+const diagnosticsChannelModule = core.loadExtScript(
+  "ext:deno_node/diagnostics_channel.js",
+);
+const diagnosticsChannel = diagnosticsChannelModule.default;
 const dns = core.loadExtScript("ext:deno_node/dns.ts").default;
 const dnsPromises = core.loadExtScript(
   "ext:deno_node/dns/promises.ts",
@@ -1669,9 +1671,9 @@ Module._load = function (request, parent, isMain) {
       isMain &&
       parent === null &&
       typeof process !== "undefined" &&
-      typeof process._fatalException === "function"
+      typeof internals.nodeProcessFatalException === "function"
     ) {
-      if (process._fatalException(err)) {
+      if (internals.nodeProcessFatalException(err)) {
         return module.exports;
       }
       if (err !== null && typeof err === "object") {
@@ -2029,7 +2031,9 @@ Module.prototype.load = function (filename) {
 
 // Loads a module at the given file path. Returns that module's
 // `exports` property.
-const moduleRequireDc = diagnosticsChannel.tracingChannel("module.require");
+const moduleRequireDc = diagnosticsChannelModule.tracingChannelInternal(
+  "module.require",
+);
 
 Module.prototype.require = function (id) {
   if (typeof id !== "string") {

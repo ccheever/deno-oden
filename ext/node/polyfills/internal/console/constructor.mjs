@@ -56,7 +56,7 @@ const {
 
 // Mock trace for now
 const trace = () => {};
-const { channel: createDiagnosticsChannel } = core.loadExtScript(
+const { channelInternal: createDiagnosticsChannel } = core.loadExtScript(
   "ext:deno_node/diagnostics_channel.js",
 );
 const onConsoleLog = createDiagnosticsChannel("console.log");

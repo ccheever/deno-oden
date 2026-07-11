@@ -30,10 +30,14 @@ const {
   ERR_TTY_INIT_FAILED,
   errnoException,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
-const { validateInteger } = core.loadExtScript(
+const { validateFunction, validateInteger } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
 );
-import { op_tty_check_fd_permission, TTY } from "ext:core/ops";
+import {
+  op_oden_guard_deny_only_surface,
+  op_tty_check_fd_permission,
+  TTY,
+} from "ext:core/ops";
 const { isatty } = core.loadExtScript("ext:deno_node/tty.js");
 const lazyNet = core.createLazyLoader("node:net");
 const {
@@ -280,7 +284,17 @@ function onSigwinch() {
   }
 }
 
-function addSigwinchListener(stream) {
+function guardSigwinch(action) {
+  // @ref LLP 0019#system-and-process-mutation [implements]
+  op_oden_guard_deny_only_surface(
+    "process",
+    "signal",
+    `${action}:SIGWINCH`,
+    `node:tty.WriteStream.${action}`,
+  );
+}
+
+function addSigwinchListenerInternal(stream) {
   SetPrototypeAdd(sigwinchStreams, stream);
   if (!sigwinchRegistered) {
     sigwinchRegistered = true;
@@ -288,7 +302,7 @@ function addSigwinchListener(stream) {
   }
 }
 
-function removeSigwinchListener(stream) {
+function removeSigwinchListenerInternal(stream) {
   SetPrototypeDelete(sigwinchStreams, stream);
   if (SetPrototypeGetSize(sigwinchStreams) === 0 && sigwinchRegistered) {
     sigwinchRegistered = false;
@@ -353,9 +367,24 @@ function ensureWriteStreamPrototype() {
 WriteStream.prototype.isTTY = true;
 
 WriteStream.prototype.on = function on(event, listener) {
-  FunctionPrototypeCall(lazyNet().Socket.prototype.on, this, event, listener);
-  if (event === "resize" && this.listenerCount("resize") === 1) {
-    addSigwinchListener(this);
+  if (event === "resize") {
+    validateFunction(listener, "listener");
+    guardSigwinch("listen");
+    const first = this.listenerCount("resize") === 0;
+    if (first) addSigwinchListenerInternal(this);
+    try {
+      FunctionPrototypeCall(
+        lazyNet().Socket.prototype.on,
+        this,
+        event,
+        listener,
+      );
+    } catch (err) {
+      if (first) removeSigwinchListenerInternal(this);
+      throw err;
+    }
+  } else {
+    FunctionPrototypeCall(lazyNet().Socket.prototype.on, this, event, listener);
   }
   return this;
 };
@@ -364,10 +393,42 @@ WriteStream.prototype.addListener = function addListener(event, listener) {
   return this.on(event, listener);
 };
 
+WriteStream.prototype.prependListener = function prependListener(
+  event,
+  listener,
+) {
+  if (event === "resize") {
+    validateFunction(listener, "listener");
+    guardSigwinch("listen");
+    const first = this.listenerCount("resize") === 0;
+    if (first) addSigwinchListenerInternal(this);
+    try {
+      FunctionPrototypeCall(
+        lazyNet().Socket.prototype.prependListener,
+        this,
+        event,
+        listener,
+      );
+    } catch (err) {
+      if (first) removeSigwinchListenerInternal(this);
+      throw err;
+    }
+  } else {
+    FunctionPrototypeCall(
+      lazyNet().Socket.prototype.prependListener,
+      this,
+      event,
+      listener,
+    );
+  }
+  return this;
+};
+
 WriteStream.prototype.removeListener = function removeListener(
   event,
   listener,
 ) {
+  if (event === "resize") guardSigwinch("unlisten");
   FunctionPrototypeCall(
     lazyNet().Socket.prototype.removeListener,
     this,
@@ -375,7 +436,7 @@ WriteStream.prototype.removeListener = function removeListener(
     listener,
   );
   if (event === "resize" && this.listenerCount("resize") === 0) {
-    removeSigwinchListener(this);
+    removeSigwinchListenerInternal(this);
   }
   return this;
 };
@@ -385,13 +446,14 @@ WriteStream.prototype.off = function off(event, listener) {
 };
 
 WriteStream.prototype.removeAllListeners = function removeAllListeners(event) {
+  if (!event || event === "resize") guardSigwinch("unlisten");
   FunctionPrototypeCall(
     lazyNet().Socket.prototype.removeAllListeners,
     this,
     event,
   );
   if (!event || event === "resize") {
-    removeSigwinchListener(this);
+    removeSigwinchListenerInternal(this);
   }
   return this;
 };
@@ -465,5 +527,5 @@ WriteStream.prototype.getColorDepth = function getColorDepth_(env) {
   return getColorDepth(env);
 };
 
-export { addSigwinchListener, isatty, WriteStream };
+export { isatty, WriteStream };
 export default { getColorDepth, hasColors, isatty, WriteStream };

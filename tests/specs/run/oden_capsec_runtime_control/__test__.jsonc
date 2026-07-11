@@ -15,6 +15,13 @@
       "output": "deny_matrix.out",
       "exitCode": 0
     },
+    "trusted_runtime_delivers_package_exception": {
+      "args": "run --allow-all trusted_exception_child.cjs",
+      "if": "unix",
+      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json" },
+      "output": "trusted_exception_child.out",
+      "exitCode": 0
+    },
     "inspector_requires_exact_static_package_row": {
       "args": "run --allow-all inspector_matrix.js",
       "envs": { "ODEN_CAPSEC_POLICY": "capsec_inspector.json" },

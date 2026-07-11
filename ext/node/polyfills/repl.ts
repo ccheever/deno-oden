@@ -3,7 +3,7 @@
 
 // deno-lint-ignore-file no-this-alias no-unused-vars no-explicit-any
 
-import { core, primordials } from "ext:core/mod.js";
+import { core, internals, primordials } from "ext:core/mod.js";
 const {
   ArrayIsArray,
   ArrayPrototypeFilter,
@@ -188,12 +188,19 @@ function _newListenerGuard(event: string, listener: any) {
 }
 function _addNewListenerGuard() {
   if (_newListenerGuardCount++ === 0) {
-    process.prependListener("newListener", _newListenerGuard);
+    internals.nodeProcessAddListenerInternal(
+      "newListener",
+      _newListenerGuard,
+      true,
+    );
   }
 }
 function _removeNewListenerGuard() {
   if (--_newListenerGuardCount === 0) {
-    process.removeListener("newListener", _newListenerGuard);
+    internals.nodeProcessRemoveListenerInternal(
+      "newListener",
+      _newListenerGuard,
+    );
   }
 }
 

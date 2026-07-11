@@ -30,6 +30,7 @@ const {
   Int8Array,
   ObjectFreeze,
   ObjectPrototypeToString,
+  SafeWeakMap,
   String,
   StringPrototypePadStart,
   Symbol,
@@ -537,43 +538,50 @@ function arrayBufferViewIndexToType(index: number): any {
   return undefined;
 }
 
-const kGCHandle = Symbol("kGCHandle");
-const kGCStartTime = Symbol("kGCStartTime");
+const gcProfilerStates = new SafeWeakMap();
 
 class GCProfiler {
-  [kGCHandle]: object | null = null;
-  [kGCStartTime]: number = 0;
+  constructor() {
+    gcProfilerStates.set(this, {
+      __proto__: null,
+      handle: null,
+      startTime: 0,
+    });
+  }
 
   start() {
     guardV8("GCProfiler.start");
-    if (this[kGCHandle] !== null) return;
+    const state = gcProfilerStates.get(this);
+    if (state.handle !== null) return;
     const handle = op_v8_gc_profiler_new();
-    this[kGCStartTime] = DateNow();
+    state.startTime = DateNow();
     op_v8_gc_profiler_start(handle);
-    this[kGCHandle] = handle;
+    state.handle = handle;
   }
 
   stop() {
-    const handle = this[kGCHandle];
+    const state = gcProfilerStates.get(this);
+    const handle = state.handle;
     if (handle === null) return undefined;
     guardV8("GCProfiler.stop");
-    this[kGCHandle] = null;
+    state.handle = null;
     const endTime = DateNow();
     const result = op_v8_gc_profiler_stop(handle);
     if (result === null) return undefined;
     return {
       version: 1,
-      startTime: this[kGCStartTime],
+      startTime: state.startTime,
       endTime,
       statistics: result.statistics,
     };
   }
 
   [SymbolDispose]() {
-    const handle = this[kGCHandle];
+    const state = gcProfilerStates.get(this);
+    const handle = state.handle;
     if (handle === null) return undefined;
     guardV8("GCProfiler.dispose");
-    this[kGCHandle] = null;
+    state.handle = null;
     // Ignore the report; dispose() must return undefined.
     op_v8_gc_profiler_stop(handle);
     return undefined;

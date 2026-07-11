@@ -107,7 +107,9 @@ const { defaultTriggerAsyncIdScope } = core.loadExtScript(
   "ext:deno_node/internal/async_hooks.ts",
 );
 const { kNeedDrain } = core.loadExtScript("ext:deno_node/internal/http.ts");
-const { channel } = core.loadExtScript("ext:deno_node/diagnostics_channel.js");
+const { channelInternal: channel } = core.loadExtScript(
+  "ext:deno_node/diagnostics_channel.js",
+);
 const { enqueueNodePerformanceEntry } = core.loadExtScript(
   "ext:deno_node/perf_hooks.js",
 );

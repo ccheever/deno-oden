@@ -34,6 +34,7 @@ const {
   SafeFinalizationRegistry,
   SafeMap,
   SafeMapIterator,
+  SafeWeakMap,
   SymbolHasInstance,
 } = primordials;
 const { WeakReference } = core.loadExtScript(
@@ -75,17 +76,19 @@ class WeakRefMap extends SafeMap {
 }
 
 function markActive(channel) {
+  const state = channelStates.get(channel);
   ObjectSetPrototypeOf(channel, ActiveChannel.prototype);
-  channel._subscribers = [];
-  channel._stores = new SafeMap();
+  state.subscribers = [];
+  state.stores = new SafeMap();
 }
 
 function maybeMarkInactive(channel) {
+  const state = channelStates.get(channel);
   // When there are no more active subscribers or bound, restore to fast prototype.
-  if (!channel._subscribers.length && !channel._stores.size) {
+  if (!state.subscribers.length && !state.stores.size) {
     ObjectSetPrototypeOf(channel, Channel.prototype);
-    channel._subscribers = undefined;
-    channel._stores = undefined;
+    state.subscribers = undefined;
+    state.stores = undefined;
   }
 }
 
@@ -112,125 +115,166 @@ function wrapStoreRun(store, data, next, transform = defaultTransform) {
   };
 }
 
+function guardChannel(channel, api) {
+  const state = channelStates.get(channel);
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    String(state.name),
+    api,
+  );
+}
+
+function hasChannelSubscribers(channel) {
+  return channelStates.get(channel).subscribers !== undefined;
+}
+
+function publishChannel(channel, data) {
+  // Capture the subscriber array up front so that subscribe/unsubscribe calls
+  // from inside a handler do not shift the snapshot being walked.
+  const state = channelStates.get(channel);
+  const subscribers = state.subscribers;
+  for (let i = 0; i < (subscribers?.length || 0); i++) {
+    try {
+      const onMessage = subscribers[i];
+      onMessage(data, state.name);
+    } catch (err) {
+      nextTick(() => {
+        throw err;
+      });
+    }
+  }
+}
+
+function runChannelStores(channel, data, fn, thisArg, args) {
+  const state = channelStates.get(channel);
+  let run = () => {
+    publishChannel(channel, data);
+    return ReflectApply(fn, thisArg, args);
+  };
+
+  for (const entry of new SafeMapIterator(state.stores ?? new SafeMap())) {
+    const store = entry[0];
+    const transform = entry[1];
+    run = wrapStoreRun(store, data, run, transform);
+  }
+
+  return run();
+}
+
 class ActiveChannel {
   subscribe(subscription) {
+    const state = channelStates.get(this);
     // @ref LLP 0019#runtime-and-memory-inspection [implements]
     op_oden_guard_deny_only_surface(
       "runtime",
       "inspect",
-      String(this.name),
+      String(state.name),
       "node:diagnostics_channel.subscribe",
     );
     validateFunction(subscription, "subscription");
     // Replace the subscriber array with a copy so any in-flight publish that
     // captured the previous reference keeps iterating over the snapshot
     // it started with.
-    this._subscribers = ArrayPrototypeSlice(this._subscribers);
-    ArrayPrototypePush(this._subscribers, subscription);
-    channels.incRef(this.name);
+    state.subscribers = ArrayPrototypeSlice(state.subscribers);
+    ArrayPrototypePush(state.subscribers, subscription);
+    channels.incRef(state.name);
   }
 
   unsubscribe(subscription) {
+    const state = channelStates.get(this);
     op_oden_guard_deny_only_surface(
       "runtime",
       "inspect",
-      String(this.name),
+      String(state.name),
       "node:diagnostics_channel.unsubscribe",
     );
-    const index = ArrayPrototypeIndexOf(this._subscribers, subscription);
+    const index = ArrayPrototypeIndexOf(state.subscribers, subscription);
     if (index === -1) return false;
 
     // Build a new array via slice + pushApply so a concurrent publish keeps
     // iterating over its original snapshot - matches Node and lets
     // unsubscribe-during-publish still deliver to the remaining subscribers
     // in that publish call.
-    const before = ArrayPrototypeSlice(this._subscribers, 0, index);
-    const after = ArrayPrototypeSlice(this._subscribers, index + 1);
-    this._subscribers = before;
-    ArrayPrototypePushApply(this._subscribers, after);
+    const before = ArrayPrototypeSlice(state.subscribers, 0, index);
+    const after = ArrayPrototypeSlice(state.subscribers, index + 1);
+    state.subscribers = before;
+    ArrayPrototypePushApply(state.subscribers, after);
 
-    channels.decRef(this.name);
+    channels.decRef(state.name);
     maybeMarkInactive(this);
 
     return true;
   }
 
   bindStore(store, transform) {
+    const state = channelStates.get(this);
     op_oden_guard_deny_only_surface(
       "runtime",
       "inspect",
-      String(this.name),
+      String(state.name),
       "node:diagnostics_channel.bindStore",
     );
-    const replacing = this._stores.has(store);
-    if (!replacing) channels.incRef(this.name);
-    this._stores.set(store, transform);
+    const replacing = state.stores.has(store);
+    if (!replacing) channels.incRef(state.name);
+    state.stores.set(store, transform);
   }
 
   unbindStore(store) {
+    const state = channelStates.get(this);
     op_oden_guard_deny_only_surface(
       "runtime",
       "inspect",
-      String(this.name),
+      String(state.name),
       "node:diagnostics_channel.unbindStore",
     );
-    if (!this._stores.has(store)) {
+    if (!state.stores.has(store)) {
       return false;
     }
 
-    this._stores.delete(store);
+    state.stores.delete(store);
 
-    channels.decRef(this.name);
+    channels.decRef(state.name);
     maybeMarkInactive(this);
 
     return true;
   }
 
   get hasSubscribers() {
+    guardChannel(this, "node:diagnostics_channel.hasSubscribers");
     return true;
   }
 
   publish(data) {
-    // Capture the subscriber array up front so that subscribe/unsubscribe
-    // calls from inside a handler (which replace `this._subscribers` with a
-    // new array) don't shift or shrink the array we're walking.
-    const subscribers = this._subscribers;
-    for (let i = 0; i < (subscribers?.length || 0); i++) {
-      try {
-        const onMessage = subscribers[i];
-        onMessage(data, this.name);
-      } catch (err) {
-        nextTick(() => {
-          // TODO(bartlomieju): in Node.js this is using `triggerUncaughtException` API, need
-          // to clarify if we need that or if just throwing the error is enough here.
-          throw err;
-          // triggerUncaughtException(err, false);
-        });
-      }
-    }
+    guardChannel(this, "node:diagnostics_channel.publish");
+    publishChannel(this, data);
   }
 
   runStores(data, fn, thisArg, ...args) {
-    let run = () => {
-      this.publish(data);
-      return ReflectApply(fn, thisArg, args);
-    };
-
-    for (const entry of new SafeMapIterator(this._stores)) {
-      const store = entry[0];
-      const transform = entry[1];
-      run = wrapStoreRun(store, data, run, transform);
-    }
-
-    return run();
+    guardChannel(this, "node:diagnostics_channel.runStores");
+    return runChannelStores(this, data, fn, thisArg, args);
   }
 }
 
 class Channel {
-  constructor(name) {
+  constructor(name, trustedToken) {
+    if (trustedToken !== internalChannelToken) {
+      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        String(name),
+        "node:diagnostics_channel.Channel",
+      );
+    }
     this._subscribers = undefined;
     this._stores = undefined;
     this.name = name;
+    channelStates.set(this, {
+      __proto__: null,
+      name,
+      subscribers: undefined,
+      stores: undefined,
+    });
 
     channels.set(name, this);
   }
@@ -242,12 +286,7 @@ class Channel {
   }
 
   subscribe(subscription) {
-    op_oden_guard_deny_only_surface(
-      "runtime",
-      "inspect",
-      String(this.name),
-      "node:diagnostics_channel.subscribe",
-    );
+    guardChannel(this, "node:diagnostics_channel.subscribe");
     validateFunction(subscription, "subscription");
     markActive(this);
     this.subscribe(subscription);
@@ -258,12 +297,7 @@ class Channel {
   }
 
   bindStore(store, transform) {
-    op_oden_guard_deny_only_surface(
-      "runtime",
-      "inspect",
-      String(this.name),
-      "node:diagnostics_channel.bindStore",
-    );
+    guardChannel(this, "node:diagnostics_channel.bindStore");
     markActive(this);
     this.bindStore(store, transform);
   }
@@ -273,19 +307,34 @@ class Channel {
   }
 
   get hasSubscribers() {
+    guardChannel(this, "node:diagnostics_channel.hasSubscribers");
     return false;
   }
 
-  publish() {}
+  publish() {
+    guardChannel(this, "node:diagnostics_channel.publish");
+  }
 
   runStores(_data, fn, thisArg, ...args) {
+    guardChannel(this, "node:diagnostics_channel.runStores");
     return ReflectApply(fn, thisArg, args);
   }
 }
 
 const channels = new WeakRefMap();
+const channelStates = new SafeWeakMap();
+const internalChannelToken = { __proto__: null };
+const internalChannelFacades = new SafeWeakMap();
 
-function channel(name) {
+function channelImpl(name, trustedInternal) {
+  if (!trustedInternal) {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      String(name),
+      "node:diagnostics_channel.channel",
+    );
+  }
   const ch = channels.get(name);
   if (ch) return ch;
 
@@ -293,7 +342,38 @@ function channel(name) {
     throw new ERR_INVALID_ARG_TYPE("channel", ["string", "symbol"], name);
   }
 
-  return new Channel(name);
+  return new Channel(
+    name,
+    trustedInternal ? internalChannelToken : undefined,
+  );
+}
+
+function channel(name) {
+  return channelImpl(name, false);
+}
+
+// Node's own instrumentation runs on behalf of the package that triggered it.
+// Keep its publisher path closure-private so it can publish to a channel that
+// root subscribed to without making the public Channel object a transferable
+// bypass.
+function channelInternal(name) {
+  const ch = channelImpl(name, true);
+  let facade = internalChannelFacades.get(ch);
+  if (facade) return facade;
+  facade = {
+    __proto__: null,
+    get hasSubscribers() {
+      return hasChannelSubscribers(ch);
+    },
+    publish(data) {
+      return publishChannel(ch, data);
+    },
+    runStores(data, fn, thisArg, ...args) {
+      return runChannelStores(ch, data, fn, thisArg, args);
+    },
+  };
+  internalChannelFacades.set(ch, facade);
+  return facade;
 }
 
 function subscribe(name, subscription) {
@@ -305,6 +385,12 @@ function unsubscribe(name, subscription) {
 }
 
 function hasSubscribers(name) {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    String(name),
+    "node:diagnostics_channel.hasSubscribers",
+  );
   const ch = channels.get(name);
   if (!ch) return false;
 
@@ -348,11 +434,14 @@ function tracingChannelFrom(nameOrChannels, name) {
 }
 
 class TracingChannel {
-  constructor(nameOrChannels) {
+  constructor(nameOrChannels, trustedToken) {
+    const trustedInternal = trustedToken === internalChannelToken;
     for (const eventName of new SafeArrayIterator(traceEvents)) {
       ObjectDefineProperty(this, eventName, {
         __proto__: null,
-        value: tracingChannelFrom(nameOrChannels, eventName),
+        value: trustedInternal && typeof nameOrChannels === "string"
+          ? channelInternal(`tracing:${nameOrChannels}:${eventName}`)
+          : tracingChannelFrom(nameOrChannels, eventName),
       });
     }
   }
@@ -504,7 +593,17 @@ class TracingChannel {
 }
 
 function tracingChannel(nameOrChannels) {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    String(nameOrChannels),
+    "node:diagnostics_channel.tracingChannel",
+  );
   return new TracingChannel(nameOrChannels);
+}
+
+function tracingChannelInternal(name) {
+  return new TracingChannel(name, internalChannelToken);
 }
 
 return {
@@ -517,9 +616,11 @@ return {
     Channel,
   },
   channel,
+  channelInternal,
   hasSubscribers,
   subscribe,
   tracingChannel,
+  tracingChannelInternal,
   unsubscribe,
   Channel,
 };
