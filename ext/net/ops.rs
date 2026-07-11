@@ -211,7 +211,8 @@ pub(crate) fn accept_err(e: std::io::Error) -> NetError {
 pub async fn op_net_accept_tcp(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
-) -> Result<(ResourceId, IpAddr, IpAddr, Option<Fd>), NetError> {
+) -> Result<(ResourceId, IpAddr, IpAddr, Option<Fd>, Option<String>), NetError>
+{
   let resource = state
     .borrow()
     .resource_table
@@ -237,18 +238,21 @@ pub async fn op_net_accept_tcp(
   let local_addr = tcp_stream.local_addr()?;
   let remote_addr = tcp_stream.peer_addr()?;
 
+  let resource = TcpStreamResource::new_with_network_peer(
+    tcp_stream.into_split(),
+    remote_addr,
+  );
+  let protected_network_peer = resource
+    .protected_inspector_peer()
+    .map(|peer| peer.to_string());
   let mut state = state.borrow_mut();
-  let rid = state
-    .resource_table
-    .add(TcpStreamResource::new_with_network_peer(
-      tcp_stream.into_split(),
-      remote_addr,
-    ));
+  let rid = state.resource_table.add(resource);
   Ok((
     rid,
     IpAddr::from(local_addr),
     IpAddr::from(remote_addr),
     _fd_raw,
+    protected_network_peer,
   ))
 }
 
@@ -530,7 +534,7 @@ pub async fn op_net_connect_tcp(
   #[cppgc] net_perm_token: Option<&NetPermToken>,
   #[smi] resource_abort_id: Option<ResourceId>,
   #[serde] options: Option<TcpConnectOptions>,
-) -> Result<(ResourceId, IpAddr, IpAddr), NetError> {
+) -> Result<(ResourceId, IpAddr, IpAddr, Option<String>), NetError> {
   op_net_connect_tcp_inner(
     state,
     addr,
@@ -548,7 +552,7 @@ pub async fn op_net_connect_tcp_inner(
   net_perm_token: Option<&NetPermToken>,
   resource_abort_id: Option<ResourceId>,
   options: Option<TcpConnectOptions>,
-) -> Result<(ResourceId, IpAddr, IpAddr), NetError> {
+) -> Result<(ResourceId, IpAddr, IpAddr, Option<String>), NetError> {
   {
     let mut state_ = state.borrow_mut();
     // If token exists and the address matches to its resolved ips,
@@ -657,16 +661,22 @@ pub async fn op_net_connect_tcp_inner(
   let local_addr = tcp_stream.local_addr()?;
   let remote_addr = tcp_stream.peer_addr()?;
 
+  let resource = TcpStreamResource::new_with_network_peer(
+    tcp_stream.into_split(),
+    remote_addr,
+  );
+  let protected_network_peer = resource
+    .protected_inspector_peer()
+    .map(|peer| peer.to_string());
   let mut state_ = state.borrow_mut();
-  let rid =
-    state_
-      .resource_table
-      .add(TcpStreamResource::new_with_network_peer(
-        tcp_stream.into_split(),
-        remote_addr,
-      ));
+  let rid = state_.resource_table.add(resource);
 
-  Ok((rid, IpAddr::from(local_addr), IpAddr::from(remote_addr)))
+  Ok((
+    rid,
+    IpAddr::from(local_addr),
+    IpAddr::from(remote_addr),
+    protected_network_peer,
+  ))
 }
 
 struct UdpSocketResource {

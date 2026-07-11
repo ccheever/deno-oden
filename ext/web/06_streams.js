@@ -9,15 +9,18 @@
 (function () {
 const { core, internals, primordials } = __bootstrap;
 const {
+  getAsyncContext,
   isAnyArrayBuffer,
   isArrayBuffer,
   isSharedArrayBuffer,
   isTypedArray,
+  setAsyncContext,
 } = core;
 const {
   // TODO(mmastrac): use readAll
   op_read_all,
   op_pipe,
+  op_oden_callback_context,
   op_readable_stream_resource_allocate,
   op_readable_stream_resource_allocate_sized,
   op_readable_stream_resource_await_close,
@@ -112,23 +115,55 @@ const { assert, AssertionError } = core.loadExtScript(
 );
 
 // A native resource can enqueue bytes before a later caller consumes them.
-// Keep a closure-private per-use guard on the stream itself so reader calls,
-// BYOB reads, and tee/clone branches re-enter the authority decision before
-// any queued bytes are delivered.
+// Keep closure-private guards on both the stream and every byte-bearing queue
+// associated with it. Public/reflected Queue access re-enters the authority
+// decision; internal stream algorithms use a module-private token through
+// captured methods so hostile prototype replacement cannot steal that token.
+//
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- Stream object passage cannot transfer the operation actor, and every application-byte delivery rechecks authority.
 const readableStreamUseGuards = new SafeWeakMap();
 const readableStreamIteratorUseGuards = new SafeWeakMap();
+const readableQueueUseStreams = new SafeWeakMap();
+const readableReaderUseStreams = new SafeWeakMap();
+const readableControllerUseStreams = new SafeWeakMap();
+const readableControllerSizeAlgorithms = new SafeWeakMap();
+const readableSizeAlgorithmCallbackRecords = new SafeWeakMap();
+const readableBYOBRequestUseStreams = new SafeWeakMap();
+// Canonical graph identities must be recorded at construction, before a
+// stream is known to need protection; otherwise a reflected slot can be
+// replaced just before the protected transition. This adds lifecycle-time
+// bookkeeping to ordinary streams, but no default per-chunk map lookup.
+const canonicalReadableSlots = new SafeWeakMap();
+const protectedReadableSlots = new SafeWeakMap();
+const readableBYOBRequestViews = new SafeWeakMap();
+const readableResourceBackings = new SafeWeakMap();
+const readableResourceBackingUnrefables = new SafeWeakMap();
+const readableResourceBackingViews = new SafeWeakMap();
+const readableResourceBackingUnrefableViews = new SafeWeakMap();
+const protectedReadableResourceBackingSlots = new SafeWeakMap();
+const readableRequestDispatches = new SafeWeakMap();
+const defaultReadRequestDispatch = ObjectCreate(null);
+const byobReadIntoRequestDispatch = ObjectCreate(null);
+const asyncIteratorReadRequestDispatch = ObjectCreate(null);
+const readableRequestNoCloseValue = ObjectCreate(null);
+let hasProtectedReadableStreams = false;
+let hasProtectedReadableQueues = false;
 
 function setReadableStreamUseGuard(stream, guard) {
   assert(isReadableStream(stream));
+  hasProtectedReadableStreams = true;
   const existing = WeakMapPrototypeGet(readableStreamUseGuards, stream);
+  let effectiveGuard;
   if (existing === undefined || existing === guard) {
-    WeakMapPrototypeSet(readableStreamUseGuards, stream, guard);
+    effectiveGuard = guard;
   } else {
-    WeakMapPrototypeSet(readableStreamUseGuards, stream, () => {
+    effectiveGuard = () => {
       existing();
       guard();
-    });
+    };
   }
+  WeakMapPrototypeSet(readableStreamUseGuards, stream, effectiveGuard);
+  protectReadableStreamGraph(stream);
 }
 
 function runReadableStreamUseGuard(stream) {
@@ -337,18 +372,49 @@ function uponPromise(promise, onFulfilled, onRejected) {
   );
 }
 
+// Never store this token on an object: reflected symbols and properties are
+// attacker-visible. Only the captured helpers below can supply it.
+const queueInternalAccessToken = ObjectCreate(null);
+const queueCleanupAccessToken = ObjectCreate(null);
+
+function runReadableQueueUseGuards(queue, accessToken) {
+  // The token authenticates the captured internal call path; it is never an
+  // authorization bypass. Reflected internal algorithms can run under an
+  // untrusted actor, so both public and internal operations recheck.
+  void accessToken;
+  if (!hasProtectedReadableQueues) return;
+  const streams = WeakMapPrototypeGet(readableQueueUseStreams, queue);
+  if (streams === undefined) return;
+  for (let i = 0; i < streams.length; i++) {
+    runReadableStreamUseGuard(streams[i]);
+  }
+}
+
 class Queue {
   #head = null;
   #tail = null;
   #size = 0;
 
-  enqueue(value) {
-    return this.enqueueWithSize(value, 1);
+  isInternalQueue(accessToken = undefined) {
+    // The private-field read is the Queue brand check. Token possession alone
+    // must not authenticate a forged object supplied through a reflected slot.
+    void this.#size;
+    return accessToken === queueInternalAccessToken;
+  }
+
+  enqueue(value, accessToken = undefined) {
+    runReadableQueueUseGuards(this, accessToken);
+    return this.#enqueueWithSize(value, 1);
   }
 
   // Stores the chunk size inline in the list node instead of a separate
   // { value, size } wrapper, so a sized enqueue costs a single allocation.
-  enqueueWithSize(value, size) {
+  enqueueWithSize(value, size, accessToken = undefined) {
+    runReadableQueueUseGuards(this, accessToken);
+    return this.#enqueueWithSize(value, size);
+  }
+
+  #enqueueWithSize(value, size) {
     const node = { value, size, next: null };
     if (this.#head === null) {
       this.#head = node;
@@ -360,14 +426,20 @@ class Queue {
     return ++this.#size;
   }
 
-  dequeue() {
-    const node = this.dequeueNode();
+  dequeue(accessToken = undefined) {
+    runReadableQueueUseGuards(this, accessToken);
+    const node = this.#dequeueNode();
     return node === null ? null : node.value;
   }
 
   // Returns the internal { value, size, next } node. Only for use by
   // dequeueValue(), which needs both the value and its size.
-  dequeueNode() {
+  dequeueNode(accessToken = undefined) {
+    runReadableQueueUseGuards(this, accessToken);
+    return this.#dequeueNode();
+  }
+
+  #dequeueNode() {
     const node = this.#head;
     if (node === null) {
       return null;
@@ -381,7 +453,8 @@ class Queue {
     return node;
   }
 
-  peek() {
+  peek(accessToken = undefined) {
+    runReadableQueueUseGuards(this, accessToken);
     if (this.#head === null) {
       return null;
     }
@@ -390,8 +463,125 @@ class Queue {
   }
 
   get size() {
+    runReadableQueueUseGuards(this, undefined);
     return this.#size;
   }
+
+  getSize(accessToken = undefined) {
+    runReadableQueueUseGuards(this, accessToken);
+    return this.#size;
+  }
+
+  cleanupSize(accessToken = undefined) {
+    if (accessToken !== queueCleanupAccessToken) {
+      throw new TypeError("Invalid readable queue cleanup access");
+    }
+    return this.#size;
+  }
+
+  cleanupPeek(accessToken = undefined) {
+    if (accessToken !== queueCleanupAccessToken) {
+      throw new TypeError("Invalid readable queue cleanup access");
+    }
+    return this.#head === null ? null : this.#head.value;
+  }
+
+  cleanupDrain(callback, accessToken = undefined) {
+    if (accessToken !== queueCleanupAccessToken) {
+      throw new TypeError("Invalid readable queue cleanup access");
+    }
+    let node = this.#head;
+    this.#head = null;
+    this.#tail = null;
+    this.#size = 0;
+    while (node !== null) {
+      const next = node.next;
+      callback(node.value);
+      node = next;
+    }
+  }
+}
+
+// Capture every method used by internal algorithms before user code can
+// replace Queue.prototype. Passing the token through dynamic dispatch would
+// let an own/prototype override observe and replay it.
+const queuePrototypeEnqueue = Queue.prototype.enqueue;
+const queuePrototypeEnqueueWithSize = Queue.prototype.enqueueWithSize;
+const queuePrototypeDequeue = Queue.prototype.dequeue;
+const queuePrototypeDequeueNode = Queue.prototype.dequeueNode;
+const queuePrototypePeek = Queue.prototype.peek;
+const queuePrototypeGetSize = Queue.prototype.getSize;
+const queuePrototypeIsInternalQueue = Queue.prototype.isInternalQueue;
+const queuePrototypeCleanupSize = Queue.prototype.cleanupSize;
+const queuePrototypeCleanupPeek = Queue.prototype.cleanupPeek;
+const queuePrototypeCleanupDrain = Queue.prototype.cleanupDrain;
+
+function isInternalQueue(queue) {
+  try {
+    return ReflectApply(queuePrototypeIsInternalQueue, queue, [
+      queueInternalAccessToken,
+    ]);
+  } catch {
+    return false;
+  }
+}
+
+function queueEnqueue(queue, value) {
+  return ReflectApply(queuePrototypeEnqueue, queue, [
+    value,
+    queueInternalAccessToken,
+  ]);
+}
+
+function queueEnqueueWithSize(queue, value, size) {
+  return ReflectApply(queuePrototypeEnqueueWithSize, queue, [
+    value,
+    size,
+    queueInternalAccessToken,
+  ]);
+}
+
+function queueDequeue(queue) {
+  return ReflectApply(queuePrototypeDequeue, queue, [
+    queueInternalAccessToken,
+  ]);
+}
+
+function queueDequeueNode(queue) {
+  return ReflectApply(queuePrototypeDequeueNode, queue, [
+    queueInternalAccessToken,
+  ]);
+}
+
+function queuePeek(queue) {
+  return ReflectApply(queuePrototypePeek, queue, [
+    queueInternalAccessToken,
+  ]);
+}
+
+function queueSize(queue) {
+  return ReflectApply(queuePrototypeGetSize, queue, [
+    queueInternalAccessToken,
+  ]);
+}
+
+function queueCleanupSize(queue) {
+  return ReflectApply(queuePrototypeCleanupSize, queue, [
+    queueCleanupAccessToken,
+  ]);
+}
+
+function queueCleanupPeek(queue) {
+  return ReflectApply(queuePrototypeCleanupPeek, queue, [
+    queueCleanupAccessToken,
+  ]);
+}
+
+function queueCleanupDrain(queue, callback) {
+  return ReflectApply(queuePrototypeCleanupDrain, queue, [
+    callback,
+    queueCleanupAccessToken,
+  ]);
 }
 
 /**
@@ -584,6 +774,410 @@ const _writer = Symbol("[[writer]]");
 const _writeRequests = Symbol("[[writeRequests]]");
 const _brand = webidl.brand;
 
+function addReadableUseStream(map, object, stream) {
+  let streams = WeakMapPrototypeGet(map, object);
+  if (streams === undefined) {
+    streams = [stream];
+    WeakMapPrototypeSet(map, object, streams);
+    return;
+  }
+  for (let i = 0; i < streams.length; i++) {
+    if (streams[i] === stream) return;
+  }
+  ArrayPrototypePush(streams, stream);
+}
+
+function protectReadableQueue(queue, stream) {
+  if (queue === undefined) return;
+  if (typeof queue !== "object" || queue === null || !isInternalQueue(queue)) {
+    throw new TypeError("Cannot protect an invalid readable stream queue");
+  }
+  hasProtectedReadableQueues = true;
+  addReadableUseStream(readableQueueUseStreams, queue, stream);
+}
+
+function getCanonicalReadableSlots(object) {
+  let slots = WeakMapPrototypeGet(canonicalReadableSlots, object);
+  if (slots === undefined) {
+    slots = ObjectCreate(null);
+    WeakMapPrototypeSet(canonicalReadableSlots, object, slots);
+  }
+  return slots;
+}
+
+function getCanonicalReadableSlot(object, slot) {
+  const slots = WeakMapPrototypeGet(canonicalReadableSlots, object);
+  if (slots === undefined || !ReflectHas(slots, slot)) {
+    throw new TypeError("Missing canonical readable stream state");
+  }
+  return slots[slot];
+}
+
+function sealProtectedReadableSlot(object, slot) {
+  const canonicalSlots = WeakMapPrototypeGet(canonicalReadableSlots, object);
+  if (canonicalSlots === undefined || !ReflectHas(canonicalSlots, slot)) {
+    throw new TypeError("Cannot protect unknown readable stream state");
+  }
+  let slots = WeakMapPrototypeGet(protectedReadableSlots, object);
+  if (slots === undefined) {
+    slots = ObjectCreate(null);
+    WeakMapPrototypeSet(protectedReadableSlots, object, slots);
+  }
+  if (ReflectHas(slots, slot)) return;
+  slots[slot] = canonicalSlots[slot];
+  ObjectDefineProperty(object, slot, {
+    __proto__: null,
+    configurable: false,
+    enumerable: false,
+    get() {
+      return slots[slot];
+    },
+    set() {
+      throw new TypeError("Cannot replace protected readable stream state");
+    },
+  });
+}
+
+function setProtectedReadableSlot(object, slot, value) {
+  const canonicalSlots = getCanonicalReadableSlots(object);
+  canonicalSlots[slot] = value;
+  const slots = WeakMapPrototypeGet(protectedReadableSlots, object);
+  if (slots !== undefined && ReflectHas(slots, slot)) {
+    slots[slot] = value;
+  } else {
+    object[slot] = value;
+  }
+}
+
+function runReadableUseStreams(map, object) {
+  const streams = WeakMapPrototypeGet(map, object);
+  if (streams === undefined) return;
+  for (let i = 0; i < streams.length; i++) {
+    runReadableStreamUseGuard(streams[i]);
+  }
+}
+
+function runReadableReaderUseGuard(reader) {
+  runReadableUseStreams(readableReaderUseStreams, reader);
+}
+
+function runReadableControllerUseGuard(controller) {
+  runReadableUseStreams(readableControllerUseStreams, controller);
+}
+
+function runReadableBYOBRequestUseGuard(byobRequest) {
+  runReadableUseStreams(readableBYOBRequestUseStreams, byobRequest);
+}
+
+function getReadableBYOBRequestView(byobRequest) {
+  runReadableBYOBRequestUseGuard(byobRequest);
+  return WeakMapPrototypeGet(readableBYOBRequestViews, byobRequest);
+}
+
+function setReadableResourceBackingInternal(stream, backing) {
+  WeakMapPrototypeSet(readableResourceBackings, stream, backing);
+}
+
+function setReadableResourceBackingUnrefableInternal(stream, backing) {
+  WeakMapPrototypeSet(readableResourceBackingUnrefables, stream, backing);
+}
+
+function getReadableResourceBackingInternal(stream) {
+  return WeakMapPrototypeGet(readableResourceBackings, stream) ?? null;
+}
+
+function getReadableResourceBackingUnrefableInternal(stream) {
+  return WeakMapPrototypeGet(readableResourceBackingUnrefables, stream) ?? null;
+}
+
+function getReadableResourceBackingView(stream, unrefable) {
+  runReadableStreamUseGuard(stream);
+  const backing = unrefable
+    ? getReadableResourceBackingUnrefableInternal(stream)
+    : getReadableResourceBackingInternal(stream);
+  if (backing === null) return null;
+  const views = unrefable
+    ? readableResourceBackingUnrefableViews
+    : readableResourceBackingViews;
+  let view = WeakMapPrototypeGet(views, stream);
+  if (view !== undefined) return view;
+  view = ObjectCreate(null);
+  ObjectDefineProperty(view, "rid", {
+    __proto__: null,
+    configurable: false,
+    enumerable: true,
+    get() {
+      runReadableStreamUseGuard(stream);
+      const current = unrefable
+        ? getReadableResourceBackingUnrefableInternal(stream)
+        : getReadableResourceBackingInternal(stream);
+      return current?.rid;
+    },
+  });
+  ObjectDefineProperty(view, "autoClose", {
+    __proto__: null,
+    configurable: false,
+    enumerable: true,
+    get() {
+      runReadableStreamUseGuard(stream);
+      const current = unrefable
+        ? getReadableResourceBackingUnrefableInternal(stream)
+        : getReadableResourceBackingInternal(stream);
+      return current?.autoClose;
+    },
+  });
+  WeakMapPrototypeSet(views, stream, view);
+  return view;
+}
+
+function sealProtectedReadableResourceBackingSlot(stream, slot, unrefable) {
+  let slots = WeakMapPrototypeGet(
+    protectedReadableResourceBackingSlots,
+    stream,
+  );
+  if (slots === undefined) {
+    slots = ObjectCreate(null);
+    WeakMapPrototypeSet(protectedReadableResourceBackingSlots, stream, slots);
+  }
+  if (ReflectHas(slots, slot)) return;
+  ObjectDefineProperty(stream, slot, {
+    __proto__: null,
+    configurable: false,
+    enumerable: false,
+    get() {
+      return getReadableResourceBackingView(stream, unrefable);
+    },
+    set() {
+      throw new TypeError("Cannot replace protected readable stream backing");
+    },
+  });
+  slots[slot] = true;
+}
+
+function registerReadableLiteralRequest(request) {
+  WeakMapPrototypeSet(readableRequestDispatches, request, {
+    __proto__: null,
+    chunkSteps: request.chunkSteps,
+    closeSteps: request.closeSteps,
+    errorSteps: request.errorSteps,
+  });
+  return request;
+}
+
+function runReadableRequestStep(request, step, value) {
+  const dispatch = WeakMapPrototypeGet(readableRequestDispatches, request);
+  assert(dispatch !== undefined);
+  const args = step === "close" && value === readableRequestNoCloseValue
+    ? []
+    : [value];
+  if (dispatch === defaultReadRequestDispatch) {
+    const method = step === "chunk"
+      ? readableStreamDefaultReadRequestChunkSteps
+      : step === "close"
+      ? readableStreamDefaultReadRequestCloseSteps
+      : readableStreamDefaultReadRequestErrorSteps;
+    return ReflectApply(method, request, args);
+  }
+  if (dispatch === byobReadIntoRequestDispatch) {
+    const method = step === "chunk"
+      ? readableStreamBYOBReadIntoRequestChunkSteps
+      : step === "close"
+      ? readableStreamBYOBReadIntoRequestCloseSteps
+      : readableStreamBYOBReadIntoRequestErrorSteps;
+    return ReflectApply(method, request, args);
+  }
+  if (dispatch === asyncIteratorReadRequestDispatch) {
+    const method = step === "chunk"
+      ? readableStreamAsyncIteratorReadRequestChunkSteps
+      : step === "close"
+      ? readableStreamAsyncIteratorReadRequestCloseSteps
+      : readableStreamAsyncIteratorReadRequestErrorSteps;
+    return ReflectApply(method, request, args);
+  }
+  const method = step === "chunk"
+    ? dispatch.chunkSteps
+    : step === "close"
+    ? dispatch.closeSteps
+    : dispatch.errorSteps;
+  return ReflectApply(method, request, args);
+}
+
+function readableRequestChunkSteps(request, chunk) {
+  return runReadableRequestStep(request, "chunk", chunk);
+}
+
+function readableRequestCloseSteps(
+  request,
+  chunk = readableRequestNoCloseValue,
+) {
+  return runReadableRequestStep(request, "close", chunk);
+}
+
+function readableRequestErrorSteps(request, error) {
+  return runReadableRequestStep(request, "error", error);
+}
+
+function getReadableBYOBRequestViewInternal(byobRequest) {
+  return WeakMapPrototypeGet(readableBYOBRequestViews, byobRequest);
+}
+
+function setReadableBYOBRequestViewInternal(byobRequest, view) {
+  WeakMapPrototypeSet(readableBYOBRequestViews, byobRequest, view);
+}
+
+function protectReadableReader(reader, stream) {
+  if (reader === undefined) return;
+  addReadableUseStream(readableReaderUseStreams, reader, stream);
+  sealProtectedReadableSlot(reader, _stream);
+  const canonicalSlots = WeakMapPrototypeGet(canonicalReadableSlots, reader);
+  if (canonicalSlots !== undefined && ReflectHas(canonicalSlots, _readRequests)) {
+    sealProtectedReadableSlot(reader, _readRequests);
+    protectReadableQueue(canonicalSlots[_readRequests], stream);
+  }
+  if (
+    canonicalSlots !== undefined &&
+    ReflectHas(canonicalSlots, _readIntoRequests)
+  ) {
+    sealProtectedReadableSlot(reader, _readIntoRequests);
+    protectReadableQueue(canonicalSlots[_readIntoRequests], stream);
+  }
+}
+
+function protectReadableBYOBRequest(byobRequest, stream) {
+  if (byobRequest === null || byobRequest === undefined) return;
+  addReadableUseStream(readableBYOBRequestUseStreams, byobRequest, stream);
+  sealProtectedReadableSlot(byobRequest, _controller);
+}
+
+function protectReadableController(controller, stream) {
+  if (controller === undefined) return;
+  addReadableUseStream(readableControllerUseStreams, controller, stream);
+  sealProtectedReadableSlot(controller, _stream);
+  sealProtectedReadableSlot(controller, _queue);
+  const canonicalSlots = WeakMapPrototypeGet(
+    canonicalReadableSlots,
+    controller,
+  );
+  assert(canonicalSlots !== undefined);
+  protectReadableQueue(canonicalSlots[_queue], stream);
+  if (ReflectHas(canonicalSlots, _pendingPullIntos)) {
+    sealProtectedReadableSlot(controller, _pendingPullIntos);
+    sealProtectedReadableSlot(controller, _byobRequest);
+    protectReadableQueue(canonicalSlots[_pendingPullIntos], stream);
+    protectReadableBYOBRequest(canonicalSlots[_byobRequest], stream);
+  } else if (ReflectHas(canonicalSlots, _strategySizeAlgorithm)) {
+    sealProtectedReadableSlot(controller, _strategySizeAlgorithm);
+  }
+}
+
+function protectReadableStreamGraph(stream) {
+  const controller = getCanonicalReadableSlot(stream, _controller);
+  const reader = getCanonicalReadableSlot(stream, _reader);
+  sealProtectedReadableSlot(stream, _controller);
+  sealProtectedReadableSlot(stream, _reader);
+  sealProtectedReadableResourceBackingSlot(stream, _resourceBacking, false);
+  sealProtectedReadableResourceBackingSlot(
+    stream,
+    _resourceBackingUnrefable,
+    true,
+  );
+  protectReadableController(controller, stream);
+  protectReadableReader(reader, stream);
+}
+
+function protectQueueForReadableOwner(ownerMap, owner, queue) {
+  const streams = WeakMapPrototypeGet(ownerMap, owner);
+  if (streams === undefined) return;
+  for (let i = 0; i < streams.length; i++) {
+    protectReadableQueue(queue, streams[i]);
+  }
+}
+
+function setReadableControllerQueue(controller, slot, queue) {
+  setProtectedReadableSlot(controller, slot, queue);
+  protectQueueForReadableOwner(
+    readableControllerUseStreams,
+    controller,
+    queue,
+  );
+}
+
+function setReadableControllerSizeAlgorithm(controller, sizeAlgorithm) {
+  WeakMapPrototypeSet(
+    readableControllerSizeAlgorithms,
+    controller,
+    sizeAlgorithm,
+  );
+  setProtectedReadableSlot(controller, _strategySizeAlgorithm, sizeAlgorithm);
+}
+
+function getReadableControllerSizeAlgorithm(controller) {
+  return WeakMapPrototypeGet(readableControllerSizeAlgorithms, controller);
+}
+
+// A strategy callback is a destination transition: establish its captured
+// callback actor and authorize before the raw chunk becomes an argument.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- Callback passage cannot inherit the source actor's authority.
+function invokeReadableControllerSizeAlgorithm(
+  controller,
+  sizeAlgorithm,
+  chunk,
+) {
+  const stream = controller[_stream];
+  if (
+    !hasProtectedReadableStreams ||
+    WeakMapPrototypeGet(readableStreamUseGuards, stream) === undefined
+  ) {
+    return ReflectApply(sizeAlgorithm, undefined, [chunk]);
+  }
+  const callbackRecord = WeakMapPrototypeGet(
+    readableSizeAlgorithmCallbackRecords,
+    sizeAlgorithm,
+  );
+  if (callbackRecord === undefined) {
+    return ReflectApply(sizeAlgorithm, undefined, [chunk]);
+  }
+  const priorContext = getAsyncContext();
+  setAsyncContext(callbackRecord.callbackContext);
+  try {
+    runReadableStreamUseGuard(stream);
+    return webidl.invokeCallbackFunction(
+      callbackRecord.callback,
+      [chunk],
+      undefined,
+      webidl.converters["unrestricted double"],
+      "Failed to execute `sizeAlgorithm`",
+    );
+  } finally {
+    setAsyncContext(priorContext);
+  }
+}
+
+function setReadableReaderQueue(reader, slot, queue) {
+  setProtectedReadableSlot(reader, slot, queue);
+  protectQueueForReadableOwner(readableReaderUseStreams, reader, queue);
+}
+
+function setReadableStreamReader(stream, reader) {
+  setProtectedReadableSlot(stream, _reader, reader);
+  if (
+    reader !== undefined &&
+    WeakMapPrototypeGet(readableStreamUseGuards, stream) !== undefined
+  ) {
+    protectReadableReader(reader, stream);
+  }
+}
+
+function setReadableReaderStream(reader, stream) {
+  setProtectedReadableSlot(reader, _stream, stream);
+  if (
+    stream !== undefined &&
+    WeakMapPrototypeGet(readableStreamUseGuards, stream) !== undefined
+  ) {
+    protectReadableReader(reader, stream);
+  }
+}
+
 function noop() {}
 async function noopAsync() {}
 const _defaultStartAlgorithm = noop;
@@ -706,8 +1300,8 @@ function createWritableStream(
  */
 function dequeueValue(container) {
   assert(container[_queue] && typeof container[_queueTotalSize] === "number");
-  assert(container[_queue].size);
-  const node = container[_queue].dequeueNode();
+  assert(queueSize(container[_queue]));
+  const node = queueDequeueNode(container[_queue]);
   container[_queueTotalSize] -= node.size;
   if (container[_queueTotalSize] < 0) {
     container[_queueTotalSize] = 0;
@@ -733,7 +1327,7 @@ function enqueueValueWithSize(container, value, size) {
       "Cannot enqueue value with size: chunk size is invalid",
     );
   }
-  container[_queue].enqueueWithSize(value, size);
+  queueEnqueueWithSize(container[_queue], value, size);
   container[_queueTotalSize] += size;
 }
 
@@ -772,14 +1366,22 @@ function extractSizeAlgorithm(strategy) {
   if (strategy.size === undefined) {
     return defaultSizeAlgorithm;
   }
-  return (chunk) =>
+  const callback = strategy.size;
+  const callbackContext = op_oden_callback_context(callback);
+  const sizeAlgorithm = (chunk) =>
     webidl.invokeCallbackFunction(
-      strategy.size,
+      callback,
       [chunk],
       undefined,
       webidl.converters["unrestricted double"],
       "Failed to execute `sizeAlgorithm`",
     );
+  WeakMapPrototypeSet(readableSizeAlgorithmCallbackRecords, sizeAlgorithm, {
+    __proto__: null,
+    callback,
+    callbackContext,
+  });
+  return sizeAlgorithm;
 }
 
 /**
@@ -817,7 +1419,9 @@ function createReadableByteStream(
  */
 function initializeReadableStream(stream) {
   stream[_state] = "readable";
-  stream[_reader] = stream[_storedError] = undefined;
+  setProtectedReadableSlot(stream, _controller, undefined);
+  setProtectedReadableSlot(stream, _reader, undefined);
+  stream[_storedError] = undefined;
   stream[_disturbed] = false;
   stream[_isClosedPromise] = new Deferred();
 }
@@ -1104,6 +1708,7 @@ async function readableStreamReadFn(reader, sink, onError) {
       }
     },
   };
+  registerReadableLiteralRequest(readRequest);
 
   while (loop) {
     // The ops here look like op_write_all/op_close, but we're not actually writing to a
@@ -1219,7 +1824,7 @@ function annotateResourceStreamError(e) {
  */
 function readableStreamForRid(rid, autoClose = true, cfn, onError) {
   const stream = cfn ? cfn(_brand) : new ReadableStream(_brand);
-  stream[_resourceBacking] = { rid, autoClose };
+  setReadableResourceBackingInternal(stream, { rid, autoClose });
 
   const tryClose = () => {
     if (!autoClose) return;
@@ -1302,7 +1907,10 @@ function readableStreamForRidUnrefable(rid, constructor = ReadableStream) {
   const stream = new constructor(_brand);
   stream[promiseSymbol] = undefined;
   stream[_isUnref] = false;
-  stream[_resourceBackingUnrefable] = { rid, autoClose: true };
+  setReadableResourceBackingUnrefableInternal(stream, {
+    rid,
+    autoClose: true,
+  });
   const underlyingSource = {
     type: "bytes",
     async pull(controller) {
@@ -1366,12 +1974,12 @@ function readableStreamForRidUnrefableUnref(stream) {
 
 function getReadableStreamResourceBacking(stream) {
   runReadableStreamUseGuard(stream);
-  return stream[_resourceBacking];
+  return getReadableResourceBackingInternal(stream);
 }
 
 function getReadableStreamResourceBackingUnrefable(stream) {
   runReadableStreamUseGuard(stream);
-  return stream[_resourceBackingUnrefable];
+  return getReadableResourceBackingUnrefableInternal(stream);
 }
 
 async function readableStreamCollectIntoUint8Array(stream) {
@@ -1452,6 +2060,7 @@ async function readableStreamCollectIntoUint8Array(stream) {
       donePromise.reject(e);
     },
   };
+  registerReadableLiteralRequest(readRequest);
 
   function pump() {
     pumping = true;
@@ -1631,8 +2240,8 @@ function peekQueueValue(container) {
     container[_queue] &&
       typeof container[_queueTotalSize] === "number",
   );
-  assert(container[_queue].size);
-  return container[_queue].peek();
+  assert(queueSize(container[_queue]));
+  return queuePeek(container[_queue]);
 }
 
 /**
@@ -1725,14 +2334,17 @@ function readableByteStreamControllerError(controller, e) {
  */
 function readableByteStreamControllerClearPendingPullIntos(controller) {
   readableByteStreamControllerInvalidateBYOBRequest(controller);
-  controller[_pendingPullIntos] = new Queue();
+  setReadableControllerQueue(controller, _pendingPullIntos, new Queue());
 }
 
 /**
  * @param {ReadableByteStreamController} controller
  * @returns {void}
  */
-function readableByteStreamControllerClose(controller) {
+function readableByteStreamControllerClose(
+  controller,
+  cleanupAccessToken = undefined,
+) {
   /** @type {ReadableStream<ArrayBuffer>} */
   const stream = controller[_stream];
   if (controller[_closeRequested] || stream[_state] !== "readable") {
@@ -1742,8 +2354,13 @@ function readableByteStreamControllerClose(controller) {
     controller[_closeRequested] = true;
     return;
   }
-  if (controller[_pendingPullIntos].size !== 0) {
-    const firstPendingPullInto = controller[_pendingPullIntos].peek();
+  const pendingPullIntoCount = cleanupAccessToken === queueCleanupAccessToken
+    ? queueCleanupSize(controller[_pendingPullIntos])
+    : queueSize(controller[_pendingPullIntos]);
+  if (pendingPullIntoCount !== 0) {
+    const firstPendingPullInto = cleanupAccessToken === queueCleanupAccessToken
+      ? queueCleanupPeek(controller[_pendingPullIntos])
+      : queuePeek(controller[_pendingPullIntos]);
     if (
       firstPendingPullInto.bytesFilled % firstPendingPullInto.elementSize !== 0
     ) {
@@ -1755,7 +2372,7 @@ function readableByteStreamControllerClose(controller) {
     }
   }
   readableByteStreamControllerClearAlgorithms(controller);
-  readableStreamClose(stream);
+  readableStreamClose(stream, cleanupAccessToken);
 }
 
 /**
@@ -1797,8 +2414,8 @@ function readableByteStreamControllerEnqueue(controller, chunk) {
     );
   }
   const transferredBuffer = ArrayBufferPrototypeTransferToFixedLength(buffer);
-  if (controller[_pendingPullIntos].size !== 0) {
-    const firstPendingPullInto = controller[_pendingPullIntos].peek();
+  if (queueSize(controller[_pendingPullIntos]) !== 0) {
+    const firstPendingPullInto = queuePeek(controller[_pendingPullIntos]);
     // deno-lint-ignore prefer-primordials
     if (isDetachedBuffer(firstPendingPullInto.buffer)) {
       throw new TypeError(
@@ -1820,7 +2437,7 @@ function readableByteStreamControllerEnqueue(controller, chunk) {
   if (readableStreamHasDefaultReader(stream)) {
     readableByteStreamControllerProcessReadRequestsUsingQueue(controller);
     if (readableStreamGetNumReadRequests(stream) === 0) {
-      assert(controller[_pendingPullIntos].size === 0);
+      assert(queueSize(controller[_pendingPullIntos]) === 0);
       readableByteStreamControllerEnqueueChunkToQueue(
         controller,
         transferredBuffer,
@@ -1828,9 +2445,9 @@ function readableByteStreamControllerEnqueue(controller, chunk) {
         byteLength,
       );
     } else {
-      assert(controller[_queue].size === 0);
-      if (controller[_pendingPullIntos].size !== 0) {
-        assert(controller[_pendingPullIntos].peek().readerType === "default");
+      assert(queueSize(controller[_queue]) === 0);
+      if (queueSize(controller[_pendingPullIntos]) !== 0) {
+        assert(queuePeek(controller[_pendingPullIntos]).readerType === "default");
         readableByteStreamControllerShiftPendingPullInto(controller);
       }
       const transferredView = new Uint8Array(
@@ -1875,7 +2492,7 @@ function readableByteStreamControllerEnqueueChunkToQueue(
   byteOffset,
   byteLength,
 ) {
-  controller[_queue].enqueue({ buffer, byteOffset, byteLength });
+  queueEnqueue(controller[_queue], { buffer, byteOffset, byteLength });
   controller[_queueTotalSize] += byteLength;
 }
 
@@ -1946,9 +2563,9 @@ function readableByteStreamControllerEnqueueDetachedPullIntoToQueue(
 function readableByteStreamControllerGetBYOBRequest(controller) {
   if (
     controller[_byobRequest] === null &&
-    controller[_pendingPullIntos].size !== 0
+    queueSize(controller[_pendingPullIntos]) !== 0
   ) {
-    const firstDescriptor = controller[_pendingPullIntos].peek();
+    const firstDescriptor = queuePeek(controller[_pendingPullIntos]);
     const view = new Uint8Array(
       // deno-lint-ignore prefer-primordials
       firstDescriptor.buffer,
@@ -1958,9 +2575,13 @@ function readableByteStreamControllerGetBYOBRequest(controller) {
       firstDescriptor.byteLength - firstDescriptor.bytesFilled,
     );
     const byobRequest = new ReadableStreamBYOBRequest(_brand);
-    byobRequest[_controller] = controller;
-    byobRequest[_view] = view;
-    controller[_byobRequest] = byobRequest;
+    setProtectedReadableSlot(byobRequest, _controller, controller);
+    setReadableBYOBRequestViewInternal(byobRequest, view);
+    setProtectedReadableSlot(controller, _byobRequest, byobRequest);
+    const stream = controller[_stream];
+    if (WeakMapPrototypeGet(readableStreamUseGuards, stream) !== undefined) {
+      protectReadableBYOBRequest(byobRequest, stream);
+    }
   }
   return controller[_byobRequest];
 }
@@ -1985,7 +2606,7 @@ function readableByteStreamControllerGetDesiredSize(controller) {
  * @returns {void}
  */
 function resetQueue(container) {
-  container[_queue] = new Queue();
+  setReadableControllerQueue(container, _queue, new Queue());
   container[_queueTotalSize] = 0;
 }
 
@@ -2045,7 +2666,7 @@ function readableByteStreamControllerShouldCallPull(controller) {
 function readableStreamAddReadRequest(stream, readRequest) {
   assert(isReadableStreamDefaultReader(stream[_reader]));
   assert(stream[_state] === "readable");
-  stream[_reader][_readRequests].enqueue(readRequest);
+  queueEnqueue(stream[_reader][_readRequests], readRequest);
 }
 
 /**
@@ -2056,7 +2677,7 @@ function readableStreamAddReadRequest(stream, readRequest) {
 function readableStreamAddReadIntoRequest(stream, readRequest) {
   assert(isReadableStreamBYOBReader(stream[_reader]));
   assert(stream[_state] === "readable" || stream[_state] === "closed");
-  stream[_reader][_readIntoRequests].enqueue(readRequest);
+  queueEnqueue(stream[_reader][_readIntoRequests], readRequest);
 }
 
 /**
@@ -2074,14 +2695,15 @@ function readableStreamCancel(stream, reason) {
   if (state === "errored") {
     return PromiseReject(stream[_storedError]);
   }
-  readableStreamClose(stream);
+  readableStreamClose(stream, queueCleanupAccessToken);
   const reader = stream[_reader];
   if (reader !== undefined && isReadableStreamBYOBReader(reader)) {
     const readIntoRequests = reader[_readIntoRequests];
-    reader[_readIntoRequests] = new Queue();
-    while (readIntoRequests.size !== 0) {
-      readIntoRequests.dequeue().closeSteps(undefined);
-    }
+    setReadableReaderQueue(reader, _readIntoRequests, new Queue());
+    queueCleanupDrain(
+      readIntoRequests,
+      (readIntoRequest) => readableRequestCloseSteps(readIntoRequest),
+    );
   }
   /** @type {Promise<void>} */
   const sourceCancelPromise = stream[_controller][_cancelSteps](reason);
@@ -2091,9 +2713,10 @@ function readableStreamCancel(stream, reason) {
 /**
  * @template R
  * @param {ReadableStream<R>} stream
+ * @param {object=} cleanupAccessToken
  * @returns {void}
  */
-function readableStreamClose(stream) {
+function readableStreamClose(stream, cleanupAccessToken = undefined) {
   assert(stream[_state] === "readable");
   stream[_state] = "closed";
   stream[_isClosedPromise].resolve(undefined);
@@ -2105,9 +2728,15 @@ function readableStreamClose(stream) {
   if (isReadableStreamDefaultReader(reader)) {
     /** @type {Array<ReadRequest<R>>} */
     const readRequests = reader[_readRequests];
-    while (readRequests.size !== 0) {
-      const readRequest = readRequests.dequeue();
-      readRequest.closeSteps();
+    if (cleanupAccessToken === queueCleanupAccessToken) {
+      queueCleanupDrain(readRequests, (readRequest) => {
+        readableRequestCloseSteps(readRequest);
+      });
+    } else {
+      while (queueSize(readRequests) !== 0) {
+        const readRequest = queueDequeue(readRequests);
+        readableRequestCloseSteps(readRequest);
+      }
     }
   }
   // This promise can be double resolved.
@@ -2198,13 +2827,16 @@ function readableStreamDefaultControllerCanCloseOrEnqueue(controller) {
 function readableStreamDefaultControllerClearAlgorithms(controller) {
   controller[_pullAlgorithm] = undefined;
   controller[_cancelAlgorithm] = undefined;
-  controller[_strategySizeAlgorithm] = undefined;
+  setReadableControllerSizeAlgorithm(controller, undefined);
   controller[_underlyingSource] = undefined;
   controller[_underlyingSourceDict] = undefined;
 }
 
 /** @param {ReadableStreamDefaultController<any>} controller */
-function readableStreamDefaultControllerClose(controller) {
+function readableStreamDefaultControllerClose(
+  controller,
+  cleanupAccessToken = undefined,
+) {
   if (
     readableStreamDefaultControllerCanCloseOrEnqueue(controller) === false
   ) {
@@ -2212,9 +2844,12 @@ function readableStreamDefaultControllerClose(controller) {
   }
   const stream = controller[_stream];
   controller[_closeRequested] = true;
-  if (controller[_queue].size === 0) {
+  const queueIsEmpty = cleanupAccessToken === queueCleanupAccessToken
+    ? queueCleanupSize(controller[_queue]) === 0
+    : queueSize(controller[_queue]) === 0;
+  if (queueIsEmpty) {
     readableStreamDefaultControllerClearAlgorithms(controller);
-    readableStreamClose(stream);
+    readableStreamClose(stream, cleanupAccessToken);
   }
 }
 
@@ -2238,11 +2873,16 @@ function readableStreamDefaultControllerEnqueue(controller, chunk) {
     readableStreamFulfillReadRequest(stream, chunk, false);
   } else {
     let chunkSize;
-    if (controller[_strategySizeAlgorithm] === defaultSizeAlgorithm) {
+    const sizeAlgorithm = getReadableControllerSizeAlgorithm(controller);
+    if (sizeAlgorithm === defaultSizeAlgorithm) {
       chunkSize = 1;
     } else {
       try {
-        chunkSize = controller[_strategySizeAlgorithm](chunk);
+        chunkSize = invokeReadableControllerSizeAlgorithm(
+          controller,
+          sizeAlgorithm,
+          chunk,
+        );
       } catch (e) {
         readableStreamDefaultControllerError(controller, e);
         throw e;
@@ -2341,12 +2981,12 @@ function readableStreamBYOBReaderRead(reader, view, min, readIntoRequest) {
   try {
     runReadableStreamUseGuard(stream);
   } catch (error) {
-    readIntoRequest.errorSteps(error);
+    readableRequestErrorSteps(readIntoRequest, error);
     return;
   }
   stream[_disturbed] = true;
   if (stream[_state] === "errored") {
-    readIntoRequest.errorSteps(stream[_storedError]);
+    readableRequestErrorSteps(readIntoRequest, stream[_storedError]);
   } else {
     readableByteStreamControllerPullInto(
       stream[_controller],
@@ -2372,10 +3012,9 @@ function readableStreamBYOBReaderRelease(reader) {
  */
 function readableStreamDefaultReaderErrorReadRequests(reader, e) {
   const readRequests = reader[_readRequests];
-  while (readRequests.size !== 0) {
-    const readRequest = readRequests.dequeue();
-    readRequest.errorSteps(e);
-  }
+  queueCleanupDrain(readRequests, (readRequest) => {
+    readableRequestErrorSteps(readRequest, e);
+  });
 }
 
 /**
@@ -2385,11 +3024,11 @@ function readableByteStreamControllerProcessPullIntoDescriptorsUsingQueue(
   controller,
 ) {
   assert(!controller[_closeRequested]);
-  while (controller[_pendingPullIntos].size !== 0) {
+  while (queueSize(controller[_pendingPullIntos]) !== 0) {
     if (controller[_queueTotalSize] === 0) {
       return;
     }
-    const pullIntoDescriptor = controller[_pendingPullIntos].peek();
+    const pullIntoDescriptor = queuePeek(controller[_pendingPullIntos]);
     if (
       readableByteStreamControllerFillPullIntoDescriptorFromQueue(
         controller,
@@ -2412,11 +3051,11 @@ function readableByteStreamControllerProcessReadRequestsUsingQueue(
 ) {
   const reader = controller[_stream][_reader];
   assert(isReadableStreamDefaultReader(reader));
-  while (reader[_readRequests].size !== 0) {
+  while (queueSize(reader[_readRequests]) !== 0) {
     if (controller[_queueTotalSize] === 0) {
       return;
     }
-    const readRequest = reader[_readRequests].dequeue();
+    const readRequest = queueDequeue(reader[_readRequests]);
     readableByteStreamControllerFillReadRequestFromQueue(
       controller,
       readRequest,
@@ -2515,7 +3154,7 @@ function readableByteStreamControllerPullInto(
   try {
     buffer = ArrayBufferPrototypeTransferToFixedLength(buffer);
   } catch (e) {
-    readIntoRequest.errorSteps(e);
+    readableRequestErrorSteps(readIntoRequest, e);
     return;
   }
 
@@ -2532,8 +3171,8 @@ function readableByteStreamControllerPullInto(
     readerType: "byob",
   };
 
-  if (controller[_pendingPullIntos].size !== 0) {
-    controller[_pendingPullIntos].enqueue(pullIntoDescriptor);
+  if (queueSize(controller[_pendingPullIntos]) !== 0) {
+    queueEnqueue(controller[_pendingPullIntos], pullIntoDescriptor);
     readableStreamAddReadIntoRequest(stream, readIntoRequest);
     return;
   }
@@ -2545,7 +3184,7 @@ function readableByteStreamControllerPullInto(
       pullIntoDescriptor.byteOffset,
       0,
     );
-    readIntoRequest.closeSteps(emptyView);
+    readableRequestCloseSteps(readIntoRequest, emptyView);
     return;
   }
   if (controller[_queueTotalSize] > 0) {
@@ -2559,7 +3198,7 @@ function readableByteStreamControllerPullInto(
         pullIntoDescriptor,
       );
       readableByteStreamControllerHandleQueueDrain(controller);
-      readIntoRequest.chunkSteps(filledView);
+      readableRequestChunkSteps(readIntoRequest, filledView);
       return;
     }
     if (controller[_closeRequested]) {
@@ -2567,11 +3206,11 @@ function readableByteStreamControllerPullInto(
         "Insufficient bytes to fill elements in the given buffer",
       );
       readableByteStreamControllerError(controller, e);
-      readIntoRequest.errorSteps(e);
+      readableRequestErrorSteps(readIntoRequest, e);
       return;
     }
   }
-  controller[_pendingPullIntos].enqueue(pullIntoDescriptor);
+  queueEnqueue(controller[_pendingPullIntos], pullIntoDescriptor);
   readableStreamAddReadIntoRequest(stream, readIntoRequest);
   readableByteStreamControllerCallPullIfNeeded(controller);
 }
@@ -2582,8 +3221,8 @@ function readableByteStreamControllerPullInto(
  * @returns {void}
  */
 function readableByteStreamControllerRespond(controller, bytesWritten) {
-  assert(controller[_pendingPullIntos].size !== 0);
-  const firstDescriptor = controller[_pendingPullIntos].peek();
+  assert(queueSize(controller[_pendingPullIntos]) !== 0);
+  const firstDescriptor = queuePeek(controller[_pendingPullIntos]);
   const state = controller[_stream][_state];
   if (state === "closed") {
     if (bytesWritten !== 0) {
@@ -2681,7 +3320,7 @@ function readableByteStreamControllerRespondInternal(
   controller,
   bytesWritten,
 ) {
-  const firstDescriptor = controller[_pendingPullIntos].peek();
+  const firstDescriptor = queuePeek(controller[_pendingPullIntos]);
   // deno-lint-ignore prefer-primordials
   assert(canTransferArrayBuffer(firstDescriptor.buffer));
   readableByteStreamControllerInvalidateBYOBRequest(controller);
@@ -2711,9 +3350,9 @@ function readableByteStreamControllerInvalidateBYOBRequest(controller) {
   if (controller[_byobRequest] === null) {
     return;
   }
-  controller[_byobRequest][_controller] = undefined;
-  controller[_byobRequest][_view] = null;
-  controller[_byobRequest] = null;
+  setProtectedReadableSlot(controller[_byobRequest], _controller, undefined);
+  setReadableBYOBRequestViewInternal(controller[_byobRequest], null);
+  setProtectedReadableSlot(controller, _byobRequest, null);
 }
 
 /**
@@ -2775,7 +3414,7 @@ function readableByteStreamControllerCommitPullIntoDescriptor(
  * @param {ArrayBufferView} view
  */
 function readableByteStreamControllerRespondWithNewView(controller, view) {
-  assert(controller[_pendingPullIntos].size !== 0);
+  assert(queueSize(controller[_pendingPullIntos]) !== 0);
 
   let buffer, byteLength, byteOffset;
   if (isTypedArray(view)) {
@@ -2793,7 +3432,7 @@ function readableByteStreamControllerRespondWithNewView(controller, view) {
   }
 
   assert(!isDetachedBuffer(buffer));
-  const firstDescriptor = controller[_pendingPullIntos].peek();
+  const firstDescriptor = queuePeek(controller[_pendingPullIntos]);
   const state = controller[_stream][_state];
   if (state === "closed") {
     if (byteLength !== 0) {
@@ -2836,7 +3475,7 @@ function readableByteStreamControllerRespondWithNewView(controller, view) {
  */
 function readableByteStreamControllerShiftPendingPullInto(controller) {
   assert(controller[_byobRequest] === null);
-  return controller[_pendingPullIntos].dequeue();
+  return queueDequeue(controller[_pendingPullIntos]);
 }
 
 /**
@@ -2866,7 +3505,7 @@ function readableByteStreamControllerFillPullIntoDescriptorFromQueue(
   }
   const queue = controller[_queue];
   while (totalBytesToCopyRemaining > 0) {
-    const headOfQueue = queue.peek();
+    const headOfQueue = queuePeek(queue);
     const bytesToCopy = MathMin(
       totalBytesToCopyRemaining,
       // deno-lint-ignore prefer-primordials
@@ -2893,7 +3532,7 @@ function readableByteStreamControllerFillPullIntoDescriptorFromQueue(
 
     // deno-lint-ignore prefer-primordials
     if (headOfQueue.byteLength === bytesToCopy) {
-      queue.dequeue();
+      queueDequeue(queue);
     } else {
       headOfQueue.byteOffset += bytesToCopy;
       headOfQueue.byteLength -= bytesToCopy;
@@ -2924,7 +3563,7 @@ function readableByteStreamControllerFillReadRequestFromQueue(
   readRequest,
 ) {
   assert(controller[_queueTotalSize] > 0);
-  const entry = controller[_queue].dequeue();
+  const entry = queueDequeue(controller[_queue]);
   // deno-lint-ignore prefer-primordials
   controller[_queueTotalSize] -= entry.byteLength;
   readableByteStreamControllerHandleQueueDrain(controller);
@@ -2936,7 +3575,7 @@ function readableByteStreamControllerFillReadRequestFromQueue(
     // deno-lint-ignore prefer-primordials
     entry.byteLength,
   );
-  readRequest.chunkSteps(view);
+  readableRequestChunkSteps(readRequest, view);
 }
 
 /**
@@ -2951,8 +3590,8 @@ function readableByteStreamControllerFillHeadPullIntoDescriptor(
   pullIntoDescriptor,
 ) {
   assert(
-    controller[_pendingPullIntos].size === 0 ||
-      controller[_pendingPullIntos].peek() === pullIntoDescriptor,
+    queueSize(controller[_pendingPullIntos]) === 0 ||
+      queuePeek(controller[_pendingPullIntos]) === pullIntoDescriptor,
   );
   assert(controller[_byobRequest] === null);
   pullIntoDescriptor.bytesFilled += size;
@@ -2994,15 +3633,15 @@ function readableStreamDefaultReaderRead(reader, readRequest) {
   try {
     runReadableStreamUseGuard(stream);
   } catch (error) {
-    readRequest.errorSteps(error);
+    readableRequestErrorSteps(readRequest, error);
     return;
   }
   stream[_disturbed] = true;
   const state = stream[_state];
   if (state === "closed") {
-    readRequest.closeSteps();
+    readableRequestCloseSteps(readRequest);
   } else if (state === "errored") {
-    readRequest.errorSteps(stream[_storedError]);
+    readableRequestErrorSteps(readRequest, stream[_storedError]);
   } else {
     assert(state === "readable");
     stream[_controller][_pullSteps](readRequest);
@@ -3057,13 +3696,13 @@ function readableStreamFulfillReadIntoRequest(stream, chunk, done) {
   assert(readableStreamHasBYOBReader(stream));
   /** @type {ReadableStreamDefaultReader<R>} */
   const reader = stream[_reader];
-  assert(reader[_readIntoRequests].size !== 0);
+  assert(queueSize(reader[_readIntoRequests]) !== 0);
   /** @type {ReadIntoRequest} */
-  const readIntoRequest = reader[_readIntoRequests].dequeue();
+  const readIntoRequest = queueDequeue(reader[_readIntoRequests]);
   if (done) {
-    readIntoRequest.closeSteps(chunk);
+    readableRequestCloseSteps(readIntoRequest, chunk);
   } else {
-    readIntoRequest.chunkSteps(chunk);
+    readableRequestChunkSteps(readIntoRequest, chunk);
   }
 }
 
@@ -3077,13 +3716,13 @@ function readableStreamFulfillReadRequest(stream, chunk, done) {
   assert(readableStreamHasDefaultReader(stream) === true);
   /** @type {ReadableStreamDefaultReader<R>} */
   const reader = stream[_reader];
-  assert(reader[_readRequests].size);
+  assert(queueSize(reader[_readRequests]));
   /** @type {ReadRequest<R>} */
-  const readRequest = reader[_readRequests].dequeue();
+  const readRequest = queueDequeue(reader[_readRequests]);
   if (done) {
-    readRequest.closeSteps();
+    readableRequestCloseSteps(readRequest);
   } else {
-    readRequest.chunkSteps(chunk);
+    readableRequestChunkSteps(readRequest, chunk);
   }
 }
 
@@ -3093,7 +3732,7 @@ function readableStreamFulfillReadRequest(stream, chunk, done) {
  */
 function readableStreamGetNumReadIntoRequests(stream) {
   assert(readableStreamHasBYOBReader(stream) === true);
-  return stream[_reader][_readIntoRequests].size;
+  return queueSize(stream[_reader][_readIntoRequests]);
 }
 
 /**
@@ -3102,7 +3741,7 @@ function readableStreamGetNumReadIntoRequests(stream) {
  */
 function readableStreamGetNumReadRequests(stream) {
   assert(readableStreamHasDefaultReader(stream) === true);
-  return stream[_reader][_readRequests].size;
+  return queueSize(stream[_reader][_readRequests]);
 }
 
 /**
@@ -3423,6 +4062,7 @@ function readableStreamPipeTo(
       }
     },
   };
+  registerReadableLiteralRequest(readRequest);
 
   function pump() {
     pumping = true;
@@ -3658,8 +4298,8 @@ function readableStreamReaderGenericCancel(reader, reason) {
  * @param {ReadableStream<R>} stream
  */
 function readableStreamReaderGenericInitialize(reader, stream) {
-  reader[_stream] = stream;
-  stream[_reader] = reader;
+  setReadableReaderStream(reader, stream);
+  setReadableStreamReader(stream, reader);
   const state = stream[_state];
   if (state === "readable") {
     reader[_closedPromise] = new Deferred();
@@ -3695,8 +4335,8 @@ function readableStreamReaderGenericRelease(reader) {
     ),
   );
   stream[_controller][_releaseSteps]();
-  stream[_reader] = undefined;
-  reader[_stream] = undefined;
+  setReadableStreamReader(stream, undefined);
+  setReadableReaderStream(reader, undefined);
 }
 
 /**
@@ -3705,10 +4345,10 @@ function readableStreamReaderGenericRelease(reader) {
  */
 function readableStreamBYOBReaderErrorReadIntoRequests(reader, e) {
   const readIntoRequests = reader[_readIntoRequests];
-  reader[_readIntoRequests] = new Queue();
-  while (readIntoRequests.size !== 0) {
-    readIntoRequests.dequeue().errorSteps(e);
-  }
+  setReadableReaderQueue(reader, _readIntoRequests, new Queue());
+  queueCleanupDrain(readIntoRequests, (readIntoRequest) => {
+    readableRequestErrorSteps(readIntoRequest, e);
+  });
 }
 
 /**
@@ -3850,6 +4490,7 @@ function readableStreamDefaultTee(stream, cloneForBranch2) {
       reading = false;
     },
   };
+  registerReadableLiteralRequest(readRequest);
 
   // Returns undefined (synchronous completion sentinel understood by
   // readableStreamDefaultControllerCallPullIfNeeded) instead of a
@@ -3974,11 +4615,13 @@ function readableByteStreamTee(stream) {
           thisReader !== reader ||
           !reading ||
           !isReadableStreamBYOBReader(reader) ||
-          stream[_controller][_pendingPullIntos].size === 0
+          queueSize(stream[_controller][_pendingPullIntos]) === 0
         ) {
           return;
         }
-        const firstDescriptor = stream[_controller][_pendingPullIntos].peek();
+        const firstDescriptor = queuePeek(
+          stream[_controller][_pendingPullIntos],
+        );
         readableByteStreamControllerRespondInClosedState(
           stream[_controller],
           firstDescriptor,
@@ -4048,10 +4691,10 @@ function readableByteStreamTee(stream) {
       if (!canceled2) {
         readableByteStreamControllerClose(branch2[_controller]);
       }
-      if (branch1[_controller][_pendingPullIntos].size !== 0) {
+      if (queueSize(branch1[_controller][_pendingPullIntos]) !== 0) {
         readableByteStreamControllerRespond(branch1[_controller], 0);
       }
-      if (branch2[_controller][_pendingPullIntos].size !== 0) {
+      if (queueSize(branch2[_controller][_pendingPullIntos]) !== 0) {
         readableByteStreamControllerRespond(branch2[_controller], 0);
       }
       if (!canceled1 || !canceled2) {
@@ -4062,10 +4705,11 @@ function readableByteStreamTee(stream) {
       reading = false;
     },
   };
+  registerReadableLiteralRequest(readRequest);
 
   function pullWithDefaultReader() {
     if (isReadableStreamBYOBReader(reader)) {
-      assert(reader[_readIntoRequests].size === 0);
+      assert(queueSize(reader[_readIntoRequests]) === 0);
       readableStreamBYOBReaderRelease(reader);
       reader = acquireReadableStreamDefaultReader(stream);
       forwardReaderError(reader);
@@ -4160,7 +4804,7 @@ function readableByteStreamTee(stream) {
         }
         if (
           !otherCanceled &&
-          otherBranch[_controller][_pendingPullIntos].size !== 0
+          queueSize(otherBranch[_controller][_pendingPullIntos]) !== 0
         ) {
           readableByteStreamControllerRespond(otherBranch[_controller], 0);
         }
@@ -4173,10 +4817,11 @@ function readableByteStreamTee(stream) {
       reading = false;
     },
   };
+  registerReadableLiteralRequest(readIntoRequest);
 
   function pullWithBYOBReader(view, forBranch2) {
     if (isReadableStreamDefaultReader(reader)) {
-      assert(reader[_readRequests].size === 0);
+      assert(queueSize(reader[_readRequests]) === 0);
       readableStreamDefaultReaderRelease(reader);
       reader = acquireReadableStreamBYOBReader(stream);
       forwardReaderError(reader);
@@ -4200,7 +4845,10 @@ function readableByteStreamTee(stream) {
     if (byobRequest === null) {
       pullWithDefaultReader();
     } else {
-      pullWithBYOBReader(byobRequest[_view], false);
+      pullWithBYOBReader(
+        getReadableBYOBRequestViewInternal(byobRequest),
+        false,
+      );
     }
   }
 
@@ -4216,7 +4864,10 @@ function readableByteStreamTee(stream) {
     if (byobRequest === null) {
       pullWithDefaultReader();
     } else {
-      pullWithBYOBReader(byobRequest[_view], true);
+      pullWithBYOBReader(
+        getReadableBYOBRequestViewInternal(byobRequest),
+        true,
+      );
     }
   }
 
@@ -4287,17 +4938,17 @@ function setUpReadableByteStreamController(
     assert(NumberIsInteger(autoAllocateChunkSize));
     assert(autoAllocateChunkSize >= 0);
   }
-  controller[_stream] = stream;
+  setProtectedReadableSlot(controller, _stream, stream);
   controller[_pullAgain] = controller[_pulling] = false;
-  controller[_byobRequest] = null;
+  setProtectedReadableSlot(controller, _byobRequest, null);
   resetQueue(controller);
   controller[_closeRequested] = controller[_started] = false;
   controller[_strategyHWM] = highWaterMark;
   controller[_pullAlgorithm] = pullAlgorithm;
   controller[_cancelAlgorithm] = cancelAlgorithm;
   controller[_autoAllocateChunkSize] = autoAllocateChunkSize;
-  controller[_pendingPullIntos] = new Queue();
-  stream[_controller] = controller;
+  setReadableControllerQueue(controller, _pendingPullIntos, new Queue());
+  setProtectedReadableSlot(stream, _controller, controller);
   const startResult = startAlgorithm(controller);
   const startPromise = PromiseResolve(startResult);
   uponPromise(
@@ -4450,18 +5101,18 @@ function setUpReadableStreamDefaultController(
   sizeAlgorithm,
 ) {
   assert(stream[_controller] === undefined);
-  controller[_stream] = stream;
+  setProtectedReadableSlot(controller, _stream, stream);
   resetQueue(controller);
   controller[_started] =
     controller[_closeRequested] =
     controller[_pullAgain] =
     controller[_pulling] =
       false;
-  controller[_strategySizeAlgorithm] = sizeAlgorithm;
+  setReadableControllerSizeAlgorithm(controller, sizeAlgorithm);
   controller[_strategyHWM] = highWaterMark;
   controller[_pullAlgorithm] = pullAlgorithm;
   controller[_cancelAlgorithm] = cancelAlgorithm;
-  stream[_controller] = controller;
+  setProtectedReadableSlot(stream, _controller, controller);
   const startResult = startAlgorithm(controller);
   const startPromise = PromiseResolve(startResult);
   uponPromise(startPromise, () => {
@@ -4536,7 +5187,7 @@ function setUpReadableStreamBYOBReader(reader, stream) {
     throw new TypeError("Cannot use a BYOB reader with a non-byte stream");
   }
   readableStreamReaderGenericInitialize(reader, stream);
-  reader[_readIntoRequests] = new Queue();
+  setReadableReaderQueue(reader, _readIntoRequests, new Queue());
 }
 
 /**
@@ -4549,7 +5200,7 @@ function setUpReadableStreamDefaultReader(reader, stream) {
     throw new TypeError("ReadableStream is locked");
   }
   readableStreamReaderGenericInitialize(reader, stream);
-  reader[_readRequests] = new Queue();
+  setReadableReaderQueue(reader, _readRequests, new Queue());
 }
 
 /**
@@ -5165,7 +5816,7 @@ function writableStreamAddWriteRequest(stream) {
   assert(stream[_state] === "writable");
   /** @type {Deferred<void>} */
   const deferred = new Deferred();
-  stream[_writeRequests].enqueue(deferred);
+  queueEnqueue(stream[_writeRequests], deferred);
   return deferred.promise;
 }
 
@@ -5242,7 +5893,7 @@ function writableStreamDefaultControllerAdvanceQueueIfNeeded(controller) {
     writableStreamFinishErroring(stream);
     return;
   }
-  if (controller[_queue].size === 0) {
+  if (queueSize(controller[_queue]) === 0) {
     return;
   }
   const value = peekQueueValue(controller);
@@ -5331,7 +5982,7 @@ function writableStreamDefaultControllerProcessClose(controller) {
   const stream = controller[_stream];
   writableStreamMarkCloseRequestInFlight(stream);
   dequeueValue(controller);
-  assert(controller[_queue].size === 0);
+  assert(queueSize(controller[_queue]) === 0);
   const sinkClosePromise = controller[_closeAlgorithm]();
   writableStreamDefaultControllerClearAlgorithms(controller);
   uponPromise(sinkClosePromise, () => {
@@ -5578,8 +6229,8 @@ function writableStreamFinishErroring(stream) {
   const storedError = stream[_storedError];
   const writeRequests = stream[_writeRequests];
   stream[_writeRequests] = new Queue();
-  while (writeRequests.size !== 0) {
-    writeRequests.dequeue().reject(storedError);
+  while (queueSize(writeRequests) !== 0) {
+    queueDequeue(writeRequests).reject(storedError);
   }
   if (stream[_pendingAbortRequest] === undefined) {
     writableStreamRejectCloseAndClosedPromiseIfNeeded(stream);
@@ -5689,8 +6340,8 @@ function writableStreamMarkCloseRequestInFlight(stream) {
  */
 function writableStreamMarkFirstWriteRequestInFlight(stream) {
   assert(stream[_inFlightWriteRequest] === undefined);
-  assert(stream[_writeRequests].size);
-  const writeRequest = stream[_writeRequests].dequeue();
+  assert(queueSize(stream[_writeRequests]));
+  const writeRequest = queueDequeue(stream[_writeRequests]);
   stream[_inFlightWriteRequest] = writeRequest;
 }
 
@@ -5768,6 +6419,11 @@ class ReadableStreamAsyncIteratorReadRequest {
   constructor(reader, promise) {
     this.#reader = reader;
     this.#promise = promise;
+    WeakMapPrototypeSet(
+      readableRequestDispatches,
+      this,
+      asyncIteratorReadRequestDispatch,
+    );
   }
 
   chunkSteps(chunk) {
@@ -5789,6 +6445,13 @@ class ReadableStreamAsyncIteratorReadRequest {
     this.#promise.reject(e);
   }
 }
+
+const readableStreamAsyncIteratorReadRequestChunkSteps =
+  ReadableStreamAsyncIteratorReadRequest.prototype.chunkSteps;
+const readableStreamAsyncIteratorReadRequestCloseSteps =
+  ReadableStreamAsyncIteratorReadRequest.prototype.closeSteps;
+const readableStreamAsyncIteratorReadRequestErrorSteps =
+  ReadableStreamAsyncIteratorReadRequest.prototype.errorSteps;
 
 /**
  * The generic (async) path for the default async iterator's next(): allocate a
@@ -5858,24 +6521,26 @@ const readableStreamAsyncIteratorPrototype = ObjectSetPrototypeOf({
     const stream = reader[_stream];
     if (stream !== undefined && stream[_state] === "readable") {
       const controller = stream[_controller];
-      if (
-        controller[_pendingPullIntos] === undefined &&
-        controller[_queue].size !== 0
-      ) {
+      if (controller[_pendingPullIntos] === undefined) {
         try {
           runReadableStreamUseGuard(stream);
+          if (queueSize(controller[_queue]) !== 0) {
+            stream[_disturbed] = true;
+            const chunk = dequeueValue(controller);
+            if (
+              controller[_closeRequested] &&
+              queueSize(controller[_queue]) === 0
+            ) {
+              readableStreamDefaultControllerClearAlgorithms(controller);
+              readableStreamClose(stream);
+            } else {
+              readableStreamDefaultControllerCallPullIfNeeded(controller);
+            }
+            return PromiseResolve({ value: chunk, done: false });
+          }
         } catch (error) {
           return PromiseReject(error);
         }
-        stream[_disturbed] = true;
-        const chunk = dequeueValue(controller);
-        if (controller[_closeRequested] && controller[_queue].size === 0) {
-          readableStreamDefaultControllerClearAlgorithms(controller);
-          readableStreamClose(stream);
-        } else {
-          readableStreamDefaultControllerCallPullIfNeeded(controller);
-        }
-        return PromiseResolve({ value: chunk, done: false });
       }
     }
 
@@ -5897,7 +6562,7 @@ const readableStreamAsyncIteratorPrototype = ObjectSetPrototypeOf({
       if (reader[_stream] === undefined) {
         return PromiseResolve({ value: undefined, done: true });
       }
-      assert(reader[_readRequests].size === 0);
+      assert(queueCleanupSize(reader[_readRequests]) === 0);
       if (this[_preventCancel] === false) {
         const result = readableStreamReaderGenericCancel(reader, arg);
         readableStreamDefaultReaderRelease(reader);
@@ -6049,12 +6714,26 @@ class ReadableStream {
   [_state];
   /** @type {any} */
   [_storedError];
-  /** @type {{ rid: number, autoClose: boolean } | null} */
-  [_resourceBacking] = null;
   /** @type {Deferred<void>} */
   [_isClosedPromise];
 
   [core.hostObjectBrand] = "ReadableStream";
+
+  get [_resourceBacking]() {
+    return getReadableResourceBackingView(this, false);
+  }
+
+  set [_resourceBacking](_value) {
+    throw new TypeError("Cannot replace readable stream backing");
+  }
+
+  get [_resourceBackingUnrefable]() {
+    return getReadableResourceBackingView(this, true);
+  }
+
+  set [_resourceBackingUnrefable](_value) {
+    throw new TypeError("Cannot replace readable stream backing");
+  }
 
   /**
    * @param {UnderlyingSource<R>=} underlyingSource
@@ -6394,6 +7073,11 @@ class ReadableStreamDefaultReadRequest {
   /** @param {Deferred<ReadableStreamReadResult<R>>} promise */
   constructor(promise) {
     this.#promise = promise;
+    WeakMapPrototypeSet(
+      readableRequestDispatches,
+      this,
+      defaultReadRequestDispatch,
+    );
   }
 
   chunkSteps(chunk) {
@@ -6408,6 +7092,13 @@ class ReadableStreamDefaultReadRequest {
     this.#promise.reject(e);
   }
 }
+
+const readableStreamDefaultReadRequestChunkSteps =
+  ReadableStreamDefaultReadRequest.prototype.chunkSteps;
+const readableStreamDefaultReadRequestCloseSteps =
+  ReadableStreamDefaultReadRequest.prototype.closeSteps;
+const readableStreamDefaultReadRequestErrorSteps =
+  ReadableStreamDefaultReadRequest.prototype.errorSteps;
 
 /** @template R */
 class ReadableStreamDefaultReader {
@@ -6450,24 +7141,26 @@ class ReadableStreamDefaultReader {
     // the chunkSteps indirection.
     if (stream[_state] === "readable") {
       const controller = stream[_controller];
-      if (
-        controller[_pendingPullIntos] === undefined &&
-        controller[_queue].size !== 0
-      ) {
+      if (controller[_pendingPullIntos] === undefined) {
         try {
           runReadableStreamUseGuard(stream);
+          if (queueSize(controller[_queue]) !== 0) {
+            stream[_disturbed] = true;
+            const chunk = dequeueValue(controller);
+            if (
+              controller[_closeRequested] &&
+              queueSize(controller[_queue]) === 0
+            ) {
+              readableStreamDefaultControllerClearAlgorithms(controller);
+              readableStreamClose(stream);
+            } else {
+              readableStreamDefaultControllerCallPullIfNeeded(controller);
+            }
+            return PromiseResolve({ value: chunk, done: false });
+          }
         } catch (error) {
           return PromiseReject(error);
         }
-        stream[_disturbed] = true;
-        const chunk = dequeueValue(controller);
-        if (controller[_closeRequested] && controller[_queue].size === 0) {
-          readableStreamDefaultControllerClearAlgorithms(controller);
-          readableStreamClose(stream);
-        } else {
-          readableStreamDefaultControllerCallPullIfNeeded(controller);
-        }
-        return PromiseResolve({ value: chunk, done: false });
       }
     }
     /** @type {Deferred<ReadableStreamReadResult<R>>} */
@@ -6547,6 +7240,11 @@ class ReadableStreamBYOBReadIntoRequest {
   /** @param {Deferred<ReadableStreamBYOBReadResult>} promise */
   constructor(promise) {
     this.#promise = promise;
+    WeakMapPrototypeSet(
+      readableRequestDispatches,
+      this,
+      byobReadIntoRequestDispatch,
+    );
   }
 
   chunkSteps(chunk) {
@@ -6561,6 +7259,13 @@ class ReadableStreamBYOBReadIntoRequest {
     this.#promise.reject(e);
   }
 }
+
+const readableStreamBYOBReadIntoRequestChunkSteps =
+  ReadableStreamBYOBReadIntoRequest.prototype.chunkSteps;
+const readableStreamBYOBReadIntoRequestCloseSteps =
+  ReadableStreamBYOBReadIntoRequest.prototype.closeSteps;
+const readableStreamBYOBReadIntoRequestErrorSteps =
+  ReadableStreamBYOBReadIntoRequest.prototype.errorSteps;
 
 /** @template R */
 class ReadableStreamBYOBReader {
@@ -6727,13 +7432,22 @@ const ReadableStreamBYOBReaderPrototype = ReadableStreamBYOBReader.prototype;
 class ReadableStreamBYOBRequest {
   /** @type {ReadableByteStreamController} */
   [_controller];
-  /** @type {Uint8Array<ArrayBuffer> | null} */
-  [_view];
+
+  /** @returns {Uint8Array<ArrayBuffer> | null} */
+  get [_view]() {
+    return getReadableBYOBRequestView(this);
+  }
+
+  /** @param {Uint8Array<ArrayBuffer> | null} value */
+  set [_view](value) {
+    runReadableBYOBRequestUseGuard(this);
+    setReadableBYOBRequestViewInternal(this, value);
+  }
 
   /** @returns {Uint8Array<ArrayBuffer> | null} */
   get view() {
     webidl.assertBranded(this, ReadableStreamBYOBRequestPrototype);
-    return this[_view];
+    return getReadableBYOBRequestView(this);
   }
 
   constructor(brand = undefined) {
@@ -6741,10 +7455,12 @@ class ReadableStreamBYOBRequest {
       webidl.illegalConstructor();
     }
     this[_brand] = _brand;
+    setReadableBYOBRequestViewInternal(this, null);
   }
 
   respond(bytesWritten) {
     webidl.assertBranded(this, ReadableStreamBYOBRequestPrototype);
+    runReadableBYOBRequestUseGuard(this);
     const prefix = "Failed to execute 'respond' on 'ReadableStreamBYOBRequest'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     bytesWritten = webidl.converters["unsigned long long"](
@@ -6760,13 +7476,14 @@ class ReadableStreamBYOBRequest {
       throw new TypeError("This BYOB request has been invalidated");
     }
 
+    const requestView = getReadableBYOBRequestViewInternal(this);
     let buffer, byteLength;
-    if (isTypedArray(this[_view])) {
-      buffer = TypedArrayPrototypeGetBuffer(this[_view]);
-      byteLength = TypedArrayPrototypeGetByteLength(this[_view]);
+    if (isTypedArray(requestView)) {
+      buffer = TypedArrayPrototypeGetBuffer(requestView);
+      byteLength = TypedArrayPrototypeGetByteLength(requestView);
     } else {
-      buffer = DataViewPrototypeGetBuffer(this[_view]);
-      byteLength = DataViewPrototypeGetByteLength(this[_view]);
+      buffer = DataViewPrototypeGetBuffer(requestView);
+      byteLength = DataViewPrototypeGetByteLength(requestView);
     }
     if (isDetachedBuffer(buffer)) {
       throw new TypeError(
@@ -6780,6 +7497,7 @@ class ReadableStreamBYOBRequest {
 
   respondWithNewView(view) {
     webidl.assertBranded(this, ReadableStreamBYOBRequestPrototype);
+    runReadableBYOBRequestUseGuard(this);
     const prefix =
       "Failed to execute 'respondWithNewView' on 'ReadableStreamBYOBRequest'";
     webidl.requiredArguments(arguments.length, 1, prefix);
@@ -6853,12 +7571,14 @@ class ReadableByteStreamController {
   /** @returns {ReadableStreamBYOBRequest | null} */
   get byobRequest() {
     webidl.assertBranded(this, ReadableByteStreamControllerPrototype);
+    runReadableControllerUseGuard(this);
     return readableByteStreamControllerGetBYOBRequest(this);
   }
 
   /** @returns {number | null} */
   get desiredSize() {
     webidl.assertBranded(this, ReadableByteStreamControllerPrototype);
+    runReadableControllerUseGuard(this);
     return readableByteStreamControllerGetDesiredSize(this);
   }
 
@@ -6873,7 +7593,7 @@ class ReadableByteStreamController {
         "ReadableByteStreamController's stream is not in a readable state",
       );
     }
-    readableByteStreamControllerClose(this);
+    readableByteStreamControllerClose(this, queueCleanupAccessToken);
   }
 
   /**
@@ -6882,6 +7602,7 @@ class ReadableByteStreamController {
    */
   enqueue(chunk) {
     webidl.assertBranded(this, ReadableByteStreamControllerPrototype);
+    runReadableControllerUseGuard(this);
     const prefix =
       "Failed to execute 'enqueue' on 'ReadableByteStreamController'";
     webidl.requiredArguments(arguments.length, 1, prefix);
@@ -6985,7 +7706,7 @@ class ReadableByteStreamController {
       try {
         buffer = new ArrayBuffer(autoAllocateChunkSize);
       } catch (e) {
-        readRequest.errorSteps(e);
+        readableRequestErrorSteps(readRequest, e);
         return;
       }
       /** @type {PullIntoDescriptor} */
@@ -7000,20 +7721,20 @@ class ReadableByteStreamController {
         viewConstructor: Uint8Array,
         readerType: "default",
       };
-      this[_pendingPullIntos].enqueue(pullIntoDescriptor);
+      queueEnqueue(this[_pendingPullIntos], pullIntoDescriptor);
     }
     readableStreamAddReadRequest(stream, readRequest);
     readableByteStreamControllerCallPullIfNeeded(this);
   }
 
   [_releaseSteps]() {
-    if (this[_pendingPullIntos].size !== 0) {
+    if (queueCleanupSize(this[_pendingPullIntos]) !== 0) {
       /** @type {PullIntoDescriptor} */
-      const firstPendingPullInto = this[_pendingPullIntos].peek();
+      const firstPendingPullInto = queueCleanupPeek(this[_pendingPullIntos]);
       firstPendingPullInto.readerType = "none";
       const newQueue = new Queue();
-      newQueue.enqueue(firstPendingPullInto);
-      this[_pendingPullIntos] = newQueue;
+      queueEnqueue(newQueue, firstPendingPullInto);
+      setReadableControllerQueue(this, _pendingPullIntos, newQueue);
     }
   }
 }
@@ -7065,6 +7786,7 @@ class ReadableStreamDefaultController {
   /** @returns {number | null} */
   get desiredSize() {
     webidl.assertBranded(this, ReadableStreamDefaultControllerPrototype);
+    runReadableControllerUseGuard(this);
     return readableStreamDefaultControllerGetDesiredSize(this);
   }
 
@@ -7074,7 +7796,7 @@ class ReadableStreamDefaultController {
     if (readableStreamDefaultControllerCanCloseOrEnqueue(this) === false) {
       throw new TypeError("The stream controller cannot close or enqueue");
     }
-    readableStreamDefaultControllerClose(this);
+    readableStreamDefaultControllerClose(this, queueCleanupAccessToken);
   }
 
   /**
@@ -7083,6 +7805,7 @@ class ReadableStreamDefaultController {
    */
   enqueue(chunk = undefined) {
     webidl.assertBranded(this, ReadableStreamDefaultControllerPrototype);
+    runReadableControllerUseGuard(this);
     if (chunk !== undefined) {
       chunk = webidl.converters.any(chunk);
     }
@@ -7135,15 +7858,15 @@ class ReadableStreamDefaultController {
    */
   [_pullSteps](readRequest) {
     const stream = this[_stream];
-    if (this[_queue].size) {
+    if (queueSize(this[_queue])) {
       const chunk = dequeueValue(this);
-      if (this[_closeRequested] && this[_queue].size === 0) {
+      if (this[_closeRequested] && queueSize(this[_queue]) === 0) {
         readableStreamDefaultControllerClearAlgorithms(this);
         readableStreamClose(stream);
       } else {
         readableStreamDefaultControllerCallPullIfNeeded(this);
       }
-      readRequest.chunkSteps(chunk);
+      readableRequestChunkSteps(readRequest, chunk);
     } else {
       readableStreamAddReadRequest(stream, readRequest);
       readableStreamDefaultControllerCallPullIfNeeded(this);
@@ -8244,18 +8967,23 @@ const kNodeMessagingTransfer = SymbolFor("nodejs.messaging.kTransfer");
 function createReadableStreamStateView(stream) {
   return {
     get disturbed() {
+      runReadableStreamUseGuard(stream);
       return stream[_disturbed];
     },
     get reader() {
+      runReadableStreamUseGuard(stream);
       return stream[_reader];
     },
     get state() {
+      runReadableStreamUseGuard(stream);
       return stream[_state];
     },
     get storedError() {
+      runReadableStreamUseGuard(stream);
       return stream[_storedError];
     },
     get controller() {
+      runReadableStreamUseGuard(stream);
       return stream[_controller];
     },
   };
@@ -8264,12 +8992,15 @@ function createReadableStreamStateView(stream) {
 function createReadableStreamDefaultReaderStateView(reader) {
   return {
     get closedPromise() {
+      runReadableReaderUseGuard(reader);
       return reader[_closedPromise]?.promise;
     },
     get readRequests() {
+      runReadableReaderUseGuard(reader);
       return reader[_readRequests];
     },
     get stream() {
+      runReadableReaderUseGuard(reader);
       return reader[_stream];
     },
   };
@@ -8278,12 +9009,15 @@ function createReadableStreamDefaultReaderStateView(reader) {
 function createReadableStreamBYOBReaderStateView(reader) {
   return {
     get closedPromise() {
+      runReadableReaderUseGuard(reader);
       return reader[_closedPromise]?.promise;
     },
     get readIntoRequests() {
+      runReadableReaderUseGuard(reader);
       return reader[_readIntoRequests];
     },
     get stream() {
+      runReadableReaderUseGuard(reader);
       return reader[_stream];
     },
   };
@@ -8292,36 +9026,47 @@ function createReadableStreamBYOBReaderStateView(reader) {
 function createReadableStreamDefaultControllerStateView(controller) {
   return {
     get cancelAlgorithm() {
+      runReadableControllerUseGuard(controller);
       return controller[_cancelAlgorithm];
     },
     get closeRequested() {
+      runReadableControllerUseGuard(controller);
       return controller[_closeRequested];
     },
     get desiredSize() {
+      runReadableControllerUseGuard(controller);
       return readableStreamDefaultControllerGetDesiredSize(controller);
     },
     get pullAlgorithm() {
+      runReadableControllerUseGuard(controller);
       return controller[_pullAlgorithm];
     },
     get pulling() {
+      runReadableControllerUseGuard(controller);
       return controller[_pulling];
     },
     get pullAgain() {
+      runReadableControllerUseGuard(controller);
       return controller[_pullAgain];
     },
     get queue() {
+      runReadableControllerUseGuard(controller);
       return controller[_queue];
     },
     get queueTotalSize() {
+      runReadableControllerUseGuard(controller);
       return controller[_queueTotalSize];
     },
     get sizeAlgorithm() {
-      return controller[_strategySizeAlgorithm];
+      runReadableControllerUseGuard(controller);
+      return getReadableControllerSizeAlgorithm(controller);
     },
     get started() {
+      runReadableControllerUseGuard(controller);
       return controller[_started];
     },
     get stream() {
+      runReadableControllerUseGuard(controller);
       return controller[_stream];
     },
   };
@@ -8330,52 +9075,68 @@ function createReadableStreamDefaultControllerStateView(controller) {
 function createReadableByteStreamControllerStateView(controller) {
   return {
     get autoAllocateChunkSize() {
+      runReadableControllerUseGuard(controller);
       return controller[_autoAllocateChunkSize];
     },
     get byobRequest() {
+      runReadableControllerUseGuard(controller);
       return controller[_byobRequest];
     },
     get cancelAlgorithm() {
+      runReadableControllerUseGuard(controller);
       return controller[_cancelAlgorithm];
     },
     get closeRequested() {
+      runReadableControllerUseGuard(controller);
       return controller[_closeRequested];
     },
     get desiredSize() {
+      runReadableControllerUseGuard(controller);
       return readableByteStreamControllerGetDesiredSize(controller);
     },
     get pendingPullIntos() {
+      runReadableControllerUseGuard(controller);
       return controller[_pendingPullIntos];
     },
     set pendingPullIntos(value) {
+      runReadableControllerUseGuard(controller);
       controller[_pendingPullIntos] = value;
     },
     get pullAlgorithm() {
+      runReadableControllerUseGuard(controller);
       return controller[_pullAlgorithm];
     },
     get pulling() {
+      runReadableControllerUseGuard(controller);
       return controller[_pulling];
     },
     get pullAgain() {
+      runReadableControllerUseGuard(controller);
       return controller[_pullAgain];
     },
     get queue() {
+      runReadableControllerUseGuard(controller);
       return controller[_queue];
     },
     get queueTotalSize() {
+      runReadableControllerUseGuard(controller);
       return controller[_queueTotalSize];
     },
     get started() {
+      runReadableControllerUseGuard(controller);
       return controller[_started];
     },
     get stream() {
+      runReadableControllerUseGuard(controller);
       return controller[_stream];
     },
   };
 }
 
 function isReadableStreamBYOBRequest(value) {
-  return !(typeof value !== "object" || value === null || !value[_view]);
+  return !(typeof value !== "object" || value === null ||
+    !WeakMapPrototypeHas(readableBYOBRequestViews, value) ||
+    getReadableBYOBRequestViewInternal(value) === null);
 }
 
 function isReadableByteStreamController(value) {

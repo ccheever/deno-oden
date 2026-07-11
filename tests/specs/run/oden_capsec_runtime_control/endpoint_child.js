@@ -26,6 +26,115 @@ function bounded(promise, label, milliseconds = 1_000) {
   );
 }
 
+const kNodeWebStreamsState = Symbol.for("nodejs.webstreams.kState");
+
+function readableReflection(body) {
+  const streamState = body[kNodeWebStreamsState];
+  const controller = streamState.controller;
+  const controllerState = controller[kNodeWebStreamsState];
+  return {
+    controller,
+    controllerState,
+    queue: controllerState.queue,
+    streamState,
+  };
+}
+
+function queueMethodsFor(queue) {
+  const prototype = Object.getPrototypeOf(queue);
+  return {
+    dequeue: prototype.dequeue,
+    dequeueNode: prototype.dequeueNode,
+    enqueue: prototype.enqueue,
+    peek: prototype.peek,
+    size: Object.getOwnPropertyDescriptor(prototype, "size").get,
+  };
+}
+
+function describedSymbol(object, description) {
+  let current = object;
+  while (current !== null) {
+    const symbol = Reflect.ownKeys(current).find((key) =>
+      typeof key === "symbol" && key.description === description
+    );
+    if (symbol !== undefined) return symbol;
+    current = Object.getPrototypeOf(current);
+  }
+  throw new Error(`missing ${description} symbol`);
+}
+
+function ordinaryQueue() {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue("ordinary-first");
+    },
+  });
+  return readableReflection(stream).queue;
+}
+
+function pendingRequestFixtures(queueMethods) {
+  const defaultStream = new ReadableStream();
+  const defaultReader = defaultStream.getReader();
+  const defaultPromise = defaultReader.read();
+  const defaultRequest = Reflect.apply(
+    queueMethods.peek,
+    defaultReader[kNodeWebStreamsState].readRequests,
+    [],
+  );
+
+  const iteratorStream = new ReadableStream();
+  const iterator = iteratorStream.values();
+  const iteratorPromise = iterator.next();
+  const iteratorReaderSymbol = Reflect.ownKeys(iterator).find((key) =>
+    typeof key === "symbol" && key.description === "[[reader]]"
+  );
+  const iteratorReader = iterator[iteratorReaderSymbol];
+  const iteratorRequest = Reflect.apply(
+    queueMethods.peek,
+    iteratorReader[kNodeWebStreamsState].readRequests,
+    [],
+  );
+
+  const byobStream = new ReadableStream({
+    type: "bytes",
+  });
+  const byobReader = byobStream.getReader({ mode: "byob" });
+  const byobPromise = byobReader.read(new Uint8Array(8));
+  const byobRequest = Reflect.apply(
+    queueMethods.peek,
+    byobReader[kNodeWebStreamsState].readIntoRequests,
+    [],
+  );
+
+  return {
+    cleanup() {
+      Promise.allSettled([
+        defaultReader.cancel(),
+        iterator.return(),
+        byobReader.cancel(),
+        defaultPromise,
+        iteratorPromise,
+        byobPromise,
+      ]);
+      try {
+        defaultReader.releaseLock();
+      } catch {
+        // Cleanup is best effort after closing the ordinary controls.
+      }
+      try {
+        byobReader.releaseLock();
+      } catch {
+        // Cleanup is best effort after closing the ordinary controls.
+      }
+    },
+    requests: {
+      byob: byobRequest,
+      default: defaultRequest,
+      iterator: iteratorRequest,
+    },
+  };
+}
+
 async function openNodeInspectorResponse() {
   const socket = await openNodeInspectorSocket();
   await bounded(
@@ -166,7 +275,179 @@ const pipeToResponse = await fetch(httpUrl);
 const pipeThroughResponse = await fetch(httpUrl);
 const transferResponse = await fetch(httpUrl);
 const webToNodeResponse = await fetch(httpUrl);
+const reflectedQueueResponse = await fetch(httpUrl);
+const retainedStateResponse = await fetch(httpUrl);
+const poisonedDefaultResponse = await fetch(httpUrl);
+const poisonedIteratorResponse = await fetch(httpUrl);
+const poisonedBYOBResponse = await fetch(httpUrl);
+const cleanupCancelResponse = await fetch(httpUrl);
+const cleanupErrorResponse = await fetch(httpUrl);
+const cleanupReleaseResponse = await fetch(httpUrl);
+const packageSizeResponse = await fetch(httpUrl);
+const rootSizeResponse = await fetch(httpUrl);
+const backingResponse = await fetch(httpUrl);
 const webToNodeStream = Readable.fromWeb(webToNodeResponse.body);
+
+const backingDenoConn = await Deno.connect({ hostname: "127.0.0.1", port });
+await backingDenoConn.write(
+  new TextEncoder().encode(
+    "GET /json/list HTTP/1.1\r\nHost: localhost\r\n\r\n",
+  ),
+);
+const protectedConnStream = backingDenoConn.readable;
+const fetchBackingSymbol = describedSymbol(
+  backingResponse.body,
+  "[[resourceBacking]]",
+);
+const connBackingSymbol = describedSymbol(
+  protectedConnStream,
+  "[[resourceBackingUnrefable]]",
+);
+const retainedFetchBacking = backingResponse.body[fetchBackingSymbol];
+const retainedConnBacking = protectedConnStream[connBackingSymbol];
+const protectedConnRid = retainedConnBacking.rid;
+
+const cleanupCloseConn = await Deno.connect({
+  hostname: "127.0.0.1",
+  port,
+});
+const cleanupCloseController = readableReflection(
+  cleanupCloseConn.readable,
+).controller;
+
+const ordinaryListener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+const ordinaryAccept = ordinaryListener.accept();
+const ordinaryClientConn = await Deno.connect(ordinaryListener.addr);
+const ordinaryServerConn = await ordinaryAccept;
+ordinaryListener.close();
+const ordinaryConnStream = ordinaryClientConn.readable;
+const ordinaryConnBackingSymbol = describedSymbol(
+  ordinaryConnStream,
+  "[[resourceBackingUnrefable]]",
+);
+
+const reflectedQueueState = readableReflection(reflectedQueueResponse.body);
+const cleanupErrorController =
+  readableReflection(cleanupErrorResponse.body).controller;
+const cleanupReader = cleanupReleaseResponse.body.getReader();
+const ordinaryReflectedQueue = ordinaryQueue();
+const queueMethods = queueMethodsFor(ordinaryReflectedQueue);
+const pendingRequests = pendingRequestFixtures(queueMethods);
+let requestPrototypeProof;
+try {
+  const poisonStatus = endpointProbe.poisonRequestPrototypes(
+    pendingRequests.requests,
+  );
+  const poisonedDefaultReader = poisonedDefaultResponse.body.getReader();
+  const poisonedIterator = poisonedIteratorResponse.body.values();
+  const poisonedBYOBReader = poisonedBYOBResponse.body.getReader({
+    mode: "byob",
+  });
+  const [defaultRead, iteratorRead, byobRead] = await Promise.all([
+    poisonedDefaultReader.read(),
+    poisonedIterator.next(),
+    poisonedBYOBReader.read(new Uint8Array(4096)),
+  ]);
+  const leakOutcome = endpointProbe.requestPrototypeLeakOutcome();
+  requestPrototypeProof = {
+    byob: poisonStatus === "POISONED" && leakOutcome.byob === "CLOSED" &&
+        !byobRead.done && byobRead.value instanceof Uint8Array
+      ? "CLOSED"
+      : "BROKEN",
+    default: poisonStatus === "POISONED" &&
+        leakOutcome.default === "CLOSED" && !defaultRead.done &&
+        defaultRead.value instanceof Uint8Array
+      ? "CLOSED"
+      : "BROKEN",
+    iterator: poisonStatus === "POISONED" &&
+        leakOutcome.iterator === "CLOSED" && !iteratorRead.done &&
+        iteratorRead.value instanceof Uint8Array
+      ? "CLOSED"
+      : "BROKEN",
+  };
+  poisonedDefaultReader.releaseLock();
+  await poisonedIterator.return();
+  poisonedBYOBReader.releaseLock();
+} finally {
+  endpointProbe.restoreRequestPrototypes();
+  await pendingRequests.cleanup();
+}
+
+const packageSizeTransform = endpointProbe.makePackageSizeTransform();
+const packageSizeOutput = packageSizeResponse.body.pipeThrough(
+  packageSizeTransform,
+);
+await new Promise((resolve) => setTimeout(resolve, 0));
+let packageSizeDelivery;
+try {
+  await new Response(packageSizeOutput).arrayBuffer();
+  packageSizeDelivery = "ALLOWED";
+} catch {
+  packageSizeDelivery = "DENIED";
+}
+const packageSizeProof = packageSizeDelivery === "DENIED" &&
+    endpointProbe.packageSizeCallbackOutcome() === "CLOSED"
+  ? "CLOSED"
+  : "BROKEN";
+
+let rootSizeSawChunk = false;
+const rootSizeTransform = new TransformStream(undefined, undefined, {
+  highWaterMark: 1,
+  size(chunk) {
+    rootSizeSawChunk = chunk instanceof Uint8Array;
+    return 1;
+  },
+});
+const rootSizeOutput = rootSizeResponse.body.pipeThrough(rootSizeTransform);
+await new Promise((resolve) => setTimeout(resolve, 0));
+const rootSizeBytes = await new Response(rootSizeOutput).arrayBuffer();
+const rootSizeProof = rootSizeSawChunk && rootSizeBytes.byteLength > 0
+  ? "ALLOWED"
+  : "BROKEN";
+
+const retainedTransform = new TransformStream();
+const retainedStreamState = retainedTransform.readable[kNodeWebStreamsState];
+const retainedController = retainedStreamState.controller;
+const retainedControllerState = retainedController[kNodeWebStreamsState];
+const retainedQueue = retainedControllerState.queue;
+const retainedControllerSymbol = describedSymbol(
+  retainedTransform.readable,
+  "[[controller]]",
+);
+const retainedQueueSymbol = describedSymbol(retainedController, "[[queue]]");
+const decoyReflection = readableReflection(new ReadableStream());
+retainedTransform.readable[retainedControllerSymbol] =
+  decoyReflection.controller;
+retainedController[retainedQueueSymbol] = decoyReflection.queue;
+const preTransitionSlotReplacementArmed =
+  retainedTransform.readable[retainedControllerSymbol] ===
+    decoyReflection.controller &&
+  retainedController[retainedQueueSymbol] === decoyReflection.queue;
+Object.setPrototypeOf(retainedQueue, null);
+const retainedOutput = retainedStateResponse.body.pipeThrough(
+  retainedTransform,
+);
+const preTransitionSlotsRestored =
+  retainedTransform.readable[retainedControllerSymbol] ===
+    retainedController &&
+  retainedController[retainedQueueSymbol] === retainedQueue;
+
+const reflectedBYOBConn = await Deno.connect({
+  hostname: "127.0.0.1",
+  port,
+});
+const reflectedBYOBStream = reflectedBYOBConn.readable;
+const reflectedBYOBReader = reflectedBYOBStream.getReader({
+  mode: "byob",
+});
+const reflectedBYOBRead = reflectedBYOBReader.read(new Uint8Array(4096));
+const reflectedBYOBController =
+  reflectedBYOBStream[kNodeWebStreamsState].controller;
+const reflectedBYOBRequest = reflectedBYOBController.byobRequest;
+const byobViewSymbol = [
+  ...Reflect.ownKeys(reflectedBYOBRequest),
+  ...Reflect.ownKeys(Object.getPrototypeOf(reflectedBYOBRequest)),
+].find((key) => typeof key === "symbol" && key.description === "[[view]]");
 
 const readDenoConn = await Deno.connect({ hostname: "127.0.0.1", port });
 await readDenoConn.write(
@@ -214,10 +495,37 @@ try {
     nodeToWebStream,
     webToNodeStream,
     denoReadableStream: denoReadableConn.readable,
+    protectedFetchBackingStream: backingResponse.body,
+    protectedFetchBackingSymbol: fetchBackingSymbol,
+    retainedFetchBacking,
+    protectedConnBackingStream: protectedConnStream,
+    protectedConnBackingSymbol: connBackingSymbol,
+    retainedConnBacking,
+    protectedConnRid,
+    ordinaryConnBackingStream: ordinaryConnStream,
+    ordinaryConnBackingSymbol,
+    byobRequest: reflectedBYOBRequest,
+    byobViewSymbol,
+    cleanupCancelStream: cleanupCancelResponse.body,
+    cleanupCloseController,
+    cleanupErrorController,
+    cleanupReader,
+    ordinaryQueue: ordinaryReflectedQueue,
+    queueMethods,
+    reflectedQueue: reflectedQueueState.queue,
+    retainedControllerState,
+    retainedQueue,
+    retainedStreamState,
+    preTransitionSlotReplacementArmed,
     rootResponse,
     rootDnsResponse,
     wsUrl,
   });
+  result.defaultReadRequestPrototypePoisoning = requestPrototypeProof.default;
+  result.iteratorReadRequestPrototypePoisoning = requestPrototypeProof.iterator;
+  result.byobReadRequestPrototypePoisoning = requestPrototypeProof.byob;
+  result.packageReadableSizeCallback = packageSizeProof;
+  result.rootReadableSizeCallback = rootSizeProof;
   responseReader = readerResponse.body.getReader();
   responseByobReader = byobResponse.body.getReader({ mode: "byob" });
   responseIterator = iteratorResponse.body.values();
@@ -239,6 +547,48 @@ try {
       readableStreamFromReader,
     }),
   );
+  const restoredReaderResult = await responseReader.read();
+  result.rootResponseReaderAfterPackage = !restoredReaderResult.done &&
+      restoredReaderResult.value instanceof Uint8Array
+    ? "ALLOWED"
+    : "BROKEN";
+  const reflectedQueueText = await reflectedQueueResponse.text();
+  result.rootReflectedQueueAfterPackage = reflectedQueueText.includes(
+      "webSocketDebuggerUrl",
+    )
+    ? "ALLOWED"
+    : "BROKEN";
+  const retainedOutputText = await new Response(retainedOutput).text();
+  result.rootRetainedOutputAfterPackage = retainedOutputText.includes(
+      "webSocketDebuggerUrl",
+    )
+    ? "ALLOWED"
+    : "BROKEN";
+  result.rootPreTransitionSlotsAfterPackage =
+    preTransitionSlotReplacementArmed && preTransitionSlotsRestored &&
+      retainedOutputText.includes("webSocketDebuggerUrl")
+      ? "ALLOWED"
+      : "BROKEN";
+  await reflectedBYOBConn.write(
+    new TextEncoder().encode(
+      "GET /json/list HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    ),
+  );
+  const reflectedBYOBResult = await reflectedBYOBRead;
+  result.rootBYOBRequestAfterPackage = !reflectedBYOBResult.done &&
+      reflectedBYOBResult.value instanceof Uint8Array
+    ? "ALLOWED"
+    : "BROKEN";
+  const backingResponseText = await backingResponse.text();
+  const backingConnBuffer = new Uint8Array(8192);
+  const backingConnBytes = await backingDenoConn.read(backingConnBuffer);
+  result.rootResourceBackingsAfterPackage = (retainedFetchBacking === null ||
+      typeof retainedFetchBacking.rid === "number") &&
+      typeof retainedConnBacking.rid === "number" &&
+      backingResponseText.includes("webSocketDebuggerUrl") &&
+      backingConnBytes !== null && backingConnBytes > 0
+    ? "ALLOWED"
+    : "BROKEN";
   const text = await probeWebSocketSend(
     wsUrl,
     JSON.stringify({ id: 1, method: "Runtime.enable" }),
@@ -301,6 +651,16 @@ try {
     // A guard regression may have disturbed or released the reader.
   }
   try {
+    reflectedBYOBReader.releaseLock();
+  } catch {
+    // The reflected request test may already have completed or errored.
+  }
+  try {
+    reflectedBYOBConn.close();
+  } catch {
+    // The reflected BYOB read may already have closed the connection.
+  }
+  try {
     await responseIterator?.return();
   } catch {
     // The denied next() should not consume, but cleanup remains best effort.
@@ -331,6 +691,26 @@ try {
     denoReadableConn.close();
   } catch {
     // The failed stream collector may already have canceled the connection.
+  }
+  try {
+    backingDenoConn.close();
+  } catch {
+    // A backing-route regression may have consumed or closed the connection.
+  }
+  try {
+    cleanupCloseConn.close();
+  } catch {
+    // Stream close does not need to close the shared native resource.
+  }
+  try {
+    ordinaryClientConn.close();
+  } catch {
+    // Ordinary resource cleanup is best effort.
+  }
+  try {
+    ordinaryServerConn.close();
+  } catch {
+    // Ordinary resource cleanup is best effort.
   }
   webToNodeStream.destroy();
 }

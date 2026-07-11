@@ -37,6 +37,9 @@ const nodeCompose = await source(
 const nodeDuplexPair = await source(
   "ext/node/polyfills/internal/streams/duplexpair.js",
 );
+const net = await source("ext/net/01_net.js");
+const netIo = await source("ext/net/io.rs");
+const netOps = await source("ext/net/ops.rs");
 
 const ping = section(
   websocket,
@@ -98,6 +101,26 @@ const nodeDuplexifyPair = section(
   "function _duplexify(pair)",
   "return d;",
 );
+const queueBarrier = section(
+  streams,
+  "const queueInternalAccessToken = ObjectCreate(null);",
+  "/**\n * @param {ArrayBufferLike} O",
+);
+const requestBarrier = section(
+  streams,
+  "const readableRequestDispatches = new SafeWeakMap();",
+  "function getReadableBYOBRequestViewInternal(byobRequest)",
+);
+const readableEnqueue = section(
+  streams,
+  "function readableStreamDefaultControllerEnqueue(controller, chunk)",
+  "function readableStreamDefaultControllerError(controller, e)",
+);
+const readableSizeCallback = section(
+  streams,
+  "function invokeReadableControllerSizeAlgorithm(",
+  "function setReadableReaderQueue(reader, slot, queue)",
+);
 const webIteratorFastPath = section(
   streams,
   "const readableStreamAsyncIteratorPrototype = ObjectSetPrototypeOf({",
@@ -108,6 +131,18 @@ const webReaderFastPath = section(
   "class ReadableStreamDefaultReader",
   "class ReadableStreamBYOBReadIntoRequest",
 );
+
+function guardCaughtBeforeQueueInspection(text, streamMarker) {
+  const streamIndex = text.indexOf(streamMarker);
+  const tryIndex = text.indexOf("try {", streamIndex);
+  const guardIndex = text.indexOf(
+    "runReadableStreamUseGuard(stream);",
+    tryIndex,
+  );
+  const queueIndex = text.indexOf("queueSize(controller[_queue])", guardIndex);
+  return streamIndex >= 0 && tryIndex > streamIndex &&
+    guardIndex > tryIndex && queueIndex > guardIndex;
+}
 
 const evidence = {
   websocketPingGuard: ping.includes(
@@ -128,10 +163,10 @@ const evidence = {
   nodePipeReadableDestinationPropagation: ordered(
     nodePipe,
     "runReadableUseGuard(this);",
-    "setReadableUseGuard(dest, sourceGuard);",
+    "setStreamUseGuard(dest, sourceGuard);",
   ) && ordered(
     nodePipe,
-    "setReadableUseGuard(dest, sourceGuard);",
+    "setStreamUseGuard(dest, sourceGuard);",
     "state.pipes.push(dest);",
   ),
   nodeStreamOperatorPropagation: nodeOperators.includes(
@@ -168,6 +203,123 @@ const evidence = {
     "runReadableStreamUseGuard(stream);",
     "const chunk = dequeueValue(controller);",
   ),
+  webQueueTokenAndCapturedDispatch: queueBarrier.includes(
+    "const queueInternalAccessToken = ObjectCreate(null);",
+  ) && queueBarrier.includes(
+    "const queuePrototypeIsInternalQueue = Queue.prototype.isInternalQueue;",
+  ) && queueBarrier.includes(
+    "void this.#size;",
+  ) && queueBarrier.includes(
+    "ReflectApply(queuePrototypeDequeue, queue",
+  ),
+  webQueueInternalCallsStillGuarded: queueBarrier.includes(
+    "both public and internal operations recheck",
+  ) && queueBarrier.includes(
+    "runReadableStreamUseGuard(streams[i]);",
+  ) && !queueBarrier.includes(
+    "if (accessToken === queueInternalAccessToken) return",
+  ),
+  webQueueDynamicDispatchClosed:
+    (streams.match(/\.(?:enqueueWithSize|dequeueNode|dequeue|peek)\(/g) ?? [])
+        .length === 0 &&
+    (streams.match(/\.enqueue\(/g) ?? []).length === 1,
+  webRequestDispatchCaptured: requestBarrier.includes(
+    "const readableRequestDispatches = new SafeWeakMap();",
+  ) && streams.includes(
+    "ReadableStreamDefaultReadRequest.prototype.chunkSteps;",
+  ) && streams.includes(
+    "ReadableStreamBYOBReadIntoRequest.prototype.chunkSteps;",
+  ) && streams.includes(
+    "ReadableStreamAsyncIteratorReadRequest.prototype.chunkSteps;",
+  ) && (streams.match(/registerReadableLiteralRequest\(/g) ?? []).length ===
+      7 &&
+    (streams.match(/\.(?:chunkSteps|closeSteps|errorSteps)\(/g) ?? [])
+        .length ===
+      0,
+  webReadableSizeCallbackCaptured: streams.includes(
+    "const readableControllerSizeAlgorithms = new SafeWeakMap();",
+  ) && readableEnqueue.includes(
+    "const sizeAlgorithm = getReadableControllerSizeAlgorithm(controller);",
+  ) && readableEnqueue.includes(
+    "chunkSize = invokeReadableControllerSizeAlgorithm(",
+  ) && streams.includes(
+    "const callbackContext = op_oden_callback_context(callback);",
+  ) && readableSizeCallback.indexOf(
+        "setAsyncContext(callbackRecord.callbackContext);",
+      ) < readableSizeCallback.indexOf("runReadableStreamUseGuard(stream);") &&
+    readableSizeCallback.indexOf("runReadableStreamUseGuard(stream);") <
+      readableSizeCallback.indexOf("callbackRecord.callback,"),
+  webFastPathsRejectGuardErrors: guardCaughtBeforeQueueInspection(
+    webIteratorFastPath,
+    "const stream = reader[_stream]",
+  ) && guardCaughtBeforeQueueInspection(
+    webReaderFastPath,
+    "const stream = this[_stream]",
+  ),
+  webBYOBViewClosurePrivate: streams.includes(
+    "const readableBYOBRequestViews = new SafeWeakMap();",
+  ) && streams.includes(
+    "return getReadableBYOBRequestView(this);",
+  ) && !streams.includes("  [_view];"),
+  webProtectedSlotsSealed: streams.includes(
+    "function sealProtectedReadableSlot(object, slot)",
+  ) && streams.includes(
+    "sealProtectedReadableSlot(controller, _pendingPullIntos);",
+  ) && streams.includes(
+    "sealProtectedReadableSlot(reader, _readRequests);",
+  ),
+  webCanonicalGraphIgnoresRetagSlots: streams.includes(
+    "const canonicalReadableSlots = new SafeWeakMap();",
+  ) && streams.includes(
+    "slots[slot] = canonicalSlots[slot];",
+  ) && !section(
+    streams,
+    "function sealProtectedReadableSlot(object, slot)",
+    "function setProtectedReadableSlot(object, slot, value)",
+  ).includes("object[slot]") && streams.includes(
+    "const controller = getCanonicalReadableSlot(stream, _controller);",
+  ) && streams.includes(
+    "setProtectedReadableSlot(stream, _controller, controller);",
+  ) && streams.includes(
+    "setProtectedReadableSlot(controller, _stream, stream);",
+  ),
+  webStateViewsRecheck: streams.includes(
+    "function createReadableByteStreamControllerStateView(controller)",
+  ) && streams.includes(
+    "runReadableControllerUseGuard(controller);",
+  ),
+  webCleanupUsesNarrowToken: streams.includes(
+    "readableByteStreamControllerClose(this, queueCleanupAccessToken);",
+  ) && streams.includes(
+    "readableStreamDefaultControllerClose(this, queueCleanupAccessToken);",
+  ) && streams.includes("function queueCleanupDrain(queue, callback)"),
+  webResourceBackingClosurePrivate: streams.includes(
+    "const readableResourceBackings = new SafeWeakMap();",
+  ) && streams.includes(
+    "const readableResourceBackingUnrefables = new SafeWeakMap();",
+  ) && streams.includes(
+    "function getReadableResourceBackingView(stream, unrefable)",
+  ) && streams.includes(
+    "sealProtectedReadableResourceBackingSlot(stream, _resourceBacking, false);",
+  ) && streams.includes(
+    "return getReadableResourceBackingView(this, true);",
+  ) && !collector.includes("stream[_resourceBacking]"),
+  webResourceBackingViewRechecks: streams.includes(
+    'ObjectDefineProperty(view, "rid", {',
+  ) && streams.includes(
+    "runReadableStreamUseGuard(stream);\n      const current = unrefable",
+  ),
+  netReadableCarriesNativeProtectedPeer: netIo.includes(
+    "pub fn protected_inspector_peer(&self) -> Option<SocketAddr>",
+  ) && netOps.includes(
+    "let protected_network_peer = resource",
+  ) && net.includes(
+    "#protectedNetworkPeer = null;",
+  ) && net.includes(
+    "lazyStreams().setReadableStreamUseGuard(readable, () => {",
+  ) && net.indexOf(
+        "lazyStreams().setReadableStreamUseGuard(readable, () => {",
+      ) < net.indexOf("this.#readable = readable;"),
 };
 
 console.log(JSON.stringify(Object.fromEntries(

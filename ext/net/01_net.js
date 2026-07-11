@@ -33,6 +33,7 @@ const {
   op_net_set_broadcast_udp,
   op_net_set_multi_loopback_udp,
   op_net_set_multi_ttl_udp,
+  op_oden_check_protected_inspector_stream_use,
   op_set_keepalive,
   op_set_nodelay,
 } = core.ops;
@@ -107,10 +108,11 @@ class Conn {
   #localAddr = null;
   #unref = false;
   #pendingReadPromises = new SafeSet();
+  #protectedNetworkPeer = null;
 
   #readable;
   #writable;
-  constructor(rid, remoteAddr, localAddr, fd) {
+  constructor(rid, remoteAddr, localAddr, fd, protectedNetworkPeer = null) {
     ObjectDefineProperty(this, internalRidSymbol, {
       __proto__: null,
       enumerable: false,
@@ -124,6 +126,7 @@ class Conn {
     this.#rid = rid;
     this.#remoteAddr = remoteAddr;
     this.#localAddr = localAddr;
+    this.#protectedNetworkPeer = protectedNetworkPeer;
   }
 
   get remoteAddr() {
@@ -166,7 +169,20 @@ class Conn {
 
   get readable() {
     if (this.#readable === undefined) {
-      this.#readable = lazyStreams().readableStreamForRidUnrefable(this.#rid);
+      const readable = lazyStreams().readableStreamForRidUnrefable(this.#rid);
+      if (this.#protectedNetworkPeer !== null) {
+        // Preserve the native resource's immutable protected-peer tag at the
+        // JS delivery boundary before the stream or backing becomes visible.
+        // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- Connected-stream object passage cannot transfer inspector authority.
+        const protectedNetworkPeer = this.#protectedNetworkPeer;
+        lazyStreams().setReadableStreamUseGuard(readable, () => {
+          op_oden_check_protected_inspector_stream_use(
+            protectedNetworkPeer,
+            "Deno.Conn readable stream",
+          );
+        });
+      }
+      this.#readable = readable;
       if (this.#unref) {
         lazyStreams().readableStreamForRidUnrefableUnref(this.#readable);
       }
@@ -226,8 +242,8 @@ class UpgradedConn extends Conn {
 class TcpConn extends Conn {
   #rid = 0;
 
-  constructor(rid, remoteAddr, localAddr, fd) {
-    super(rid, remoteAddr, localAddr, fd);
+  constructor(rid, remoteAddr, localAddr, fd, protectedNetworkPeer = null) {
+    super(rid, remoteAddr, localAddr, fd, protectedNetworkPeer);
     ObjectDefineProperty(this, internalRidSymbol, {
       __proto__: null,
       enumerable: false,
@@ -320,13 +336,25 @@ class Listener {
     }
     this.#promise = promise;
     if (this.#unref) core.unrefOpPromise(promise);
-    const { 0: rid, 1: localAddr, 2: remoteAddr, 3: fd } = await promise;
+    const {
+      0: rid,
+      1: localAddr,
+      2: remoteAddr,
+      3: fd,
+      4: protectedNetworkPeer,
+    } = await promise;
     this.#promise = null;
     switch (this.#type) {
       case "tcp":
         localAddr.transport = "tcp";
         remoteAddr.transport = "tcp";
-        return new TcpConn(rid, remoteAddr, localAddr, fd);
+        return new TcpConn(
+          rid,
+          remoteAddr,
+          localAddr,
+          fd,
+          protectedNetworkPeer,
+        );
       case "unix":
         return new UnixConn(
           rid,
@@ -706,7 +734,12 @@ async function connect(args) {
       const port = validatePort(args.port);
 
       try {
-        const { 0: rid, 1: localAddr, 2: remoteAddr } =
+        const {
+          0: rid,
+          1: localAddr,
+          2: remoteAddr,
+          3: protectedNetworkPeer,
+        } =
           await op_net_connect_tcp(
             {
               hostname: args.hostname ?? "127.0.0.1",
@@ -723,7 +756,13 @@ async function connect(args) {
         localAddr.transport = "tcp";
         remoteAddr.transport = "tcp";
 
-        return new TcpConn(rid, remoteAddr, localAddr);
+        return new TcpConn(
+          rid,
+          remoteAddr,
+          localAddr,
+          undefined,
+          protectedNetworkPeer,
+        );
       } finally {
         if (args?.signal) {
           args.signal[abortSignal.remove](abortHandler);

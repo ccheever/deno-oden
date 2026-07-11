@@ -73,6 +73,10 @@ where
     }
   }
 
+  pub fn protected_inspector_peer(&self) -> Option<SocketAddr> {
+    self.network_peer
+  }
+
   pub fn into_inner(self) -> (R, W) {
     (self.rd.into_inner(), self.wr.into_inner())
   }
