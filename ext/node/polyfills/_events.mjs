@@ -118,6 +118,27 @@ function setEventListenerDeliveryHook(target, hook) {
   WeakMapPrototypeSet(eventListenerDeliveryHooks, target, hook);
 }
 
+function setDefaultEventListenerDeliveryHook(target, hook) {
+  if (WeakMapPrototypeGet(eventListenerDeliveryHooks, target) === undefined) {
+    WeakMapPrototypeSet(eventListenerDeliveryHooks, target, hook);
+  }
+}
+
+function isProtectedEventEmitter(target) {
+  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  return deliveryHook?.isProtected?.() === true;
+}
+
+function runWithoutAsyncContext(run) {
+  const previous = core.getAsyncContext();
+  core.setAsyncContext(undefined);
+  try {
+    return run();
+  } finally {
+    core.setAsyncContext(previous);
+  }
+}
+
 function trackEventListener(target, listener, delivery) {
   let tracked = WeakMapPrototypeGet(trackedEventListeners, target);
   if (tracked === undefined) {
@@ -145,8 +166,16 @@ function captureEventListenerDeliveries(target, type, listeners) {
     if (delivery === undefined) {
       // A direct `_events` entry is exactly the callable we will invoke. Its
       // public `.listener` property is attacker-forgeable and must not supply
-      // provenance.
-      delivery = deliveryHook.capture(type, listener, listener, true);
+      // provenance. A closure-tracked genuine once wrapper can safely recover
+      // the original recipient even when protection attached after it was
+      // registered.
+      const onceListener = WeakMapPrototypeGet(genuineOnceWrappers, listener);
+      delivery = deliveryHook.capture(
+        type,
+        onceListener ?? listener,
+        listener,
+        true,
+      );
     }
     ArrayPrototypePush(deliveries, delivery);
   }
@@ -628,6 +657,15 @@ EventEmitter.prototype.emit = function emit(type, ...args) {
     prepareCapturedEventDelivery(this, type, listeners),
   );
 };
+const EventEmitterPublicEmit = EventEmitter.prototype.emit;
+
+function emitLifecycleMetaEvent(target, type, ...args) {
+  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  if (deliveryHook?.isProtected?.() === true) {
+    return FunctionPrototypeCall(EventEmitterPublicEmit, target, type, ...args);
+  }
+  return target.emit(type, ...args);
+}
 
 function _addListener(target, type, listener, prepend) {
   let m;
@@ -644,7 +682,17 @@ function _addListener(target, type, listener, prepend) {
     // To avoid recursion in the case that type === "newListener"! Before
     // adding it to the listeners, first emit "newListener".
     if (events.newListener !== undefined) {
-      target.emit("newListener", type, listener.listener ?? listener);
+      const protectedTarget = isProtectedEventEmitter(target);
+      const onceListener = protectedTarget
+        ? WeakMapPrototypeGet(genuineOnceWrappers, listener)
+        : undefined;
+      emitLifecycleMetaEvent(
+        target,
+        "newListener",
+        type,
+        onceListener ??
+          (protectedTarget ? listener : listener.listener ?? listener),
+      );
 
       // Re-assign `events` because a newListener handler could have caused the
       // this._events to be assigned to a new object
@@ -716,6 +764,11 @@ function _addListener(target, type, listener, prepend) {
  * @returns {EventEmitter}
  */
 EventEmitter.prototype.addListener = function addListener(type, listener) {
+  if (isProtectedEventEmitter(this)) {
+    return runWithoutAsyncContext(() =>
+      _addListener(this, type, listener, false)
+    );
+  }
   return _addListener(this, type, listener, false);
 };
 
@@ -732,12 +785,26 @@ EventEmitter.prototype.prependListener = function prependListener(
   type,
   listener,
 ) {
+  if (isProtectedEventEmitter(this)) {
+    return runWithoutAsyncContext(() =>
+      _addListener(this, type, listener, true)
+    );
+  }
   return _addListener(this, type, listener, true);
 };
 
 function onceWrapper() {
   if (!this.fired) {
-    removeEventEmitterListener(this.target, this.type, this.wrapFn);
+    if (isProtectedEventEmitter(this.target)) {
+      // A protected emitter can outlive the code that registered this wrapper.
+      // Never redispatch through a package-replaceable lifecycle method while
+      // running with the original listener's captured context.
+      runWithoutAsyncContext(() =>
+        removeEventEmitterListener(this.target, this.type, this.wrapFn)
+      );
+    } else {
+      this.target.removeListener(this.type, this.wrapFn);
+    }
     this.fired = true;
     if (arguments.length === 0) {
       return FunctionPrototypeCall(this.listener, this.target);
@@ -764,7 +831,15 @@ function _onceWrap(target, type, listener) {
 EventEmitter.prototype.once = function once(type, listener) {
   checkListener(listener);
 
-  this.on(type, _onceWrap(this, type, listener));
+  if (isProtectedEventEmitter(this)) {
+    // Keep the protected lifecycle path closure-owned. Calling `this.on()`
+    // here lets a late bound/native replacement run with the caller's CPED.
+    runWithoutAsyncContext(() =>
+      _addListener(this, type, _onceWrap(this, type, listener), false)
+    );
+  } else {
+    this.on(type, _onceWrap(this, type, listener));
+  }
   return this;
 };
 
@@ -781,7 +856,13 @@ EventEmitter.prototype.prependOnceListener = function prependOnceListener(
 ) {
   checkListener(listener);
 
-  this.prependListener(type, _onceWrap(this, type, listener));
+  if (isProtectedEventEmitter(this)) {
+    runWithoutAsyncContext(() =>
+      _addListener(this, type, _onceWrap(this, type, listener), true)
+    );
+  } else {
+    this.prependListener(type, _onceWrap(this, type, listener));
+  }
   return this;
 };
 
@@ -795,25 +876,39 @@ EventEmitter.prototype.removeListener = function removeListener(
   type,
   listener,
 ) {
+  if (isProtectedEventEmitter(this)) {
+    return runWithoutAsyncContext(() =>
+      removeListenerExact(this, type, listener)
+    );
+  }
+  return removeListenerExact(this, type, listener);
+};
+
+function removeListenerExact(target, type, listener) {
   checkListener(listener);
 
-  const events = this._events;
+  const events = target._events;
   if (events === undefined) {
-    return this;
+    return target;
   }
 
   const list = events[type];
   if (list === undefined) {
-    return this;
+    return target;
   }
 
   if (listenerMatches(list, listener)) {
-    if (--this._eventsCount === 0) {
-      this._events = ObjectCreate(null);
+    if (--target._eventsCount === 0) {
+      target._events = ObjectCreate(null);
     } else {
       delete events[type];
       if (events.removeListener) {
-        this.emit("removeListener", type, list.listener || listener);
+        emitLifecycleMetaEvent(
+          target,
+          "removeListener",
+          type,
+          list.listener || listener,
+        );
       }
     }
   } else if (typeof list !== "function") {
@@ -827,7 +922,7 @@ EventEmitter.prototype.removeListener = function removeListener(
     }
 
     if (position < 0) {
-      return this;
+      return target;
     }
 
     if (position === 0) {
@@ -841,12 +936,12 @@ EventEmitter.prototype.removeListener = function removeListener(
     }
 
     if (events.removeListener !== undefined) {
-      this.emit("removeListener", type, listener);
+      emitLifecycleMetaEvent(target, "removeListener", type, listener);
     }
   }
 
-  return this;
-};
+  return target;
+}
 
 EventEmitter.prototype.off = EventEmitter.prototype.removeListener;
 const EventEmitterPublicOff = EventEmitter.prototype.off;
@@ -1510,7 +1605,7 @@ ObjectDefineProperty(EventEmitter, "EventEmitterAsyncResource", {
 // Hidden internal export captured before the public constructor can escape to
 // package code. Protected stream adapters must not bless a poisoned public
 // EventEmitter.prototype when they load later.
-const protectedEventEmitterEmit = EventEmitter.prototype.emit;
+const protectedEventEmitterEmit = EventEmitterPublicEmit;
 const protectedEventEmitterListenerCount = _listenerCount;
 const protectedEventEmitterOff = EventEmitter.prototype.off;
 const protectedEventEmitterOnce = EventEmitter.prototype.once;
@@ -1545,6 +1640,7 @@ return {
   emitPreparedEvent,
   prepareEventListenerDelivery,
   removeEventEmitterListener,
+  setDefaultEventListenerDeliveryHook,
   setEventListenerDeliveryHook,
 };
 })();

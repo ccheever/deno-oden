@@ -80,6 +80,11 @@
       "output": "stream_scalar_state_driver.out",
       "exitCode": 0
     },
+    "protected_stream_lifecycle_uses_exact_cleanup_recipients": {
+      "args": "run --allow-all lifecycle_barrier_driver.js",
+      "output": "lifecycle_barrier_driver.out",
+      "exitCode": 0
+    },
     "protected_cross_stream_delivery_is_closed_before_raw_bytes": {
       "args": "run --allow-all cross_stream_barrier_driver.js",
       "output": "cross_stream_barrier_driver.out",

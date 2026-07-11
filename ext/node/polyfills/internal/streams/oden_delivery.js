@@ -38,6 +38,8 @@ const streamDeliveryPreflights = new SafeWeakMap();
 const activeStreamDeliveryPreflights = new SafeWeakSet();
 const streamTrustedDeliveryCallbacks = new SafeWeakMap();
 const streamCleanupDeliveryCallbacks = new SafeWeakMap();
+const streamDestroyDeliverySnapshots = new SafeWeakMap();
+const snapshottedStreamDestroyDeliveries = new SafeWeakSet();
 const trustedDeliveryCallbacks = new SafeWeakMap();
 const trustedDeliveryPreflights = new SafeWeakMap();
 
@@ -137,11 +139,104 @@ function addStreamUseGuardPart(stream, guard) {
   return true;
 }
 
+function runWithoutAsyncContext(run) {
+  const previous = core.getAsyncContext();
+  core.setAsyncContext(undefined);
+  try {
+    return run();
+  } finally {
+    core.setAsyncContext(previous);
+  }
+}
+
+function installDefaultEventDeliveryHook(stream) {
+  const events = core.loadExtScript("ext:deno_node/_events.mjs");
+  events.setDefaultEventListenerDeliveryHook(stream, {
+    isProtected() {
+      return getStreamUseGuard(stream) !== undefined;
+    },
+    capture(type, recipient, listener = recipient) {
+      const captured = isStreamTrustedDeliveryCallback(stream, recipient)
+        ? captureTrustedDeliveryCallback(recipient, listener)
+        : captureDeliveryCallback(recipient, listener);
+      if (type === "data") {
+        return {
+          invoke(receiver, args) {
+            return runCapturedDelivery(stream, captured, receiver, args);
+          },
+          preflight() {
+            preflightCapturedDelivery(stream, captured);
+          },
+        };
+      }
+      // Lifecycle events carry no bytes. They remain observable after
+      // revocation, but every listener resumes only in its own CPED.
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+      return {
+        invoke(receiver, args) {
+          return runCapturedCallback(captured, receiver, args);
+        },
+        preflight() {},
+      };
+    },
+    captureRejection() {
+      if (getStreamUseGuard(stream) === undefined) return undefined;
+      const recipient = runWithoutAsyncContext(
+        () => stream[events.captureRejectionSymbol],
+      );
+      if (typeof recipient !== "function") return null;
+      const captured = isStreamTrustedDeliveryCallback(stream, recipient)
+        ? captureTrustedDeliveryCallback(recipient)
+        : captureDeliveryCallback(recipient);
+      return {
+        invoke(receiver, args) {
+          return runCapturedDelivery(stream, captured, receiver, args);
+        },
+        preflight() {
+          preflightCapturedDelivery(stream, captured);
+        },
+      };
+    },
+  });
+}
+
+function snapshotStreamDestroyDelivery(stream) {
+  if (WeakSetPrototypeHas(snapshottedStreamDestroyDeliveries, stream)) return;
+  WeakSetPrototypeAdd(snapshottedStreamDestroyDeliveries, stream);
+  try {
+    const destroy = runWithoutAsyncContext(() => stream._destroy);
+    if (typeof destroy === "function") {
+      WeakMapPrototypeSet(streamDestroyDeliverySnapshots, stream, {
+        captured: captureDeliveryCallback(destroy),
+        error: undefined,
+      });
+    }
+  } catch (error) {
+    WeakMapPrototypeSet(streamDestroyDeliverySnapshots, stream, {
+      captured: undefined,
+      error,
+    });
+  }
+}
+
+function getStreamDestroyDeliverySnapshot(stream) {
+  return WeakMapPrototypeGet(streamDestroyDeliverySnapshots, stream);
+}
+
 function setStreamUseGuard(stream, guard) {
   if (!addStreamUseGuardPart(stream, guard)) return;
   const parts = WeakMapPrototypeGet(streamUseGuardParts, stream);
   const partList = WeakMapPrototypeGet(streamUseGuardPartLists, stream);
+  const hadDestroySnapshot = WeakSetPrototypeHas(
+    snapshottedStreamDestroyDeliveries,
+    stream,
+  );
   try {
+    // Freeze terminal cleanup at the protection boundary. A later package
+    // replacement may run in its own CPED, but it cannot suppress the native
+    // recipient that actually tears the protected resource down.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    snapshotStreamDestroyDelivery(stream);
     const attach = WeakMapPrototypeGet(streamGuardAttachHooks, stream);
     if (attach !== undefined) attach(guard);
     if (getStreamUseGuard(stream) === undefined) {
@@ -151,7 +246,12 @@ function setStreamUseGuard(stream, guard) {
         streamUseGuardRunner(stream),
       );
     }
+    installDefaultEventDeliveryHook(stream);
   } catch (error) {
+    if (!hadDestroySnapshot) {
+      WeakSetPrototypeDelete(snapshottedStreamDestroyDeliveries, stream);
+      WeakMapPrototypeDelete(streamDestroyDeliverySnapshots, stream);
+    }
     WeakSetPrototypeDelete(parts, guard);
     const index = ArrayPrototypeIndexOf(partList, guard);
     if (index !== -1) ArrayPrototypeSplice(partList, index, 1);
@@ -528,6 +628,7 @@ return {
   captureTrustedDeliveryCallback,
   createStreamUseAdmission,
   getStreamUseGuard,
+  getStreamDestroyDeliverySnapshot,
   hasStreamUseGuard,
   markTrustedDeliveryCallback,
   isStreamTrustedDeliveryCallback,
