@@ -96,9 +96,21 @@ pub fn op_node_http_check_proxy_net(
   port: u16,
   #[string] api_name: &str,
 ) -> Result<(), PermissionCheckError> {
+  deno_permissions::oden_capsec_reject_forward_proxy(api_name)?;
   state.borrow_mut::<PermissionsContainer>().check_net(
     NetPermissionAction::Fetch,
     &(hostname, Some(port)),
     api_name,
+  )
+}
+
+/// The /1.1 protected-peer patch profile cannot safely reuse a Node Agent
+/// socket across requests because the JS pool key has no authenticated Oden
+/// principal dimension. Trusted Node glue uses this bit to destroy the socket
+/// before assigning it to a queued or later request.
+#[op2(fast)]
+pub fn op_node_http_capsec_no_reuse() -> bool {
+  deno_permissions::oden_capsec_profile_is(
+    deno_permissions::ODEN_CAPSEC_PROFILE,
   )
 }

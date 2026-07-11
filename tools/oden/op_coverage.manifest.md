@@ -62,11 +62,11 @@ allowed only at the two audited typed helpers named by the generator.
 | --- | --- | --- | --- | --- |
 | connect | check_net_resolved | check_resolved() | ext/fetch/dns.rs:243 | propagated |
 | fetch | check_net_resolved | check_resolved() | ext/fetch/dns.rs:243 | propagated |
-| fetch | check_net_url | op_fetch() | ext/fetch/lib.rs:473 | explicit |
-| fetch | check_net_url | op_fetch_custom_client() | ext/fetch/lib.rs:874 | explicit |
-| fetch | check_net | op_fetch_custom_client() | ext/fetch/lib.rs:881 | explicit |
-| fetch | check_net_unix_socket | op_fetch_custom_client() | ext/fetch/lib.rs:901 | explicit |
-| fetch | check_net_vsock | op_fetch_custom_client() | ext/fetch/lib.rs:912 | explicit |
+| fetch | check_net_url | op_fetch() | ext/fetch/lib.rs:474 | explicit |
+| fetch | check_net_url | op_fetch_custom_client() | ext/fetch/lib.rs:880 | explicit |
+| fetch | check_net | op_fetch_custom_client() | ext/fetch/lib.rs:887 | explicit |
+| fetch | check_net_unix_socket | op_fetch_custom_client() | ext/fetch/lib.rs:907 | explicit |
+| fetch | check_net_vsock | op_fetch_custom_client() | ext/fetch/lib.rs:918 | explicit |
 | fetch | check_net_url | check_net_url() | ext/kv/remote.rs:75 | explicit |
 | fetch | check_net_url | open() | ext/kv/remote.rs:160 | explicit |
 | connect | check_net | op_net_connect_tls() | ext/net/ops_tls.rs:425 | explicit |
@@ -92,7 +92,7 @@ allowed only at the two audited typed helpers named by the generator.
 | connect | check_net_resolved | op_quic_endpoint_connect() | ext/net/quic.rs:582 | explicit |
 | fetch | check_net | op_node_getaddrinfo() | ext/node/ops/dns.rs:71 | explicit |
 | fetch | check_net | op_node_getnameinfo() | ext/node/ops/dns.rs:274 | explicit |
-| fetch | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:99 | explicit |
+| fetch | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:100 | explicit |
 | listen | check_net | op_inspector_open() | ext/node/ops/inspector.rs:101 | explicit |
 | listen | check_net_unix_socket | bind() | ext/node/ops/pipe_wrap.rs:385 | explicit |
 | listen | check_net_unix_socket | listen() | ext/node/ops/pipe_wrap.rs:419 | explicit |
@@ -114,24 +114,24 @@ allowed only at the two audited typed helpers named by the generator.
 | connect | check_net_resolved | op_node_udp_send() | ext/node/ops/udp.rs:604 | explicit |
 | connect | check_net_url | op_ws_check_permission_and_cancel_handle() | ext/websocket/lib.rs:133 | explicit |
 | connect | check_net_url | op_ws_create() | ext/websocket/lib.rs:461 | explicit |
-| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:9945 | explicit |
-| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:11202 | explicit |
-| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:11232 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11259 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11265 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11275 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11281 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11299 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11304 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11328 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11337 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11347 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14435 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14444 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14458 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14465 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14472 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14480 | explicit |
+| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:10178 | explicit |
+| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:11435 | explicit |
+| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:11465 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11492 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11498 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11508 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11514 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11532 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11537 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11561 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11570 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:11580 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14668 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14677 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14691 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14698 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14705 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:14713 | explicit |
 
 ## Network resource/API action matrix
 
@@ -212,13 +212,13 @@ consume a resource authorized by the operation named in the note.
 
 - ext/cache/lib.rs:381
 - ext/cron/lib.rs:122
-- ext/fetch/lib.rs:464
-- ext/fetch/lib.rs:467
-- ext/fetch/lib.rs:551
-- ext/fetch/lib.rs:557
-- ext/fetch/lib.rs:577
-- ext/fetch/lib.rs:677
-- ext/fetch/lib.rs:964
+- ext/fetch/lib.rs:465
+- ext/fetch/lib.rs:468
+- ext/fetch/lib.rs:552
+- ext/fetch/lib.rs:558
+- ext/fetch/lib.rs:578
+- ext/fetch/lib.rs:678
+- ext/fetch/lib.rs:970
 - ext/ffi/callback.rs:651
 - ext/ffi/dlfcn.rs:242
 - ext/fs/ops.rs:218

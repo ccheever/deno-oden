@@ -45,6 +45,7 @@ mod oden_dynamic;
 mod oden_handle;
 mod oden_policy;
 mod oden_principal_index;
+mod oden_protected;
 pub mod prompter;
 mod runtime_descriptor_parser;
 pub mod which;
@@ -71,6 +72,9 @@ use self::oden_policy::Mode as OdenMode;
 use self::oden_policy::Policy as OdenPolicy;
 use self::oden_policy::Principal as OdenPrincipal;
 use self::oden_policy::Request as OdenRequest;
+use self::oden_protected::ProtectedMetadataCheck as OdenProtectedMetadataCheck;
+use self::oden_protected::ProtectedMetadataPolicy as OdenProtectedMetadataPolicy;
+use self::oden_protected::ProtectedMetadataRowFile as OdenProtectedMetadataRowFile;
 use self::prompter::PromptResponse;
 use self::which::WhichSys;
 
@@ -410,6 +414,197 @@ pub fn oden_capsec_guard_surface(
     ));
   }
   Ok(())
+}
+
+/// Refuse forward-proxy routes while capsec is armed. The initial protected
+/// metadata profile has no authenticated final-peer attestation for proxies,
+/// so authorizing only the visible proxy peer would reintroduce DNS/redirect
+/// laundering. Ambient proxy environment is neutralized separately; explicit
+/// Deno and Node proxy routes call this boundary before opening a channel.
+// @ref LLP 0019#proxies-and-network-deputies [implements]
+pub fn oden_capsec_reject_forward_proxy(
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  let principal = oden_capsec_principal();
+  let label = principal.label();
+  oden_capsec_audit_record(
+    &label,
+    "network",
+    "forward-proxy",
+    "unattested",
+    "DENY(unattested final peer)",
+    None,
+  );
+  Err(PermissionCheckError::PermissionDenied(
+    PermissionDeniedError {
+      access: format!("{api_name} forward-proxy access"),
+      name: "capsec",
+      custom_message: Some(
+        "oden capsec: forward proxies are closed because this profile has no authenticated final-peer attestation"
+          .to_string(),
+      ),
+      state: PermissionState::Denied,
+    },
+  ))
+}
+
+/// Apply LLP 0019's built-in metadata stratum at the concrete peer selected
+/// for a connection or datagram. This is deliberately a negative-only
+/// continuation: matching the exact annotation does not return success until
+/// every non-ambient principal still holds the ordinary exact static floor.
+/// Session revocation therefore wins in permissive and audit as well as
+/// enforce, and neither a handle nor mode fallback can rescue this path.
+// @ref LLP 0019#protected-metadata-endpoints [implements]
+// @ref LLP 0019#decision-precedence [implements]
+fn oden_capsec_check_protected_metadata(
+  action: NetPermissionAction,
+  ip: IpAddr,
+  port: u16,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE)
+    || action == NetPermissionAction::Listen
+    || !oden_protected::is_protected_metadata_ip(ip)
+  {
+    return Ok(());
+  }
+  oden_capsec_readiness_gate()?;
+  let target = oden_protected::endpoint_scope(ip, port);
+  let request = OdenRequest {
+    family: OdenFamily::Network,
+    action: action.as_str().to_string(),
+    target: target.clone(),
+  };
+  let file = oden_capsec_policy_file().ok_or_else(|| {
+    PermissionCheckError::PermissionDenied(PermissionDeniedError {
+      access: format!("{api_name} protected metadata access to {target:?}"),
+      name: "capsec",
+      custom_message: Some(
+        "oden capsec: protected metadata requires a valid armed policy snapshot"
+          .to_string(),
+      ),
+      state: PermissionState::Denied,
+    })
+  })?;
+
+  // Stack intersection is mandatory for protected resources, independent of
+  // the compatibility deputyClasses switch. If there are no constrained
+  // principals, the direct ambient/root principal remains a dimension and
+  // must carry its own exact root-scoped row.
+  let mut principals =
+    OdenPolicy::constrained_principals(&oden_capsec_principal_set());
+  if principals.is_empty() {
+    principals.push(oden_capsec_principal());
+  }
+
+  for principal in principals {
+    let principal_key = principal.key();
+    let evidence = match file.protected_metadata_policy.check(
+      &principal_key,
+      action.as_str(),
+      ip,
+      port,
+    ) {
+      OdenProtectedMetadataCheck::NotProtected => return Ok(()),
+      OdenProtectedMetadataCheck::Deny => {
+        oden_capsec_audit_record(
+          &principal.label(),
+          "network",
+          action.as_str(),
+          &target,
+          "DENY(protected metadata guard)",
+          None,
+        );
+        return Err(oden_protected_metadata_denied(
+          api_name,
+          &principal.label(),
+          &target,
+          "no exact protected exception",
+        ));
+      }
+      OdenProtectedMetadataCheck::Continue(evidence) => evidence,
+    };
+
+    oden_capsec_protected_metadata_continuation_record(
+      &principal.label(),
+      action.as_str(),
+      &target,
+      evidence.reason_digest,
+      evidence.receipt_digest,
+      file.protected_metadata_policy.receipt_set_digest(),
+    );
+
+    // Root/runtime ordinary authority is evaluated only after the exact root
+    // annotation above. Every constrained principal must independently retain
+    // the exact static row; Policy::grants includes session revocations.
+    if !principal.is_ambient()
+      && !oden_capsec_policy().grants(&principal, &request)
+    {
+      oden_capsec_audit_record(
+        &principal.label(),
+        "network",
+        action.as_str(),
+        &target,
+        "DENY(protected static floor or session revocation)",
+        None,
+      );
+      return Err(oden_protected_metadata_denied(
+        api_name,
+        &principal.label(),
+        &target,
+        "ordinary exact static authority is absent or revoked",
+      ));
+    }
+  }
+  Ok(())
+}
+
+fn oden_protected_metadata_denied(
+  api_name: &str,
+  principal: &str,
+  target: &str,
+  reason: &str,
+) -> PermissionCheckError {
+  PermissionCheckError::PermissionDenied(PermissionDeniedError {
+    access: format!("{api_name} protected metadata access to {target:?}"),
+    name: "capsec",
+    custom_message: Some(format!(
+      "oden capsec: protected metadata denied for principal {principal:?}: {reason}"
+    )),
+    state: PermissionState::Denied,
+  })
+}
+
+fn oden_capsec_protected_metadata_continuation_record(
+  principal: &str,
+  action: &str,
+  target: &str,
+  reason_digest: &str,
+  receipt_digest: Option<&str>,
+  receipt_set_digest: Option<&str>,
+) {
+  let rec = serde_json::json!({
+    "v": 1,
+    "event": "protected_metadata",
+    "principal": principal,
+    "capability": format!("network:{action}"),
+    "target": target,
+    // This records only that one refusal was cleared. The following ordinary
+    // decision record is the allow/deny authority result.
+    "decision": "continue",
+    "decider": "protected-negative-continuation",
+    "protected": {
+      "class": "metadata",
+      "reasonDigest": reason_digest,
+      "receiptDigest": receipt_digest,
+      "receiptSetDigest": receipt_set_digest,
+    },
+  });
+  oden_capsec_write_audit_record(&rec);
 }
 
 /// Structural arming (LLP 0001, ENG-23764/23772): the presence of the policy
@@ -2736,6 +2931,22 @@ struct OdenPolicyFile {
   // is unaffected.
   #[serde(default, rename = "deputyClasses")]
   deputy_classes: Vec<String>,
+  // LLP 0019 protected-resource annotations. These rows are not a second grant
+  // channel: validation requires each one to decorate an existing exact static
+  // network floor row. The engine uses them only to clear the built-in
+  // metadata refusal, then continues ordinary evaluation.
+  #[serde(default, rename = "protectedMetadata")]
+  protected_metadata: Vec<OdenProtectedMetadataRowFile>,
+  // Optional trusted-parent receipt binding. Presence enables the gate and
+  // requires one receipt digest per row; null is malformed, not "gate off".
+  #[serde(
+    default,
+    rename = "protectedMetadataReceiptSetDigest",
+    deserialize_with = "oden_deserialize_optional_string"
+  )]
+  protected_metadata_receipt_set_digest: Option<String>,
+  #[serde(skip)]
+  protected_metadata_policy: OdenProtectedMetadataPolicy,
 }
 
 #[derive(Debug, serde::Deserialize, Clone)]
@@ -2754,6 +2965,15 @@ fn oden_default_on_request() -> String {
 }
 
 fn oden_deserialize_optional_mode<'de, D>(
+  deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  oden_deserialize_optional_string(deserializer)
+}
+
+fn oden_deserialize_optional_string<'de, D>(
   deserializer: D,
 ) -> Result<Option<String>, D::Error>
 where
@@ -2840,14 +3060,15 @@ fn oden_parse_policy_file(
   text: &str,
   path: &std::path::Path,
 ) -> Result<OdenPolicyFile, String> {
-  let file = serde_json::from_str::<OdenPolicyFile>(text).map_err(|err| {
-    format!(
-      "{}:{}:{}: invalid policy JSON/shape: {err}",
-      path.display(),
-      err.line(),
-      err.column()
-    )
-  })?;
+  let mut file =
+    serde_json::from_str::<OdenPolicyFile>(text).map_err(|err| {
+      format!(
+        "{}:{}:{}: invalid policy JSON/shape: {err}",
+        path.display(),
+        err.line(),
+        err.column()
+      )
+    })?;
 
   if let Some(mode) = file.mode.as_deref()
     && !matches!(mode, "permissive" | "audit" | "enforce")
@@ -2912,6 +3133,13 @@ fn oden_parse_policy_file(
       )
     })?;
   }
+  file.protected_metadata_policy = OdenProtectedMetadataPolicy::compile(
+    &file.protected_metadata,
+    file.protected_metadata_receipt_set_digest.as_deref(),
+    &file.grants,
+    &file.deny_ceiling,
+  )
+  .map_err(|error| format!("{}#{error}", path.display()))?;
   Ok(file)
 }
 
@@ -7948,11 +8176,16 @@ impl PermissionsContainer {
   #[inline(always)]
   pub fn check_net_resolved(
     &mut self,
-    _action: NetPermissionAction,
+    action: NetPermissionAction,
     resolved_ip: &std::net::IpAddr,
     port: u16,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
+    // The protected guard is engine-owned and runs at the actual candidate
+    // boundary before stock layer-1 resolved-deny checks and before any
+    // application bytes. Every caller repeats this for redirects, reconnects,
+    // Happy-Eyeballs candidates, and UDP destinations.
+    oden_capsec_check_protected_metadata(action, *resolved_ip, port, api_name)?;
     let mut inner = self.inner.lock();
     let desc = NetDescriptor(Host::Ip(*resolved_ip), Some(port.into()));
     inner.net.check_resolved_ip_deny(&desc, Some(api_name))?;

@@ -74,6 +74,7 @@ use http::Uri;
 use http::header::ACCEPT;
 use http::header::ACCEPT_ENCODING;
 use http::header::AUTHORIZATION;
+use http::header::CONNECTION;
 use http::header::CONTENT_ENCODING;
 use http::header::CONTENT_LENGTH;
 use http::header::HOST;
@@ -866,6 +867,11 @@ pub fn op_fetch_custom_client(
   #[scoped] mut args: CreateHttpClientArgs,
   #[cppgc] tls_keys: &TlsKeysHolder,
 ) -> Result<ResourceId, FetchError> {
+  if args.proxy.is_some() {
+    deno_permissions::oden_capsec_reject_forward_proxy(
+      "Deno.createHttpClient()",
+    )?;
+  }
   if let Some(proxy) = &mut args.proxy {
     let permissions = state.borrow_mut::<PermissionsContainer>();
     match proxy {
@@ -1030,6 +1036,14 @@ pub enum HttpClientCreateError {
   UnixProxyNotSupportedOnWindows,
   #[error("Vsock proxy is not supported on this platform")]
   VsockProxyNotSupported,
+  #[error(
+    "Oden capability security refuses forward proxies without authenticated final-peer attestation"
+  )]
+  CapsecForwardProxyUnsupported,
+  #[error(
+    "Oden capability security requires HTTP/1 for per-request final-peer mediation"
+  )]
+  CapsecHttp2Unsupported,
 }
 
 /// Create new instance of async Client. This client supports
@@ -1038,6 +1052,15 @@ pub fn create_http_client(
   user_agent: &str,
   options: CreateHttpClientOptions,
 ) -> Result<Client, HttpClientCreateError> {
+  let final_peer_profile = deno_permissions::oden_capsec_profile_is(
+    deno_permissions::ODEN_CAPSEC_PROFILE,
+  );
+  if options.proxy.is_some() && final_peer_profile {
+    return Err(HttpClientCreateError::CapsecForwardProxyUnsupported);
+  }
+  if final_peer_profile && !options.http1 {
+    return Err(HttpClientCreateError::CapsecHttp2Unsupported);
+  }
   let mut tls_config =
     deno_tls::create_client_config(deno_tls::TlsClientConfigOptions {
       root_cert_store: options.root_cert_store,
@@ -1055,7 +1078,7 @@ pub fn create_http_client(
   let proxy_tls_config = Arc::from(tls_config.clone());
 
   let mut alpn_protocols = vec![];
-  if options.http2 {
+  if options.http2 && !final_peer_profile {
     alpn_protocols.push("h2".into());
   }
   if options.http1 {
@@ -1148,7 +1171,16 @@ pub fn create_http_client(
     user_agent: Some(user_agent.clone()),
   };
 
-  if let Some(pool_max_idle_per_host) = options.pool_max_idle_per_host {
+  if final_peer_profile {
+    // @ref LLP 0019#protected-metadata-endpoints [implements]
+    // A pooled connection is keyed by origin, not by Oden principal. Reusing
+    // it could skip the concrete-peer guard for a later request from another
+    // principal. The /1.1 patch profile therefore closes idle reuse and HTTP/2
+    // multiplexing until the pool key carries authenticated peer + principal
+    // identity.
+    builder.http2_only(false);
+    builder.pool_max_idle_per_host(0);
+  } else if let Some(pool_max_idle_per_host) = options.pool_max_idle_per_host {
     builder.pool_max_idle_per_host(pool_max_idle_per_host);
   }
 
@@ -1158,7 +1190,7 @@ pub fn create_http_client(
     );
   }
 
-  match (options.http1, options.http2) {
+  match (options.http1, options.http2 && !final_peer_profile) {
     (true, false) => {} // noop, handled by ALPN above
     (false, true) => {
       builder.http2_only(true);
@@ -1512,6 +1544,14 @@ impl Client {
   ) -> Result<http::Response<ResBody>, ClientSendError> {
     self.inject_common_headers(&mut req);
 
+    if deno_permissions::oden_capsec_profile_is(
+      deno_permissions::ODEN_CAPSEC_PROFILE,
+    ) {
+      req
+        .headers_mut()
+        .insert(CONNECTION, HeaderValue::from_static("close"));
+    }
+
     req.headers_mut().entry(ACCEPT).or_insert(STAR_STAR);
 
     let uri = req.uri().clone();
@@ -1533,6 +1573,14 @@ impl Client {
     mut req: http::Request<ReqBody>,
   ) -> Result<http::Response<ResBody>, ClientSendError> {
     self.inject_common_headers(&mut req);
+
+    if deno_permissions::oden_capsec_profile_is(
+      deno_permissions::ODEN_CAPSEC_PROFILE,
+    ) {
+      req
+        .headers_mut()
+        .insert(CONNECTION, HeaderValue::from_static("close"));
+    }
 
     req.headers_mut().entry(ACCEPT).or_insert(STAR_STAR);
 

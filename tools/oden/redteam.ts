@@ -237,6 +237,24 @@ const CHECKLIST: HoleClass[] = [
     note:
       "the typed action is selected at each resource-creating operation and the full positive/negative matrix covers Deno, Node, Unix, vsock, QUIC, WebSocket, and WebTransport; the syntax-aware call manifest rejects unclassified checks",
   },
+  {
+    category: "protected-final-peer",
+    attack:
+      "metadata access is laundered through mode fallback, numeric/mapped addresses, redirects, reconnects, or datagrams",
+    status: "closed",
+    tests: ["oden_capsec_protected_metadata"],
+    note:
+      "the /1.1 engine classifies every concrete candidate before application bytes in every armed mode; only an exact static principal/action/IP/port annotation clears the negative guard",
+  },
+  {
+    category: "protected-final-peer",
+    attack:
+      "an unattested proxy or pooled HTTP connection hides the request's final peer or acting principal",
+    status: "closed",
+    tests: ["oden_capsec_protected_metadata"],
+    note:
+      "forward proxies are closed, ambient proxy configuration is neutralized, and fetch plus Node Agent reuse is disabled until a pool key can bind authenticated final-peer and principal identity",
+  },
   // --- Minimal lockdown -------------------------------------------------------
   {
     category: "lockdown",

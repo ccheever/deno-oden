@@ -1,6 +1,6 @@
 # Oden red-team soundness gate (generated)
 
-Phase-2 exit gate. 43 attack classes CLOSED with a guarding spec test; 2 DOCUMENTED RESIDUALS. Zero undocumented open holes.
+Phase-2 exit gate. 45 attack classes CLOSED with a guarding spec test; 2 DOCUMENTED RESIDUALS. Zero undocumented open holes.
 
 ## Closed (guarded by a spec fixture)
 
@@ -25,6 +25,8 @@ Phase-2 exit gate. 43 attack classes CLOSED with a guarding spec test; 2 DOCUMEN
 | generation | silent policy drift / expansion of authority | oden_capsec_policy_gen | the generated artifact is byte-reproducible; --check classes expansions (high-severity) apart from shrinkages and fails on drift |
 | generation | deny-ceiling bypass through an op-body fast path (fast-skip-with-denies) | oden_capsec_ceiling | the layer-1-compiled ceiling denies hold under --allow-all through direct ops and the node: require path |
 | network-action-confusion | a fetch/connect/listen grant is reused by another protocol-class action | oden_capsec_network_actions | the typed action is selected at each resource-creating operation and the full positive/negative matrix covers Deno, Node, Unix, vsock, QUIC, WebSocket, and WebTransport; the syntax-aware call manifest rejects unclassified checks |
+| protected-final-peer | metadata access is laundered through mode fallback, numeric/mapped addresses, redirects, reconnects, or datagrams | oden_capsec_protected_metadata | the /1.1 engine classifies every concrete candidate before application bytes in every armed mode; only an exact static principal/action/IP/port annotation clears the negative guard |
+| protected-final-peer | an unattested proxy or pooled HTTP connection hides the request's final peer or acting principal | oden_capsec_protected_metadata | forward proxies are closed, ambient proxy configuration is neutralized, and fetch plus Node Agent reuse is disabled until a pool key can bind authenticated final-peer and principal identity |
 | lockdown | a dependency patches a shared intrinsic a check relies on | oden_capsec_lockdown | the freeze walk + Error taming make the primordials non-writable; enforce defaults lockdown ON (ODEN_CAPSEC_LOCKDOWN=0 is the named override), audit/permissive stay opt-in per the compat-corpus NO-GO (ENG-23880); the ext/node lazy-write repairs and prepareStackTrace shim landed with ENG-23781 |
 | compartment-globals | 1. direct free identifier reaches unendowed fetch | oden_capsec_compartment_globals | the ESM/CJS scope-aware rewrite redirects the unresolved identifier to a throwing per-principal record; local parameters named fetch remain untouched |
 | compartment-globals | 2. globalThis/global/self computed member reaches unendowed fetch | oden_capsec_compartment_globals | global aliases resolve to the filtered per-principal Proxy, including computed property access |

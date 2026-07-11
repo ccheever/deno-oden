@@ -1,0 +1,16 @@
+{
+  "mode": "enforce",
+  "grants": {
+    "root": "network:connect:[fd20:ce::254]:1",
+    "protected-dep": "network:connect:[fd20:ce::254]:1"
+  },
+  "protectedMetadata": [
+    {
+      "principal": "root",
+      "action": "connect",
+      "ip": "fd20:ce::254",
+      "port": 1,
+      "reasonDigest": "607c9120956161f11d18408e12fe1bd98be86c88d14eacafb0b46378dfd21e0f"
+    }
+  ]
+}

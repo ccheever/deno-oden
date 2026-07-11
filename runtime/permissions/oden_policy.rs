@@ -416,7 +416,7 @@ fn covers_one(g: &Grant, req: &Request) -> bool {
     }
     Family::Network => {
       (g.action == req.action || g.action == "*")
-        && host_covered(&g.scope, &host_of(&req.target))
+        && host_covered(&g.scope, &req.target)
     }
     Family::Env => {
       (g.action == req.action || g.action == "*")
@@ -494,6 +494,11 @@ pub fn path_under(child: &str, parent: &str) -> bool {
 }
 
 fn host_covered(grant_host: &str, host: &str) -> bool {
+  let (grant_host, grant_port) = endpoint_of(grant_host);
+  let (host, port) = endpoint_of(host);
+  if grant_port.is_some() && grant_port != port {
+    return false;
+  }
   let grant_host = grant_host.to_ascii_lowercase();
   let host = host.to_ascii_lowercase();
   grant_host == "*"
@@ -501,24 +506,39 @@ fn host_covered(grant_host: &str, host: &str) -> bool {
     || host.ends_with(&format!(".{grant_host}"))
 }
 
-fn host_of(target: &str) -> String {
+/// Split a network scope/occurrence into host and effective port. A static row
+/// may omit the port to retain Rev1's host-across-ports behavior; when it names
+/// one, matching is exact. URL occurrences materialize their scheme default.
+fn endpoint_of(target: &str) -> (String, Option<u16>) {
   if target.starts_with("unix:") || target.starts_with("vsock:") {
-    return target.to_string();
+    return (target.to_string(), None);
   }
-  let t = target
-    .strip_prefix("https://")
-    .or_else(|| target.strip_prefix("http://"))
-    .unwrap_or(target);
+  let (t, default_port) = if let Some(rest) = target.strip_prefix("https://") {
+    (rest, Some(443))
+  } else if let Some(rest) = target.strip_prefix("http://") {
+    (rest, Some(80))
+  } else {
+    (target, None)
+  };
   let t = t.split('/').next().unwrap_or(t);
+  let t = t.rsplit('@').next().unwrap_or(t);
   if let Some(bracketed) = t.strip_prefix('[')
     && let Some(end) = bracketed.find(']')
   {
-    return format!("[{}]", &bracketed[..end]);
+    let after = &bracketed[end + 1..];
+    let port = after
+      .strip_prefix(':')
+      .and_then(|value| value.parse::<u16>().ok())
+      .or(default_port);
+    return (format!("[{}]", &bracketed[..end]), port);
   }
   if t.matches(':').count() == 1 {
-    return t.split(':').next().unwrap_or(t).to_string();
+    let (host, port) = t.split_once(':').unwrap_or((t, ""));
+    if let Ok(port) = port.parse::<u16>() {
+      return (host.to_string(), Some(port));
+    }
   }
-  t.to_string()
+  (t.to_string(), default_port)
 }
 
 fn basename(p: &str) -> String {
@@ -905,6 +925,53 @@ mod tests {
         "fork accepted invalid grant {invalid:?}"
       );
     }
+  }
+
+  #[test]
+  fn network_rows_with_ports_match_only_the_exact_effective_port() {
+    let exact = Grant::parse("network:fetch:169.254.169.254:80").unwrap();
+    assert!(covers(
+      std::slice::from_ref(&exact),
+      &Request {
+        family: Family::Network,
+        action: "fetch".into(),
+        target: "169.254.169.254:80".into(),
+      }
+    ));
+    assert!(covers(
+      std::slice::from_ref(&exact),
+      &Request {
+        family: Family::Network,
+        action: "fetch".into(),
+        target: "http://169.254.169.254/path".into(),
+      }
+    ));
+    assert!(!covers(
+      std::slice::from_ref(&exact),
+      &Request {
+        family: Family::Network,
+        action: "fetch".into(),
+        target: "169.254.169.254:443".into(),
+      }
+    ));
+    assert!(!covers(
+      std::slice::from_ref(&exact),
+      &Request {
+        family: Family::Network,
+        action: "connect".into(),
+        target: "169.254.169.254:80".into(),
+      }
+    ));
+
+    let across_ports = Grant::parse("network:fetch:169.254.169.254").unwrap();
+    assert!(covers(
+      &[across_ports],
+      &Request {
+        family: Family::Network,
+        action: "fetch".into(),
+        target: "169.254.169.254:443".into(),
+      }
+    ));
   }
 
   #[test]

@@ -140,6 +140,19 @@ enum Filter {
 }
 
 pub(crate) fn from_env() -> Proxies {
+  // Armed capsec snapshots neutralize ambient network configuration before the
+  // guest-visible stack is initialized. The initial profile has no
+  // authenticated final-peer attestation for forward proxies, so inherited
+  // proxy and bypass variables cannot silently change a direct route.
+  // @ref LLP 0019#proxies-and-network-deputies [implements]
+  if deno_permissions::oden_capsec_profile_is(
+    deno_permissions::ODEN_CAPSEC_PROFILE,
+  ) {
+    return Proxies {
+      intercepts: Vec::new(),
+      no: None,
+    };
+  }
   let mut intercepts = Vec::new();
 
   match parse_env_var("ALL_PROXY", Filter::All) {

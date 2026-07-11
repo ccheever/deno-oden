@@ -1,0 +1,82 @@
+{
+  // LLP 0019 Stage B.2: the compiled /1.1 engine owns protected metadata at
+  // the concrete peer boundary, independent of mode and wrapper flags.
+  "tempDir": true,
+  "tests": {
+    "permissive_still_denies": {
+      "args": "run --allow-all deny_app.js direct",
+      "envs": { "ODEN_CAPSEC_POLICY": "permissive.json" },
+      "output": "direct.out",
+      "exitCode": 0
+    },
+    "audit_still_denies": {
+      "args": "run --allow-all deny_app.js direct",
+      "envs": { "ODEN_CAPSEC_POLICY": "audit.json" },
+      "output": "direct.out",
+      "exitCode": 0
+    },
+    "enforce_still_denies": {
+      "args": "run --allow-all deny_app.js direct",
+      "envs": { "ODEN_CAPSEC_POLICY": "enforce.json" },
+      "output": "direct.out",
+      "exitCode": 0
+    },
+    "ipv4_mapped_ipv6_is_metadata": {
+      "args": "run --allow-all deny_app.js mapped",
+      "envs": { "ODEN_CAPSEC_POLICY": "permissive.json" },
+      "output": "mapped.out",
+      "exitCode": 0
+    },
+    "redirect_rechecks_final_peer": {
+      "args": "run --allow-all deny_app.js redirect",
+      "envs": { "ODEN_CAPSEC_POLICY": "permissive.json" },
+      "output": "redirect.out",
+      "exitCode": 0
+    },
+    "each_udp_destination_is_guarded": {
+      "args": "run --allow-all deny_app.js udp",
+      "envs": { "ODEN_CAPSEC_POLICY": "permissive.json" },
+      "output": "udp.out",
+      "exitCode": 0
+    },
+    "unattested_forward_proxy_is_closed": {
+      "args": "run --allow-all deny_app.js proxy",
+      "envs": { "ODEN_CAPSEC_POLICY": "permissive.json" },
+      "output": "proxy.out",
+      "exitCode": 0
+    },
+    "keep_alive_reuse_cannot_skip_final_peer_mediation": {
+      "args": "run --allow-all keepalive_app.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "permissive.json" },
+      "output": "keepalive.out",
+      "exitCode": 0
+    },
+    "node_agent_reuse_cannot_skip_final_peer_mediation": {
+      "args": "run --allow-all node_keepalive_app.mjs",
+      "envs": { "ODEN_CAPSEC_POLICY": "permissive.json" },
+      "output": "node_keepalive.out",
+      "exitCode": 0
+    },
+    "exact_root_row_and_receipt_are_negative_only_continuation": {
+      "args": "run --allow-all positive_app.js",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "positive.json",
+        "ODEN_CAPSEC_AUDIT": "positive-audit.ndjson"
+      },
+      "output": "positive.out",
+      "exitCode": 0
+    },
+    "exact_package_principal_row_continues": {
+      "args": "run --allow-all package_app.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "package_positive.json" },
+      "output": "package_positive.out",
+      "exitCode": 0
+    },
+    "root_row_cannot_authorize_a_package_principal": {
+      "args": "run --allow-all package_app.js",
+      "envs": { "ODEN_CAPSEC_POLICY": "principal_mismatch.json" },
+      "output": "principal_mismatch.out",
+      "exitCode": 0
+    }
+  }
+}

@@ -4,6 +4,7 @@
 import { core, primordials } from "ext:core/mod.js";
 import {
   op_get_env_no_permission_check,
+  op_node_http_capsec_no_reuse,
   op_node_http_net_token,
 } from "ext:core/ops";
 import * as net from "node:net";
@@ -49,6 +50,7 @@ const {
   ObjectValues,
   RegExpPrototypeExec,
   SafeRegExp,
+  SafeWeakSet,
   StringPrototypeIndexOf,
   StringPrototypeSlice,
   StringPrototypeSplit,
@@ -57,6 +59,7 @@ const {
 } = primordials;
 
 const KEEP_ALIVE_TIMEOUT_RE = new SafeRegExp("^timeout=(\\d+)");
+const odenCapsecNoReuseAgents = new SafeWeakSet();
 
 const kOnKeylog = Symbol("onkeylog");
 const kRequestOptions = Symbol("requestOptions");
@@ -143,6 +146,13 @@ export function Agent(options) {
   FunctionPrototypeCall(EventEmitter, this);
 
   this.options = { __proto__: null, ...options };
+  // @ref LLP 0019#protected-metadata-endpoints [implements]
+  // The /1.1 final-peer profile has no principal-bound Node socket-pool key.
+  // Keep this in a module-private weak brand so user options/reflection cannot
+  // turn reuse back on after construction.
+  if (op_node_http_capsec_no_reuse()) {
+    odenCapsecNoReuseAgents.add(this);
+  }
 
   this.defaultPort = this.options.defaultPort || 80;
   this.protocol = this.options.protocol || "http:";
@@ -157,7 +167,9 @@ export function Agent(options) {
   this.sockets = ObjectCreate(null);
   this.freeSockets = ObjectCreate(null);
   this.keepAliveMsecs = this.options.keepAliveMsecs || 1000;
-  this.keepAlive = this.options.keepAlive || false;
+  this.keepAlive = odenCapsecNoReuseAgents.has(this)
+    ? false
+    : (this.options.keepAlive || false);
   this.maxSockets = this.options.maxSockets || Agent.defaultMaxSockets;
   this.maxFreeSockets = this.options.maxFreeSockets || 256;
   this.scheduling = this.options.scheduling || "lifo";
@@ -197,6 +209,13 @@ export function Agent(options) {
     // interleave with nextTick, so a server FIN may arrive before 'free'
     // runs, making the socket non-writable but not yet destroyed.
     if (socket.destroyed) {
+      return;
+    }
+
+    // Never assign a protected-profile socket to a queued or later request:
+    // doing so would skip DNS/final-peer mediation for the new principal.
+    if (odenCapsecNoReuseAgents.has(this)) {
+      socket.destroy();
       return;
     }
 
