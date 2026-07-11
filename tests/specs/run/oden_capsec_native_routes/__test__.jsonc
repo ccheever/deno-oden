@@ -1,0 +1,10 @@
+{
+  "tests": {
+    "native_routes_are_gated_before_mutation": {
+      "args": "run --allow-all driver.js",
+      "if": "unix",
+      "output": "driver.out",
+      "exitCode": 0
+    }
+  }
+}

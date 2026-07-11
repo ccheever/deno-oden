@@ -1,0 +1,8 @@
+{
+  "mode": "permissive",
+  "grants": {
+    "native-route-denied": "run:/bin/sh",
+    "native-route-open-no-listen": "inspector:activate",
+    "native-route-allowed": "inspector:activate,network:listen:127.0.0.1"
+  }
+}

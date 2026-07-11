@@ -304,7 +304,7 @@ consume a resource authorized by the operation named in the note.
 - ext/web/stream_resource.rs:507
 - ext/websocket/lib.rs:142
 - ext/websocket/lib.rs:596
-- ext/websocket/lib.rs:829
+- ext/websocket/lib.rs:836
 - libs/core/ops_builtin.rs:577
 - libs/core/ops_builtin_v8.rs:1420
 - libs/core_testing/checkin/runner/ops_io.rs:122

@@ -89,6 +89,12 @@ fn op_worker_recv_message_sync(
 fn op_worker_maybe_wait_for_debugger(
   state: &mut OpState,
 ) -> Result<(), deno_permissions::PermissionCheckError> {
+  worker_maybe_wait_for_debugger_impl(state)
+}
+
+fn worker_maybe_wait_for_debugger_impl(
+  state: &mut OpState,
+) -> Result<(), deno_permissions::PermissionCheckError> {
   let should_wait = state
     .try_borrow::<WaitForWorkerDebuggerOnMessage>()
     .map(|wait| wait.0)
@@ -134,4 +140,162 @@ fn op_worker_close(state: &mut OpState) {
 fn op_worker_get_type(state: &mut OpState) -> WorkerThreadType {
   let handle = state.borrow::<WebWorkerInternalHandle>().clone();
   handle.worker_type
+}
+
+#[cfg(test)]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "isolated native-route tests create temporary policy and audit artifacts and execute the current test binary"
+)]
+mod tests {
+  use std::process::Command;
+  use std::process::Stdio;
+  use std::time::Duration;
+  use std::time::Instant;
+  use std::time::SystemTime;
+  use std::time::UNIX_EPOCH;
+
+  use deno_core::OpState;
+
+  use super::*;
+
+  const CHILD_SCENARIO: &str = "ODEN_TEST_WORKER_DEBUGGER_ROUTE";
+  const TEST_NAME: &str = "ops::web_worker::tests::worker_debugger_wait_requires_exact_root_row_before_mutation";
+  const TARGET: &str = "startup:worker-wait-for-debugger";
+
+  struct TestDir(std::path::PathBuf);
+
+  impl TestDir {
+    fn new() -> Self {
+      let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+      let path = std::env::temp_dir().join(format!(
+        "oden-worker-debugger-route-{}-{nonce}",
+        std::process::id()
+      ));
+      std::fs::create_dir(&path).unwrap();
+      Self(path)
+    }
+  }
+
+  impl Drop for TestDir {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn run_child(
+    scenario: &str,
+    policy: &std::path::Path,
+    audit: &std::path::Path,
+  ) {
+    let stdout_path = audit.with_extension(format!("{scenario}.stdout"));
+    let stderr_path = audit.with_extension(format!("{scenario}.stderr"));
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+      .args([TEST_NAME, "--exact", "--nocapture", "--test-threads=1"])
+      .stdout(Stdio::from(std::fs::File::create(&stdout_path).unwrap()))
+      .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()));
+    for (name, _) in std::env::vars_os() {
+      if name.to_string_lossy().starts_with("ODEN_CAPSEC_")
+        || name == CHILD_SCENARIO
+      {
+        command.env_remove(name);
+      }
+    }
+    command
+      .env(CHILD_SCENARIO, scenario)
+      .env("ODEN_CAPSEC_POLICY", policy)
+      .env("ODEN_CAPSEC_AUDIT", audit);
+    let mut child = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let (status, timed_out) = loop {
+      if let Some(status) = child.try_wait().unwrap() {
+        break (status, false);
+      }
+      if Instant::now() >= deadline {
+        let _ = child.kill();
+        break (child.wait().unwrap(), true);
+      }
+      std::thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = std::fs::read_to_string(stdout_path).unwrap();
+    let stderr = std::fs::read_to_string(stderr_path).unwrap();
+    assert!(
+      !timed_out && status.success(),
+      "child scenario {scenario} failed (timed_out={timed_out}, status={status}):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+  }
+
+  fn assert_audit(audit: &std::path::Path, decision: &str, principal: &str) {
+    let records = std::fs::read_to_string(audit).unwrap();
+    let found = records.lines().any(|line| {
+      let record: deno_core::serde_json::Value =
+        deno_core::serde_json::from_str(line).unwrap();
+      record["capability"] == "inspector:activate"
+        && record["target"] == TARGET
+        && record["decision"] == decision
+        && record["principal"] == principal
+    });
+    assert!(found, "missing exact {decision} audit row in {records}");
+  }
+
+  #[test]
+  fn worker_debugger_wait_requires_exact_root_row_before_mutation() {
+    if let Ok(scenario) = std::env::var(CHILD_SCENARIO) {
+      let mut state = OpState::new(None);
+      state.put(WaitForWorkerDebuggerOnMessage(true));
+      match scenario.as_str() {
+        "deny" => {
+          let error = worker_maybe_wait_for_debugger_impl(&mut state)
+            .expect_err("missing exact root row must deny");
+          assert!(
+            error.to_string().contains(TARGET)
+              && error
+                .to_string()
+                .contains("exact static inspector:activate row"),
+            "unexpected denial: {error}"
+          );
+          assert!(
+            state.borrow::<WaitForWorkerDebuggerOnMessage>().0,
+            "denial must happen before clearing the wait flag"
+          );
+
+          state.put(WaitForWorkerDebuggerOnMessage(false));
+          worker_maybe_wait_for_debugger_impl(&mut state)
+            .expect("a worker with no pending wait must remain a no-op");
+        }
+        "allow" => {
+          worker_maybe_wait_for_debugger_impl(&mut state)
+            .expect("exact root row should authorize the startup helper");
+          assert!(
+            !state.borrow::<WaitForWorkerDebuggerOnMessage>().0,
+            "authorized route must consume the one-shot wait flag"
+          );
+        }
+        other => panic!("unknown child scenario {other}"),
+      }
+      return;
+    }
+
+    let dir = TestDir::new();
+    let deny_policy = dir.0.join("deny.json");
+    let allow_policy = dir.0.join("allow.json");
+    let deny_audit = dir.0.join("deny.ndjson");
+    let allow_audit = dir.0.join("allow.ndjson");
+    std::fs::write(&deny_policy, r#"{"mode":"permissive","grants":{}}"#)
+      .unwrap();
+    std::fs::write(
+      &allow_policy,
+      r#"{"mode":"permissive","grants":{},"rootGrants":"inspector:activate"}"#,
+    )
+    .unwrap();
+
+    run_child("deny", &deny_policy, &deny_audit);
+    run_child("allow", &allow_policy, &allow_audit);
+    assert_audit(&deny_audit, "deny", "root/runtime-control");
+    assert_audit(&allow_audit, "allow", "root/runtime-control");
+  }
 }

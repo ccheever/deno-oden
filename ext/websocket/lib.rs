@@ -687,12 +687,7 @@ impl ServerWebSocket {
     &self,
     api_name: &str,
   ) -> Result<(), WebsocketError> {
-    if let Some(peer) = self.network_peer {
-      deno_permissions::oden_capsec_check_protected_inspector_stream_use(
-        peer, api_name,
-      )?;
-    }
-    Ok(())
+    check_protected_inspector_peer_use(self.network_peer, api_name)
   }
 
   /// Initiate a server-side graceful shutdown of this websocket. Cancels the
@@ -777,6 +772,18 @@ impl ServerWebSocket {
     ws.write_frame(frame).await?;
     Ok(())
   }
+}
+
+fn check_protected_inspector_peer_use(
+  peer: Option<std::net::SocketAddr>,
+  api_name: &str,
+) -> Result<(), WebsocketError> {
+  if let Some(peer) = peer {
+    deno_permissions::oden_capsec_check_protected_inspector_stream_use(
+      peer, api_name,
+    )?;
+  }
+  Ok(())
 }
 
 impl Resource for ServerWebSocket {
@@ -1178,5 +1185,151 @@ where
 {
   fn execute(&self, fut: Fut) {
     deno_core::unsync::spawn(fut);
+  }
+}
+
+#[cfg(test)]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "isolated native-route tests create temporary policy and audit artifacts and execute the current test binary"
+)]
+mod tests {
+  use std::process::Command;
+  use std::process::Stdio;
+  use std::time::Duration;
+  use std::time::Instant;
+  use std::time::SystemTime;
+  use std::time::UNIX_EPOCH;
+
+  use super::*;
+
+  const CHILD_SCENARIO: &str = "ODEN_TEST_WS_PING_NATIVE_ROUTE";
+  const TEST_NAME: &str =
+    "tests::ws_ping_native_preflight_guards_protected_inspector_peer";
+  const ENDPOINT: &str = "127.0.0.1:9229";
+
+  struct TestDir(std::path::PathBuf);
+
+  impl TestDir {
+    fn new() -> Self {
+      let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+      let path = std::env::temp_dir()
+        .join(format!("oden-ws-ping-route-{}-{nonce}", std::process::id()));
+      std::fs::create_dir(&path).unwrap();
+      Self(path)
+    }
+  }
+
+  impl Drop for TestDir {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn run_child(
+    scenario: &str,
+    policy: &std::path::Path,
+    audit: &std::path::Path,
+  ) {
+    let stdout_path = audit.with_extension(format!("{scenario}.stdout"));
+    let stderr_path = audit.with_extension(format!("{scenario}.stderr"));
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+      .args([TEST_NAME, "--exact", "--nocapture", "--test-threads=1"])
+      .stdout(Stdio::from(std::fs::File::create(&stdout_path).unwrap()))
+      .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()));
+    for (name, _) in std::env::vars_os() {
+      if name.to_string_lossy().starts_with("ODEN_CAPSEC_")
+        || name == CHILD_SCENARIO
+      {
+        command.env_remove(name);
+      }
+    }
+    command
+      .env(CHILD_SCENARIO, scenario)
+      .env("ODEN_CAPSEC_POLICY", policy)
+      .env("ODEN_CAPSEC_AUDIT", audit);
+    let mut child = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let (status, timed_out) = loop {
+      if let Some(status) = child.try_wait().unwrap() {
+        break (status, false);
+      }
+      if Instant::now() >= deadline {
+        let _ = child.kill();
+        break (child.wait().unwrap(), true);
+      }
+      std::thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = std::fs::read_to_string(stdout_path).unwrap();
+    let stderr = std::fs::read_to_string(stderr_path).unwrap();
+    assert!(
+      !timed_out && status.success(),
+      "child scenario {scenario} failed (timed_out={timed_out}, status={status}):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+  }
+
+  fn assert_audit(audit: &std::path::Path, decision: &str, principal: &str) {
+    let target = format!("protected-inspector-stream:{ENDPOINT}");
+    let records = std::fs::read_to_string(audit).unwrap();
+    let found = records.lines().any(|line| {
+      let record: deno_core::serde_json::Value =
+        deno_core::serde_json::from_str(line).unwrap();
+      record["capability"] == "inspector:activate"
+        && record["target"] == target
+        && record["decision"] == decision
+        && record["principal"] == principal
+    });
+    assert!(found, "missing exact {decision} audit row in {records}");
+  }
+
+  #[test]
+  fn ws_ping_native_preflight_guards_protected_inspector_peer() {
+    if let Ok(scenario) = std::env::var(CHILD_SCENARIO) {
+      let endpoint = ENDPOINT.parse().unwrap();
+      match scenario.as_str() {
+        "deny" => {
+          check_protected_inspector_peer_use(None, "WebSocket.ping")
+            .expect("an ordinary untagged websocket must remain unaffected");
+          let error = check_protected_inspector_peer_use(
+            Some(endpoint),
+            "WebSocket.ping",
+          )
+          .expect_err("a protected inspector peer must require authority");
+          assert!(
+            error.to_string().contains("protected-inspector-stream")
+              && error.to_string().contains(ENDPOINT)
+              && error
+                .to_string()
+                .contains("exact static inspector:activate row"),
+            "unexpected denial: {error}"
+          );
+        }
+        "allow" => {
+          deno_permissions::prompter::set_current_oden_trusted_host_actor(true);
+          check_protected_inspector_peer_use(Some(endpoint), "WebSocket.ping")
+            .expect("trusted root control may use its protected websocket");
+          deno_permissions::prompter::set_current_oden_trusted_host_actor(
+            false,
+          );
+        }
+        other => panic!("unknown child scenario {other}"),
+      }
+      return;
+    }
+
+    let dir = TestDir::new();
+    let policy = dir.0.join("policy.json");
+    let deny_audit = dir.0.join("deny.ndjson");
+    let allow_audit = dir.0.join("allow.ndjson");
+    std::fs::write(&policy, r#"{"mode":"permissive","grants":{}}"#).unwrap();
+
+    run_child("deny", &policy, &deny_audit);
+    run_child("allow", &policy, &allow_audit);
+    assert_audit(&deny_audit, "deny", "no-user");
+    assert_audit(&allow_audit, "allow-ambient", "root/runtime");
   }
 }

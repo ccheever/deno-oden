@@ -753,15 +753,29 @@ pub fn op_require_package_imports_resolve<
 pub fn op_require_break_on_next_statement(
   state: Rc<RefCell<OpState>>,
 ) -> Result<(), deno_permissions::PermissionCheckError> {
+  require_break_on_next_statement_impl(state)
+}
+
+fn require_break_on_next_statement_impl(
+  state: Rc<RefCell<OpState>>,
+) -> Result<(), deno_permissions::PermissionCheckError> {
+  with_require_break_authorization(|| {
+    let inspector =
+      { state.borrow().borrow::<Rc<JsRuntimeInspector>>().clone() };
+    inspector.wait_for_session_and_break_on_next_statement();
+  })
+}
+
+fn with_require_break_authorization<T>(
+  effect: impl FnOnce() -> T,
+) -> Result<T, deno_permissions::PermissionCheckError> {
   // @ref LLP 0019#inspector [implements]
   deno_permissions::oden_capsec_check_inspector_activation(
     "node:require.break-on-next-statement",
     "require break on next statement",
     true,
   )?;
-  let inspector = { state.borrow().borrow::<Rc<JsRuntimeInspector>>().clone() };
-  inspector.wait_for_session_and_break_on_next_statement();
-  Ok(())
+  Ok(effect())
 }
 
 #[op2(fast)]
@@ -797,5 +811,153 @@ fn url_or_path_to_string(
     Ok(url.into_path()?.to_string_lossy().into_owned())
   } else {
     Ok(url.to_string_lossy().into_owned())
+  }
+}
+
+#[cfg(test)]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "isolated native-route tests create temporary policy and audit artifacts and execute the current test binary"
+)]
+mod tests {
+  use std::cell::Cell;
+  use std::process::Command;
+  use std::process::Stdio;
+  use std::time::Duration;
+  use std::time::Instant;
+  use std::time::SystemTime;
+  use std::time::UNIX_EPOCH;
+
+  use super::*;
+
+  const CHILD_SCENARIO: &str = "ODEN_TEST_REQUIRE_BREAK_ROUTE";
+  const TEST_NAME: &str = "ops::require::tests::require_break_requires_exact_root_row_before_inspector_access";
+  const TARGET: &str = "node:require.break-on-next-statement";
+
+  struct TestDir(std::path::PathBuf);
+
+  impl TestDir {
+    fn new() -> Self {
+      let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+      let path = std::env::temp_dir().join(format!(
+        "oden-require-break-route-{}-{nonce}",
+        std::process::id()
+      ));
+      std::fs::create_dir(&path).unwrap();
+      Self(path)
+    }
+  }
+
+  impl Drop for TestDir {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn run_child(
+    scenario: &str,
+    policy: &std::path::Path,
+    audit: &std::path::Path,
+  ) {
+    let stdout_path = audit.with_extension(format!("{scenario}.stdout"));
+    let stderr_path = audit.with_extension(format!("{scenario}.stderr"));
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+      .args([TEST_NAME, "--exact", "--nocapture", "--test-threads=1"])
+      .stdout(Stdio::from(std::fs::File::create(&stdout_path).unwrap()))
+      .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()));
+    for (name, _) in std::env::vars_os() {
+      if name.to_string_lossy().starts_with("ODEN_CAPSEC_")
+        || name == CHILD_SCENARIO
+      {
+        command.env_remove(name);
+      }
+    }
+    command
+      .env(CHILD_SCENARIO, scenario)
+      .env("ODEN_CAPSEC_POLICY", policy)
+      .env("ODEN_CAPSEC_AUDIT", audit);
+    let mut child = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let (status, timed_out) = loop {
+      if let Some(status) = child.try_wait().unwrap() {
+        break (status, false);
+      }
+      if Instant::now() >= deadline {
+        let _ = child.kill();
+        break (child.wait().unwrap(), true);
+      }
+      std::thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = std::fs::read_to_string(stdout_path).unwrap();
+    let stderr = std::fs::read_to_string(stderr_path).unwrap();
+    assert!(
+      !timed_out && status.success(),
+      "child scenario {scenario} failed (timed_out={timed_out}, status={status}):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+  }
+
+  fn assert_audit(audit: &std::path::Path, decision: &str, principal: &str) {
+    let records = std::fs::read_to_string(audit).unwrap();
+    let found = records.lines().any(|line| {
+      let record: deno_core::serde_json::Value =
+        deno_core::serde_json::from_str(line).unwrap();
+      record["capability"] == "inspector:activate"
+        && record["target"] == TARGET
+        && record["decision"] == decision
+        && record["principal"] == principal
+    });
+    assert!(found, "missing exact {decision} audit row in {records}");
+  }
+
+  #[test]
+  fn require_break_requires_exact_root_row_before_inspector_access() {
+    if let Ok(scenario) = std::env::var(CHILD_SCENARIO) {
+      match scenario.as_str() {
+        "deny" => {
+          // No inspector is installed. This call can return a permission error
+          // only if the real op authorizes before borrowing inspector state.
+          let state = Rc::new(RefCell::new(OpState::new(None)));
+          let error = require_break_on_next_statement_impl(state)
+            .expect_err("missing exact root row must deny");
+          assert!(
+            error.to_string().contains(TARGET)
+              && error
+                .to_string()
+                .contains("exact static inspector:activate row"),
+            "unexpected denial: {error}"
+          );
+        }
+        "allow" => {
+          let effect_ran = Cell::new(false);
+          with_require_break_authorization(|| effect_ran.set(true))
+            .expect("exact root row should authorize the CJS break helper");
+          assert!(effect_ran.get(), "authorized helper must reach its effect");
+        }
+        other => panic!("unknown child scenario {other}"),
+      }
+      return;
+    }
+
+    let dir = TestDir::new();
+    let deny_policy = dir.0.join("deny.json");
+    let allow_policy = dir.0.join("allow.json");
+    let deny_audit = dir.0.join("deny.ndjson");
+    let allow_audit = dir.0.join("allow.ndjson");
+    std::fs::write(&deny_policy, r#"{"mode":"permissive","grants":{}}"#)
+      .unwrap();
+    std::fs::write(
+      &allow_policy,
+      r#"{"mode":"permissive","grants":{},"rootGrants":"inspector:activate"}"#,
+    )
+    .unwrap();
+
+    run_child("deny", &deny_policy, &deny_audit);
+    run_child("allow", &allow_policy, &allow_audit);
+    assert_audit(&deny_audit, "deny", "root/runtime-control");
+    assert_audit(&allow_audit, "allow", "root/runtime-control");
   }
 }

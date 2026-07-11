@@ -513,12 +513,11 @@ pub fn op_inspector_connect<'s>(
   })
 }
 
-/// Like `op_inspector_connect`, but skips the legacy `--allow-sys=inspector`
-/// permission check. Only intended for the `node:repl` polyfill, which
-/// uses a private inspector session to evaluate the in-flight input with
-/// `Runtime.evaluate({ throwOnSideEffect: true })` for the inline preview.
-/// The session can only inspect the current runtime, which user code can
-/// already do via other JS APIs, so no permission is required.
+/// Like `op_inspector_connect`, this is intended only for the `node:repl`
+/// polyfill's private inline-preview session. It skips the legacy
+/// `--allow-sys=inspector` check, but capsec still requires the exact native
+/// `inspector:activate` row before creating the session because the preview
+/// can observe the shared runtime.
 #[op2(stack_trace)]
 #[cppgc]
 pub fn op_node_repl_inspector_connect<'s>(
