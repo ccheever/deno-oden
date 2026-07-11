@@ -209,6 +209,17 @@ const originalWritableStates = new SafeWeakMap();
 const writableEnabledValues = new SafeWeakMap();
 const writableHighWaterMarkValues = new SafeWeakMap();
 const bufferedWriteAdmissions = new SafeWeakMap();
+// Completion callbacks retain the CPED of each registration independently of
+// the continuation that eventually completes the write. The raw callback slots
+// remain untouched for ordinary Node compatibility; protected dispatch uses
+// only these closure-private records so object passage cannot borrow a later
+// root writer's authority.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+const activeWriteCallbackRecords = new SafeWeakMap();
+const afterWriteTickCallbackRecords = new SafeWeakMap();
+const bufferedWriteCallbackRecords = new SafeWeakMap();
+const endCallbackRecords = new SafeWeakMap();
+const writableCallbackSequenceValues = new SafeWeakMap();
 const protectedWritableCleanupEnds = new SafeWeakMap();
 let WritablePrototypeWrite;
 let WritablePrototypeUncork;
@@ -379,6 +390,123 @@ function writableStateForStream(stream) {
 
 function getGuardedWritableState(state) {
   return WeakMapPrototypeGet(guardedWritableStates, state);
+}
+
+function captureWritableCallback(state, callback) {
+  if (callback === nop) return undefined;
+  const sequence = (WeakMapPrototypeGet(writableCallbackSequenceValues, state) ??
+    0) + 1;
+  WeakMapPrototypeSet(writableCallbackSequenceValues, state, sequence);
+  return {
+    captured: captureDeliveryCallback(callback),
+    sequence,
+  };
+}
+
+function singleWriteCallbackCompletion(record) {
+  return record === undefined
+    ? undefined
+    : {
+      callback: record.captured.callback,
+      kind: "single",
+      record,
+      sequence: record.sequence,
+    };
+}
+
+function takeBufferedWriteCallbackRecord(entry) {
+  const record = WeakMapPrototypeGet(bufferedWriteCallbackRecords, entry);
+  WeakMapPrototypeDelete(bufferedWriteCallbackRecords, entry);
+  return record;
+}
+
+function batchWriteCallbackCompletion(callback, buffered, start) {
+  const members = [];
+  for (let i = start; i < buffered.length; i++) {
+    const entry = buffered[i];
+    const record = takeBufferedWriteCallbackRecord(entry);
+    if (record !== undefined) {
+      ArrayPrototypePush(members, { entry, record });
+    }
+  }
+  return members.length === 0
+    ? undefined
+    : {
+      callback,
+      kind: "writev",
+      members,
+      sequence: members[0].record.sequence,
+    };
+}
+
+function setActiveWriteCallbackRecord(state, completion) {
+  if (completion === undefined) {
+    WeakMapPrototypeDelete(activeWriteCallbackRecords, state);
+  } else {
+    WeakMapPrototypeSet(activeWriteCallbackRecords, state, completion);
+  }
+}
+
+function takeActiveWriteCallbackRecord(state) {
+  const completion = WeakMapPrototypeGet(activeWriteCallbackRecords, state);
+  WeakMapPrototypeDelete(activeWriteCallbackRecords, state);
+  return completion;
+}
+
+function insertWriteCallbackRecord(records, completion) {
+  if (completion === undefined) return;
+  let index = records.length;
+  while (
+    index > 0 && records[index - 1].sequence > completion.sequence
+  ) {
+    index--;
+  }
+  ArrayPrototypeSplice(records, index, 0, completion);
+}
+
+function invokeProtectedWriteCallback(stream, completion, error) {
+  if (completion.kind === "single") {
+    return runCapturedCallback(
+      completion.record.captured,
+      undefined,
+      [error],
+    );
+  }
+
+  // Node invokes _writev completion callbacks with the buffered request as
+  // `this`; that request contains the application chunk and encoding. Treat
+  // the complete recipient set as byte delivery before exposing any entry.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  for (let i = 0; i < completion.members.length; i++) {
+    preflightCapturedDelivery(stream, completion.members[i].record.captured);
+  }
+  for (let i = 0; i < completion.members.length; i++) {
+    const member = completion.members[i];
+    runCapturedDelivery(
+      stream,
+      member.record.captured,
+      member.entry,
+      [error],
+    );
+  }
+}
+
+function runScheduledWriteCallback(stream, state, record, callback, error) {
+  if (getGuardedWritableState(state) === undefined) {
+    return FunctionPrototypeCall(callback, undefined, error);
+  }
+  if (record === undefined) return;
+  return runCapturedCallback(record.captured, undefined, [error]);
+}
+
+function appendEndCallbackRecord(state, callback, captured) {
+  let records = WeakMapPrototypeGet(endCallbackRecords, state);
+  if (records === undefined) {
+    records = { callbacks: [], receiver: [] };
+    WeakMapPrototypeSet(endCallbackRecords, state, records);
+  }
+  ArrayPrototypePush(records.callbacks, captured);
+  ArrayPrototypePush(records.receiver, callback);
 }
 
 function canInspectGuardedWritable(state) {
@@ -1122,6 +1250,11 @@ function _write(stream, chunk, encoding, cb) {
     }
   }
 
+  // Capture before any asynchronous error or completion can resume. This is
+  // intentionally unconditional: an ordinary in-flight or corked Writable may
+  // become protected before its callback is delivered.
+  const callbackRecord = captureWritableCallback(state, cb);
+
   let err;
   if ((state[kState] & kEnding) !== 0) {
     err = new ERR_STREAM_WRITE_AFTER_END();
@@ -1130,13 +1263,28 @@ function _write(stream, chunk, encoding, cb) {
   }
 
   if (err) {
-    writableNextTick(cb, err);
+    writableNextTick(
+      runScheduledWriteCallback,
+      stream,
+      state,
+      callbackRecord,
+      cb,
+      err,
+    );
     errorOrDestroy(stream, err, true);
     return err;
   }
 
   state.pendingcb++;
-  return writeOrBuffer(stream, state, chunk, encoding, cb, admission);
+  return writeOrBuffer(
+    stream,
+    state,
+    chunk,
+    encoding,
+    cb,
+    admission,
+    callbackRecord,
+  );
 }
 
 Writable.prototype.write = function (chunk, encoding, cb) {
@@ -1196,6 +1344,7 @@ function writeOrBuffer(
   encoding,
   callback,
   admission,
+  callbackRecord,
 ) {
   const len = writableChunkLength(state, chunk);
 
@@ -1212,6 +1361,13 @@ function writeOrBuffer(
 
     const entry = { chunk, encoding, callback };
     WeakMapPrototypeSet(bufferedWriteAdmissions, entry, admission);
+    if (callbackRecord !== undefined) {
+      WeakMapPrototypeSet(
+        bufferedWriteCallbackRecords,
+        entry,
+        callbackRecord,
+      );
+    }
     ArrayPrototypePush(writableStateBuffer(state), entry);
     if ((state[kState] & kAllBuffers) !== 0 && encoding !== "buffer") {
       state[kState] &= ~kAllBuffers;
@@ -1224,6 +1380,10 @@ function writeOrBuffer(
     if (callback !== nop) {
       state.writecb = callback;
     }
+    setActiveWriteCallbackRecord(
+      state,
+      singleWriteCallbackCompletion(callbackRecord),
+    );
     state[kState] |= kWriting | kSync | kExpectWriteCb;
     // The immediate path is still on the admitting call stack. Preserve that
     // live actor instead of replacing it with a detached-continuation stamp;
@@ -1260,11 +1420,13 @@ function doWrite(
   encoding,
   cb,
   admission,
+  completion,
 ) {
   state.writelen = len;
   if (cb !== nop) {
     state.writecb = cb;
   }
+  setActiveWriteCallbackRecord(state, completion);
   state[kState] |= kWriting | kSync | kExpectWriteCb;
   if ((state[kState] & kDestroyed) !== 0) {
     writableOnwrite(state)(new ERR_STREAM_DESTROYED("write"));
@@ -1292,10 +1454,14 @@ function doWrite(
   state[kState] &= ~kSync;
 }
 
-function onwriteError(stream, state, er, cb) {
+function onwriteError(stream, state, er, cb, completion) {
   --state.pendingcb;
 
-  cb(er);
+  if (getGuardedWritableState(state) === undefined) {
+    cb(er);
+  } else if (completion !== undefined) {
+    invokeProtectedWriteCallback(stream, completion, er);
+  }
   // Ensure callbacks are invoked even when autoDestroy is
   // not enabled. Passing `er` here doesn't make sense since
   // it's related to one specific write, not to the buffered
@@ -1314,7 +1480,13 @@ function onwrite(stream, er) {
   }
 
   const sync = (state[kState] & kSync) !== 0;
-  const cb = (state[kState] & kWriteCb) !== 0 ? state[kWriteCbValue] : nop;
+  const completion = takeActiveWriteCallbackRecord(state);
+  const reflectedCallback = (state[kState] & kWriteCb) !== 0
+    ? state[kWriteCbValue]
+    : nop;
+  const cb = getGuardedWritableState(state) === undefined
+    ? reflectedCallback
+    : completion?.callback ?? nop;
 
   state.writecb = null;
   state[kState] &= ~(kWriting | kExpectWriteCb);
@@ -1337,9 +1509,9 @@ function onwrite(stream, er) {
     }
 
     if (sync) {
-      writableNextTick(onwriteError, stream, state, er, cb);
+      writableNextTick(onwriteError, stream, state, er, cb, completion);
     } else {
-      onwriteError(stream, state, er, cb);
+      onwriteError(stream, state, er, cb, completion);
     }
   } else {
     if ((state[kState] & kBuffered) !== 0) {
@@ -1358,7 +1530,14 @@ function onwrite(stream, er) {
       // memory allocations.
       if (cb === nop) {
         if ((state[kState] & kAfterWritePending) === 0 && needTick) {
-          writableNextTick(afterWrite, stream, state, 1, cb);
+          writableNextTick(
+            afterWrite,
+            stream,
+            state,
+            1,
+            cb,
+            undefined,
+          );
           state[kState] |= kAfterWritePending;
         } else {
           state.pendingcb--;
@@ -1370,10 +1549,36 @@ function onwrite(stream, er) {
         (state[kState] & kAfterWriteTickInfo) !== 0 &&
         state[kAfterWriteTickInfoValue].cb === cb
       ) {
-        state[kAfterWriteTickInfoValue].count++;
+        const tickInfo = state[kAfterWriteTickInfoValue];
+        tickInfo.count++;
+        const callbackRecords = WeakMapPrototypeGet(
+          afterWriteTickCallbackRecords,
+          tickInfo,
+        );
+        if (callbackRecords !== undefined) {
+          callbackRecords.count++;
+          insertWriteCallbackRecord(
+            callbackRecords.completions,
+            completion,
+          );
+        }
       } else if (needTick) {
-        state[kAfterWriteTickInfoValue] = { count: 1, cb, stream, state };
-        writableNextTick(afterWriteTick, state[kAfterWriteTickInfoValue]);
+        const tickInfo = { count: 1, cb, stream, state };
+        const callbackRecords = {
+          callback: cb,
+          completions: [],
+          count: 1,
+          state,
+          stream,
+        };
+        insertWriteCallbackRecord(callbackRecords.completions, completion);
+        WeakMapPrototypeSet(
+          afterWriteTickCallbackRecords,
+          tickInfo,
+          callbackRecords,
+        );
+        state[kAfterWriteTickInfoValue] = tickInfo;
+        writableNextTick(afterWriteTick, tickInfo);
         state[kState] |= kAfterWritePending | kAfterWriteTickInfo;
       } else {
         state.pendingcb--;
@@ -1382,18 +1587,37 @@ function onwrite(stream, er) {
         }
       }
     } else {
-      afterWrite(stream, state, 1, cb);
+      afterWrite(stream, state, 1, cb, completion === undefined
+        ? undefined
+        : [completion]);
     }
   }
 }
 
-function afterWriteTick({ stream, state, count, cb }) {
+function afterWriteTick(info) {
+  const callbackRecords = WeakMapPrototypeGet(
+    afterWriteTickCallbackRecords,
+    info,
+  );
+  WeakMapPrototypeDelete(afterWriteTickCallbackRecords, info);
+  const protectedState = callbackRecords !== undefined &&
+    getGuardedWritableState(callbackRecords.state) !== undefined;
+  const stream = protectedState ? callbackRecords.stream : info.stream;
+  const state = protectedState ? callbackRecords.state : info.state;
+  const count = protectedState ? callbackRecords.count : info.count;
+  const cb = protectedState ? callbackRecords.callback : info.cb;
   state[kState] &= ~kAfterWriteTickInfo;
   state[kAfterWriteTickInfoValue] = null;
-  return afterWrite(stream, state, count, cb);
+  return afterWrite(
+    stream,
+    state,
+    count,
+    cb,
+    protectedState ? callbackRecords.completions : undefined,
+  );
 }
 
-function afterWrite(stream, state, count, cb) {
+function afterWrite(stream, state, count, cb, callbackRecords) {
   state[kState] &= ~kAfterWritePending;
 
   const needDrain =
@@ -1404,9 +1628,21 @@ function afterWrite(stream, state, count, cb) {
     stream.emit("drain");
   }
 
-  while (count-- > 0) {
-    state.pendingcb--;
-    cb(null);
+  if (getGuardedWritableState(state) === undefined) {
+    while (count-- > 0) {
+      state.pendingcb--;
+      cb(null);
+    }
+  } else if (cb === nop) {
+    state.pendingcb -= count;
+  } else {
+    for (let i = 0; i < count; i++) {
+      state.pendingcb--;
+      const completion = callbackRecords?.[i];
+      if (completion !== undefined) {
+        invokeProtectedWriteCallback(stream, completion, null);
+      }
+    }
   }
 
   if ((state[kState] & kDestroyed) !== 0) {
@@ -1439,13 +1675,19 @@ function errorBufferWithoutContext(state) {
 
   if ((state[kState] & kBuffered) !== 0) {
     const buffered = writableStateBufferForCleanup(state);
-    const bufferedIndex = getGuardedWritableState(state)?.bufferedIndex ??
-      state.bufferedIndex;
+    const guarded = getGuardedWritableState(state);
+    const bufferedIndex = guarded?.bufferedIndex ?? state.bufferedIndex;
     for (let n = bufferedIndex; n < buffered.length; ++n) {
-      const { chunk, callback } = buffered[n];
+      const entry = buffered[n];
+      const { chunk, callback } = entry;
+      const callbackRecord = takeBufferedWriteCallbackRecord(entry);
       const len = writableChunkLength(state, chunk);
       state.length -= len;
-      callback(state.errored ?? new ERR_STREAM_DESTROYED("write"));
+      const error = state.errored ?? new ERR_STREAM_DESTROYED("write");
+      if (guarded === undefined) callback(error);
+      else if (callbackRecord !== undefined) {
+        runCapturedCallback(callbackRecord.captured, undefined, [error]);
+      }
     }
   }
 
@@ -1503,6 +1745,7 @@ function clearBuffer(stream, state) {
       ? buffered
       : ArrayPrototypeSlice(buffered, i);
     chunks.allBuffers = (state[kState] & kAllBuffers) !== 0;
+    const completion = batchWriteCallbackCompletion(callback, buffered, i);
 
     doWrite(
       stream,
@@ -1513,6 +1756,7 @@ function clearBuffer(stream, state) {
       "",
       callback,
       writableAdmission(buffered[i]),
+      completion,
     );
 
     resetBuffer(state);
@@ -1520,6 +1764,7 @@ function clearBuffer(stream, state) {
     do {
       const entry = buffered[i];
       const { chunk, encoding, callback } = entry;
+      const callbackRecord = takeBufferedWriteCallbackRecord(entry);
       buffered[i++] = null;
       const len = objectMode ? 1 : writableChunkLength(state, chunk);
       doWrite(
@@ -1531,6 +1776,7 @@ function clearBuffer(stream, state) {
         encoding,
         callback,
         writableAdmission(entry),
+        singleWriteCallbackCompletion(callbackRecord),
       );
     } while (i < buffered.length && (state[kState] & kWriting) === 0);
 
