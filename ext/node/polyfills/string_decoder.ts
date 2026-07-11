@@ -45,16 +45,28 @@ const {
   DataViewPrototypeGetBuffer,
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
+  FunctionPrototypeCall,
   NumberPrototypeToString,
-  ObjectPrototypeIsPrototypeOf,
   String,
   TypedArrayPrototypeGetBuffer,
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
   StringPrototypeToLowerCase,
+  TypedArrayPrototypeFill,
+  TypedArrayPrototypeSet,
+  TypedArrayPrototypeSubarray,
   Uint8Array,
 } = primordials;
 const { isTypedArray } = core;
+const BufferAllocUnsafe = Buffer.allocUnsafe;
+const BufferCopy = Buffer.prototype.copy;
+const BufferFrom = Buffer.from;
+const BufferIsBuffer = Buffer.isBuffer;
+const BufferToString = Buffer.prototype.toString;
+
+function bufferFrom(value) {
+  return FunctionPrototypeCall(BufferFrom, Buffer, value);
+}
 
 const ENCODING_UTF8 = 0;
 const ENCODING_BASE64 = 1;
@@ -79,8 +91,7 @@ function normalizeEncoding(enc) {
 }
 
 function isBufferType(buf) {
-  return ObjectPrototypeIsPrototypeOf(Buffer.prototype, buf) &&
-    buf.BYTES_PER_ELEMENT;
+  return BufferIsBuffer(buf);
 }
 
 function normalizeBuffer(buf) {
@@ -95,7 +106,7 @@ function normalizeBuffer(buf) {
     return buf;
   } else {
     const isTA = isTypedArray(buf);
-    return Buffer.from(
+    return bufferFrom(
       new Uint8Array(
         isTA
           ? TypedArrayPrototypeGetBuffer(buf)
@@ -113,15 +124,14 @@ function normalizeBuffer(buf) {
 
 const maxStringLengthHex = NumberPrototypeToString(MAX_STRING_LENGTH, 16);
 function bufferToString(buf, encoding, start, end) {
-  const len = (end ?? buf.length) - (start ?? 0);
+  const len = (end ?? TypedArrayPrototypeGetByteLength(buf)) - (start ?? 0);
   if (len > MAX_STRING_LENGTH) {
     throw new NodeError(
       "ERR_STRING_TOO_LONG",
       `Cannot create a string longer than 0x${maxStringLengthHex} characters`,
     );
   }
-  // deno-lint-ignore prefer-primordials -- buf is a Buffer; Buffer.prototype.toString(encoding) is not String.prototype.toString
-  return buf.toString(encoding, start, end);
+  return FunctionPrototypeCall(BufferToString, buf, encoding, start, end);
 }
 
 const kBufferedBytes = Symbol("bufferedBytes");
@@ -131,7 +141,8 @@ function decode(buf) {
   const enc = this.enc;
 
   let bufIdx = 0;
-  let bufEnd = buf.length;
+  const bufLength = TypedArrayPrototypeGetByteLength(buf);
+  let bufEnd = bufLength;
 
   let prepend = "";
   let rest = "";
@@ -144,12 +155,19 @@ function decode(buf) {
       if (enc === ENCODING_UTF8) {
         for (
           let i = 0;
-          i < buf.length - bufIdx && i < this[kMissingBytes];
+          i < bufLength - bufIdx && i < this[kMissingBytes];
           i++
         ) {
           if ((buf[i] & 0xC0) !== 0x80) {
             this[kMissingBytes] = 0;
-            buf.copy(this.lastChar, this[kBufferedBytes], bufIdx, bufIdx + i);
+            FunctionPrototypeCall(
+              BufferCopy,
+              buf,
+              this.lastChar,
+              this[kBufferedBytes],
+              bufIdx,
+              bufIdx + i,
+            );
             this[kBufferedBytes] += i;
             bufIdx += i;
             break;
@@ -157,8 +175,10 @@ function decode(buf) {
         }
       }
 
-      const bytesToCopy = MathMin(buf.length - bufIdx, this[kMissingBytes]);
-      buf.copy(
+      const bytesToCopy = MathMin(bufLength - bufIdx, this[kMissingBytes]);
+      FunctionPrototypeCall(
+        BufferCopy,
+        buf,
         this.lastChar,
         this[kBufferedBytes],
         bufIdx,
@@ -181,12 +201,12 @@ function decode(buf) {
       }
     }
 
-    if (buf.length - bufIdx === 0) {
+    if (bufLength - bufIdx === 0) {
       rest = prepend.length > 0 ? prepend : "";
       prepend = "";
     } else {
-      if (enc === ENCODING_UTF8 && (buf[buf.length - 1] & 0x80)) {
-        for (let i = buf.length - 1;; i--) {
+      if (enc === ENCODING_UTF8 && (buf[bufLength - 1] & 0x80)) {
+        for (let i = bufLength - 1;; i--) {
           this[kBufferedBytes] += 1;
           if ((buf[i] & 0xC0) === 0x80) {
             if (this[kBufferedBytes] >= 4 || i === 0) {
@@ -215,25 +235,27 @@ function decode(buf) {
           }
         }
       } else if (enc === ENCODING_UTF16) {
-        if ((buf.length - bufIdx) % 2 === 1) {
+        if ((bufLength - bufIdx) % 2 === 1) {
           this[kBufferedBytes] = 1;
           this[kMissingBytes] = 1;
-        } else if ((buf[buf.length - 1] & 0xFC) === 0xD8) {
+        } else if ((buf[bufLength - 1] & 0xFC) === 0xD8) {
           this[kBufferedBytes] = 2;
           this[kMissingBytes] = 2;
         }
       } else if (enc === ENCODING_BASE64 || enc === ENCODING_BASE64URL) {
-        this[kBufferedBytes] = (buf.length - bufIdx) % 3;
+        this[kBufferedBytes] = (bufLength - bufIdx) % 3;
         if (this[kBufferedBytes] > 0) {
           this[kMissingBytes] = 3 - this[kBufferedBytes];
         }
       }
 
       if (this[kBufferedBytes] > 0) {
-        buf.copy(
+        FunctionPrototypeCall(
+          BufferCopy,
+          buf,
           this.lastChar,
           0,
-          buf.length - this[kBufferedBytes],
+          bufLength - this[kBufferedBytes],
         );
         bufEnd -= this[kBufferedBytes];
       }
@@ -311,7 +333,7 @@ function StringDecoder(encoding) {
       break;
   }
   this.encoding = normalizedEncoding;
-  this.lastChar = Buffer.allocUnsafe(bufLen);
+  this.lastChar = FunctionPrototypeCall(BufferAllocUnsafe, Buffer, bufLen);
   this.enc = enc;
   this[kBufferedBytes] = 0;
   this[kMissingBytes] = 0;
@@ -344,7 +366,7 @@ StringDecoder.prototype.end = function end(buf) {
 StringDecoder.prototype.text = function text(buf, offset) {
   this[kBufferedBytes] = 0;
   this[kMissingBytes] = 0;
-  return this.write(buf.subarray(offset));
+  return this.write(TypedArrayPrototypeSubarray(buf, offset));
 };
 
 ObjectDefineProperties(StringDecoder.prototype, {
@@ -366,8 +388,25 @@ ObjectDefineProperties(StringDecoder.prototype, {
   },
 });
 
+// Move an active decoder's partial-codepoint state out of a user-reachable
+// instance. Stream protection uses this synchronously when a guarded readable
+// is attached so a retained `lastChar` buffer cannot expose protected bytes.
+// The private counters are intentionally copied here, where their symbols are
+// available, instead of trying to reconstruct them through mutable methods.
+function transferStringDecoder(source) {
+  const decoder = new StringDecoder(source.encoding);
+  decoder[kBufferedBytes] = source[kBufferedBytes];
+  decoder[kMissingBytes] = source[kMissingBytes];
+  TypedArrayPrototypeSet(decoder.lastChar, source.lastChar);
+  TypedArrayPrototypeFill(source.lastChar, 0);
+  source[kBufferedBytes] = 0;
+  source[kMissingBytes] = 0;
+  return decoder;
+}
+
 return {
   StringDecoder,
+  transferStringDecoder,
   default: { StringDecoder },
 };
 })();

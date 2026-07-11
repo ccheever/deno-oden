@@ -30,6 +30,9 @@ const { core, primordials } = __bootstrap;
 const Transform = core.loadExtScript(
   "ext:deno_node/internal/streams/transform.js",
 ).default;
+const { markStreamTrustedDeliveryCallback } = core.loadExtScript(
+  "ext:deno_node/internal/streams/oden_delivery.js",
+);
 
 const {
   ObjectSetPrototypeOf,
@@ -44,6 +47,7 @@ function PassThrough(options) {
   }
 
   Transform.call(this, options);
+  markStreamTrustedDeliveryCallback(this, PassThrough.prototype._transform);
 }
 
 PassThrough.prototype._transform = function (chunk, encoding, cb) {

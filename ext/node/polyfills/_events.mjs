@@ -56,11 +56,14 @@ const {
   SafeArrayIterator,
   SafeMap,
   SafeSet,
+  SafeWeakMap,
   String,
   StringPrototypeSplit,
   Symbol,
   SymbolFor,
   SymbolAsyncIterator,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet,
 } = primordials;
 
 const kRejection = SymbolFor("nodejs.rejection");
@@ -107,6 +110,122 @@ const kMaxEventTargetListeners = Symbol("events.maxEventTargetListeners");
 const kMaxEventTargetListenersWarned = Symbol(
   "events.maxEventTargetListenersWarned",
 );
+const eventListenerDeliveryHooks = new SafeWeakMap();
+const genuineOnceWrappers = new SafeWeakMap();
+const trackedEventListeners = new SafeWeakMap();
+
+function setEventListenerDeliveryHook(target, hook) {
+  WeakMapPrototypeSet(eventListenerDeliveryHooks, target, hook);
+}
+
+function trackEventListener(target, listener, delivery) {
+  let tracked = WeakMapPrototypeGet(trackedEventListeners, target);
+  if (tracked === undefined) {
+    tracked = new SafeWeakMap();
+    WeakMapPrototypeSet(trackedEventListeners, target, tracked);
+  }
+  WeakMapPrototypeSet(tracked, listener, delivery);
+}
+
+function listenerMatches(stored, listener) {
+  return stored === listener ||
+    stored.listener === listener;
+}
+
+function captureEventListenerDeliveries(target, type, listeners) {
+  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  if (deliveryHook === undefined) return undefined;
+  const tracked = WeakMapPrototypeGet(trackedEventListeners, target);
+  const deliveries = [];
+  for (let i = 0; i < listeners.length; i++) {
+    const listener = listeners[i];
+    let delivery = tracked === undefined
+      ? undefined
+      : WeakMapPrototypeGet(tracked, listener);
+    if (delivery === undefined) {
+      // A direct `_events` entry is exactly the callable we will invoke. Its
+      // public `.listener` property is attacker-forgeable and must not supply
+      // provenance.
+      delivery = deliveryHook.capture(type, listener, listener, true);
+    }
+    ArrayPrototypePush(deliveries, delivery);
+  }
+  // Authorize the complete exact snapshot before any recipient runs.
+  for (let i = 0; i < deliveries.length; i++) {
+    deliveries[i]?.preflight();
+  }
+  return deliveries;
+}
+
+function prepareCapturedEventDelivery(target, type, listeners) {
+  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  const protectedDelivery = deliveryHook?.isProtected?.() === true;
+  // Protected delivery freezes this decision before raw bytes can leave their
+  // queue. Ordinary EventEmitters retain Node's per-listener post-call read.
+  const captureRejections = protectedDelivery
+    ? Boolean(target[kCapture])
+    : undefined;
+  const rejectionDelivery = captureRejections === true
+    ? captureRejectionDelivery(target)
+    : undefined;
+  rejectionDelivery?.preflight();
+  return {
+    deliveries: captureEventListenerDeliveries(target, type, listeners),
+    listeners,
+    captureRejections,
+    protectedDelivery,
+    rejectionDelivery,
+  };
+}
+
+function captureRejectionDelivery(target) {
+  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  return deliveryHook?.captureRejection?.();
+}
+
+function prepareEventListenerDelivery(target, type) {
+  const events = target._events;
+  if (events === undefined) return undefined;
+  const handler = events[type];
+  if (handler === undefined) return undefined;
+  const listeners = typeof handler === "function"
+    ? [handler]
+    : arrayClone(handler);
+  return prepareCapturedEventDelivery(target, type, listeners);
+}
+
+function emitPreparedEvent(target, type, args, prepared) {
+  if (prepared === undefined) return false;
+  const {
+    captureRejections,
+    deliveries,
+    listeners,
+    protectedDelivery,
+    rejectionDelivery,
+  } = prepared;
+  for (let i = 0; i < listeners.length; i++) {
+    const delivery = deliveries?.[i];
+    // Recheck revocation at the individual boundary, then keep the captured
+    // recipient CPED installed throughout the callback so work scheduled by
+    // that callback cannot inherit the emitter's ambient authority.
+    delivery?.preflight();
+    const result = delivery === undefined
+      ? FunctionPrototypeApply(listeners[i], target, args)
+      : delivery.invoke(target, args);
+    if (result !== undefined && result !== null) {
+      addCatch(
+        target,
+        result,
+        type,
+        rejectionDelivery === null ? [] : args,
+        rejectionDelivery,
+        protectedDelivery ? captureRejections : Boolean(target[kCapture]),
+        protectedDelivery,
+      );
+    }
+  }
+  return true;
+}
 
 /**
  * Creates a new `EventEmitter` instance.
@@ -248,8 +367,16 @@ EventEmitter.init = function (opts) {
   }
 };
 
-function addCatch(that, promise, type, args) {
-  if (!that[kCapture]) {
+function addCatch(
+  that,
+  promise,
+  type,
+  args,
+  rejectionDelivery,
+  captureRejections,
+  protectedDelivery,
+) {
+  if (!captureRejections) {
     return;
   }
 
@@ -262,7 +389,15 @@ function addCatch(that, promise, type, args) {
       FunctionPrototypeCall(then, promise, undefined, function (err) {
         // The callback is called with nextTick to avoid a follow-up
         // rejection from this promise.
-        nextTick(emitUnhandledRejectionOrErr, that, err, type, args);
+        nextTick(
+          emitUnhandledRejectionOrErr,
+          that,
+          err,
+          type,
+          args,
+          rejectionDelivery,
+          protectedDelivery,
+        );
       });
     }
   } catch (err) {
@@ -270,8 +405,20 @@ function addCatch(that, promise, type, args) {
   }
 }
 
-function emitUnhandledRejectionOrErr(ee, err, type, args) {
-  if (typeof ee[kRejection] === "function") {
+function emitUnhandledRejectionOrErr(
+  ee,
+  err,
+  type,
+  args,
+  rejectionDelivery,
+  protectedDelivery,
+) {
+  if (rejectionDelivery !== undefined && rejectionDelivery !== null) {
+    rejectionDelivery.invoke(ee, [err, type, ...new SafeArrayIterator(args)]);
+  } else if (
+    !protectedDelivery && rejectionDelivery === undefined &&
+    typeof ee[kRejection] === "function"
+  ) {
     ee[kRejection](err, type, ...new SafeArrayIterator(args));
   } else {
     // We have to disable the capture rejections mechanism, otherwise
@@ -468,33 +615,18 @@ EventEmitter.prototype.emit = function emit(type, ...args) {
     return false;
   }
 
-  if (typeof handler === "function") {
-    const result = FunctionPrototypeApply(handler, this, args);
-
-    // We check if result is undefined first because that
-    // is the most common case so we do not pay any perf
-    // penalty
-    if (result !== undefined && result !== null) {
-      addCatch(this, result, type, args);
-    }
-  } else {
-    const len = handler.length;
-    const listeners = arrayClone(handler);
-    for (let i = 0; i < len; ++i) {
-      const result = FunctionPrototypeApply(listeners[i], this, args);
-
-      // We check if result is undefined first because that
-      // is the most common case so we do not pay any perf
-      // penalty.
-      // This code is duplicated because extracting it away
-      // would make it non-inlineable.
-      if (result !== undefined && result !== null) {
-        addCatch(this, result, type, args);
-      }
-    }
-  }
-
-  return true;
+  // Capture and authorize the complete recipient set before invoking any
+  // listener. The same snapshot is then delivered, so a mutable `_events`
+  // getter or Proxy cannot switch recipients between the check and the call.
+  const listeners = typeof handler === "function"
+    ? [handler]
+    : arrayClone(handler);
+  return emitPreparedEvent(
+    this,
+    type,
+    args,
+    prepareCapturedEventDelivery(this, type, listeners),
+  );
 };
 
 function _addListener(target, type, listener, prepend) {
@@ -519,6 +651,21 @@ function _addListener(target, type, listener, prepend) {
       events = target._events;
     }
     existing = events[type];
+  }
+
+  const deliveryHook = WeakMapPrototypeGet(eventListenerDeliveryHooks, target);
+  if (deliveryHook !== undefined) {
+    const onceListener = WeakMapPrototypeGet(genuineOnceWrappers, listener);
+    const delivery = deliveryHook.capture(
+      type,
+      onceListener ?? listener,
+      listener,
+      false,
+    );
+    if (delivery !== undefined) {
+      delivery.preflight();
+      trackEventListener(target, listener, delivery);
+    }
   }
 
   if (existing === undefined) {
@@ -603,6 +750,7 @@ function _onceWrap(target, type, listener) {
   const state = { fired: false, wrapFn: undefined, target, type, listener };
   const wrapped = FunctionPrototypeBind(onceWrapper, state);
   wrapped.listener = listener;
+  WeakMapPrototypeSet(genuineOnceWrappers, wrapped, listener);
   state.wrapFn = wrapped;
   return wrapped;
 }
@@ -659,7 +807,7 @@ EventEmitter.prototype.removeListener = function removeListener(
     return this;
   }
 
-  if (list === listener || list.listener === listener) {
+  if (listenerMatches(list, listener)) {
     if (--this._eventsCount === 0) {
       this._events = ObjectCreate(null);
     } else {
@@ -672,7 +820,7 @@ EventEmitter.prototype.removeListener = function removeListener(
     let position = -1;
 
     for (let i = list.length - 1; i >= 0; i--) {
-      if (list[i] === listener || list[i].listener === listener) {
+      if (listenerMatches(list[i], listener)) {
         position = i;
         break;
       }
@@ -1338,5 +1486,8 @@ return {
   on,
   once,
   setMaxListeners,
+  emitPreparedEvent,
+  prepareEventListenerDelivery,
+  setEventListenerDeliveryHook,
 };
 })();

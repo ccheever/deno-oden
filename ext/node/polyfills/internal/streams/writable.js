@@ -38,6 +38,21 @@ const {
 
 const webStreamsAdaptersSpecifier =
   "ext:deno_node/internal/webstreams/adapters.js";
+const {
+  captureDeliveryCallback,
+  captureTrustedDeliveryCallback,
+  getStreamUseGuard,
+  isStreamCleanupDeliveryCallback,
+  isStreamTrustedDeliveryCallback,
+  preflightCapturedDelivery,
+  registerStreamDeliveryPreflight,
+  registerStreamGuardAttachHook,
+  runCapturedDelivery,
+  runCapturedCleanup,
+  runStreamUseGuard,
+} = core.loadExtScript(
+  "ext:deno_node/internal/streams/oden_delivery.js",
+);
 
 const {
   AbortError,
@@ -83,17 +98,30 @@ const Stream = _mod1.Stream;
 "use strict";
 
 const {
+  ArrayBufferIsView,
+  ArrayPrototypePush,
   ArrayPrototypeSlice,
+  ArrayPrototypeSplice,
+  DataViewPrototypeGetBuffer,
+  DataViewPrototypeGetByteLength,
+  DataViewPrototypeGetByteOffset,
   Error,
+  FunctionPrototypeCall,
   FunctionPrototypeSymbolHasInstance,
   ObjectDefineProperties,
   ObjectDefineProperty,
   ObjectSetPrototypeOf,
   Promise,
+  SafeWeakMap,
   StringPrototypeToLowerCase,
   Symbol,
   SymbolAsyncDispose,
   SymbolHasInstance,
+  TypedArrayPrototypeGetBuffer,
+  TypedArrayPrototypeGetByteLength,
+  TypedArrayPrototypeGetByteOffset,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet,
 } = primordials;
 
 Writable.WritableState = WritableState;
@@ -102,6 +130,42 @@ const { errorOrDestroy } = destroyImpl;
 
 ObjectSetPrototypeOf(Writable.prototype, Stream.prototype);
 ObjectSetPrototypeOf(Writable, Stream);
+const BufferFrom = Buffer.from;
+const BufferIsBuffer = Buffer.isBuffer;
+const BufferIsEncoding = Buffer.isEncoding;
+const isTypedArray = core.isTypedArray;
+
+function bufferFrom(value, encodingOrOffset, length) {
+  return FunctionPrototypeCall(
+    BufferFrom,
+    Buffer,
+    value,
+    encodingOrOffset,
+    length,
+  );
+}
+
+function bufferFromArrayBufferView(view) {
+  const typedArray = isTypedArray(view);
+  return bufferFrom(
+    typedArray
+      ? TypedArrayPrototypeGetBuffer(view)
+      : DataViewPrototypeGetBuffer(view),
+    typedArray
+      ? TypedArrayPrototypeGetByteOffset(view)
+      : DataViewPrototypeGetByteOffset(view),
+    typedArray
+      ? TypedArrayPrototypeGetByteLength(view)
+      : DataViewPrototypeGetByteLength(view),
+  );
+}
+
+function writableChunkLength(state, chunk) {
+  if ((state[kState] & kObjectMode) !== 0) return 1;
+  return typeof chunk === "string"
+    ? chunk.length
+    : TypedArrayPrototypeGetByteLength(chunk);
+}
 
 function nop() {}
 
@@ -111,6 +175,203 @@ const kDefaultEncodingValue = Symbol("kDefaultEncodingValue");
 const kWriteCbValue = Symbol("kWriteCbValue");
 const kAfterWriteTickInfoValue = Symbol("kAfterWriteTickInfoValue");
 const kBufferedValue = Symbol("kBufferedValue");
+// Protected input queues and implementation identities cannot remain on the
+// reflectable WritableState/stream surface after authority attaches.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+const guardedWritableStates = new SafeWeakMap();
+const originalWritableStates = new SafeWeakMap();
+let WritablePrototypeWrite;
+let WritablePublicWrite;
+
+function isRegisteredWritable(stream) {
+  return WeakMapPrototypeGet(originalWritableStates, stream) !== undefined;
+}
+
+function isWritablePublicWrite(callback) {
+  return callback === WritablePublicWrite;
+}
+
+function writableStateForStream(stream) {
+  const original = WeakMapPrototypeGet(originalWritableStates, stream);
+  return original !== undefined && getStreamUseGuard(stream) !== undefined
+    ? original
+    : stream._writableState;
+}
+
+function getGuardedWritableState(state) {
+  return WeakMapPrototypeGet(guardedWritableStates, state);
+}
+
+function writableStateBuffer(state) {
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) return state[kBufferedValue];
+  runStreamUseGuard(guarded.stream);
+  return guarded.buffer;
+}
+
+function writableStateBufferForCleanup(state) {
+  const guarded = getGuardedWritableState(state);
+  return guarded === undefined ? state[kBufferedValue] : guarded.buffer;
+}
+
+function writableStateBufferIndex(state) {
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) return state.bufferedIndex;
+  runStreamUseGuard(guarded.stream);
+  return guarded.bufferedIndex;
+}
+
+function setWritableStateBufferIndex(state, index) {
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) state.bufferedIndex = index;
+  else {
+    runStreamUseGuard(guarded.stream);
+    guarded.bufferedIndex = index;
+  }
+}
+
+function setWritableStateBuffer(state, value) {
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) {
+    state[kBufferedValue] = value;
+    state.bufferedIndex = 0;
+  } else {
+    runStreamUseGuard(guarded.stream);
+    guarded.buffer = value;
+    guarded.bufferedIndex = 0;
+    state[kBufferedValue] = null;
+    state.bufferedIndex = 0;
+  }
+}
+
+function protectWritableState(stream) {
+  const state = WeakMapPrototypeGet(originalWritableStates, stream);
+  if (state === undefined || getGuardedWritableState(state) !== undefined) {
+    return;
+  }
+  const publicBuffer = state[kBufferedValue];
+  const privateBuffer = publicBuffer === null
+    ? null
+    : ArrayPrototypeSlice(publicBuffer, state.bufferedIndex);
+  if (publicBuffer !== null) publicBuffer.length = 0;
+  state[kBufferedValue] = null;
+  state.bufferedIndex = 0;
+
+  const write = stream._write;
+  const writev = stream._writev;
+  const final = stream._final;
+  const capture = (callback, trusted = false) =>
+    trusted || isStreamTrustedDeliveryCallback(stream, callback)
+      ? captureTrustedDeliveryCallback(callback)
+      : captureDeliveryCallback(callback);
+  WeakMapPrototypeSet(guardedWritableStates, state, {
+    buffer: privateBuffer,
+    bufferedIndex: 0,
+    onwrite: state.onwrite,
+    stream,
+    final: typeof final === "function" ? capture(final) : null,
+    finalCleanupSafe: typeof final === "function" &&
+      isStreamCleanupDeliveryCallback(stream, final),
+    write: typeof write === "function"
+      ? capture(write, write === WritablePrototypeWrite)
+      : null,
+    writeIsDefault: write === WritablePrototypeWrite,
+    writev: typeof writev === "function" ? capture(writev) : null,
+  });
+}
+
+function hasWritableWritev(stream, state) {
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) return typeof stream._writev === "function";
+  runStreamUseGuard(stream);
+  return guarded.writev !== null;
+}
+
+function preflightWritableImplementation(stream) {
+  const state = writableStateForStream(stream);
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) return;
+  const captured = guarded.writeIsDefault && guarded.writev !== null
+    ? guarded.writev
+    : guarded.write;
+  preflightCapturedDelivery(stream, captured);
+}
+
+function writableOnwrite(state) {
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) return state.onwrite;
+  runStreamUseGuard(guarded.stream);
+  return guarded.onwrite;
+}
+
+function hasWritableFinal(stream, state) {
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) return typeof stream._final === "function";
+  if (guarded.final === null) return false;
+  if (
+    guarded.buffer !== null &&
+    guarded.bufferedIndex < guarded.buffer.length
+  ) {
+    runStreamUseGuard(stream);
+    throw new Error("guarded writable queue reached _final before delivery");
+  }
+  if (!guarded.finalCleanupSafe) runStreamUseGuard(stream);
+  return true;
+}
+
+function invokeWritableFinal(stream, state, callback) {
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) {
+    return FunctionPrototypeCall(stream._final, stream, callback);
+  }
+  return guarded.finalCleanupSafe
+    ? runCapturedCleanup(guarded.final, stream, [callback])
+    : runCapturedDelivery(stream, guarded.final, stream, [callback]);
+}
+
+function invokeWritableImplementation(
+  stream,
+  state,
+  writev,
+  chunk,
+  encoding,
+  cb,
+) {
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) {
+    if (writev) {
+      return FunctionPrototypeCall(stream._writev, stream, chunk, cb);
+    }
+    return FunctionPrototypeCall(stream._write, stream, chunk, encoding, cb);
+  }
+
+  runStreamUseGuard(stream);
+  if (writev) {
+    return runCapturedDelivery(
+      stream,
+      guarded.writev,
+      stream,
+      [chunk, cb],
+    );
+  }
+  if (guarded.writeIsDefault) {
+    if (guarded.writev === null) {
+      throw new ERR_METHOD_NOT_IMPLEMENTED("_write()");
+    }
+    return runCapturedDelivery(
+      stream,
+      guarded.writev,
+      stream,
+      [[{ chunk, encoding }], cb],
+    );
+  }
+  return runCapturedDelivery(
+    stream,
+    guarded.write,
+    stream,
+    [chunk, encoding, cb],
+  );
+}
 
 // When an options object passed to `new Writable(...)` carries this symbol set
 // to `true`, the resulting `WritableState` stores its packed `kState` bitfield
@@ -334,13 +595,28 @@ ObjectDefineProperties(WritableState.prototype, {
     __proto__: null,
     enumerable: false,
     get() {
-      return (this[kState] & kBuffered) !== 0 ? this[kBufferedValue] : [];
+      if ((this[kState] & kBuffered) === 0) return [];
+      const guarded = getGuardedWritableState(this);
+      if (guarded === undefined) return this[kBufferedValue];
+      runStreamUseGuard(guarded.stream);
+      return ArrayPrototypeSlice(guarded.buffer, guarded.bufferedIndex);
     },
     set(value) {
-      this[kBufferedValue] = value;
       if (value) {
+        const guarded = getGuardedWritableState(this);
+        if (guarded === undefined) {
+          this[kBufferedValue] = value;
+        } else {
+          runStreamUseGuard(guarded.stream);
+          guarded.buffer = ArrayPrototypeSlice(value);
+          guarded.bufferedIndex = 0;
+          value.length = 0;
+          this[kBufferedValue] = null;
+          this.bufferedIndex = 0;
+        }
         this[kState] |= kBuffered;
       } else {
+        setWritableStateBuffer(this, null);
         this[kState] &= ~kBuffered;
       }
     },
@@ -351,6 +627,7 @@ function WritableState(options, stream, isDuplex) {
   // Bit map field to store WritableState more efficiently with 1 bit per field
   // instead of a V8 slot per field.
   this[kState] = kSync | kConstructed | kEmitClose | kAutoDestroy;
+  WeakMapPrototypeSet(originalWritableStates, stream, this);
 
   // Opt-in (used by `process.stdout`/`process.stderr`): keep the `kState`
   // bitfield behind an accessor so reads always observe the latest write, even
@@ -405,7 +682,7 @@ function WritableState(options, stream, isDuplex) {
     defaultEncoding === "utf-8"
   ) {
     this[kState] |= kDefaultUTF8Encoding;
-  } else if (Buffer.isEncoding(defaultEncoding)) {
+  } else if (BufferIsEncoding(defaultEncoding)) {
     this[kState] &= ~kDefaultUTF8Encoding;
     this[kDefaultEncodingValue] = defaultEncoding;
   } else {
@@ -431,11 +708,25 @@ function WritableState(options, stream, isDuplex) {
   // Number of pending user-supplied write callbacks
   // this must be 0 before 'finish' can be emitted.
   this.pendingcb = 0;
+
+  registerStreamGuardAttachHook(stream, () => protectWritableState(stream));
+  registerStreamDeliveryPreflight(
+    stream,
+    () => preflightWritableImplementation(stream),
+  );
 }
 
 function resetBuffer(state) {
-  state[kBufferedValue] = null;
-  state.bufferedIndex = 0;
+  const guarded = getGuardedWritableState(state);
+  if (guarded === undefined) {
+    state[kBufferedValue] = null;
+    state.bufferedIndex = 0;
+  } else {
+    guarded.buffer = null;
+    guarded.bufferedIndex = 0;
+    state[kBufferedValue] = null;
+    state.bufferedIndex = 0;
+  }
   state[kState] |= kAllBuffers | kAllNoop;
   state[kState] &= ~kBuffered;
 }
@@ -443,7 +734,10 @@ function resetBuffer(state) {
 WritableState.prototype.getBuffer = function getBuffer() {
   return (this[kState] & kBuffered) === 0
     ? []
-    : ArrayPrototypeSlice(this.buffered, this.bufferedIndex);
+    : ArrayPrototypeSlice(
+      writableStateBuffer(this),
+      writableStateBufferIndex(this),
+    );
 };
 
 ObjectDefineProperty(WritableState.prototype, "bufferedRequestCount", {
@@ -451,7 +745,7 @@ ObjectDefineProperty(WritableState.prototype, "bufferedRequestCount", {
   get() {
     return (this[kState] & kBuffered) === 0
       ? 0
-      : this[kBufferedValue].length - this.bufferedIndex;
+      : writableStateBuffer(this).length - writableStateBufferIndex(this);
   },
 });
 
@@ -513,7 +807,7 @@ function Writable(options) {
 
   if (this._construct != null) {
     destroyImpl.construct(this, () => {
-      this._writableState[kOnConstructed](this);
+      writableStateForStream(this)[kOnConstructed](this);
     });
   }
 }
@@ -534,7 +828,8 @@ Writable.prototype.pipe = function () {
 };
 
 function _write(stream, chunk, encoding, cb) {
-  const state = stream._writableState;
+  const state = writableStateForStream(stream);
+  runStreamUseGuard(stream);
 
   if (cb == null || typeof cb !== "function") {
     cb = nop;
@@ -549,7 +844,7 @@ function _write(stream, chunk, encoding, cb) {
       encoding = (state[kState] & kDefaultUTF8Encoding) !== 0
         ? "utf8"
         : state.defaultEncoding;
-    } else if (encoding !== "buffer" && !Buffer.isEncoding(encoding)) {
+    } else if (encoding !== "buffer" && !BufferIsEncoding(encoding)) {
       throw new ERR_UNKNOWN_ENCODING(encoding);
     }
 
@@ -558,13 +853,13 @@ function _write(stream, chunk, encoding, cb) {
         throw new ERR_UNKNOWN_ENCODING(encoding);
       }
       if ((state[kState] & kDecodeStrings) !== 0) {
-        chunk = Buffer.from(chunk, encoding);
+        chunk = bufferFrom(chunk, encoding);
         encoding = "buffer";
       }
-    } else if (chunk instanceof Buffer) {
+    } else if (BufferIsBuffer(chunk)) {
       encoding = "buffer";
-    } else if (Stream._isArrayBufferView(chunk)) {
-      chunk = Stream._uint8ArrayToBuffer(chunk);
+    } else if (ArrayBufferIsView(chunk)) {
+      chunk = bufferFromArrayBufferView(chunk);
       encoding = "buffer";
     } else {
       throw new ERR_INVALID_ARG_TYPE(
@@ -600,16 +895,17 @@ Writable.prototype.write = function (chunk, encoding, cb) {
 
   return _write(this, chunk, encoding, cb) === true;
 };
+WritablePublicWrite = Writable.prototype.write;
 
 Writable.prototype.cork = function () {
-  const state = this._writableState;
+  const state = writableStateForStream(this);
 
   state[kState] |= kCorked;
   state.corked++;
 };
 
 Writable.prototype.uncork = function () {
-  const state = this._writableState;
+  const state = writableStateForStream(this);
 
   if (state.corked) {
     state.corked--;
@@ -629,10 +925,10 @@ Writable.prototype.setDefaultEncoding = function setDefaultEncoding(encoding) {
   if (typeof encoding === "string") {
     encoding = StringPrototypeToLowerCase(encoding);
   }
-  if (!Buffer.isEncoding(encoding)) {
+  if (!BufferIsEncoding(encoding)) {
     throw new ERR_UNKNOWN_ENCODING(encoding);
   }
-  this._writableState.defaultEncoding = encoding;
+  writableStateForStream(this).defaultEncoding = encoding;
   return this;
 };
 
@@ -640,7 +936,7 @@ Writable.prototype.setDefaultEncoding = function setDefaultEncoding(encoding) {
 // in the queue, and wait our turn.  Otherwise, call _write
 // If we return false, then we need a drain event, so set that flag.
 function writeOrBuffer(stream, state, chunk, encoding, callback) {
-  const len = (state[kState] & kObjectMode) !== 0 ? 1 : chunk.length;
+  const len = writableChunkLength(state, chunk);
 
   state.length += len;
 
@@ -650,10 +946,13 @@ function writeOrBuffer(stream, state, chunk, encoding, callback) {
   ) {
     if ((state[kState] & kBuffered) === 0) {
       state[kState] |= kBuffered;
-      state[kBufferedValue] = [];
+      setWritableStateBuffer(state, []);
     }
 
-    state[kBufferedValue].push({ chunk, encoding, callback });
+    ArrayPrototypePush(
+      writableStateBuffer(state),
+      { chunk, encoding, callback },
+    );
     if ((state[kState] & kAllBuffers) !== 0 && encoding !== "buffer") {
       state[kState] &= ~kAllBuffers;
     }
@@ -666,7 +965,14 @@ function writeOrBuffer(stream, state, chunk, encoding, callback) {
       state.writecb = callback;
     }
     state[kState] |= kWriting | kSync | kExpectWriteCb;
-    stream._write(chunk, encoding, state.onwrite);
+    invokeWritableImplementation(
+      stream,
+      state,
+      false,
+      chunk,
+      encoding,
+      writableOnwrite(state),
+    );
     state[kState] &= ~kSync;
   }
 
@@ -688,11 +994,25 @@ function doWrite(stream, state, writev, len, chunk, encoding, cb) {
   }
   state[kState] |= kWriting | kSync | kExpectWriteCb;
   if ((state[kState] & kDestroyed) !== 0) {
-    state.onwrite(new ERR_STREAM_DESTROYED("write"));
+    writableOnwrite(state)(new ERR_STREAM_DESTROYED("write"));
   } else if (writev) {
-    stream._writev(chunk, state.onwrite);
+    invokeWritableImplementation(
+      stream,
+      state,
+      true,
+      chunk,
+      encoding,
+      writableOnwrite(state),
+    );
   } else {
-    stream._write(chunk, encoding, state.onwrite);
+    invokeWritableImplementation(
+      stream,
+      state,
+      false,
+      chunk,
+      encoding,
+      writableOnwrite(state),
+    );
   }
   state[kState] &= ~kSync;
 }
@@ -711,7 +1031,7 @@ function onwriteError(stream, state, er, cb) {
 }
 
 function onwrite(stream, er) {
-  const state = stream._writableState;
+  const state = writableStateForStream(stream);
 
   if ((state[kState] & kExpectWriteCb) === 0) {
     errorOrDestroy(stream, new ERR_MULTIPLE_CALLBACK());
@@ -830,9 +1150,12 @@ function errorBuffer(state) {
   }
 
   if ((state[kState] & kBuffered) !== 0) {
-    for (let n = state.bufferedIndex; n < state.buffered.length; ++n) {
-      const { chunk, callback } = state[kBufferedValue][n];
-      const len = (state[kState] & kObjectMode) !== 0 ? 1 : chunk.length;
+    const buffered = writableStateBufferForCleanup(state);
+    const bufferedIndex = getGuardedWritableState(state)?.bufferedIndex ??
+      state.bufferedIndex;
+    for (let n = bufferedIndex; n < buffered.length; ++n) {
+      const { chunk, callback } = buffered[n];
+      const len = writableChunkLength(state, chunk);
       state.length -= len;
       callback(state.errored ?? new ERR_STREAM_DESTROYED("write"));
     }
@@ -857,7 +1180,8 @@ function clearBuffer(stream, state) {
   }
 
   const objectMode = (state[kState] & kObjectMode) !== 0;
-  const { [kBufferedValue]: buffered, bufferedIndex } = state;
+  const buffered = writableStateBuffer(state);
+  const bufferedIndex = writableStateBufferIndex(state);
   const bufferedLength = buffered.length - bufferedIndex;
 
   if (!bufferedLength) {
@@ -867,7 +1191,7 @@ function clearBuffer(stream, state) {
   let i = bufferedIndex;
 
   state[kState] |= kBufferProcessing;
-  if (bufferedLength > 1 && stream._writev) {
+  if (bufferedLength > 1 && hasWritableWritev(stream, state)) {
     state.pendingcb -= bufferedLength - 1;
 
     const callback = (state[kState] & kAllNoop) !== 0 ? nop : (err) => {
@@ -889,17 +1213,17 @@ function clearBuffer(stream, state) {
     do {
       const { chunk, encoding, callback } = buffered[i];
       buffered[i++] = null;
-      const len = objectMode ? 1 : chunk.length;
+      const len = objectMode ? 1 : writableChunkLength(state, chunk);
       doWrite(stream, state, false, len, chunk, encoding, callback);
     } while (i < buffered.length && (state[kState] & kWriting) === 0);
 
     if (i === buffered.length) {
       resetBuffer(state);
     } else if (i > 256) {
-      buffered.splice(0, i);
-      state.bufferedIndex = 0;
+      ArrayPrototypeSplice(buffered, 0, i);
+      setWritableStateBufferIndex(state, 0);
     } else {
-      state.bufferedIndex = i;
+      setWritableStateBufferIndex(state, i);
     }
   }
   state[kState] &= ~kBufferProcessing;
@@ -913,10 +1237,12 @@ Writable.prototype._write = function (chunk, encoding, cb) {
   }
 };
 
+WritablePrototypeWrite = Writable.prototype._write;
+
 Writable.prototype._writev = null;
 
 Writable.prototype.end = function (chunk, encoding, cb) {
-  const state = this._writableState;
+  const state = writableStateForStream(this);
 
   if (typeof chunk === "function") {
     cb = chunk;
@@ -1020,13 +1346,13 @@ function prefinish(stream, state) {
   }
 
   if (
-    typeof stream._final === "function" && (state[kState] & kDestroyed) === 0
+    hasWritableFinal(stream, state) && (state[kState] & kDestroyed) === 0
   ) {
     state[kState] |= kFinalCalled | kSync;
     state.pendingcb++;
 
     try {
-      stream._final((err) => onFinish(stream, state, err));
+      invokeWritableFinal(stream, state, (err) => onFinish(stream, state, err));
     } catch (err) {
       onFinish(stream, state, err);
     }
@@ -1104,8 +1430,9 @@ ObjectDefineProperties(Writable.prototype, {
   closed: {
     __proto__: null,
     get() {
-      return this._writableState
-        ? (this._writableState[kState] & kClosed) !== 0
+      const state = writableStateForStream(this);
+      return state
+        ? (state[kState] & kClosed) !== 0
         : false;
     },
   },
@@ -1113,23 +1440,25 @@ ObjectDefineProperties(Writable.prototype, {
   destroyed: {
     __proto__: null,
     get() {
-      return this._writableState
-        ? (this._writableState[kState] & kDestroyed) !== 0
+      const state = writableStateForStream(this);
+      return state
+        ? (state[kState] & kDestroyed) !== 0
         : false;
     },
     set(value) {
       // Backward compatibility, the user is explicitly managing destroyed.
-      if (!this._writableState) return;
+      const state = writableStateForStream(this);
+      if (!state) return;
 
-      if (value) this._writableState[kState] |= kDestroyed;
-      else this._writableState[kState] &= ~kDestroyed;
+      if (value) state[kState] |= kDestroyed;
+      else state[kState] &= ~kDestroyed;
     },
   },
 
   writable: {
     __proto__: null,
     get() {
-      const w = this._writableState;
+      const w = writableStateForStream(this);
       // w.writable === false means that this is part of a Duplex stream
       // where the writable side was disabled upon construction.
       // Compat. The user might manually disable writable side through
@@ -1139,8 +1468,9 @@ ObjectDefineProperties(Writable.prototype, {
     },
     set(val) {
       // Backwards compatible.
-      if (this._writableState) {
-        this._writableState.writable = !!val;
+      const state = writableStateForStream(this);
+      if (state) {
+        state.writable = !!val;
       }
     },
   },
@@ -1148,7 +1478,7 @@ ObjectDefineProperties(Writable.prototype, {
   writableFinished: {
     __proto__: null,
     get() {
-      const state = this._writableState;
+      const state = writableStateForStream(this);
       return state ? (state[kState] & kFinished) !== 0 : false;
     },
   },
@@ -1156,7 +1486,7 @@ ObjectDefineProperties(Writable.prototype, {
   writableObjectMode: {
     __proto__: null,
     get() {
-      const state = this._writableState;
+      const state = writableStateForStream(this);
       return state ? (state[kState] & kObjectMode) !== 0 : false;
     },
   },
@@ -1164,7 +1494,7 @@ ObjectDefineProperties(Writable.prototype, {
   writableBuffer: {
     __proto__: null,
     get() {
-      const state = this._writableState;
+      const state = writableStateForStream(this);
       return state && state.getBuffer();
     },
   },
@@ -1172,7 +1502,7 @@ ObjectDefineProperties(Writable.prototype, {
   writableEnded: {
     __proto__: null,
     get() {
-      const state = this._writableState;
+      const state = writableStateForStream(this);
       return state ? (state[kState] & kEnding) !== 0 : false;
     },
   },
@@ -1180,7 +1510,7 @@ ObjectDefineProperties(Writable.prototype, {
   writableNeedDrain: {
     __proto__: null,
     get() {
-      const state = this._writableState;
+      const state = writableStateForStream(this);
       return state
         ? (state[kState] & (kDestroyed | kEnding | kNeedDrain)) === kNeedDrain
         : false;
@@ -1190,7 +1520,7 @@ ObjectDefineProperties(Writable.prototype, {
   writableHighWaterMark: {
     __proto__: null,
     get() {
-      const state = this._writableState;
+      const state = writableStateForStream(this);
       return state?.highWaterMark;
     },
   },
@@ -1198,7 +1528,7 @@ ObjectDefineProperties(Writable.prototype, {
   writableCorked: {
     __proto__: null,
     get() {
-      const state = this._writableState;
+      const state = writableStateForStream(this);
       return state ? state.corked : 0;
     },
   },
@@ -1206,7 +1536,7 @@ ObjectDefineProperties(Writable.prototype, {
   writableLength: {
     __proto__: null,
     get() {
-      const state = this._writableState;
+      const state = writableStateForStream(this);
       return state?.length;
     },
   },
@@ -1215,7 +1545,7 @@ ObjectDefineProperties(Writable.prototype, {
     __proto__: null,
     enumerable: false,
     get() {
-      const state = this._writableState;
+      const state = writableStateForStream(this);
       return state ? state.errored : null;
     },
   },
@@ -1223,7 +1553,7 @@ ObjectDefineProperties(Writable.prototype, {
   writableAborted: {
     __proto__: null,
     get: function () {
-      const state = this._writableState;
+      const state = writableStateForStream(this);
       return (
         (state[kState] & (kHasWritable | kWritable)) !== kHasWritable &&
         (state[kState] & (kDestroyed | kErrored)) !== 0 &&
@@ -1235,7 +1565,7 @@ ObjectDefineProperties(Writable.prototype, {
 
 const destroy = destroyImpl.destroy;
 Writable.prototype.destroy = function (err, cb) {
-  const state = this._writableState;
+  const state = writableStateForStream(this);
 
   // Invoke pending callbacks.
   if (
@@ -1293,5 +1623,11 @@ Writable.prototype[SymbolAsyncDispose] = function () {
   );
 };
 
-return { default: Writable, Writable };
+return {
+  default: Writable,
+  isRegisteredWritable,
+  isWritablePublicWrite,
+  Writable,
+  writableStateForStream,
+};
 })();

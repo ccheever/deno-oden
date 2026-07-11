@@ -174,8 +174,12 @@ try {
   const prearmedDestination = new PassThrough();
   nodeStreams.add(prearmedDestination);
   const prearmedOutcome = deniedProbe.awaitNodeData(prearmedDestination);
-  prearmedSource.pipe(prearmedDestination);
-  prearmedSource.read();
+  try {
+    prearmedSource.pipe(prearmedDestination);
+    prearmedSource.read();
+  } catch {
+    result.pipePrearmedDataListener = "DENIED";
+  }
   prearmedSource.unpipe(prearmedDestination);
   prearmedSource.pause();
   prearmedDestination.pause();
@@ -184,7 +188,7 @@ try {
   // synchronous delivery this exploit measures.
   prearmedSource._readableState.reading = true;
   prearmedDestination._readableState.reading = true;
-  result.pipePrearmedDataListener = await bounded(
+  result.pipePrearmedDataListener ??= await bounded(
     prearmedOutcome,
     "prearmed data listener",
   );

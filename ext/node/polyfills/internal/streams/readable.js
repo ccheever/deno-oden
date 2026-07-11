@@ -5,7 +5,12 @@
 const { core, primordials } = __bootstrap;
 const lazyProcess = core.createLazyLoader("node:process");
 const process = lazyProcess().default;
-const { EventEmitter: EE } = core.loadExtScript("ext:deno_node/_events.mjs");
+const {
+  emitPreparedEvent,
+  EventEmitter: EE,
+  prepareEventListenerDelivery,
+  setEventListenerDeliveryHook,
+} = core.loadExtScript("ext:deno_node/_events.mjs");
 const {
   prependListener,
   Stream,
@@ -41,13 +46,32 @@ const imported1 = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const { validateObject } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
 );
-const { StringDecoder } = core.loadExtScript("ext:deno_node/string_decoder.ts");
+const { StringDecoder, transferStringDecoder } = core.loadExtScript(
+  "ext:deno_node/string_decoder.ts",
+);
 const lazyFrom = core.createLazyLoader(
   "ext:deno_node/internal/streams/from.js",
 );
 const _mod2 = core.loadExtScript("ext:deno_node/internal/util/debuglog.ts");
 const webStreamsAdaptersSpecifier =
   "ext:deno_node/internal/webstreams/adapters.js";
+const {
+  captureDeliveryCallback,
+  captureTrustedDeliveryCallback,
+  getStreamUseGuard,
+  markTrustedDeliveryCallback,
+  isStreamTrustedDeliveryCallback,
+  markStreamTrustedDeliveryCallback,
+  preflightCapturedDelivery,
+  preflightStreamDelivery,
+  registerStreamDeliveryPreflight,
+  registerStreamGuardAttachHook,
+  runCapturedDelivery,
+  runStreamUseGuard,
+  setStreamUseGuard,
+} = core.loadExtScript(
+  "ext:deno_node/internal/streams/oden_delivery.js",
+);
 
 const {
   AbortError,
@@ -86,7 +110,17 @@ const {
 "use strict";
 
 const {
+  ArrayBufferIsView,
   ArrayPrototypeIndexOf,
+  ArrayPrototypePush,
+  ArrayPrototypeSlice,
+  ArrayPrototypeSplice,
+  ArrayPrototypeUnshift,
+  DataViewPrototypeGetBuffer,
+  DataViewPrototypeGetByteLength,
+  DataViewPrototypeGetByteOffset,
+  FunctionPrototypeBind,
+  FunctionPrototypeCall,
   NumberIsInteger,
   NumberIsNaN,
   NumberParseInt,
@@ -96,10 +130,14 @@ const {
   Promise,
   SafeSet,
   SafeWeakMap,
+  StringPrototypeSlice,
   Symbol,
   SymbolAsyncDispose,
   SymbolAsyncIterator,
   SymbolSpecies,
+  TypedArrayPrototypeGetBuffer,
+  TypedArrayPrototypeGetByteLength,
+  TypedArrayPrototypeGetByteOffset,
   TypedArrayPrototypeSet,
   WeakMapPrototypeGet,
   WeakMapPrototypeSet,
@@ -112,41 +150,246 @@ let debug = _mod2.debuglog("stream", (fn) => {
 });
 
 const FastBuffer = Buffer[SymbolSpecies];
+const BufferAlloc = Buffer.alloc;
+const BufferAllocUnsafe = Buffer.allocUnsafe;
+const BufferFrom = Buffer.from;
+const BufferIsBuffer = Buffer.isBuffer;
+const BufferIsEncoding = Buffer.isEncoding;
+const BufferPrototypeToString = Buffer.prototype.toString;
+const isTypedArray = core.isTypedArray;
+const StringDecoderPrototypeEnd = StringDecoder.prototype.end;
+const StringDecoderPrototypeWrite = StringDecoder.prototype.write;
+let ReadablePrototypePush;
+
+function bufferAlloc(length) {
+  return FunctionPrototypeCall(BufferAlloc, Buffer, length);
+}
+
+function bufferAllocUnsafe(length) {
+  return FunctionPrototypeCall(BufferAllocUnsafe, Buffer, length);
+}
+
+function bufferFrom(value, encodingOrOffset, length) {
+  return FunctionPrototypeCall(
+    BufferFrom,
+    Buffer,
+    value,
+    encodingOrOffset,
+    length,
+  );
+}
+
+function bufferFromArrayBufferView(view) {
+  const typedArray = isTypedArray(view);
+  return bufferFrom(
+    typedArray
+      ? TypedArrayPrototypeGetBuffer(view)
+      : DataViewPrototypeGetBuffer(view),
+    typedArray
+      ? TypedArrayPrototypeGetByteOffset(view)
+      : DataViewPrototypeGetByteOffset(view),
+    typedArray
+      ? TypedArrayPrototypeGetByteLength(view)
+      : DataViewPrototypeGetByteLength(view),
+  );
+}
+
+function bufferToString(buffer, encoding) {
+  return FunctionPrototypeCall(BufferPrototypeToString, buffer, encoding);
+}
+
+function readableChunkLength(state, chunk) {
+  if ((state[kState] & kObjectMode) !== 0) return 1;
+  if (typeof chunk === "string") return chunk.length;
+  return getGuardedReadableState(state) === undefined
+    ? chunk.length
+    : TypedArrayPrototypeGetByteLength(chunk);
+}
+
+function readableBufferChunkLength(state, chunk) {
+  if ((state[kState] & kDecoder) !== 0) return chunk.length;
+  return getGuardedReadableState(state) === undefined
+    ? chunk.length
+    : TypedArrayPrototypeGetByteLength(chunk);
+}
+
+function readableBufferView(state, data, offset = 0, length) {
+  if (getGuardedReadableState(state) === undefined) {
+    return new FastBuffer(
+      data.buffer,
+      data.byteOffset + offset,
+      length ?? data.length - offset,
+    );
+  }
+  const byteOffset = TypedArrayPrototypeGetByteOffset(data);
+  const byteLength = TypedArrayPrototypeGetByteLength(data);
+  return new FastBuffer(
+    TypedArrayPrototypeGetBuffer(data),
+    byteOffset + offset,
+    length ?? byteLength - offset,
+  );
+}
 
 ObjectSetPrototypeOf(Readable.prototype, Stream.prototype);
 ObjectSetPrototypeOf(Readable, Stream);
 const nop = () => {};
+const directEventDeliverySentinel = FunctionPrototypeBind(nop, undefined);
 
 // Protected native sockets can otherwise prefetch into this module's JS
 // buffer under the creator's context and later expose those bytes through a
 // passed Readable. Keep closure-private per-consumer guards and run them before
 // any public operation can start flow or dequeue buffered data.
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
-const readableUseGuards = new SafeWeakMap();
 const readableIteratorUseGuards = new SafeWeakMap();
+const guardedReadableStates = new SafeWeakMap();
+const originalReadableStates = new SafeWeakMap();
+
+function readableStateForStream(stream) {
+  const original = WeakMapPrototypeGet(originalReadableStates, stream);
+  return original !== undefined && getStreamUseGuard(stream) !== undefined
+    ? original
+    : stream._readableState;
+}
 
 function getReadableUseGuard(source) {
-  const streamGuard = WeakMapPrototypeGet(readableUseGuards, source);
+  const streamGuard = getStreamUseGuard(source);
   return streamGuard === undefined
     ? WeakMapPrototypeGet(readableIteratorUseGuards, source)
     : streamGuard;
 }
 
 function setReadableUseGuard(stream, guard) {
-  const existing = WeakMapPrototypeGet(readableUseGuards, stream);
-  if (existing === undefined || existing === guard) {
-    WeakMapPrototypeSet(readableUseGuards, stream, guard);
-  } else {
-    WeakMapPrototypeSet(readableUseGuards, stream, () => {
-      existing();
-      guard();
-    });
-  }
+  setStreamUseGuard(stream, guard);
 }
 
 function runReadableUseGuard(stream) {
-  const guard = WeakMapPrototypeGet(readableUseGuards, stream);
-  if (guard !== undefined) guard();
+  runStreamUseGuard(stream);
+}
+
+function getGuardedReadableState(state) {
+  return WeakMapPrototypeGet(guardedReadableStates, state);
+}
+
+function readableStateBuffer(state) {
+  const guarded = getGuardedReadableState(state);
+  if (guarded === undefined) return state.buffer;
+  runStreamUseGuard(guarded.stream);
+  return guarded.buffer;
+}
+
+function readableStateBufferIndex(state) {
+  const guarded = getGuardedReadableState(state);
+  if (guarded === undefined) return state.bufferIndex;
+  runStreamUseGuard(guarded.stream);
+  return guarded.bufferIndex;
+}
+
+function setReadableStateBufferIndex(state, index) {
+  const guarded = getGuardedReadableState(state);
+  if (guarded === undefined) state.bufferIndex = index;
+  else {
+    runStreamUseGuard(guarded.stream);
+    guarded.bufferIndex = index;
+  }
+}
+
+function writeReadableStateDecoder(state, chunk) {
+  const guarded = getGuardedReadableState(state);
+  if (guarded === undefined) return state[kDecoderValue].write(chunk);
+  runStreamUseGuard(guarded.stream);
+  return FunctionPrototypeCall(StringDecoderPrototypeWrite, guarded.decoder, chunk);
+}
+
+function endReadableStateDecoder(state) {
+  const guarded = getGuardedReadableState(state);
+  if (guarded === undefined) return state[kDecoderValue].end();
+  runStreamUseGuard(guarded.stream);
+  return FunctionPrototypeCall(StringDecoderPrototypeEnd, guarded.decoder);
+}
+
+function setReadableStateDecoder(state, value) {
+  const guarded = getGuardedReadableState(state);
+  if (guarded === undefined) {
+    state[kDecoderValue] = value;
+  } else {
+    runStreamUseGuard(guarded.stream);
+    guarded.decoder = value ? transferStringDecoder(value) : null;
+    state[kDecoderValue] = null;
+  }
+  if (value) state[kState] |= kDecoder;
+  else state[kState] &= ~kDecoder;
+}
+
+function protectReadableState(stream) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  if (state === undefined || getGuardedReadableState(state) !== undefined) {
+    return;
+  }
+  const publicBuffer = state.buffer;
+  const privateBuffer = ArrayPrototypeSlice(
+    publicBuffer,
+    state.bufferIndex,
+  );
+  const decoder = (state[kState] & kDecoder) !== 0
+    ? transferStringDecoder(state[kDecoderValue])
+    : null;
+  // Clear every retained reference synchronously before the guard becomes
+  // visible. The public fields remain compatibility-shaped decoys; all engine
+  // paths switch to the closure-private record below.
+  publicBuffer.length = 0;
+  state.buffer = [];
+  state.bufferIndex = 0;
+  state[kDecoderValue] = null;
+  WeakMapPrototypeSet(guardedReadableStates, state, {
+    buffer: privateBuffer,
+    bufferIndex: 0,
+    decoder,
+    stream,
+  });
+}
+
+function installReadableDeliveryHook(stream) {
+  setEventListenerDeliveryHook(stream, {
+    isProtected() {
+      return getStreamUseGuard(stream) !== undefined;
+    },
+    capture(type, recipient, listener = recipient, direct = false) {
+      if (type !== "data") return undefined;
+      const captured = captureDeliveryCallback(
+        direct ? directEventDeliverySentinel : recipient,
+        listener,
+      );
+      return {
+        invoke(receiver, args) {
+          return runCapturedDelivery(stream, captured, receiver, args);
+        },
+        preflight() {
+          preflightCapturedDelivery(stream, captured);
+        },
+      };
+    },
+    captureRejection() {
+      if (getStreamUseGuard(stream) === undefined) return undefined;
+      const recipient = stream[EE.captureRejectionSymbol];
+      if (typeof recipient !== "function") return null;
+      const captured = isStreamTrustedDeliveryCallback(stream, recipient)
+        ? captureTrustedDeliveryCallback(recipient)
+        : captureDeliveryCallback(recipient);
+      return {
+        invoke(receiver, args) {
+          return runCapturedDelivery(stream, captured, receiver, args);
+        },
+        preflight() {
+          preflightCapturedDelivery(stream, captured);
+        },
+      };
+    },
+  });
+}
+
+function emitReadableData(stream, chunk) {
+  const listeners = prepareEventListenerDelivery(stream, "data");
+  return emitPreparedEvent(stream, "data", [chunk], listeners);
 }
 
 const { errorOrDestroy } = destroyImpl;
@@ -268,15 +511,17 @@ ObjectDefineProperties(ReadableState.prototype, {
     __proto__: null,
     enumerable: false,
     get() {
-      return (this[kState] & kDecoder) !== 0 ? this[kDecoderValue] : null;
+      const guarded = getGuardedReadableState(this);
+      if (guarded === undefined) {
+        return (this[kState] & kDecoder) !== 0 ? this[kDecoderValue] : null;
+      }
+      runStreamUseGuard(guarded.stream);
+      return (this[kState] & kDecoder) !== 0
+        ? new StringDecoder(guarded.decoder.encoding)
+        : null;
     },
     set(value) {
-      if (value) {
-        this[kDecoderValue] = value;
-        this[kState] |= kDecoder;
-      } else {
-        this[kState] &= ~kDecoder;
-      }
+      setReadableStateDecoder(this, value);
     },
   },
 
@@ -321,6 +566,11 @@ function ReadableState(options, stream, isDuplex) {
   // Bit map field to store ReadableState more efficiently with 1 bit per field
   // instead of a V8 slot per field.
   this[kState] = kEmitClose | kAutoDestroy | kConstructed | kSync;
+  WeakMapPrototypeSet(originalReadableStates, stream, this);
+  markStreamTrustedDeliveryCallback(
+    stream,
+    Readable.prototype[EE.captureRejectionSymbol],
+  );
 
   // Object stream flag. Used to make read(n) ignore n and to
   // make all the buffer merging and length checks go away.
@@ -358,7 +608,7 @@ function ReadableState(options, stream, isDuplex) {
     defaultEncoding === "utf-8"
   ) {
     this[kState] |= kDefaultUTF8Encoding;
-  } else if (Buffer.isEncoding(defaultEncoding)) {
+  } else if (BufferIsEncoding(defaultEncoding)) {
     this.defaultEncoding = defaultEncoding;
   } else {
     throw new ERR_UNKNOWN_ENCODING(defaultEncoding);
@@ -372,6 +622,13 @@ function ReadableState(options, stream, isDuplex) {
     this.decoder = new StringDecoder(options.encoding);
     this.encoding = options.encoding;
   }
+
+  registerStreamGuardAttachHook(stream, () => protectReadableState(stream));
+  registerStreamDeliveryPreflight(
+    stream,
+    () => prepareEventListenerDelivery(stream, "data"),
+  );
+  installReadableDeliveryHook(stream);
 }
 
 ReadableState.prototype[kOnConstructed] = function onConstructed(stream) {
@@ -424,7 +681,7 @@ function Readable(options) {
 
   if (this._construct != null) {
     destroyImpl.construct(this, () => {
-      this._readableState[kOnConstructed](this);
+      readableStateForStream(this)[kOnConstructed](this);
     });
   }
 }
@@ -457,16 +714,17 @@ Readable.prototype[SymbolAsyncDispose] = function () {
 Readable.prototype.push = function (chunk, encoding) {
   debug("push", chunk);
 
-  const state = this._readableState;
+  const state = readableStateForStream(this);
   return (state[kState] & kObjectMode) === 0
     ? readableAddChunkPushByteMode(this, state, chunk, encoding)
     : readableAddChunkPushObjectMode(this, state, chunk, encoding);
 };
+ReadablePrototypePush = Readable.prototype.push;
 
 // Unshift should *always* be something directly out of read().
 Readable.prototype.unshift = function (chunk, encoding) {
   debug("unshift", chunk);
-  const state = this._readableState;
+  const state = readableStateForStream(this);
   return (state[kState] & kObjectMode) === 0
     ? readableAddChunkUnshiftByteMode(this, state, chunk, encoding)
     : readableAddChunkUnshiftObjectMode(this, state, chunk);
@@ -486,14 +744,14 @@ function readableAddChunkUnshiftByteMode(stream, state, chunk, encoding) {
       if (state.encoding) {
         // When unshifting, if state.encoding is set, we have to save
         // the string in the BufferList with the state encoding.
-        chunk = Buffer.from(chunk, encoding).toString(state.encoding);
+        chunk = bufferToString(bufferFrom(chunk, encoding), state.encoding);
       } else {
-        chunk = Buffer.from(chunk, encoding);
+        chunk = bufferFrom(chunk, encoding);
       }
     }
-  } else if (Stream._isArrayBufferView(chunk)) {
-    chunk = Stream._uint8ArrayToBuffer(chunk);
-  } else if (chunk !== undefined && !(chunk instanceof Buffer)) {
+  } else if (ArrayBufferIsView(chunk)) {
+    chunk = bufferFromArrayBufferView(chunk);
+  } else if (chunk !== undefined && !BufferIsBuffer(chunk)) {
     errorOrDestroy(
       stream,
       new ERR_INVALID_ARG_TYPE(
@@ -505,7 +763,7 @@ function readableAddChunkUnshiftByteMode(stream, state, chunk, encoding) {
     return false;
   }
 
-  if (!(chunk && chunk.length > 0)) {
+  if (!(chunk && readableChunkLength(state, chunk) > 0)) {
     return canPushMore(state);
   }
 
@@ -545,13 +803,13 @@ function readableAddChunkPushByteMode(stream, state, chunk, encoding) {
   if (typeof chunk === "string") {
     encoding ||= state.defaultEncoding;
     if (state.encoding !== encoding) {
-      chunk = Buffer.from(chunk, encoding);
+      chunk = bufferFrom(chunk, encoding);
       encoding = "";
     }
-  } else if (chunk instanceof Buffer) {
+  } else if (BufferIsBuffer(chunk)) {
     encoding = "";
-  } else if (Stream._isArrayBufferView(chunk)) {
-    chunk = Stream._uint8ArrayToBuffer(chunk);
+  } else if (ArrayBufferIsView(chunk)) {
+    chunk = bufferFromArrayBufferView(chunk);
     encoding = "";
   } else if (chunk !== undefined) {
     errorOrDestroy(
@@ -565,7 +823,7 @@ function readableAddChunkPushByteMode(stream, state, chunk, encoding) {
     return false;
   }
 
-  if (!chunk || chunk.length <= 0) {
+  if (!chunk || readableChunkLength(state, chunk) <= 0) {
     state[kState] &= ~kReading;
     maybeReadMore(stream, state);
 
@@ -583,7 +841,7 @@ function readableAddChunkPushByteMode(stream, state, chunk, encoding) {
 
   state[kState] &= ~kReading;
   if ((state[kState] & kDecoder) !== 0 && !encoding) {
-    chunk = state[kDecoderValue].write(chunk);
+    chunk = writeReadableStateDecoder(state, chunk);
     if (chunk.length === 0) {
       maybeReadMore(stream, state);
       return canPushMore(state);
@@ -613,7 +871,7 @@ function readableAddChunkPushObjectMode(stream, state, chunk, encoding) {
   state[kState] &= ~kReading;
 
   if ((state[kState] & kDecoder) !== 0 && !encoding) {
-    chunk = state[kDecoderValue].write(chunk);
+    chunk = writeReadableStateDecoder(state, chunk);
   }
 
   addChunk(stream, state, chunk, false);
@@ -642,18 +900,21 @@ function addChunk(stream, state, chunk, addToFront) {
     }
 
     state[kState] |= kDataEmitted;
-    stream.emit("data", chunk);
+    emitReadableData(stream, chunk);
   } else {
     // Update the buffer info.
-    state.length += (state[kState] & kObjectMode) !== 0 ? 1 : chunk.length;
+    state.length += readableChunkLength(state, chunk);
+    const buffer = readableStateBuffer(state);
     if (addToFront) {
-      if (state.bufferIndex > 0) {
-        state.buffer[--state.bufferIndex] = chunk;
+      const bufferIndex = readableStateBufferIndex(state);
+      if (bufferIndex > 0) {
+        setReadableStateBufferIndex(state, bufferIndex - 1);
+        buffer[bufferIndex - 1] = chunk;
       } else {
-        state.buffer.unshift(chunk); // Slow path
+        ArrayPrototypeUnshift(buffer, chunk); // Slow path
       }
     } else {
-      state.buffer.push(chunk);
+      ArrayPrototypePush(buffer, chunk);
     }
 
     if ((state[kState] & kNeedReadable) !== 0) {
@@ -664,30 +925,36 @@ function addChunk(stream, state, chunk, addToFront) {
 }
 
 Readable.prototype.isPaused = function () {
-  const state = this._readableState;
+  const state = readableStateForStream(this);
   return (state[kState] & kPaused) !== 0 ||
     (state[kState] & (kHasFlowing | kFlowing)) === kHasFlowing;
 };
 
 // Backwards compatibility.
 Readable.prototype.setEncoding = function (enc) {
-  const state = this._readableState;
+  const state = readableStateForStream(this);
 
   const decoder = new StringDecoder(enc);
   state.decoder = decoder;
   // If setEncoding(null), decoder.encoding equals utf8.
-  state.encoding = state.decoder.encoding;
+  state.encoding = decoder.encoding;
 
   // Iterate over current buffer to convert already stored Buffers:
   let content = "";
-  for (const data of state.buffer.slice(state.bufferIndex)) {
-    content += decoder.write(data);
+  const buffer = readableStateBuffer(state);
+  for (
+    const data of ArrayPrototypeSlice(
+      buffer,
+      readableStateBufferIndex(state),
+    )
+  ) {
+    content += writeReadableStateDecoder(state, data);
   }
-  state.buffer.length = 0;
-  state.bufferIndex = 0;
+  buffer.length = 0;
+  setReadableStateBufferIndex(state, 0);
 
   if (content !== "") {
-    state.buffer.push(content);
+    ArrayPrototypePush(buffer, content);
   }
   state.length = content.length;
   return this;
@@ -724,11 +991,17 @@ function howMuchToRead(n, state) {
   if (NumberIsNaN(n)) {
     // Only flow one buffer at a time.
     if ((state[kState] & kFlowing) !== 0 && state.length) {
-      return state.buffer[state.bufferIndex].length;
+      return readableBufferChunkLength(
+        state,
+        readableStateBuffer(state)[readableStateBufferIndex(state)],
+      );
     }
     // Fast path for buffers.
     if ((state[kState] & kDecoder) === 0 && state.length) {
-      return state.buffer[state.bufferIndex].length;
+      return readableBufferChunkLength(
+        state,
+        readableStateBuffer(state)[readableStateBufferIndex(state)],
+      );
     }
     return state.length;
   }
@@ -749,7 +1022,7 @@ Readable.prototype.read = function (n) {
   } else if (!NumberIsInteger(n)) {
     n = NumberParseInt(n, 10);
   }
-  const state = this._readableState;
+  const state = readableStateForStream(this);
   const nOrig = n;
 
   // If we're asking for more than the current hwm, then raise the hwm.
@@ -857,7 +1130,11 @@ Readable.prototype.read = function (n) {
   }
 
   let ret;
+  let preparedDataListeners;
   if (n > 0) {
+    // Capture and authorize the complete recipient set before private data is
+    // removed from the queue. The same snapshot is used for delivery below.
+    preparedDataListeners = prepareEventListenerDelivery(this, "data");
     ret = fromList(n, state);
   } else {
     ret = null;
@@ -890,7 +1167,7 @@ Readable.prototype.read = function (n) {
 
   if (ret !== null && (state[kState] & (kErrorEmitted | kCloseEmitted)) === 0) {
     state[kState] |= kDataEmitted;
-    this.emit("data", ret);
+    emitPreparedEvent(this, "data", [ret], preparedDataListeners);
   }
 
   return ret;
@@ -899,14 +1176,11 @@ Readable.prototype.read = function (n) {
 function onEofChunk(stream, state) {
   debug("onEofChunk");
   if ((state[kState] & kEnded) !== 0) return;
-  const decoder = (state[kState] & kDecoder) !== 0
-    ? state[kDecoderValue]
-    : null;
-  if (decoder) {
-    const chunk = decoder.end();
+  if ((state[kState] & kDecoder) !== 0) {
+    const chunk = endReadableStateDecoder(state);
     if (chunk?.length) {
-      state.buffer.push(chunk);
-      state.length += (state[kState] & kObjectMode) !== 0 ? 1 : chunk.length;
+      ArrayPrototypePush(readableStateBuffer(state), chunk);
+      state.length += readableChunkLength(state, chunk);
     }
   }
   state[kState] |= kEnded;
@@ -930,7 +1204,7 @@ function onEofChunk(stream, state) {
 // another read() call => stack overflow.  This way, it might trigger
 // a nextTick recursion warning, but that's not so bad.
 function emitReadable(stream) {
-  const state = stream._readableState;
+  const state = readableStateForStream(stream);
   debug("emitReadable");
   state[kState] &= ~kNeedReadable;
   if ((state[kState] & kEmittedReadable) === 0) {
@@ -941,7 +1215,7 @@ function emitReadable(stream) {
 }
 
 function emitReadable_(stream) {
-  const state = stream._readableState;
+  const state = readableStateForStream(stream);
   debug("emitReadable_");
   if (
     (state[kState] & (kDestroyed | kErrored)) === 0 &&
@@ -1028,15 +1302,33 @@ Readable.prototype._read = function (n) {
 Readable.prototype.pipe = function (dest, pipeOpts) {
   runReadableUseGuard(this);
   const sourceGuard = getReadableUseGuard(this);
-  if (sourceGuard !== undefined && dest?._readableState !== undefined) {
-    // A readable Duplex/Transform/PassThrough is a destination transition,
-    // not an authority boundary. The destination may buffer bytes while root
-    // owns the pipe, so later consumers must retain the source guard.
+  if (
+    sourceGuard !== undefined && dest !== null &&
+    (typeof dest === "object" || typeof dest === "function")
+  ) {
+    // Every pipe destination is a transition, not an authority boundary. A
+    // writable-only destination may retain queued input just as a readable
+    // Duplex may retain output, so attach the guard before any `write()` can
+    // reach writeOrBuffer.
     // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
-    setReadableUseGuard(dest, sourceGuard);
+    setStreamUseGuard(dest, sourceGuard);
   }
   const src = this;
-  const state = this._readableState;
+  const state = readableStateForStream(this);
+  let capturedDestWrite;
+  if (sourceGuard !== undefined) {
+    const destWrite = dest.write;
+    const {
+      isRegisteredWritable,
+      isWritablePublicWrite,
+    } = core.loadExtScript("ext:deno_node/internal/streams/writable.js");
+    if (isWritablePublicWrite(destWrite) && !isRegisteredWritable(dest)) {
+      throw new ERR_INVALID_ARG_TYPE("dest", "Writable", dest);
+    }
+    capturedDestWrite = isWritablePublicWrite(destWrite)
+      ? captureTrustedDeliveryCallback(destWrite)
+      : captureDeliveryCallback(destWrite);
+  }
 
   if (state.pipes.length === 1) {
     if ((state[kState] & kMultiAwaitDrain) === 0) {
@@ -1135,10 +1427,21 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
     }
   }
 
+  markTrustedDeliveryCallback(
+    ondata,
+    capturedDestWrite === undefined
+      ? undefined
+      : () => {
+        preflightCapturedDelivery(dest, capturedDestWrite);
+        preflightStreamDelivery(dest);
+      },
+  );
   src.on("data", ondata);
   function ondata(chunk) {
     debug("ondata");
-    const ret = dest.write(chunk);
+    const ret = capturedDestWrite === undefined
+      ? dest.write(chunk)
+      : runCapturedDelivery(dest, capturedDestWrite, dest, [chunk]);
     debug("dest.write", ret);
     if (ret === false) {
       pause();
@@ -1200,7 +1503,7 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
 
 function pipeOnDrain(src, dest) {
   return function pipeOnDrainFunctionResult() {
-    const state = src._readableState;
+    const state = readableStateForStream(src);
 
     // `ondrain` will call directly,
     // `this` maybe not a reference to dest,
@@ -1223,7 +1526,7 @@ function pipeOnDrain(src, dest) {
 }
 
 Readable.prototype.unpipe = function (dest) {
-  const state = this._readableState;
+  const state = readableStateForStream(this);
   const unpipeInfo = { hasUnpiped: false };
 
   // If we're not piping anywhere, then do nothing.
@@ -1266,7 +1569,7 @@ Readable.prototype.on = function (ev, fn) {
     runReadableUseGuard(this);
   }
   const res = Stream.prototype.on.call(this, ev, fn);
-  const state = this._readableState;
+  const state = readableStateForStream(this);
 
   if (ev === "data") {
     state[kState] |= kDataListening;
@@ -1299,7 +1602,7 @@ Readable.prototype.on = function (ev, fn) {
 Readable.prototype.addListener = Readable.prototype.on;
 
 Readable.prototype.removeListener = function (ev, fn) {
-  const state = this._readableState;
+  const state = readableStateForStream(this);
 
   const res = Stream.prototype.removeListener.call(this, ev, fn);
 
@@ -1336,7 +1639,7 @@ Readable.prototype.removeAllListeners = function (ev) {
 };
 
 function updateReadableListening(self) {
-  const state = self._readableState;
+  const state = readableStateForStream(self);
 
   if (self.listenerCount("readable") > 0) {
     state[kState] |= kReadableListening;
@@ -1369,7 +1672,7 @@ function nReadingNextTick(self) {
 // If the user uses them, then switch into old mode.
 Readable.prototype.resume = function () {
   runReadableUseGuard(this);
-  const state = this._readableState;
+  const state = readableStateForStream(this);
   if ((state[kState] & kDestroyed) !== 0) {
     return this;
   }
@@ -1413,7 +1716,7 @@ function resume_(stream, state) {
 }
 
 Readable.prototype.pause = function () {
-  const state = this._readableState;
+  const state = readableStateForStream(this);
   if ((state[kState] & kDestroyed) !== 0) {
     return this;
   }
@@ -1429,7 +1732,7 @@ Readable.prototype.pause = function () {
 };
 
 function flow(stream) {
-  const state = stream._readableState;
+  const state = readableStateForStream(stream);
   debug("flow");
   while ((state[kState] & kFlowing) !== 0 && stream.read() !== null);
 }
@@ -1438,7 +1741,7 @@ function flow(stream) {
 // This is *not* part of the readable stream interface.
 // It is an ugly unfortunate mess of history.
 Readable.prototype.wrap = function (stream) {
-  const sourceGuard = WeakMapPrototypeGet(readableUseGuards, stream);
+  const sourceGuard = getReadableUseGuard(stream);
   if (sourceGuard !== undefined) {
     setReadableUseGuard(this, sourceGuard);
   }
@@ -1448,15 +1751,24 @@ Readable.prototype.wrap = function (stream) {
   // 'error' on the wrapped stream? Would require
   // a static factory method, e.g. Readable.wrap(stream).
 
-  stream.on("data", (chunk) => {
-    if (!this.push(chunk) && stream.pause) {
+  const wrapped = this;
+  function ondata(chunk) {
+    if (
+      !FunctionPrototypeCall(ReadablePrototypePush, wrapped, chunk) &&
+      stream.pause
+    ) {
       paused = true;
       stream.pause();
     }
-  });
+  }
+  markTrustedDeliveryCallback(
+    ondata,
+    () => preflightStreamDelivery(wrapped),
+  );
+  stream.on("data", ondata);
 
   stream.on("end", () => {
-    this.push(null);
+    FunctionPrototypeCall(ReadablePrototypePush, wrapped, null);
   });
 
   stream.on("error", (err) => {
@@ -1557,7 +1869,7 @@ async function* createAsyncIterator(stream, options) {
   } finally {
     if (
       (error || options?.destroyOnReturn !== false) &&
-      (error === undefined || stream._readableState.autoDestroy)
+      (error === undefined || readableStateForStream(stream).autoDestroy)
     ) {
       destroyImpl.destroyer(stream, null);
     } else {
@@ -1574,7 +1886,7 @@ ObjectDefineProperties(Readable.prototype, {
   readable: {
     __proto__: null,
     get() {
-      const r = this._readableState;
+      const r = readableStateForStream(this);
       // r.readable === false means that this is part of a Duplex stream
       // where the readable side was disabled upon construction.
       // Compat. The user might manually disable readable side through
@@ -1584,8 +1896,9 @@ ObjectDefineProperties(Readable.prototype, {
     },
     set(val) {
       // Backwards compat.
-      if (this._readableState) {
-        this._readableState.readable = !!val;
+      const state = readableStateForStream(this);
+      if (state) {
+        state.readable = !!val;
       }
     },
   },
@@ -1594,7 +1907,7 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get: function () {
-      return this._readableState.dataEmitted;
+      return readableStateForStream(this).dataEmitted;
     },
   },
 
@@ -1603,9 +1916,10 @@ ObjectDefineProperties(Readable.prototype, {
     enumerable: false,
     get: function () {
       return !!(
-        this._readableState.readable !== false &&
-        (this._readableState.destroyed || this._readableState.errored) &&
-        !this._readableState.endEmitted
+        readableStateForStream(this).readable !== false &&
+        (readableStateForStream(this).destroyed ||
+          readableStateForStream(this).errored) &&
+        !readableStateForStream(this).endEmitted
       );
     },
   },
@@ -1614,7 +1928,7 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get: function () {
-      return this._readableState.highWaterMark;
+      return readableStateForStream(this).highWaterMark;
     },
   },
 
@@ -1622,7 +1936,11 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get: function () {
-      return this._readableState?.buffer;
+      const state = readableStateForStream(this);
+      const guarded = getGuardedReadableState(state);
+      if (guarded === undefined) return state?.buffer;
+      runReadableUseGuard(this);
+      return ArrayPrototypeSlice(guarded.buffer, guarded.bufferIndex);
     },
   },
 
@@ -1630,11 +1948,12 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get: function () {
-      return this._readableState.flowing;
+      return readableStateForStream(this).flowing;
     },
     set: function (state) {
-      if (this._readableState) {
-        this._readableState.flowing = state;
+      const readableState = readableStateForStream(this);
+      if (readableState) {
+        readableState.flowing = state;
       }
     },
   },
@@ -1643,7 +1962,7 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get() {
-      return this._readableState.length;
+      return readableStateForStream(this).length;
     },
   },
 
@@ -1651,7 +1970,8 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get() {
-      return this._readableState ? this._readableState.objectMode : false;
+      const state = readableStateForStream(this);
+      return state ? state.objectMode : false;
     },
   },
 
@@ -1659,7 +1979,8 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get() {
-      return this._readableState ? this._readableState.encoding : null;
+      const state = readableStateForStream(this);
+      return state ? state.encoding : null;
     },
   },
 
@@ -1667,14 +1988,16 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get() {
-      return this._readableState ? this._readableState.errored : null;
+      const state = readableStateForStream(this);
+      return state ? state.errored : null;
     },
   },
 
   closed: {
     __proto__: null,
     get() {
-      return this._readableState ? this._readableState.closed : false;
+      const state = readableStateForStream(this);
+      return state ? state.closed : false;
     },
   },
 
@@ -1682,18 +2005,20 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get() {
-      return this._readableState ? this._readableState.destroyed : false;
+      const state = readableStateForStream(this);
+      return state ? state.destroyed : false;
     },
     set(value) {
       // We ignore the value if the stream
       // has not been initialized yet.
-      if (!this._readableState) {
+      const state = readableStateForStream(this);
+      if (!state) {
         return;
       }
 
       // Backward compatibility, the user is explicitly
       // managing destroyed.
-      this._readableState.destroyed = value;
+      state.destroyed = value;
     },
   },
 
@@ -1701,7 +2026,8 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get() {
-      return this._readableState ? this._readableState.endEmitted : false;
+      const state = readableStateForStream(this);
+      return state ? state.endEmitted : false;
     },
   },
 });
@@ -1745,10 +2071,10 @@ function fromList(n, state) {
     return null;
   }
 
-  let idx = state.bufferIndex;
+  let idx = readableStateBufferIndex(state);
   let ret;
 
-  const buf = state.buffer;
+  const buf = readableStateBuffer(state);
   const len = buf.length;
 
   if ((state[kState] & kObjectMode) !== 0) {
@@ -1763,25 +2089,32 @@ function fromList(n, state) {
         buf[idx++] = null;
       }
     } else if (len - idx === 0) {
-      ret = Buffer.alloc(0);
+      ret = bufferAlloc(0);
     } else if (len - idx === 1) {
       ret = buf[idx];
       buf[idx++] = null;
     } else {
-      ret = Buffer.allocUnsafe(state.length);
+      ret = bufferAllocUnsafe(state.length);
 
       let i = 0;
       while (idx < len) {
         TypedArrayPrototypeSet(ret, buf[idx], i);
-        i += buf[idx].length;
+        i += readableBufferChunkLength(state, buf[idx]);
         buf[idx++] = null;
       }
     }
-  } else if (n < buf[idx].length) {
+  } else if (n < readableBufferChunkLength(state, buf[idx])) {
     // `slice` is the same for buffers and strings.
-    ret = buf[idx].slice(0, n);
-    buf[idx] = buf[idx].slice(n);
-  } else if (n === buf[idx].length) {
+    if ((state[kState] & kDecoder) !== 0) {
+      ret = StringPrototypeSlice(buf[idx], 0, n);
+      buf[idx] = StringPrototypeSlice(buf[idx], n);
+    } else {
+      const data = buf[idx];
+      const dataLength = readableBufferChunkLength(state, data);
+      ret = readableBufferView(state, data, 0, n);
+      buf[idx] = readableBufferView(state, data, n, dataLength - n);
+    }
+  } else if (n === readableBufferChunkLength(state, buf[idx])) {
     // First chunk is a perfect match.
     ret = buf[idx];
     buf[idx++] = null;
@@ -1798,36 +2131,38 @@ function fromList(n, state) {
           ret += str;
           buf[idx++] = null;
         } else {
-          ret += str.slice(0, n);
-          buf[idx] = str.slice(n);
+          ret += StringPrototypeSlice(str, 0, n);
+          buf[idx] = StringPrototypeSlice(str, n);
         }
         break;
       }
     }
   } else {
-    ret = Buffer.allocUnsafe(n);
+    ret = bufferAllocUnsafe(n);
 
     const retLen = n;
     while (idx < len) {
       const data = buf[idx];
-      if (n > data.length) {
+      const dataLength = readableBufferChunkLength(state, data);
+      if (n > dataLength) {
         TypedArrayPrototypeSet(ret, data, retLen - n);
-        n -= data.length;
+        n -= dataLength;
         buf[idx++] = null;
       } else {
-        if (n === data.length) {
+        if (n === dataLength) {
           TypedArrayPrototypeSet(ret, data, retLen - n);
           buf[idx++] = null;
         } else {
           TypedArrayPrototypeSet(
             ret,
-            new FastBuffer(data.buffer, data.byteOffset, n),
+            readableBufferView(state, data, 0, n),
             retLen - n,
           );
-          buf[idx] = new FastBuffer(
-            data.buffer,
-            data.byteOffset + n,
-            data.length - n,
+          buf[idx] = readableBufferView(
+            state,
+            data,
+            n,
+            dataLength - n,
           );
         }
         break;
@@ -1836,20 +2171,20 @@ function fromList(n, state) {
   }
 
   if (idx === len) {
-    state.buffer.length = 0;
-    state.bufferIndex = 0;
+    buf.length = 0;
+    setReadableStateBufferIndex(state, 0);
   } else if (idx > 1024) {
-    state.buffer.splice(0, idx);
-    state.bufferIndex = 0;
+    ArrayPrototypeSplice(buf, 0, idx);
+    setReadableStateBufferIndex(state, 0);
   } else {
-    state.bufferIndex = idx;
+    setReadableStateBufferIndex(state, idx);
   }
 
   return ret;
 }
 
 function endReadable(stream) {
-  const state = stream._readableState;
+  const state = readableStateForStream(stream);
 
   debug("endReadable");
   if ((state[kState] & kEndEmitted) === 0) {
@@ -1936,7 +2271,7 @@ Readable.toWeb = function (streamReadable, options) {
     streamReadable,
     options,
   );
-  const sourceGuard = WeakMapPrototypeGet(readableUseGuards, streamReadable);
+  const sourceGuard = getReadableUseGuard(streamReadable);
   if (sourceGuard !== undefined) {
     const { setReadableStreamUseGuard } = core.loadExtScript(
       "ext:deno_web/06_streams.js",
@@ -1961,6 +2296,7 @@ return {
   default: Readable,
   getReadableUseGuard,
   Readable,
+  readableStateForStream,
   setReadableUseGuard,
 };
 })();

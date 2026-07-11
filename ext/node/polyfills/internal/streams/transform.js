@@ -71,8 +71,27 @@ const _mod1 = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const Duplex = core.loadExtScript(
   "ext:deno_node/internal/streams/duplex.js",
 ).default;
+const { readableStateForStream } = core.loadExtScript(
+  "ext:deno_node/internal/streams/readable.js",
+);
+const { writableStateForStream } = core.loadExtScript(
+  "ext:deno_node/internal/streams/writable.js",
+);
 const { getHighWaterMark } = core.loadExtScript(
   "ext:deno_node/internal/streams/state.js",
+);
+const {
+  captureDeliveryCallback,
+  captureTrustedDeliveryCallback,
+  isStreamTrustedDeliveryCallback,
+  markStreamTrustedDeliveryCallback,
+  preflightCapturedDelivery,
+  registerStreamDeliveryPreflight,
+  registerStreamGuardAttachHook,
+  runCapturedDelivery,
+  runStreamUseGuard,
+} = core.loadExtScript(
+  "ext:deno_node/internal/streams/oden_delivery.js",
 );
 
 const {
@@ -80,14 +99,72 @@ const {
 } = _mod1.codes;
 
 const {
+  FunctionPrototypeCall,
   ObjectSetPrototypeOf,
+  SafeWeakMap,
   Symbol,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet,
 } = primordials;
 
 ObjectSetPrototypeOf(Transform.prototype, Duplex.prototype);
 ObjectSetPrototypeOf(Transform, Duplex);
 
 const kCallback = Symbol("kCallback");
+// Freeze package callback recipients at protection time and authorize them
+// before either input chunks or derived output cross the Transform boundary.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+const guardedTransforms = new SafeWeakMap();
+const ReadablePrototypePush = Duplex.prototype.push;
+let TransformPrototypeWrite;
+
+function protectTransform(stream) {
+  if (WeakMapPrototypeGet(guardedTransforms, stream) !== undefined) return;
+  const transform = stream._transform;
+  const flush = stream._flush;
+  const capture = (callback) =>
+    isStreamTrustedDeliveryCallback(stream, callback)
+      ? captureTrustedDeliveryCallback(callback)
+      : captureDeliveryCallback(callback);
+  WeakMapPrototypeSet(guardedTransforms, stream, {
+    flush: typeof flush === "function" ? capture(flush) : null,
+    transform: typeof transform === "function"
+      ? capture(transform)
+      : null,
+    writeIsTransform: stream._write === TransformPrototypeWrite,
+  });
+}
+
+function preflightTransformImplementation(stream) {
+  const guarded = WeakMapPrototypeGet(guardedTransforms, stream);
+  if (guarded?.writeIsTransform && guarded.transform !== null) {
+    preflightCapturedDelivery(stream, guarded.transform);
+  }
+}
+
+function invokeTransform(stream, chunk, encoding, callback) {
+  const guarded = WeakMapPrototypeGet(guardedTransforms, stream);
+  if (guarded === undefined) {
+    return FunctionPrototypeCall(
+      stream._transform,
+      stream,
+      chunk,
+      encoding,
+      callback,
+    );
+  }
+  return runCapturedDelivery(
+    stream,
+    guarded.transform,
+    stream,
+    [chunk, encoding, callback],
+  );
+}
+
+function pushTransformOutput(stream, chunk) {
+  runStreamUseGuard(stream);
+  return FunctionPrototypeCall(ReadablePrototypePush, stream, chunk);
+}
 
 function Transform(options) {
   if (!(this instanceof Transform)) {
@@ -117,7 +194,7 @@ function Transform(options) {
   // We have implemented the _read method, and done the other things
   // that Readable wants before the first _read call, so unset the
   // sync guard flag.
-  this._readableState.sync = false;
+  readableStateForStream(this).sync = false;
 
   this[kCallback] = null;
 
@@ -131,6 +208,18 @@ function Transform(options) {
     }
   }
 
+  markStreamTrustedDeliveryCallback(this, TransformPrototypeWrite);
+  markStreamTrustedDeliveryCallback(this, final);
+  if (this._transform === Transform.prototype._transform) {
+    markStreamTrustedDeliveryCallback(this, this._transform);
+  }
+
+  registerStreamGuardAttachHook(this, () => protectTransform(this));
+  registerStreamDeliveryPreflight(
+    this,
+    () => preflightTransformImplementation(this),
+  );
+
   // When the writable side finishes, then flush out anything remaining.
   // Backwards compat. Some Transform streams incorrectly implement _final
   // instead of or in addition to _flush. By using 'prefinish' instead of
@@ -139,8 +228,12 @@ function Transform(options) {
 }
 
 function final(cb) {
-  if (typeof this._flush === "function" && !this.destroyed) {
-    this._flush((er, data) => {
+  const guarded = WeakMapPrototypeGet(guardedTransforms, this);
+  const flush = guarded === undefined
+    ? (typeof this._flush === "function" ? this._flush : null)
+    : guarded.flush;
+  if (flush !== null && !this.destroyed) {
+    const onflush = (er, data) => {
       if (er) {
         if (cb) {
           cb(er);
@@ -151,15 +244,20 @@ function final(cb) {
       }
 
       if (data != null) {
-        this.push(data);
+        pushTransformOutput(this, data);
       }
-      this.push(null);
+      pushTransformOutput(this, null);
       if (cb) {
         cb();
       }
-    });
+    };
+    if (guarded === undefined) {
+      FunctionPrototypeCall(flush, this, onflush);
+    } else {
+      runCapturedDelivery(this, flush, this, [onflush]);
+    }
   } else {
-    this.push(null);
+    pushTransformOutput(this, null);
     if (cb) {
       cb();
     }
@@ -179,18 +277,18 @@ Transform.prototype._transform = function (chunk, encoding, callback) {
 };
 
 Transform.prototype._write = function (chunk, encoding, callback) {
-  const rState = this._readableState;
-  const wState = this._writableState;
+  const rState = readableStateForStream(this);
+  const wState = writableStateForStream(this);
   const length = rState.length;
 
-  this._transform(chunk, encoding, (err, val) => {
+  invokeTransform(this, chunk, encoding, (err, val) => {
     if (err) {
       callback(err);
       return;
     }
 
     if (val != null) {
-      this.push(val);
+      pushTransformOutput(this, val);
     }
 
     if (rState.ended) {
@@ -209,6 +307,7 @@ Transform.prototype._write = function (chunk, encoding, callback) {
     }
   });
 };
+TransformPrototypeWrite = Transform.prototype._write;
 
 Transform.prototype._read = function () {
   if (this[kCallback]) {

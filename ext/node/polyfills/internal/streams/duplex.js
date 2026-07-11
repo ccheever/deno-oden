@@ -33,13 +33,17 @@ const _mod1 =
 const {
   default: Readable,
   getReadableUseGuard,
+  readableStateForStream,
   setReadableUseGuard,
 } = core.loadExtScript(
   "ext:deno_node/internal/streams/readable.js",
 );
-const Writable = core.loadExtScript(
+const {
+  default: Writable,
+  writableStateForStream,
+} = core.loadExtScript(
   "ext:deno_node/internal/streams/writable.js",
-).default;
+);
 const { addAbortSignal } = core.loadExtScript(
   "ext:deno_node/internal/streams/add-abort-signal.js",
 );
@@ -154,8 +158,8 @@ function Duplex(options) {
 
   if (this._construct != null) {
     destroyImpl.construct(this, () => {
-      this._readableState[kOnConstructed](this);
-      this._writableState[kOnConstructed](this);
+      readableStateForStream(this)[kOnConstructed](this);
+      writableStateForStream(this)[kOnConstructed](this);
     });
   }
 }
