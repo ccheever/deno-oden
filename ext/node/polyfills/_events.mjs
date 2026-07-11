@@ -52,8 +52,6 @@ const {
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   Promise,
-  PromisePrototypeFinally,
-  PromisePrototypeThen,
   PromiseReject,
   PromiseResolve,
   ReflectOwnKeys,
@@ -842,15 +840,11 @@ function emitLifecycleMetaEvent(target, type, ...args) {
     eventListenerDeliveryHooks,
     target,
   );
+  ArrayPrototypeUnshift(args, type);
   if (deliveryHook?.isProtected?.() === true) {
-    return FunctionPrototypeCall(
-      EventEmitterPublicEmit,
-      target,
-      type,
-      ...args,
-    );
+    return FunctionPrototypeApply(EventEmitterPublicEmit, target, args);
   }
-  return target.emit(type, ...args);
+  return FunctionPrototypeApply(target.emit, target, args);
 }
 
 // Authorize the exact listener before protected EventEmitter mutation clears
@@ -1553,11 +1547,6 @@ function getEventListeners(emitterOrTarget, type) {
   );
 }
 
-function hasDataEventDeliveryHook(emitter, name) {
-  return name === "data" &&
-    WeakMapPrototypeGet(eventListenerDeliveryHooks, emitter) !== undefined;
-}
-
 function runDataEventUseGuard(emitter, name = "data") {
   if (name !== "data") return;
   const deliveryHook = WeakMapPrototypeGet(
@@ -1597,92 +1586,6 @@ function guardDataEventArguments(emitter, name, args) {
   return guarded;
 }
 
-function captureEventPromiseCallback(emitter, callback) {
-  if (typeof callback !== "function") return undefined;
-  const deliveryHook = WeakMapPrototypeGet(
-    eventListenerDeliveryHooks,
-    emitter,
-  );
-  const delivery = deliveryHook?.capture(
-    "error",
-    callback,
-    callback,
-    false,
-    false,
-  );
-  return delivery ?? {
-    invoke(receiver, args) {
-      return FunctionPrototypeApply(callback, receiver, args);
-    },
-  };
-}
-
-function invokeEventPromiseCallback(delivery, args) {
-  const result = delivery.invoke(undefined, args);
-  // Promise resolution may inspect an arbitrary returned thenable. Do that
-  // after the exact callback CPED has been restored, without lending the
-  // registering caller's positive continuation to a bound getter.
-  return runWithoutAsyncContext(() => PromiseResolve(result));
-}
-
-// The shell is a genuine but permanently pending Promise, preserving Promise
-// brand checks. Its own immutable `constructor` forces `await` and Promise
-// combinators through the guarded `then`; calling a captured
-// `%Promise.prototype.then%` directly can observe only the inert shell, never
-// the data-bearing private Promise.
-function guardDataEventPromise(emitter, promise) {
-  const guarded = new Promise(() => {});
-  ObjectDefineProperties(guarded, {
-    constructor: {
-      __proto__: null,
-      value: undefined,
-    },
-    then: {
-      __proto__: null,
-      value(onFulfilled, onRejected) {
-        if (typeof onFulfilled === "function") {
-          runDataEventUseGuard(emitter);
-        }
-        const fulfilled = captureEventPromiseCallback(emitter, onFulfilled);
-        const rejected = captureEventPromiseCallback(emitter, onRejected);
-        const next = PromisePrototypeThen(
-          promise,
-          fulfilled === undefined
-            ? undefined
-            : (value) => invokeEventPromiseCallback(fulfilled, [value]),
-          rejected === undefined
-            ? undefined
-            : (error) => invokeEventPromiseCallback(rejected, [error]),
-        );
-        return guardDataEventPromise(emitter, next);
-      },
-    },
-    catch: {
-      __proto__: null,
-      value(onRejected) {
-        return guarded.then(undefined, onRejected);
-      },
-    },
-    finally: {
-      __proto__: null,
-      value(onFinally) {
-        if (typeof onFinally === "function") {
-          runDataEventUseGuard(emitter);
-        }
-        const delivery = captureEventPromiseCallback(emitter, onFinally);
-        const next = PromisePrototypeFinally(
-          promise,
-          delivery === undefined
-            ? onFinally
-            : () => invokeEventPromiseCallback(delivery, []),
-        );
-        return guardDataEventPromise(emitter, next);
-      },
-    },
-  });
-  return guarded;
-}
-
 /**
  * Creates a `Promise` that is fulfilled when the emitter
  * emits the given event.
@@ -1719,7 +1622,7 @@ function onceInternal(emitter, name, options) {
 
   const promise = new Promise((resolve, reject) => {
     const hasErrorListener = name !== "error" &&
-      (isProtectedEventEmitter(emitter) ||
+      (WeakMapPrototypeGet(eventListenerDeliveryHooks, emitter) !== undefined ||
         typeof emitter.once === "function");
     const errorListener = (err) => {
       eventTargetAgnosticRemoveListener(emitter, name, resolver);
@@ -1765,9 +1668,7 @@ function onceInternal(emitter, name, options) {
       );
     }
   });
-  return hasDataEventDeliveryHook(emitter, name)
-    ? guardDataEventPromise(emitter, promise)
-    : promise;
+  return promise;
 }
 
 const AsyncIteratorPrototype = ObjectGetPrototypeOf(
@@ -1807,11 +1708,11 @@ function createDataEventIterResult(emitter, event, value) {
 }
 
 function eventTargetAgnosticRemoveListener(emitter, name, listener, flags) {
-  if (isProtectedEventEmitter(emitter)) {
-    const deliveryHook = WeakMapPrototypeGet(
-      eventListenerDeliveryHooks,
-      emitter,
-    );
+  const deliveryHook = WeakMapPrototypeGet(
+    eventListenerDeliveryHooks,
+    emitter,
+  );
+  if (deliveryHook !== undefined) {
     if (typeof deliveryHook?.removeListener === "function") {
       deliveryHook.removeListener(name, listener);
     } else {
@@ -1866,16 +1767,30 @@ function eventTargetAgnosticAddTrustedListener(
   listener,
   flags,
 ) {
-  if (
-    WeakMapPrototypeGet(eventListenerDeliveryHooks, emitter) === undefined
-  ) {
+  const deliveryHook = WeakMapPrototypeGet(
+    eventListenerDeliveryHooks,
+    emitter,
+  );
+  if (deliveryHook === undefined) {
     return eventTargetAgnosticAddListener(emitter, name, listener, flags);
   }
   return withTrustedEventListenerRegistration(
     emitter,
     name,
     listener,
-    () => eventTargetAgnosticAddListener(emitter, name, listener, flags),
+    () => {
+      if (flags?.once) {
+        const wrapped = _onceWrap(emitter, name, listener);
+        if (typeof deliveryHook.addOnceListener === "function") {
+          return deliveryHook.addOnceListener(name, wrapped);
+        }
+        return addEventEmitterListener(emitter, name, wrapped);
+      }
+      if (typeof deliveryHook.addListener === "function") {
+        return deliveryHook.addListener(name, listener);
+      }
+      return addEventEmitterListener(emitter, name, listener);
+    },
   );
 }
 
@@ -2020,7 +1935,8 @@ function on(emitter, event, options = kEmptyObject) {
   );
   if (
     event !== "error" &&
-    (isProtectedEventEmitter(emitter) || typeof emitter.on === "function")
+    (WeakMapPrototypeGet(eventListenerDeliveryHooks, emitter) !== undefined ||
+      typeof emitter.on === "function")
   ) {
     addEventListener(emitter, "error", errorHandler);
   }

@@ -4,12 +4,28 @@ import events, {
   addAbortListener,
   errorMonitor,
   EventEmitter,
+  once,
 } from "node:events";
 import * as eventsNs from "node:events";
 import { createRequire } from "node:module";
+import { PassThrough } from "node:stream";
 import { assert, assertEquals, assertStrictEquals } from "@std/assert";
 
 EventEmitter.captureRejections = true;
+
+Deno.test("events.once data result keeps native Promise behavior", async () => {
+  const stream = new PassThrough();
+  const promise = once(stream, "data");
+  assert(promise instanceof Promise);
+  assertStrictEquals(Promise.resolve(promise), promise);
+
+  const capturedThen = Promise.prototype.then;
+  const throughCapturedThen = capturedThen.call(promise, (args) => args);
+  stream.end("ordinary");
+
+  const args = (await throughCapturedThen) as unknown[];
+  assertEquals(String(args[0]), "ordinary");
+});
 
 Deno.test("regression #20441", async () => {
   const { promise, resolve } = Promise.withResolvers<void>();

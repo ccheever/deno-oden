@@ -80,6 +80,11 @@
       "output": "writable_callback_provenance_driver.out",
       "exitCode": 0
     },
+    "protected_event_results_preserve_registration_provenance": {
+      "args": "run --allow-all event_results_barrier_driver.js",
+      "output": "event_results_barrier_driver.out",
+      "exitCode": 0
+    },
     "protected_stream_scalars_are_not_package_dispatch_surfaces": {
       "args": "run --allow-all stream_scalar_state_driver.js",
       "output": "stream_scalar_state_driver.out",

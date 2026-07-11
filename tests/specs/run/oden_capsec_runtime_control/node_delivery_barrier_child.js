@@ -275,22 +275,59 @@ try {
 
   phase("events-derived-results");
   const onceRoot = await protectedNodeBuffer("events.once root");
+  const onceRootPromise = eventsOnce(onceRoot, "data");
+  onceRoot.read();
   const onceRootArgs = await bounded(
-    eventsOnce(onceRoot, "data"),
+    onceRootPromise,
     "events.once root delivery",
   );
   result.eventsOnceRoot = onceRootArgs[0] == null ? "EMPTY" : "ROOT_ALLOWED";
 
   const oncePassed = await protectedNodeBuffer("events.once passage");
+  const oncePassedPromise = eventsOnce(oncePassed, "data");
+  result.eventsOncePromiseBrand = deniedProbe.inspectEventPromiseBrand(
+    oncePassedPromise,
+  );
+  const oncePassedPackage = deniedProbe.consumeEventPromise(
+    oncePassedPromise,
+  );
+  oncePassed.read();
   result.eventsOncePassedPromise = await bounded(
-    deniedProbe.consumeEventPromise(eventsOnce(oncePassed, "data")),
+    oncePassedPackage,
     "events.once package passage",
   );
+  result.eventsOncePromiseResolve = await bounded(
+    deniedProbe.consumeResolvedEventPromise(oncePassedPromise),
+    "events.once Promise.resolve passage",
+  );
+  result.eventsOncePromiseAll = await bounded(
+    deniedProbe.consumeAllEventPromises(oncePassedPromise),
+    "events.once Promise.all passage",
+  );
+  result.eventsOncePromiseRace = await bounded(
+    deniedProbe.consumeRacedEventPromise(oncePassedPromise),
+    "events.once Promise.race passage",
+  );
+  result.eventsOnceCapturedPromiseThen = await bounded(
+    deniedProbe.consumeEventPromiseWithCapturedThen(oncePassedPromise),
+    "events.once captured Promise.prototype.then passage",
+  );
+  const oncePassedRootArgs = await bounded(
+    oncePassedPromise,
+    "events.once retained root promise",
+  );
+  result.eventsOncePassedPromiseRoot = oncePassedRootArgs[0] == null
+    ? "EMPTY"
+    : "ROOT_ALLOWED";
 
   const onceCallback = await protectedNodeBuffer("events.once callback");
   const onceCallbackPromise = eventsOnce(onceCallback, "data");
+  const oncePackageCallback = onceCallbackPromise.then(
+    deniedProbe.inspectEventArguments,
+  );
+  onceCallback.read();
   result.eventsOncePackageCallback = await bounded(
-    onceCallbackPromise.then(deniedProbe.inspectEventArguments),
+    oncePackageCallback,
     "events.once package callback",
   );
 
@@ -309,6 +346,42 @@ try {
     ? "EMPTY"
     : "ROOT_ALLOWED";
 
+  const packagePreprotectedDestination = new PassThrough();
+  streams.add(packagePreprotectedDestination);
+  const packagePreprotectedPromise = deniedProbe.consumeRegisteredEventOnce(
+    packagePreprotectedDestination,
+  );
+  const packagePreprotectedSource = await protectedNodeBuffer(
+    "events.once package pre-protection",
+  );
+  packagePreprotectedSource.pipe(packagePreprotectedDestination);
+  result.eventsOncePackagePreProtection = await bounded(
+    packagePreprotectedPromise,
+    "events.once package pre-protection delivery",
+  );
+
+  const replaySource = await protectedNodeBuffer(
+    "trusted listener registration replay",
+  );
+  const registrationReplayProbe = deniedProbe.makeRegistrationReplayProbe(
+    replaySource,
+  );
+  result.trustedRegistrationProbeListener = deniedProbe.registerEventListener(
+    replaySource,
+    "newListener",
+    registrationReplayProbe.callback,
+  );
+  const replayPromise = eventsOnce(replaySource, "data");
+  replaySource.read();
+  const replayArgs = await bounded(
+    replayPromise,
+    "trusted listener registration replay root delivery",
+  );
+  result.trustedRegistrationReplay = registrationReplayProbe.outcome();
+  result.trustedRegistrationReplayRoot = replayArgs[0] == null
+    ? "EMPTY"
+    : "ROOT_ALLOWED";
+
   const trustedSource = await protectedNodeBuffer(
     "trusted listener source",
   );
@@ -318,18 +391,36 @@ try {
   const trustedTargetLength = trustedTarget.readableLength;
   const trustedPromise = eventsOnce(trustedSource, "data");
   trustedPromise.catch(() => {});
-  trustedTarget._events.data = trustedSource._events.data;
+  const trustedListener = trustedSource._events.data;
+  result.trustedListenerReregister = deniedProbe.registerEventListener(
+    trustedTarget,
+    "data",
+    trustedListener,
+  );
+  trustedTarget._events.data = trustedListener;
   result.trustedListenerTransplant = attempt(() => trustedTarget.read());
   result.trustedListenerTransplantRetainsBuffer =
     trustedTarget.readableLength === trustedTargetLength ? "YES" : "NO";
 
   const iteratorRootSource = await protectedNodeBuffer("events.on root");
   const iteratorRoot = eventsOn(iteratorRootSource, "data");
+  iteratorRootSource.read();
   const iteratorRootResult = await bounded(
     iteratorRoot.next(),
     "events.on root delivery",
   );
   result.eventsOnRoot = iteratorRootResult.value?.[0] == null
+    ? "EMPTY"
+    : "ROOT_ALLOWED";
+  result.eventsOnPassedResult = await bounded(
+    deniedProbe.consumeEventIteratorResult(iteratorRootResult),
+    "events.on package result passage",
+  );
+  result.eventsOnPassedResultGetter = await bounded(
+    deniedProbe.consumeEventIteratorResultGetter(iteratorRootResult),
+    "events.on package result getter passage",
+  );
+  result.eventsOnPassedResultRoot = iteratorRootResult.value?.[0] == null
     ? "EMPTY"
     : "ROOT_ALLOWED";
   await iteratorRoot.return();
@@ -338,7 +429,7 @@ try {
     "events.on iterator passage",
   );
   const iteratorPassed = eventsOn(iteratorPassedSource, "data");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  iteratorPassedSource.read();
   result.eventsOnPassedIterator = await bounded(
     deniedProbe.consumeEventIterator(iteratorPassed),
     "events.on package iterator",
@@ -355,8 +446,8 @@ try {
     "events.on promise passage",
   );
   const iteratorPromise = eventsOn(iteratorPromiseSource, "data");
-  await new Promise((resolve) => setTimeout(resolve, 0));
   const rootNextPromise = iteratorPromise.next();
+  iteratorPromiseSource.read();
   result.eventsOnPassedNextPromise = await bounded(
     deniedProbe.consumeEventIteratorPromise(rootNextPromise),
     "events.on package next promise",
@@ -369,6 +460,50 @@ try {
     ? "EMPTY"
     : "ROOT_ALLOWED";
   await iteratorPromise.return();
+
+  const iteratorPreprotectedDestination = new PassThrough();
+  streams.add(iteratorPreprotectedDestination);
+  const iteratorPreprotectedPromise = deniedProbe
+    .consumeRegisteredEventIterator(
+      iteratorPreprotectedDestination,
+    );
+  const iteratorPreprotectedSource = await protectedNodeBuffer(
+    "events.on package pre-protection",
+  );
+  iteratorPreprotectedSource.pipe(iteratorPreprotectedDestination);
+  result.eventsOnPackagePreProtection = await bounded(
+    iteratorPreprotectedPromise,
+    "events.on package pre-protection delivery",
+  );
+
+  const lifecycleSource = await protectedNodeBuffer(
+    "events.once lifecycle observability",
+  );
+  const lifecycleObservation = deniedProbe.observeEventLifecycle(
+    lifecycleSource,
+    "oden-lifecycle",
+  );
+  lifecycleSource.emit("oden-lifecycle");
+  result.eventsOnceLifecyclePackage = await bounded(
+    lifecycleObservation,
+    "events.once package lifecycle observation",
+  );
+
+  const iteratorCleanupSource = await protectedNodeBuffer(
+    "events.on lifecycle cleanup",
+  );
+  const iteratorCleanup = eventsOn(iteratorCleanupSource, "data");
+  result.eventsOnPackageCleanup = await bounded(
+    deniedProbe.closeEventIterator(iteratorCleanup),
+    "events.on package cleanup",
+  );
+  const iteratorCleanupResult = await bounded(
+    iteratorCleanup.next(),
+    "events.on root post-cleanup result",
+  );
+  result.eventsOnPackageCleanupRoot = iteratorCleanupResult.done === true
+    ? "CLOSED"
+    : "BROKEN";
 
   phase("rejections");
   const previousCapture = EventEmitter.captureRejections;
