@@ -37,6 +37,7 @@ const {
 
 import {
   promiseReturningOperators,
+  runPromiseReturningOperator,
   streamReturningOperators,
 } from "ext:deno_node/internal/streams/operators.js";
 
@@ -125,9 +126,9 @@ for (let i = 0; i < promiseKeys.length; i++) {
     if (new.target) {
       throw new ERR_ILLEGAL_CONSTRUCTOR();
     }
-    if (key === "toArray" && getReadableUseGuard(this) !== undefined) {
+    if (getReadableUseGuard(this) !== undefined) {
       const iterator = createAdmittedReadableAsyncIterator(this);
-      return ReflectApply(op, this, [args[0], iterator]);
+      return runPromiseReturningOperator(op, this, args, iterator);
     }
     return ReflectApply(op, this, args);
   }

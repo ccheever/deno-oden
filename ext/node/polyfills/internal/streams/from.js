@@ -8,6 +8,14 @@ const { nextTick: ProtectedFromNextTick } = core.loadExtScript(
 );
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const _mod1 = core.loadExtScript("ext:deno_node/internal/errors.ts");
+const {
+  createStreamUseAdmission,
+  getStreamUseGuard,
+  markStreamTrustedDeliveryCallback,
+  runWithStreamUseAdmission,
+} = core.loadExtScript(
+  "ext:deno_node/internal/streams/oden_delivery.js",
+);
 
 const {
   ERR_INVALID_ARG_TYPE,
@@ -78,10 +86,14 @@ function from(Readable, iterable, opts) {
   // being called before last iteration completion.
   let reading = false;
   let isAsyncValues = false;
+  let operationAdmission;
 
-  readable._read = function () {
+  const readFromIterable = readable._read = function () {
     if (!reading) {
       reading = true;
+      operationAdmission = getStreamUseGuard(readable) === undefined
+        ? undefined
+        : createStreamUseAdmission(readable);
 
       if (isAsync) {
         nextAsync();
@@ -92,6 +104,7 @@ function from(Readable, iterable, opts) {
       }
     }
   };
+  markStreamTrustedDeliveryCallback(readable, readFromIterable);
 
   readable._destroy = function (error, cb) {
     PromisePrototypeThen(
@@ -120,13 +133,23 @@ function from(Readable, iterable, opts) {
   // There are a lot of duplication here, it's done on purpose for performance
   // reasons - avoid await when not needed.
 
+  function push(value) {
+    return operationAdmission === undefined
+      ? pushReadableChunk(readable, value)
+      : runWithStreamUseAdmission(
+        readable,
+        operationAdmission,
+        () => pushReadableChunk(readable, value),
+      );
+  }
+
   function nextSyncWithSyncValues() {
     for (;;) {
       try {
         const { value, done } = iterator.next();
 
         if (done) {
-          pushReadableChunk(readable, null);
+          push(null);
           return;
         }
 
@@ -142,7 +165,7 @@ function from(Readable, iterable, opts) {
           throw new ERR_STREAM_NULL_VALUES();
         }
 
-        if (pushReadableChunk(readable, value)) {
+        if (push(value)) {
           continue;
         }
 
@@ -165,7 +188,7 @@ function from(Readable, iterable, opts) {
         throw new ERR_STREAM_NULL_VALUES();
       }
 
-      if (pushReadableChunk(readable, res)) {
+      if (push(res)) {
         nextSyncWithAsyncValues();
         return;
       }
@@ -182,7 +205,7 @@ function from(Readable, iterable, opts) {
         const { value, done } = iterator.next();
 
         if (done) {
-          pushReadableChunk(readable, null);
+          push(null);
           return;
         }
 
@@ -196,7 +219,7 @@ function from(Readable, iterable, opts) {
           throw new ERR_STREAM_NULL_VALUES();
         }
 
-        if (pushReadableChunk(readable, res)) {
+        if (push(res)) {
           continue;
         }
 
@@ -214,7 +237,7 @@ function from(Readable, iterable, opts) {
         const { value, done } = await iterator.next();
 
         if (done) {
-          pushReadableChunk(readable, null);
+          push(null);
           return;
         }
 
@@ -223,7 +246,7 @@ function from(Readable, iterable, opts) {
           throw new ERR_STREAM_NULL_VALUES();
         }
 
-        if (pushReadableChunk(readable, value)) {
+        if (push(value)) {
           continue;
         }
 

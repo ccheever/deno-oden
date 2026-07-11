@@ -28,10 +28,12 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/streams/utils.js");
 const {
   captureDeliveryCallback,
+  createStreamUseAdmission,
   linkStreamUseGuard,
   markTrustedDeliveryCallback,
   preflightCapturedDelivery,
   runCapturedDelivery,
+  runWithStreamUseAdmissionRecheck,
   wrapIterableDelivery,
 } = core.loadExtScript(
   "ext:deno_node/internal/streams/oden_delivery.js",
@@ -52,6 +54,7 @@ const {
 const {
   ArrayPrototypePush,
   ArrayPrototypeShift,
+  Error,
   MathFloor,
   Number,
   NumberIsNaN,
@@ -59,12 +62,51 @@ const {
   PromisePrototypeThen,
   PromiseReject,
   PromiseResolve,
+  ReflectApply,
+  SafeWeakMap,
   Symbol,
   SymbolAsyncIterator,
+  WeakMapPrototypeDelete,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet,
 } = primordials;
 
 const kEmpty = Symbol("kEmpty");
 const kEof = Symbol("kEof");
+const pendingPromiseOperatorIterators = new SafeWeakMap();
+
+function operationIterable(source, iterator) {
+  return iterator === undefined
+    ? source
+    : {
+      [SymbolAsyncIterator]() {
+        return iterator;
+      },
+    };
+}
+
+function takePromiseOperatorIterator(source) {
+  const iterator = WeakMapPrototypeGet(pendingPromiseOperatorIterators, source);
+  if (iterator !== undefined) {
+    WeakMapPrototypeDelete(pendingPromiseOperatorIterators, source);
+  }
+  return iterator;
+}
+
+function runPromiseReturningOperator(operation, source, args, iterator) {
+  if (iterator === undefined) return ReflectApply(operation, source, args);
+  if (
+    WeakMapPrototypeGet(pendingPromiseOperatorIterators, source) !== undefined
+  ) {
+    throw new Error("nested promise stream operator admission");
+  }
+  WeakMapPrototypeSet(pendingPromiseOperatorIterators, source, iterator);
+  try {
+    return ReflectApply(operation, source, args);
+  } finally {
+    WeakMapPrototypeDelete(pendingPromiseOperatorIterators, source);
+  }
+}
 
 function createOperatorCarrier(source) {
   const carrier = {};
@@ -92,6 +134,7 @@ function createProjectedCallback(source, callback, project) {
   markTrustedDeliveryCallback(
     projected,
     () => preflightCapturedDelivery(carrier, captured),
+    captured.context,
   );
   return projected;
 }
@@ -121,7 +164,7 @@ function compose(stream, options) {
   return composedStream;
 }
 
-function map(fn, options) {
+function map(fn, options, operationIterator = undefined) {
   if (typeof fn !== "function") {
     throw new ERR_INVALID_ARG_TYPE(
       "fn",
@@ -155,6 +198,17 @@ function map(fn, options) {
   const carrier = createOperatorCarrier(source);
   const capturedFn = captureDeliveryCallback(fn);
   const output = async function* map() {
+    const callbackAdmission = createStreamUseAdmission(
+      carrier,
+      capturedFn.context,
+    );
+    if (capturedFn.preflight !== undefined) {
+      runWithStreamUseAdmissionRecheck(
+        carrier,
+        callbackAdmission,
+        capturedFn.preflight,
+      );
+    }
     const signal = AbortSignal.any(
       options?.signal === undefined ? [] : [options.signal],
     );
@@ -192,7 +246,9 @@ function map(fn, options) {
     async function pump() {
       try {
         preflightCapturedDelivery(carrier, capturedFn);
-        for await (let val of stream) {
+        for await (
+          let val of operationIterable(stream, operationIterator)
+        ) {
           if (done) {
             return;
           }
@@ -202,11 +258,14 @@ function map(fn, options) {
           }
 
           try {
-            val = runCapturedDelivery(
+            val = runWithStreamUseAdmissionRecheck(
               carrier,
-              capturedFn,
-              undefined,
-              [val, signalOpt],
+              callbackAdmission,
+              () => ReflectApply(
+                capturedFn.callback,
+                undefined,
+                [val, signalOpt],
+              ),
             );
 
             if (val === kEmpty) {
@@ -287,14 +346,24 @@ function map(fn, options) {
   return guardOperatorOutput(source, output);
 }
 
-async function some(fn, options = undefined) {
-  for await (const unused of filter.call(this, fn, options)) {
+async function some(
+  fn,
+  options = undefined,
+  operationIterator = takePromiseOperatorIterator(this),
+) {
+  for await (
+    const unused of filter.call(this, fn, options, operationIterator)
+  ) {
     return true;
   }
   return false;
 }
 
-async function every(fn, options = undefined) {
+async function every(
+  fn,
+  options = undefined,
+  operationIterator = takePromiseOperatorIterator(this),
+) {
   if (typeof fn !== "function") {
     throw new ERR_INVALID_ARG_TYPE(
       "fn",
@@ -308,17 +377,27 @@ async function every(fn, options = undefined) {
     fn,
     (selected) => !selected,
   );
-  return !(await some.call(this, negated, options));
+  return !(await some.call(this, negated, options, operationIterator));
 }
 
-async function find(fn, options) {
-  for await (const result of filter.call(this, fn, options)) {
+async function find(
+  fn,
+  options,
+  operationIterator = takePromiseOperatorIterator(this),
+) {
+  for await (
+    const result of filter.call(this, fn, options, operationIterator)
+  ) {
     return result;
   }
   return undefined;
 }
 
-async function forEach(fn, options) {
+async function forEach(
+  fn,
+  options,
+  operationIterator = takePromiseOperatorIterator(this),
+) {
   if (typeof fn !== "function") {
     throw new ERR_INVALID_ARG_TYPE(
       "fn",
@@ -332,10 +411,12 @@ async function forEach(fn, options) {
     () => kEmpty,
   );
   // eslint-disable-next-line no-unused-vars
-  for await (const unused of map.call(this, forEachFn, options));
+  for await (
+    const unused of map.call(this, forEachFn, options, operationIterator)
+  );
 }
 
-function filter(fn, options) {
+function filter(fn, options, operationIterator = undefined) {
   if (typeof fn !== "function") {
     throw new ERR_INVALID_ARG_TYPE(
       "fn",
@@ -348,7 +429,7 @@ function filter(fn, options) {
     fn,
     (selected, value) => selected ? value : kEmpty,
   );
-  return map.call(this, filterFn, options);
+  return map.call(this, filterFn, options, operationIterator);
 }
 
 // Specific to provide better error to reduce since the argument is only
@@ -360,7 +441,12 @@ class ReduceAwareErrMissingArgs extends ERR_MISSING_ARGS {
   }
 }
 
-async function reduce(reducer, initialValue, options) {
+async function reduce(
+  reducer,
+  initialValue,
+  options,
+  operationIterator = takePromiseOperatorIterator(this),
+) {
   if (typeof reducer !== "function") {
     throw new ERR_INVALID_ARG_TYPE(
       "reducer",
@@ -397,7 +483,7 @@ async function reduce(reducer, initialValue, options) {
   }
   let gotAnyItemFromStream = false;
   try {
-    for await (const value of this) {
+    for await (const value of operationIterable(this, operationIterator)) {
       gotAnyItemFromStream = true;
       if (options?.signal?.aborted) {
         throw new AbortError();
@@ -423,7 +509,10 @@ async function reduce(reducer, initialValue, options) {
   return initialValue;
 }
 
-async function toArray(options, operationIterator = undefined) {
+async function toArray(
+  options,
+  operationIterator = takePromiseOperatorIterator(this),
+) {
   if (options != null) {
     validateObject(options, "options");
   }
@@ -432,11 +521,7 @@ async function toArray(options, operationIterator = undefined) {
   }
 
   const result = [];
-  const source = operationIterator === undefined ? this : {
-    [SymbolAsyncIterator]() {
-      return operationIterator;
-    },
-  };
+  const source = operationIterable(this, operationIterator);
   for await (const val of source) {
     if (options?.signal?.aborted) {
       throw new AbortError(undefined, { cause: options.signal.reason });
@@ -549,7 +634,7 @@ const promiseReturningOperators = {
   find,
 };
 
-export { promiseReturningOperators };
+export { promiseReturningOperators, runPromiseReturningOperator };
 
 export default {
   streamReturningOperators,

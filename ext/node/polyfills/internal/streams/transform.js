@@ -222,6 +222,9 @@ function Transform(options) {
 
   markStreamTrustedDeliveryCallback(this, TransformPrototypeWrite);
   markStreamTrustedDeliveryCallback(this, final);
+  if (this._read === Transform.prototype._read) {
+    markStreamTrustedDeliveryCallback(this, Transform.prototype._read);
+  }
   if (this._transform === Transform.prototype._transform) {
     markStreamTrustedDeliveryCallback(this, this._transform);
   }

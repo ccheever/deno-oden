@@ -53,6 +53,7 @@ class DuplexSide extends Duplex {
     super(options);
     this.#callback = null;
     this.#otherSide = null;
+    markStreamTrustedDeliveryCallback(this, DuplexSide.prototype._read);
     markStreamTrustedDeliveryCallback(this, DuplexSide.prototype._write);
     markStreamTrustedDeliveryCallback(this, DuplexSide.prototype._final);
     markStreamCleanupDeliveryCallback(this, DuplexSide.prototype._final);

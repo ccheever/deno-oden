@@ -383,11 +383,12 @@ export default function compose(...streams) {
           }
         }
       };
+      markStreamTrustedDeliveryCallback(d, readFromTail);
     } else if (isWebStream(tail)) {
       const readable = isTransformStream(tail) ? tail.readable : tail;
       const reader = readable.getReader();
       const capturedReaderRead = captureDeliveryCallback(reader.read);
-      d._read = async function composedWebRead() {
+      const readFromWeb = d._read = async function composedWebRead() {
         while (true) {
           try {
             const { value, done } = await runCapturedDelivery(
@@ -410,6 +411,7 @@ export default function compose(...streams) {
           }
         }
       };
+      markStreamTrustedDeliveryCallback(d, readFromWeb);
     }
   }
 

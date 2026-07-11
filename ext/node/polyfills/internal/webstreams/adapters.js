@@ -168,29 +168,31 @@ function newStreamReadableFromReadableStream(
   const reader = acquireReadableStreamDefaultReader(readableStream);
   let closed = false;
 
+  function readFromWeb() {
+    uponPromise(
+      readableStreamDefaultReaderReadPromise(reader),
+      (chunk) => {
+        try {
+          if (chunk.done) {
+            pushReadableChunk(readable, null);
+          } else {
+            pushReadableChunk(readable, chunk.value);
+          }
+        } catch (error) {
+          destroyNodeStream(readable, error);
+        }
+      },
+      (error) => destroyNodeStream(readable, error),
+    );
+  }
+
   const readable = new (lazyStream().Readable)({
     objectMode,
     highWaterMark,
     encoding,
     signal,
 
-    read() {
-      uponPromise(
-        readableStreamDefaultReaderReadPromise(reader),
-        (chunk) => {
-          try {
-            if (chunk.done) {
-              pushReadableChunk(readable, null);
-            } else {
-              pushReadableChunk(readable, chunk.value);
-            }
-          } catch (error) {
-            destroyNodeStream(readable, error);
-          }
-        },
-        (error) => destroyNodeStream(readable, error),
-      );
-    },
+    read: readFromWeb,
 
     destroy(error, callback) {
       function done() {
@@ -220,6 +222,9 @@ function newStreamReadableFromReadableStream(
       done();
     },
   });
+  if (readable._read === readFromWeb) {
+    markStreamTrustedDeliveryCallback(readable, readFromWeb);
+  }
 
   registerStreamGuardAttachHook(readable, (guard) => {
     setReadableStreamUseGuard(readableStream, guard);
@@ -464,6 +469,24 @@ function newStreamDuplexFromReadableWritablePair(
   let writableClosed = false;
   let readableClosed = false;
 
+  function readFromWeb() {
+    uponPromise(
+      readableStreamDefaultReaderReadPromise(reader),
+      (chunk) => {
+        try {
+          if (chunk.done) {
+            pushReadableChunk(duplex, null);
+          } else {
+            pushReadableChunk(duplex, chunk.value);
+          }
+        } catch (error) {
+          destroyNodeStream(duplex, error);
+        }
+      },
+      (error) => destroyNodeStream(duplex, error),
+    );
+  }
+
   const duplex = new (lazyStream().Duplex)({
     allowHalfOpen,
     highWaterMark,
@@ -555,23 +578,7 @@ function newStreamDuplexFromReadableWritablePair(
       }
     },
 
-    read() {
-      uponPromise(
-        readableStreamDefaultReaderReadPromise(reader),
-        (chunk) => {
-          try {
-            if (chunk.done) {
-              pushReadableChunk(duplex, null);
-            } else {
-              pushReadableChunk(duplex, chunk.value);
-            }
-          } catch (error) {
-            destroyNodeStream(duplex, error);
-          }
-        },
-        (error) => destroyNodeStream(duplex, error),
-      );
-    },
+    read: readFromWeb,
 
     destroy(error, callback) {
       function done() {
@@ -616,6 +623,9 @@ function newStreamDuplexFromReadableWritablePair(
       done();
     },
   });
+  if (duplex._read === readFromWeb) {
+    markStreamTrustedDeliveryCallback(duplex, readFromWeb);
+  }
 
   markStreamTrustedDeliveryCallback(duplex, duplex._write);
   markStreamTrustedDeliveryCallback(duplex, duplex._writev);

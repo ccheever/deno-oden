@@ -556,6 +556,7 @@ function _duplexify(pair) {
         }
       }
     };
+    markStreamTrustedDeliveryCallback(d, readFromPair);
   }
 
   d._destroy = function duplexifiedDestroy(err, callback) {

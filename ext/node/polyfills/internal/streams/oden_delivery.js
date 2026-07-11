@@ -31,6 +31,7 @@ const streamUseGuardPartLists = new SafeWeakMap();
 const activeStreamUseGuardParts = new SafeWeakSet();
 const activeStreamUseGuardPartContexts = new SafeWeakMap();
 const activeStreamUseGuardPartList = [];
+const activeStreamUseAdmissionContexts = [];
 let streamUseGuardScopeDepth = 0;
 let forceStreamUseGuardRecheckDepth = 0;
 const streamGuardAttachHooks = new SafeWeakMap();
@@ -41,6 +42,7 @@ const streamCleanupDeliveryCallbacks = new SafeWeakMap();
 const streamDestroyDeliverySnapshots = new SafeWeakMap();
 const snapshottedStreamDestroyDeliveries = new SafeWeakSet();
 const trustedDeliveryCallbacks = new SafeWeakMap();
+const trustedDeliveryContexts = new SafeWeakMap();
 const trustedDeliveryPreflights = new SafeWeakMap();
 
 function getStreamUseGuard(stream) {
@@ -274,27 +276,39 @@ function propagateStreamUseGuard(source, target) {
 // under the public caller. It is closure-private and may authorize trusted
 // loader transitions for that operation; package callbacks still force a live
 // constituent recheck before delivery.
-function createStreamUseAdmission(stream) {
+function createStreamUseAdmission(stream, requestedContext = undefined) {
   const current = WeakMapPrototypeGet(streamUseGuardPartLists, stream);
   const parts = [];
   const contexts = [];
+  const operationContext = requestedContext ??
+    activeStreamUseAdmissionContexts[activeStreamUseAdmissionContexts.length - 1] ??
+    core.ops.op_oden_schedule_context();
   if (current !== undefined) {
-    runInStreamUseGuardScope(() => {
-      streamUseGuardRunner(stream)();
-      for (let i = 0; i < current.length; i++) {
-        const part = current[i];
-        ArrayPrototypePush(parts, part);
-        ArrayPrototypePush(
-          contexts,
-          WeakMapPrototypeGet(activeStreamUseGuardPartContexts, part),
-        );
-      }
-    });
+    const previous = operationContext === undefined
+      ? undefined
+      : core.getAsyncContext();
+    if (operationContext !== undefined) core.setAsyncContext(operationContext);
+    try {
+      runInStreamUseGuardScope(() => {
+        streamUseGuardRunner(stream)();
+        for (let i = 0; i < current.length; i++) {
+          const part = current[i];
+          ArrayPrototypePush(parts, part);
+          ArrayPrototypePush(
+            contexts,
+            WeakMapPrototypeGet(activeStreamUseGuardPartContexts, part) ??
+              operationContext,
+          );
+        }
+      });
+    } finally {
+      if (operationContext !== undefined) core.setAsyncContext(previous);
+    }
   }
   return { contexts, stream, parts };
 }
 
-function runWithStreamUseAdmission(stream, admission, callback) {
+function streamUseAdmissionContext(stream, admission) {
   if (admission.stream !== stream) {
     throw new TypeError("stream use admission target changed");
   }
@@ -308,20 +322,68 @@ function runWithStreamUseAdmission(stream, admission, callback) {
       throw new TypeError("stream use admission constituents changed");
     }
   }
-  return runInStreamUseGuardScope(() => {
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      if (!WeakSetPrototypeHas(activeStreamUseGuardParts, part)) {
-        WeakSetPrototypeAdd(activeStreamUseGuardParts, part);
-        ArrayPrototypePush(activeStreamUseGuardPartList, part);
-        const context = admission.contexts[i];
-        if (context !== undefined) {
-          WeakMapPrototypeSet(activeStreamUseGuardPartContexts, part, context);
+  let admittedContext;
+  for (let i = 0; i < admission.contexts.length; i++) {
+    if (admission.contexts[i] !== undefined) {
+      admittedContext = admission.contexts[i];
+    }
+  }
+  return admittedContext;
+}
+
+function runWithStreamUseAdmission(stream, admission, callback) {
+  const admittedContext = streamUseAdmissionContext(stream, admission);
+  const parts = admission.parts;
+  const previous = admittedContext === undefined
+    ? undefined
+    : core.getAsyncContext();
+  if (admittedContext !== undefined) core.setAsyncContext(admittedContext);
+  ArrayPrototypePush(activeStreamUseAdmissionContexts, admittedContext);
+  try {
+    return runInStreamUseGuardScope(() => {
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!WeakSetPrototypeHas(activeStreamUseGuardParts, part)) {
+          WeakSetPrototypeAdd(activeStreamUseGuardParts, part);
+          ArrayPrototypePush(activeStreamUseGuardPartList, part);
+          const context = admission.contexts[i];
+          if (context !== undefined) {
+            WeakMapPrototypeSet(
+              activeStreamUseGuardPartContexts,
+              part,
+              context,
+            );
+          }
         }
       }
-    }
-    return callback();
-  });
+      return callback();
+    });
+  } finally {
+    ArrayPrototypePop(activeStreamUseAdmissionContexts);
+    if (admittedContext !== undefined) core.setAsyncContext(previous);
+  }
+}
+
+function runWithStreamUseAdmissionRecheck(
+  stream,
+  admission,
+  callback,
+) {
+  const admittedContext = streamUseAdmissionContext(stream, admission);
+  const previous = admittedContext === undefined
+    ? undefined
+    : core.getAsyncContext();
+  if (admittedContext !== undefined) core.setAsyncContext(admittedContext);
+  ArrayPrototypePush(activeStreamUseAdmissionContexts, admittedContext);
+  try {
+    return runWithForcedStreamUseGuardRecheck(() => {
+      runStreamUseGuard(stream);
+      return callback();
+    });
+  } finally {
+    ArrayPrototypePop(activeStreamUseAdmissionContexts);
+    if (admittedContext !== undefined) core.setAsyncContext(previous);
+  }
 }
 
 function linkStreamUseGuard(source, target) {
@@ -355,8 +417,11 @@ function registerStreamGuardAttachHook(stream, hook) {
   }
 }
 
-function markTrustedDeliveryCallback(callback, preflight) {
+function markTrustedDeliveryCallback(callback, preflight, context = undefined) {
   WeakMapPrototypeSet(trustedDeliveryCallbacks, callback, true);
+  if (context !== undefined) {
+    WeakMapPrototypeSet(trustedDeliveryContexts, callback, context);
+  }
   if (preflight !== undefined) {
     WeakMapPrototypeSet(trustedDeliveryPreflights, callback, preflight);
   }
@@ -368,7 +433,9 @@ function captureDeliveryCallback(callback, invoke = callback) {
     true;
   return {
     callback: invoke,
-    context: trusted ? undefined : core.ops.op_oden_callback_context(callback),
+    context: trusted
+      ? WeakMapPrototypeGet(trustedDeliveryContexts, callback)
+      : core.ops.op_oden_callback_context(callback),
     preflight: WeakMapPrototypeGet(trustedDeliveryPreflights, callback),
     trusted,
   };
@@ -646,6 +713,7 @@ return {
   runCapturedCleanup,
   runStreamUseGuard,
   runWithStreamUseAdmission,
+  runWithStreamUseAdmissionRecheck,
   setStreamUseGuard,
   wrapIterableDelivery,
 };

@@ -478,6 +478,15 @@ function addReadableListener(stream, type, listener) {
   return FunctionPrototypeCall(ReadablePublicOn, stream, type, listener);
 }
 
+function removeReadableListener(stream, type, listener) {
+  return FunctionPrototypeCall(
+    ReadablePublicRemoveListener,
+    stream,
+    type,
+    listener,
+  );
+}
+
 function createReadableAsyncIterator(stream) {
   return FunctionPrototypeCall(ReadablePublicAsyncIterator, stream);
 }
@@ -565,6 +574,10 @@ function protectReadableState(stream, guard = undefined) {
   const state = WeakMapPrototypeGet(originalReadableStates, stream);
   if (state === undefined) return;
   if (getGuardedReadableState(state) === undefined) {
+    const read = stream._read;
+    const capturedRead = isStreamTrustedDeliveryCallback(stream, read)
+      ? captureTrustedDeliveryCallback(read)
+      : captureDeliveryCallback(read);
     const publicBuffer = state.buffer;
     const privateBuffer = ArrayPrototypeSlice(
       publicBuffer,
@@ -584,6 +597,7 @@ function protectReadableState(stream, guard = undefined) {
       buffer: privateBuffer,
       bufferIndex: 0,
       decoder,
+      read: capturedRead,
       stream,
     });
   }
@@ -592,6 +606,14 @@ function protectReadableState(stream, guard = undefined) {
       setStreamUseGuard(state.pipes[i], guard);
     }
   }
+}
+
+function invokeReadableImplementation(stream, state, size) {
+  const guarded = getGuardedReadableState(state);
+  if (guarded === undefined) {
+    return FunctionPrototypeCall(stream._read, stream, size);
+  }
+  return runCapturedDelivery(stream, guarded.read, stream, [size]);
 }
 
 function installReadableDeliveryHook(stream) {
@@ -1503,7 +1525,11 @@ Readable.prototype.read = function (n) {
 
     // Call internal read method
     try {
-      this._read(readableStateHighWaterMark(state));
+      invokeReadableImplementation(
+        this,
+        state,
+        readableStateHighWaterMark(state),
+      );
     } catch (err) {
       errorOrDestroy(this, err);
     }
@@ -1575,7 +1601,7 @@ function readReadableChunk(stream, size = undefined) {
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
 function readGuardedReadable(stream, state, size) {
   if (getStreamUseGuard(stream) === undefined) {
-    return stream.read(size);
+    return FunctionPrototypeCall(ReadablePrototypeRead, stream, size);
   }
   runReadableUseGuard(stream);
   const registeredState = WeakMapPrototypeGet(originalReadableStates, stream);
@@ -2387,13 +2413,7 @@ function flow(stream) {
 // This is *not* part of the readable stream interface.
 // It is an ugly unfortunate mess of history.
 Readable.prototype.wrap = function (stream) {
-  linkStreamUseGuard(stream, this);
   let paused = false;
-
-  // TODO (ronag): Should this.destroy(err) emit
-  // 'error' on the wrapped stream? Would require
-  // a static factory method, e.g. Readable.wrap(stream).
-
   const wrapped = this;
   const registeredSource = isRegisteredReadable(stream);
   const captureSourceMethod = (method, trusted) =>
@@ -2416,6 +2436,19 @@ Readable.prototype.wrap = function (stream) {
     : undefined;
   const addSourceListener = (type, listener) =>
     runCapturedCallback(capturedSourceOn, stream, [type, listener]);
+
+  const readWrappedStream = this._read = function wrappedRead() {
+    if (paused && capturedSourceResume !== undefined) {
+      paused = false;
+      runCapturedCallback(capturedSourceResume, stream, []);
+    }
+  };
+  markStreamTrustedDeliveryCallback(wrapped, readWrappedStream);
+  linkStreamUseGuard(stream, wrapped);
+
+  // TODO (ronag): Should this.destroy(err) emit
+  // 'error' on the wrapped stream? Would require
+  // a static factory method, e.g. Readable.wrap(stream).
 
   function ondata(chunk) {
     if (
@@ -2448,13 +2481,6 @@ Readable.prototype.wrap = function (stream) {
     destroyReadableStream(wrapped);
   });
 
-  this._read = () => {
-    if (paused && capturedSourceResume !== undefined) {
-      paused = false;
-      runCapturedCallback(capturedSourceResume, stream, []);
-    }
-  };
-
   // Proxy all the other methods. Important when wrapping filters and duplexes.
   const streamKeys = ObjectKeys(stream);
   for (let j = 1; j < streamKeys.length; j++) {
@@ -2484,7 +2510,9 @@ Readable.prototype.iterator = function (options) {
 };
 
 function streamToAsyncIterator(stream, options, admittedOperation) {
-  if (typeof stream.read !== "function") {
+  if (
+    admittedOperation === undefined && typeof stream.read !== "function"
+  ) {
     stream = Readable.wrap(stream, { objectMode: true });
   }
 
@@ -2506,21 +2534,33 @@ async function* createAsyncIterator(stream, options, admittedOperation) {
     }
   }
 
-  stream.on("readable", next);
-
   let error;
-  const cleanup = eos(stream, { writable: false }, (err) => {
+  const onFinished = (err) => {
     error = err ? aggregateTwoErrors(error, err) : null;
     callback();
     callback = nop;
-  });
+  };
+  let cleanup;
+  if (admittedOperation === undefined) {
+    stream.on("readable", next);
+    cleanup = eos(stream, { writable: false }, onFinished);
+  } else {
+    cleanup = runWithStreamUseAdmission(
+      stream,
+      admittedOperation.admission,
+      () => {
+        addReadableListener(stream, "readable", next);
+        return eos(stream, { writable: false }, onFinished);
+      },
+    );
+  }
 
   try {
     while (true) {
       const chunk = stream.destroyed
         ? null
         : admittedOperation === undefined
-        ? stream.read()
+        ? FunctionPrototypeCall(ReadablePrototypeRead, stream)
         : readAdmittedReadableChunk(
           stream,
           admittedOperation.state,
@@ -2546,8 +2586,19 @@ async function* createAsyncIterator(stream, options, admittedOperation) {
     ) {
       destroyImpl.destroyer(stream, null);
     } else {
-      stream.off("readable", next);
-      cleanup();
+      if (admittedOperation === undefined) {
+        stream.off("readable", next);
+        cleanup();
+      } else {
+        runWithStreamUseAdmission(
+          stream,
+          admittedOperation.admission,
+          () => {
+            removeReadableListener(stream, "readable", next);
+            cleanup();
+          },
+        );
+      }
     }
   }
 }
@@ -3004,6 +3055,7 @@ return {
   pushReadableChunk,
   readProtectedReadableZero,
   readReadableChunk,
+  removeReadableListener,
   Readable,
   readableStateForStream,
   readableHighWaterMark,
