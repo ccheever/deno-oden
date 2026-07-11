@@ -298,6 +298,14 @@ function scheduleCapturedNextTick(captured, args) {
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
 const guardedReadableStates = new SafeWeakMap();
 const originalReadableStates = new SafeWeakMap();
+// Once a Readable participates in a protected route, decisions that can start
+// work must not consult scalar fields retained on the public ReadableState.
+// Keep the construction-time values and engine-owned updates separately so a
+// package-held state reference cannot install a getter that runs as the later
+// consumer.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+const readableEnabledValues = new SafeWeakMap();
+const readableHighWaterMarkValues = new SafeWeakMap();
 // Native EOF cleanup is allowed after revocation, but it must still use the
 // construction-time state and captured implementation. The override is
 // closure-private and exists only for that exact terminal transition.
@@ -334,7 +342,7 @@ function isReadableDestroyed(stream) {
 
 function isReadableActive(stream) {
   const state = WeakMapPrototypeGet(originalReadableStates, stream);
-  return state !== undefined && state.readable !== false &&
+  return state !== undefined && readableStateEnabled(state) &&
     (state[kState] & (kDestroyed | kErrored | kErrorEmitted | kEndEmitted)) ===
       0;
 }
@@ -346,7 +354,40 @@ function readableObjectMode(stream) {
 
 function readableHighWaterMark(stream) {
   const state = WeakMapPrototypeGet(originalReadableStates, stream);
-  return state?.highWaterMark;
+  return state === undefined ? undefined : readableStateHighWaterMark(state);
+}
+
+function readableStateEnabled(state) {
+  return getGuardedReadableState(state) === undefined
+    ? state.readable !== false
+    : WeakMapPrototypeGet(readableEnabledValues, state) !== false;
+}
+
+function setReadableStateEnabled(state, value) {
+  const enabled = value !== false;
+  WeakMapPrototypeSet(readableEnabledValues, state, enabled);
+  if (getGuardedReadableState(state) === undefined) {
+    state.readable = enabled;
+  }
+}
+
+function setReadableActive(stream, value) {
+  const state = WeakMapPrototypeGet(originalReadableStates, stream) ??
+    stream._readableState;
+  if (state !== undefined) setReadableStateEnabled(state, value);
+}
+
+function readableStateHighWaterMark(state) {
+  return getGuardedReadableState(state) === undefined
+    ? state.highWaterMark
+    : WeakMapPrototypeGet(readableHighWaterMarkValues, state);
+}
+
+function setReadableStateHighWaterMark(state, value) {
+  WeakMapPrototypeSet(readableHighWaterMarkValues, state, value);
+  if (getGuardedReadableState(state) === undefined) {
+    state.highWaterMark = value;
+  }
 }
 
 // Native callers only need an admission signal. Never return the retained
@@ -760,6 +801,7 @@ function ReadableState(options, stream, isDuplex) {
   // instead of a V8 slot per field.
   this[kState] = kEmitClose | kAutoDestroy | kConstructed | kSync;
   WeakMapPrototypeSet(originalReadableStates, stream, this);
+  WeakMapPrototypeSet(readableEnabledValues, this, true);
   markStreamTrustedDeliveryCallback(
     stream,
     Readable.prototype[EE.captureRejectionSymbol],
@@ -777,9 +819,11 @@ function ReadableState(options, stream, isDuplex) {
 
   // The point at which it stops calling _read() to fill the buffer
   // Note: 0 is a valid value, means "don't call _read preemptively ever"
-  this.highWaterMark = options
+  const highWaterMark = options
     ? getHighWaterMark(this, options, "readableHighWaterMark", isDuplex)
     : getDefaultHighWaterMark(false);
+  this.highWaterMark = highWaterMark;
+  WeakMapPrototypeSet(readableHighWaterMarkValues, this, highWaterMark);
 
   this.buffer = [];
   this.bufferIndex = 0;
@@ -1140,7 +1184,7 @@ function canPushMore(state) {
   // Also, if we have no data yet, we can stand some more bytes.
   // This is to work around cases where hwm=0, such as the repl.
   return (state[kState] & kEnded) === 0 &&
-    (state.length < state.highWaterMark || state.length === 0);
+    (state.length < readableStateHighWaterMark(state) || state.length === 0);
 }
 
 function addChunk(
@@ -1300,8 +1344,8 @@ Readable.prototype.read = function (n) {
   const nOrig = n;
 
   // If we're asking for more than the current hwm, then raise the hwm.
-  if (n > state.highWaterMark) {
-    state.highWaterMark = computeNewHighWaterMark(n);
+  if (n > readableStateHighWaterMark(state)) {
+    setReadableStateHighWaterMark(state, computeNewHighWaterMark(n));
   }
 
   if (n !== 0) {
@@ -1314,8 +1358,8 @@ Readable.prototype.read = function (n) {
   if (
     n === 0 &&
     (state[kState] & kNeedReadable) !== 0 &&
-    ((state.highWaterMark !== 0
-      ? state.length >= state.highWaterMark
+    ((readableStateHighWaterMark(state) !== 0
+      ? state.length >= readableStateHighWaterMark(state)
       : state.length > 0) ||
       (state[kState] & kEnded) !== 0)
   ) {
@@ -1365,7 +1409,10 @@ Readable.prototype.read = function (n) {
   debug("need readable", doRead);
 
   // If we currently have less than the highWaterMark, then also read some.
-  if (state.length === 0 || state.length - n < state.highWaterMark) {
+  if (
+    state.length === 0 ||
+    state.length - n < readableStateHighWaterMark(state)
+  ) {
     doRead = true;
     debug("length less than watermark", doRead);
   }
@@ -1390,7 +1437,7 @@ Readable.prototype.read = function (n) {
 
     // Call internal read method
     try {
-      this._read(state.highWaterMark);
+      this._read(readableStateHighWaterMark(state));
     } catch (err) {
       errorOrDestroy(this, err);
     }
@@ -1415,7 +1462,9 @@ Readable.prototype.read = function (n) {
   }
 
   if (ret === null) {
-    state[kState] |= state.length <= state.highWaterMark ? kNeedReadable : 0;
+    state[kState] |= state.length <= readableStateHighWaterMark(state)
+      ? kNeedReadable
+      : 0;
     n = 0;
   } else {
     state.length -= n;
@@ -1574,7 +1623,7 @@ function emitReadable_(stream, state = getReadableOperationState(stream)) {
   // 3. It is below the highWaterMark, so we can schedule
   //    another readable later.
   state[kState] |= (state[kState] & (kFlowing | kEnded)) === 0 &&
-      state.length <= state.highWaterMark
+      state.length <= readableStateHighWaterMark(state)
     ? kNeedReadable
     : 0;
   flow(stream);
@@ -1633,7 +1682,7 @@ function maybeReadMore_(stream, state, scheduledGuard) {
   //   up calling push() with more data.
   while (
     (state[kState] & (kReading | kEnded)) === 0 &&
-    (state.length < state.highWaterMark ||
+    (state.length < readableStateHighWaterMark(state) ||
       ((state[kState] & kFlowing) !== 0 && state.length === 0))
   ) {
     const len = state.length;
@@ -2347,15 +2396,14 @@ ObjectDefineProperties(Readable.prototype, {
       // where the readable side was disabled upon construction.
       // Compat. The user might manually disable readable side through
       // deprecated setter.
-      return !!r && r.readable !== false && !r.destroyed && !r.errorEmitted &&
-        !r.endEmitted;
+      return !!r && readableStateEnabled(r) &&
+        (r[kState] & (kDestroyed | kErrored | kErrorEmitted | kEndEmitted)) ===
+          0;
     },
     set(val) {
       // Backwards compat.
       const state = readableStateForStream(this);
-      if (state) {
-        state.readable = !!val;
-      }
+      if (state) setReadableStateEnabled(state, !!val);
     },
   },
 
@@ -2371,11 +2419,11 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get: function () {
+      const state = readableStateForStream(this);
       return !!(
-        readableStateForStream(this).readable !== false &&
-        (readableStateForStream(this).destroyed ||
-          readableStateForStream(this).errored) &&
-        !readableStateForStream(this).endEmitted
+        readableStateEnabled(state) &&
+        (state[kState] & (kDestroyed | kErrored)) !== 0 &&
+        (state[kState] & kEndEmitted) === 0
       );
     },
   },
@@ -2384,7 +2432,7 @@ ObjectDefineProperties(Readable.prototype, {
     __proto__: null,
     enumerable: false,
     get: function () {
-      return readableStateForStream(this).highWaterMark;
+      return readableStateHighWaterMark(readableStateForStream(this));
     },
   },
 
@@ -2683,14 +2731,10 @@ function endWritableNT(stream) {
     const {
       endProtectedWritableCleanup,
       isRegisteredWritable,
-      writableStateForStream,
+      isWritableActive,
     } = core.loadExtScript("ext:deno_node/internal/streams/writable.js");
     if (!isRegisteredWritable(stream)) return;
-    const state = writableStateForStream(stream);
-    if (
-      state.writable !== false && !state.ending && !state.ended &&
-      !state.destroyed
-    ) {
+    if (isWritableActive(stream)) {
       endProtectedWritableCleanup(stream);
     }
     return;
@@ -2795,6 +2839,7 @@ return {
   readableObjectMode,
   registerReadableState,
   resumeReadable,
+  setReadableActive,
   setReadableUseGuard,
   shouldStartProtectedReadable,
 };

@@ -189,6 +189,13 @@ const kBufferedValue = Symbol("kBufferedValue");
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
 const guardedWritableStates = new SafeWeakMap();
 const originalWritableStates = new SafeWeakMap();
+// Protected composition must not read liveness or sizing decisions from the
+// reflectable WritableState. Retain engine-owned scalar values separately so
+// a package-held state reference cannot install a getter that later runs as a
+// more-authorized consumer.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+const writableEnabledValues = new SafeWeakMap();
+const writableHighWaterMarkValues = new SafeWeakMap();
 const bufferedWriteAdmissions = new SafeWeakMap();
 const protectedWritableCleanupEnds = new SafeWeakMap();
 let WritablePrototypeWrite;
@@ -208,7 +215,7 @@ function isWritableDestroyed(stream) {
 
 function isWritableActive(stream) {
   const state = WeakMapPrototypeGet(originalWritableStates, stream);
-  return state !== undefined && state.writable !== false &&
+  return state !== undefined && writableStateEnabled(state) &&
     (state[kState] & (kEnding | kEnded | kDestroyed | kErrored)) === 0;
 }
 
@@ -223,7 +230,34 @@ function writableObjectMode(stream) {
 }
 
 function writableHighWaterMark(stream) {
-  return WeakMapPrototypeGet(originalWritableStates, stream)?.highWaterMark;
+  const state = WeakMapPrototypeGet(originalWritableStates, stream);
+  return state === undefined ? undefined : writableStateHighWaterMark(state);
+}
+
+function writableStateEnabled(state) {
+  return getGuardedWritableState(state) === undefined
+    ? state.writable !== false
+    : WeakMapPrototypeGet(writableEnabledValues, state) !== false;
+}
+
+function setWritableStateEnabled(state, value) {
+  const enabled = value !== false;
+  WeakMapPrototypeSet(writableEnabledValues, state, enabled);
+  if (getGuardedWritableState(state) === undefined) {
+    state.writable = enabled;
+  }
+}
+
+function setWritableActive(stream, value) {
+  const state = WeakMapPrototypeGet(originalWritableStates, stream) ??
+    stream._writableState;
+  if (state !== undefined) setWritableStateEnabled(state, value);
+}
+
+function writableStateHighWaterMark(state) {
+  return getGuardedWritableState(state) === undefined
+    ? state.highWaterMark
+    : WeakMapPrototypeGet(writableHighWaterMarkValues, state);
 }
 
 function isWritablePublicWrite(callback) {
@@ -807,6 +841,7 @@ function WritableState(options, stream, isDuplex) {
   // instead of a V8 slot per field.
   this[kState] = kSync | kConstructed | kEmitClose | kAutoDestroy;
   WeakMapPrototypeSet(originalWritableStates, stream, this);
+  WeakMapPrototypeSet(writableEnabledValues, this, true);
 
   // Opt-in (used by `process.stdout`/`process.stderr`): keep the `kState`
   // bitfield behind an accessor so reads always observe the latest write, even
@@ -838,9 +873,11 @@ function WritableState(options, stream, isDuplex) {
   // The point at which write() starts returning false
   // Note: 0 is a valid value, means that we always return false if
   // the entire buffer is not flushed immediately on write().
-  this.highWaterMark = options
+  const highWaterMark = options
     ? getHighWaterMark(this, options, "writableHighWaterMark", isDuplex)
     : getDefaultHighWaterMark(false);
+  this.highWaterMark = highWaterMark;
+  WeakMapPrototypeSet(writableHighWaterMarkValues, this, highWaterMark);
 
   if (!options || options.decodeStrings !== false) {
     this[kState] |= kDecodeStrings;
@@ -1171,7 +1208,8 @@ function writeOrBuffer(
     state[kState] &= ~kSync;
   }
 
-  const ret = state.length < state.highWaterMark || state.length === 0;
+  const ret = state.length < writableStateHighWaterMark(state) ||
+    state.length === 0;
 
   if (!ret) {
     state[kState] |= kNeedDrain;
@@ -1704,15 +1742,13 @@ ObjectDefineProperties(Writable.prototype, {
       // where the writable side was disabled upon construction.
       // Compat. The user might manually disable writable side through
       // deprecated setter.
-      return !!w && w.writable !== false &&
+      return !!w && writableStateEnabled(w) &&
         (w[kState] & (kEnding | kEnded | kDestroyed | kErrored)) === 0;
     },
     set(val) {
       // Backwards compatible.
       const state = writableStateForStream(this);
-      if (state) {
-        state.writable = !!val;
-      }
+      if (state) setWritableStateEnabled(state, !!val);
     },
   },
 
@@ -1762,7 +1798,9 @@ ObjectDefineProperties(Writable.prototype, {
     __proto__: null,
     get() {
       const state = writableStateForStream(this);
-      return state?.highWaterMark;
+      return state === undefined
+        ? undefined
+        : writableStateHighWaterMark(state);
     },
   },
 
@@ -1883,6 +1921,7 @@ return {
   protectedWritableEnd,
   protectedWritableUncork,
   protectedWritableWrite,
+  setWritableActive,
   setWritableUseGuard,
   Writable,
   writableNeedsDrain,

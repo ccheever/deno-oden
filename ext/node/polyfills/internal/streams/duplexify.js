@@ -33,11 +33,13 @@ const {
   isReadablePublicLifecycleMethod,
   isReadablePublicRead,
   pushReadableChunk,
+  setReadableActive,
 } = core.loadExtScript("ext:deno_node/internal/streams/readable.js");
 const {
   isRegisteredWritable,
   isWritablePublicEnd,
   isWritablePublicWrite,
+  setWritableActive,
 } = core.loadExtScript("ext:deno_node/internal/streams/writable.js");
 const { isEventEmitterPublicLifecycleMethod } = core.loadExtScript(
   "ext:deno_node/_events.mjs",
@@ -147,13 +149,13 @@ export default function duplexify(body, name) {
       // https://github.com/nodejs/node/pull/34385
 
       if (options?.readable === false) {
-        this._readableState.readable = false;
+        setReadableActive(this, false);
         this._readableState.ended = true;
         this._readableState.endEmitted = true;
       }
 
       if (options?.writable === false) {
-        this._writableState.writable = false;
+        setWritableActive(this, false);
         this._writableState.ending = true;
         this._writableState.ended = true;
         this._writableState.finished = true;

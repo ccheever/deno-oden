@@ -37,9 +37,11 @@ const {
   default: Readable,
   readableStateForStream,
   registerReadableState,
+  setReadableActive,
 } = readableModule;
 const {
   default: Writable,
+  setWritableActive,
   writableStateForStream,
 } = core.loadExtScript(
   "ext:deno_node/internal/streams/writable.js",
@@ -112,13 +114,13 @@ function Duplex(options) {
     this.allowHalfOpen = options.allowHalfOpen !== false;
 
     if (options.readable === false) {
-      this._readableState.readable = false;
+      setReadableActive(this, false);
       this._readableState.ended = true;
       this._readableState.endEmitted = true;
     }
 
     if (options.writable === false) {
-      this._writableState.writable = false;
+      setWritableActive(this, false);
       this._writableState.ending = true;
       this._writableState.ended = true;
       this._writableState.finished = true;

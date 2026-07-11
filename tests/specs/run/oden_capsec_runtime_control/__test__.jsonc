@@ -75,6 +75,11 @@
       "output": "node_delivery_barrier_driver.out",
       "exitCode": 0
     },
+    "protected_stream_scalars_are_not_package_dispatch_surfaces": {
+      "args": "run --allow-all stream_scalar_state_driver.js",
+      "output": "stream_scalar_state_driver.out",
+      "exitCode": 0
+    },
     "protected_cross_stream_delivery_is_closed_before_raw_bytes": {
       "args": "run --allow-all cross_stream_barrier_driver.js",
       "output": "cross_stream_barrier_driver.out",
