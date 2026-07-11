@@ -291,27 +291,22 @@ try {
   const oncePassedPackage = deniedProbe.consumeEventPromise(
     oncePassedPromise,
   );
+  const oncePassedResolvedPackage = deniedProbe.consumeResolvedEventPromise(
+    oncePassedPromise,
+  );
+  const oncePassedAllPackage = deniedProbe.consumeAllEventPromises(
+    oncePassedPromise,
+  );
+  const oncePassedRacePackage = deniedProbe.consumeRacedEventPromise(
+    oncePassedPromise,
+  );
+  const oncePassedCapturedThenPackage = deniedProbe
+    .consumeEventPromiseWithCapturedThen(oncePassedPromise);
+  const oncePassedContinuationRead = deniedProbe.readAfterEventPromise(
+    oncePassedPromise,
+    oncePassed,
+  );
   oncePassed.read();
-  result.eventsOncePassedPromise = await bounded(
-    oncePassedPackage,
-    "events.once package passage",
-  );
-  result.eventsOncePromiseResolve = await bounded(
-    deniedProbe.consumeResolvedEventPromise(oncePassedPromise),
-    "events.once Promise.resolve passage",
-  );
-  result.eventsOncePromiseAll = await bounded(
-    deniedProbe.consumeAllEventPromises(oncePassedPromise),
-    "events.once Promise.all passage",
-  );
-  result.eventsOncePromiseRace = await bounded(
-    deniedProbe.consumeRacedEventPromise(oncePassedPromise),
-    "events.once Promise.race passage",
-  );
-  result.eventsOnceCapturedPromiseThen = await bounded(
-    deniedProbe.consumeEventPromiseWithCapturedThen(oncePassedPromise),
-    "events.once captured Promise.prototype.then passage",
-  );
   const oncePassedRootArgs = await bounded(
     oncePassedPromise,
     "events.once retained root promise",
@@ -319,6 +314,31 @@ try {
   result.eventsOncePassedPromiseRoot = oncePassedRootArgs[0] == null
     ? "EMPTY"
     : "ROOT_ALLOWED";
+  result.eventsOncePackageContinuationRoot = attempt(() => oncePassed.read());
+  result.eventsOncePassedPromise = await bounded(
+    oncePassedPackage,
+    "events.once package passage",
+  );
+  result.eventsOncePromiseResolve = await bounded(
+    oncePassedResolvedPackage,
+    "events.once Promise.resolve passage",
+  );
+  result.eventsOncePromiseAll = await bounded(
+    oncePassedAllPackage,
+    "events.once Promise.all passage",
+  );
+  result.eventsOncePromiseRace = await bounded(
+    oncePassedRacePackage,
+    "events.once Promise.race passage",
+  );
+  result.eventsOnceCapturedPromiseThen = await bounded(
+    oncePassedCapturedThenPackage,
+    "events.once captured Promise.prototype.then passage",
+  );
+  result.eventsOncePackageContinuationRead = await bounded(
+    oncePassedContinuationRead,
+    "events.once package continuation read",
+  );
 
   const onceCallback = await protectedNodeBuffer("events.once callback");
   const onceCallbackPromise = eventsOnce(onceCallback, "data");
@@ -412,6 +432,9 @@ try {
   result.eventsOnRoot = iteratorRootResult.value?.[0] == null
     ? "EMPTY"
     : "ROOT_ALLOWED";
+  result.eventsOnPassedResultRoot = iteratorRootResult.value?.[0] == null
+    ? "EMPTY"
+    : "ROOT_ALLOWED";
   result.eventsOnPassedResult = await bounded(
     deniedProbe.consumeEventIteratorResult(iteratorRootResult),
     "events.on package result passage",
@@ -420,9 +443,6 @@ try {
     deniedProbe.consumeEventIteratorResultGetter(iteratorRootResult),
     "events.on package result getter passage",
   );
-  result.eventsOnPassedResultRoot = iteratorRootResult.value?.[0] == null
-    ? "EMPTY"
-    : "ROOT_ALLOWED";
   await iteratorRoot.return();
 
   const iteratorPassedSource = await protectedNodeBuffer(
@@ -430,14 +450,19 @@ try {
   );
   const iteratorPassed = eventsOn(iteratorPassedSource, "data");
   iteratorPassedSource.read();
-  result.eventsOnPassedIterator = await bounded(
-    deniedProbe.consumeEventIterator(iteratorPassed),
-    "events.on package iterator",
+  const iteratorPassedPackage = deniedProbe.consumeEventIterator(
+    iteratorPassed,
   );
+  const iteratorRetainedPromise = iteratorPassed.next();
   const iteratorRetainedResult = await bounded(
-    iteratorPassed.next(),
+    iteratorRetainedPromise,
     "events.on retained root delivery",
   );
+  const iteratorPassedOutcome = await bounded(
+    iteratorPassedPackage,
+    "events.on package iterator",
+  );
+  result.eventsOnPassedIterator = iteratorPassedOutcome;
   result.eventsOnIteratorDenialRetainsValue =
     iteratorRetainedResult.value?.[0] == null ? "EMPTY" : "ROOT_ALLOWED";
   await iteratorPassed.return();
@@ -447,15 +472,19 @@ try {
   );
   const iteratorPromise = eventsOn(iteratorPromiseSource, "data");
   const rootNextPromise = iteratorPromise.next();
-  iteratorPromiseSource.read();
-  result.eventsOnPassedNextPromise = await bounded(
-    deniedProbe.consumeEventIteratorPromise(rootNextPromise),
-    "events.on package next promise",
+  const packageNextPromise = deniedProbe.consumeEventIteratorPromise(
+    rootNextPromise,
   );
+  iteratorPromiseSource.read();
   const rootNextResult = await bounded(
     rootNextPromise,
     "events.on root next promise",
   );
+  const packageNextResult = await bounded(
+    packageNextPromise,
+    "events.on package next promise",
+  );
+  result.eventsOnPassedNextPromise = packageNextResult;
   result.eventsOnPassedNextPromiseRoot = rootNextResult.value?.[0] == null
     ? "EMPTY"
     : "ROOT_ALLOWED";

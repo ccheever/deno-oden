@@ -155,6 +155,7 @@ const {
   NumberParseInt,
   ObjectDefineProperties,
   ObjectKeys,
+  ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   Promise,
   ReflectApply,
@@ -188,6 +189,7 @@ const BufferIsBuffer = protectedBufferIsBuffer ?? Buffer.isBuffer;
 const BufferIsEncoding = protectedBufferIsEncoding ?? Buffer.isEncoding;
 const BufferPrototypeToString = protectedBufferToString ??
   Buffer.prototype.toString;
+const NotCapablePrototype = Deno.errors.NotCapable.prototype;
 const isTypedArray = core.isTypedArray;
 let ReadablePrototypeRead;
 let ReadablePrototypePush;
@@ -291,6 +293,13 @@ function scheduleCapturedNextTick(captured, args) {
     ProtectedReadableNextTick,
     process,
     () => runCapturedCallback(captured, undefined, args),
+  );
+}
+
+function isNotCapableError(error) {
+  return ObjectPrototypeIsPrototypeOf(
+    NotCapablePrototype,
+    error,
   );
 }
 
@@ -1878,20 +1887,37 @@ function maybeReadMore_(stream, state, scheduledGuard) {
   //   called push() with new data. In this case we skip performing more
   //   read()s. The execution ends in this method again after the _read() ends
   //   up calling push() with more data.
-  while (
-    (state[kState] & (kReading | kEnded)) === 0 &&
-    (state.length < readableStateHighWaterMark(state) ||
-      ((state[kState] & kFlowing) !== 0 && state.length === 0))
-  ) {
-    const len = state.length;
-    debug("maybeReadMore read 0");
-    readGuardedReadable(stream, state, 0);
-    if (len === state.length) {
-      // Didn't get any data, stop spinning.
-      break;
+  try {
+    while (
+      (state[kState] & (kReading | kEnded)) === 0 &&
+      (state.length < readableStateHighWaterMark(state) ||
+        ((state[kState] & kFlowing) !== 0 && state.length === 0))
+    ) {
+      const len = state.length;
+      debug("maybeReadMore read 0");
+      readGuardedReadable(stream, state, 0);
+      if (len === state.length) {
+        // Didn't get any data, stop spinning.
+        break;
+      }
     }
+  } catch (error) {
+    // A next-tick prefetch has no synchronous consumer to receive an
+    // authorization denial. Retire only that scheduled work; the guard runs
+    // before `_read` or buffered-byte delivery, and a later public operation
+    // must authorize independently.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    if (!isNotCapableError(error)) throw error;
+    if (
+      (state[kState] & (kDataListening | kReadableListening)) !== 0
+    ) {
+      // An installed consumer needs the ordinary Node error signal so its
+      // pipeline or adapter can settle as refused instead of hanging.
+      errorOrDestroy(stream, error);
+    }
+  } finally {
+    state[kState] &= ~kReadingMore;
   }
-  state[kState] &= ~kReadingMore;
 }
 
 // Abstract method.  to be overridden in specific implementation classes.
@@ -2385,16 +2411,29 @@ function resume(stream, state) {
 }
 
 function resume_(stream, state) {
-  debug("resume", (state[kState] & kReading) !== 0);
-  if ((state[kState] & kReading) === 0) {
-    readGuardedReadable(stream, state, 0);
-  }
+  try {
+    debug("resume", (state[kState] & kReading) !== 0);
+    if ((state[kState] & kReading) === 0) {
+      readGuardedReadable(stream, state, 0);
+    }
 
-  state[kState] &= ~kResumeScheduled;
-  emitGuardedReadableEvent(stream, "resume");
-  flow(stream);
-  if ((state[kState] & (kFlowing | kReading)) === kFlowing) {
-    readGuardedReadable(stream, state, 0);
+    state[kState] &= ~kResumeScheduled;
+    emitGuardedReadableEvent(stream, "resume");
+    flow(stream);
+    if ((state[kState] & (kFlowing | kReading)) === kFlowing) {
+      readGuardedReadable(stream, state, 0);
+    }
+  } catch (error) {
+    if (!isNotCapableError(error)) throw error;
+    // `resume_` is loader-owned next-tick maintenance. A denied actor stops
+    // this flow without delivering buffered bytes; root or another authorized
+    // caller can explicitly resume later under a fresh operation actor.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    const hadConsumer = (state[kState] &
+      (kDataListening | kReadableListening)) !== 0;
+    state[kState] &= ~(kResumeScheduled | kFlowing);
+    state[kState] |= kHasPaused | kPaused;
+    if (hadConsumer) errorOrDestroy(stream, error);
   }
 }
 

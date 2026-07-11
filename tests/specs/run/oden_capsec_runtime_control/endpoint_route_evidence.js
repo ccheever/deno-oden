@@ -25,6 +25,9 @@ const nodeReadable = await source(
   "ext/node/polyfills/internal/streams/readable.js",
 );
 const nodeStream = await source("ext/node/polyfills/stream.ts");
+const nodeDuplex = await source(
+  "ext/node/polyfills/internal/streams/duplex.js",
+);
 const nodeWebAdapters = await source(
   "ext/node/polyfills/internal/webstreams/adapters.js",
 );
@@ -85,6 +88,16 @@ const nodeDuplexConversions = section(
   nodeWebAdapters,
   "function newStreamDuplexFromReadableWritablePair(",
   "function newReadableStreamFromStreamReadable(",
+);
+const nodeDuplexToWebFacade = section(
+  nodeDuplex,
+  "Duplex.toWeb = function (duplex, options)",
+  "let duplexify;",
+);
+const nodeDuplexToWebConversion = section(
+  nodeWebAdapters,
+  "function newReadableWritablePairFromDuplex(",
+  "\nreturn {\n  newReadableStreamFromStreamReadable,",
 );
 const nodeDuplexifyFunction = section(
   nodeDuplexify,
@@ -183,6 +196,16 @@ const evidence = {
     "registerWritableStreamGuardAttachHook(writableStream, (guard) =>",
   ) && nodeDuplexConversions.match(/setStreamUseGuard\(duplex, guard\);/g)
         ?.length === 2,
+  nodeDuplexToWebFacadeDelegation: nodeDuplexToWebFacade.includes(
+    "return lazyWebStreams().newReadableWritablePairFromDuplex(\n" +
+      "    duplex,\n" +
+      "    options,\n" +
+      "  );",
+  ) && nodeDuplexToWebConversion.includes(
+    "newWritableStreamFromStreamWritable(duplex)",
+  ) && nodeDuplexToWebConversion.includes(
+    "newReadableStreamFromStreamReadable(duplex, readableOptions)",
+  ),
   nodeDuplexifyPropagation: nodeDuplexifyFunction.includes(
     "linkStreamUseGuard(carrier, guardedValue);",
   ) && nodeDuplexify.includes("linkStreamUseGuard(stream, carrier);") &&

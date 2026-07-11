@@ -1,6 +1,6 @@
 import inspector from "node:inspector";
 import { createRequire } from "node:module";
-import { PassThrough, Readable, Writable } from "node:stream";
+import { Duplex, PassThrough, Readable, Writable } from "node:stream";
 
 const port = Number(Deno.args[0]);
 if (!inspector.url()) throw new Error("startup inspector URL missing");
@@ -209,8 +209,12 @@ try {
 
   const lateNodeBridge = new PassThrough();
   nodeStreams.add(lateNodeBridge);
-  const lateNodeWebReadable = Readable.toWeb(lateNodeBridge);
+  // Exercise the public Duplex facade as well as the per-side adapters whose
+  // guard propagation is checked by endpoint_route_evidence.js.
+  const lateNodeWebPair = Duplex.toWeb(lateNodeBridge);
+  const lateNodeWebReadable = lateNodeWebPair.readable;
   webStreams.add(lateNodeWebReadable);
+  webStreams.add(lateNodeWebPair.writable);
   const lateNodeWebProbe = deniedProbe.makeWebWritableDeliveryProbe(false);
   webStreams.add(lateNodeWebProbe.writable);
   const lateNodeWebEgress = lateNodeWebReadable.pipeTo(
