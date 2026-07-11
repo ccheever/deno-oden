@@ -33,6 +33,7 @@ const {
   ArrayPrototypeSplice,
   Boolean,
   DateNow,
+  Error,
   ErrorPrototype,
   FunctionPrototypeCall,
   NumberIsFinite,
@@ -59,6 +60,9 @@ const {
 } = primordials;
 
 import net from "node:net";
+const { getReadableUseGuard } = core.loadExtScript(
+  "ext:deno_node/internal/streams/readable.js",
+);
 const { ok: assert } = core.loadExtScript("ext:deno_node/assert.ts");
 const { kEmptyObject, once } = core.loadExtScript(
   "ext:deno_node/internal/util.mjs",
@@ -1473,13 +1477,40 @@ ClientRequest.prototype.onSocket = function onSocket(socket, err) {
     err = socket.errored;
   }
   if (socket && !err) {
+    if (getReadableUseGuard(socket) !== undefined) {
+      nextTick(
+        onSocketNT,
+        this,
+        socket,
+        protectedHttpTransportError(),
+      );
+      return;
+    }
     socket._httpMessage = this;
     socket.on("error", socketErrorListener);
   }
   nextTick(onSocketNT, this, socket, err);
 };
 
+function protectedHttpTransportError() {
+  const error = new Error(
+    "node:http cannot consume a protected inspector transport",
+  );
+  error.code = "ERR_ACCESS_DENIED";
+  return error;
+}
+
 function onSocketNT(req, socket, err) {
+  if (!err && socket && getReadableUseGuard(socket) !== undefined) {
+    // The HTTP/1 parser surface is extensively reflectable (`socket.parser`,
+    // indexed parser callbacks, and `IncomingMessage.push`). Until that graph
+    // has a private canonical representation, categorically refuse protected
+    // inspector transports before parser allocation, listener installation,
+    // request flush, or response bytes. Direct net/fetch remain available to
+    // authorized callers.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    err = protectedHttpTransportError();
+  }
   if (req.destroyed || err) {
     req.destroyed = true;
 

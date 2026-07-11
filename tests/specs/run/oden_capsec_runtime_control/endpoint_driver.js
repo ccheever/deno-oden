@@ -65,8 +65,7 @@ function exactInspectorAuditIndex(records, principal, port, decision) {
     record.v === 1 && record.principal === principal &&
     record.capability === "inspector:activate" &&
     record.target === `protected-inspector-stream:127.0.0.1:${port}` &&
-    record.decision === decision &&
-    record.suggestion === (decision === "deny" ? "inspector:activate" : null)
+    record.decision === decision && record.suggestion === null
   );
 }
 

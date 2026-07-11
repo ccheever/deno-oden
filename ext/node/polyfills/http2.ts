@@ -82,6 +82,9 @@ const {
   storeHTTPOptions,
 } = core.createLazyLoader("node:_http_server")();
 const { Duplex } = core.createLazyLoader("node:stream")();
+const { getReadableUseGuard } = core.loadExtScript(
+  "ext:deno_node/internal/streams/readable.js",
+);
 const lazyTls = core.createLazyLoader("node:tls");
 const tls = lazyTls().default;
 const { deprecate } = core.loadExtScript("ext:deno_node/util.ts");
@@ -3479,6 +3482,20 @@ function setupHandle(socket, type, options) {
   if (this.destroyed) {
     process.nextTick(emit, this, "connect", this, socket);
     return;
+  }
+
+  if (getReadableUseGuard(socket) !== undefined) {
+    // The JS HTTP/2 adapter feeds loader-owned `data` listeners into a
+    // reflectable native-session handle. Refuse protected inspector transports
+    // before listener installation, buffered reads, or `receive()` rather than
+    // treating that mutable graph as an authority-bearing byte destination.
+    // Direct net/fetch remain available to authorized callers.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    const error = new Error(
+      "node:http2 cannot consume a protected inspector transport",
+    );
+    error.code = "ERR_ACCESS_DENIED";
+    throw error;
   }
 
   // Deno's nghttp2 driver communicates with the socket purely via JS

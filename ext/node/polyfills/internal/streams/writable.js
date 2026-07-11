@@ -535,6 +535,11 @@ const kAfterWritePending = 1 << 28;
 const kBuffered = 1 << 29;
 const kEnded = 1 << 30;
 
+function writableNeedsDrain(stream) {
+  const state = writableStateForStream(stream);
+  return state !== undefined && (state[kState] & kNeedDrain) !== 0;
+}
+
 // TODO(benjamingr) it is likely slower to do it this way than with free functions
 function makeBitMapDescriptor(bit) {
   return {
@@ -1616,9 +1621,7 @@ ObjectDefineProperties(Writable.prototype, {
     __proto__: null,
     get() {
       const state = writableStateForStream(this);
-      return state
-        ? (state[kState] & kClosed) !== 0
-        : false;
+      return state ? (state[kState] & kClosed) !== 0 : false;
     },
   },
 
@@ -1626,9 +1629,7 @@ ObjectDefineProperties(Writable.prototype, {
     __proto__: null,
     get() {
       const state = writableStateForStream(this);
-      return state
-        ? (state[kState] & kDestroyed) !== 0
-        : false;
+      return state ? (state[kState] & kDestroyed) !== 0 : false;
     },
     set(value) {
       // Backward compatibility, the user is explicitly managing destroyed.
@@ -1792,7 +1793,9 @@ Writable.fromWeb = function (writableStream, options) {
 };
 
 Writable.toWeb = function (streamWritable) {
-  return lazyWebStreams().newWritableStreamFromStreamWritable(streamWritable);
+  return lazyWebStreams().newWritableStreamFromStreamWritable(
+    streamWritable,
+  );
 };
 
 Writable.prototype[SymbolAsyncDispose] = function () {
@@ -1823,6 +1826,7 @@ return {
   protectedWritableWrite,
   setWritableUseGuard,
   Writable,
+  writableNeedsDrain,
   writableStateForStream,
 };
 })();

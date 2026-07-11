@@ -75,6 +75,11 @@
       "output": "node_delivery_barrier_driver.out",
       "exitCode": 0
     },
+    "protected_cross_stream_delivery_is_closed_before_raw_bytes": {
+      "args": "run --allow-all cross_stream_barrier_driver.js",
+      "output": "cross_stream_barrier_driver.out",
+      "exitCode": 0
+    },
     "trusted_runtime_tooling_emits_exact_guard_audits": {
       "args": "run --allow-all trusted_tooling_driver.js",
       "output": "trusted_tooling_driver.out",

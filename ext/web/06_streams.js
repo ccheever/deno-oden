@@ -37,8 +37,10 @@ const {
   ArrayBufferPrototypeGetDetached,
   ArrayBufferPrototypeSlice,
   ArrayBufferPrototypeTransferToFixedLength,
+  ArrayPrototypeIndexOf,
   ArrayPrototypeMap,
   ArrayPrototypePush,
+  ArrayPrototypeSplice,
   AsyncGeneratorPrototype,
   BigInt64Array,
   BigUint64Array,
@@ -70,7 +72,9 @@ const {
   ReflectHas,
   SafeFinalizationRegistry,
   SafePromiseAll,
+  SafePromisePrototypeFinally,
   SafeWeakMap,
+  SafeWeakSet,
   // TODO(lucacasonato): add SharedArrayBuffer to primordials
   // SharedArrayBufferPrototype,
   String,
@@ -89,9 +93,13 @@ const {
   Uint32Array,
   Uint8Array,
   Uint8ClampedArray,
+  WeakMapPrototypeDelete,
   WeakMapPrototypeGet,
   WeakMapPrototypeHas,
   WeakMapPrototypeSet,
+  WeakSetPrototypeAdd,
+  WeakSetPrototypeDelete,
+  WeakSetPrototypeHas,
   queueMicrotask,
 } = primordials;
 
@@ -122,7 +130,11 @@ const { assert, AssertionError } = core.loadExtScript(
 //
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- Stream object passage cannot transfer the operation actor, and every application-byte delivery rechecks authority.
 const readableStreamUseGuards = new SafeWeakMap();
-const readableStreamIteratorUseGuards = new SafeWeakMap();
+const readableStreamUseGuardParts = new SafeWeakMap();
+const readableStreamUseGuardPartLists = new SafeWeakMap();
+const readableStreamGuardAttachHooks = new SafeWeakMap();
+const readableStreamPipeDestinations = new SafeWeakMap();
+const readableStreamIteratorUseStreams = new SafeWeakMap();
 const readableQueueUseStreams = new SafeWeakMap();
 const readableReaderUseStreams = new SafeWeakMap();
 const readableControllerUseStreams = new SafeWeakMap();
@@ -142,28 +154,135 @@ const readableResourceBackingViews = new SafeWeakMap();
 const readableResourceBackingUnrefableViews = new SafeWeakMap();
 const protectedReadableResourceBackingSlots = new SafeWeakMap();
 const readableRequestDispatches = new SafeWeakMap();
+const writableStreamUseGuards = new SafeWeakMap();
+const writableStreamUseGuardParts = new SafeWeakMap();
+const writableStreamUseGuardPartLists = new SafeWeakMap();
+const writableStreamGuardAttachHooks = new SafeWeakMap();
+const writableQueueUseStreams = new SafeWeakMap();
+const writableControllerUseStreams = new SafeWeakMap();
+const writableWriterUseStreams = new SafeWeakMap();
+const writableWriteAlgorithmCallbackRecords = new SafeWeakMap();
+const transformAlgorithmCallbackRecords = new SafeWeakMap();
+const trustedWritableCallbacks = new SafeWeakMap();
+const writableTransformOwners = new SafeWeakMap();
 const defaultReadRequestDispatch = ObjectCreate(null);
 const byobReadIntoRequestDispatch = ObjectCreate(null);
 const asyncIteratorReadRequestDispatch = ObjectCreate(null);
 const readableRequestNoCloseValue = ObjectCreate(null);
 let hasProtectedReadableStreams = false;
 let hasProtectedReadableQueues = false;
+let hasProtectedWritableStreams = false;
+let hasProtectedWritableQueues = false;
+
+function addWebStreamUseGuardPart(partsMap, partListsMap, stream, guard) {
+  let parts = WeakMapPrototypeGet(partsMap, stream);
+  if (parts === undefined) {
+    parts = new SafeWeakSet();
+    WeakMapPrototypeSet(partsMap, stream, parts);
+    WeakMapPrototypeSet(partListsMap, stream, []);
+  }
+  if (WeakSetPrototypeHas(parts, guard)) return false;
+  WeakSetPrototypeAdd(parts, guard);
+  ArrayPrototypePush(WeakMapPrototypeGet(partListsMap, stream), guard);
+  return true;
+}
+
+function removeWebStreamUseGuardPart(partsMap, partListsMap, stream, guard) {
+  const parts = WeakMapPrototypeGet(partsMap, stream);
+  if (parts === undefined || !WeakSetPrototypeHas(parts, guard)) return false;
+  WeakSetPrototypeDelete(parts, guard);
+  const partList = WeakMapPrototypeGet(partListsMap, stream);
+  const index = ArrayPrototypeIndexOf(partList, guard);
+  if (index !== -1) ArrayPrototypeSplice(partList, index, 1);
+  if (partList.length === 0) {
+    WeakMapPrototypeDelete(partsMap, stream);
+    WeakMapPrototypeDelete(partListsMap, stream);
+  }
+  return true;
+}
+
+function runWebStreamUseGuardParts(partListsMap, stream) {
+  const parts = WeakMapPrototypeGet(partListsMap, stream);
+  if (parts === undefined) return;
+  for (let i = 0; i < parts.length; i++) parts[i]();
+}
+
+function forEachReadableStreamUseGuard(stream, callback) {
+  const parts = WeakMapPrototypeGet(readableStreamUseGuardPartLists, stream);
+  if (parts === undefined) return;
+  for (let i = 0; i < parts.length; i++) callback(parts[i]);
+}
+
+function trackReadableStreamPipeDestination(source, dest) {
+  let destinations = WeakMapPrototypeGet(
+    readableStreamPipeDestinations,
+    source,
+  );
+  if (destinations === undefined) {
+    destinations = [];
+    WeakMapPrototypeSet(readableStreamPipeDestinations, source, destinations);
+  }
+  ArrayPrototypePush(destinations, dest);
+}
+
+function untrackReadableStreamPipeDestination(source, dest) {
+  const destinations = WeakMapPrototypeGet(
+    readableStreamPipeDestinations,
+    source,
+  );
+  if (destinations === undefined) return;
+  const index = ArrayPrototypeIndexOf(destinations, dest);
+  if (index !== -1) ArrayPrototypeSplice(destinations, index, 1);
+}
 
 function setReadableStreamUseGuard(stream, guard) {
   assert(isReadableStream(stream));
+  if (
+    !addWebStreamUseGuardPart(
+      readableStreamUseGuardParts,
+      readableStreamUseGuardPartLists,
+      stream,
+      guard,
+    )
+  ) {
+    return;
+  }
   hasProtectedReadableStreams = true;
   const existing = WeakMapPrototypeGet(readableStreamUseGuards, stream);
-  let effectiveGuard;
-  if (existing === undefined || existing === guard) {
-    effectiveGuard = guard;
-  } else {
-    effectiveGuard = () => {
-      existing();
-      guard();
-    };
+  if (existing === undefined) {
+    WeakMapPrototypeSet(
+      readableStreamUseGuards,
+      stream,
+      () => runWebStreamUseGuardParts(readableStreamUseGuardPartLists, stream),
+    );
   }
-  WeakMapPrototypeSet(readableStreamUseGuards, stream, effectiveGuard);
-  protectReadableStreamGraph(stream);
+  try {
+    protectReadableStreamGraph(stream);
+    const destinations = WeakMapPrototypeGet(
+      readableStreamPipeDestinations,
+      stream,
+    );
+    if (destinations !== undefined) {
+      for (let i = 0; i < destinations.length; i++) {
+        setWritableStreamUseGuard(destinations[i], guard);
+      }
+    }
+    const attach = WeakMapPrototypeGet(readableStreamGuardAttachHooks, stream);
+    if (attach !== undefined) attach(guard);
+  } catch (error) {
+    removeWebStreamUseGuardPart(
+      readableStreamUseGuardParts,
+      readableStreamUseGuardPartLists,
+      stream,
+      guard,
+    );
+    if (
+      WeakMapPrototypeGet(readableStreamUseGuardPartLists, stream) === undefined
+    ) {
+      WeakMapPrototypeDelete(readableStreamUseGuards, stream);
+    }
+    throw error;
+  }
 }
 
 function runReadableStreamUseGuard(stream) {
@@ -173,6 +292,111 @@ function runReadableStreamUseGuard(stream) {
 
 function getReadableStreamUseGuard(stream) {
   return WeakMapPrototypeGet(readableStreamUseGuards, stream);
+}
+
+function registerReadableStreamGuardAttachHook(stream, hook) {
+  const existing = WeakMapPrototypeGet(readableStreamGuardAttachHooks, stream);
+  if (existing === undefined) {
+    WeakMapPrototypeSet(readableStreamGuardAttachHooks, stream, hook);
+  } else {
+    WeakMapPrototypeSet(readableStreamGuardAttachHooks, stream, (guard) => {
+      existing(guard);
+      hook(guard);
+    });
+  }
+  const parts = WeakMapPrototypeGet(readableStreamUseGuardPartLists, stream);
+  if (parts !== undefined) {
+    for (let i = 0; i < parts.length; i++) hook(parts[i]);
+  }
+}
+
+function setWritableStreamUseGuard(stream, guard) {
+  assert(isWritableStream(stream));
+  if (
+    !addWebStreamUseGuardPart(
+      writableStreamUseGuardParts,
+      writableStreamUseGuardPartLists,
+      stream,
+      guard,
+    )
+  ) {
+    return;
+  }
+  hasProtectedWritableStreams = true;
+  const existing = WeakMapPrototypeGet(writableStreamUseGuards, stream);
+  if (existing === undefined) {
+    WeakMapPrototypeSet(
+      writableStreamUseGuards,
+      stream,
+      () => runWebStreamUseGuardParts(writableStreamUseGuardPartLists, stream),
+    );
+  }
+  try {
+    protectWritableStreamGraph(stream);
+    const transform = WeakMapPrototypeGet(writableTransformOwners, stream);
+    if (transform !== undefined) {
+      protectTransformStreamGraph(transform);
+      setReadableStreamUseGuard(
+        getCanonicalReadableSlot(transform, _readable),
+        guard,
+      );
+    }
+    const attach = WeakMapPrototypeGet(writableStreamGuardAttachHooks, stream);
+    if (attach !== undefined) attach(guard);
+  } catch (error) {
+    removeWebStreamUseGuardPart(
+      writableStreamUseGuardParts,
+      writableStreamUseGuardPartLists,
+      stream,
+      guard,
+    );
+    if (
+      WeakMapPrototypeGet(writableStreamUseGuardPartLists, stream) === undefined
+    ) {
+      WeakMapPrototypeDelete(writableStreamUseGuards, stream);
+    }
+    throw error;
+  }
+}
+
+function getWritableStreamUseGuard(stream) {
+  return WeakMapPrototypeGet(writableStreamUseGuards, stream);
+}
+
+function runWritableStreamUseGuard(stream) {
+  const guard = WeakMapPrototypeGet(writableStreamUseGuards, stream);
+  if (guard !== undefined) guard();
+}
+
+function registerWritableStreamGuardAttachHook(stream, hook) {
+  const existing = WeakMapPrototypeGet(writableStreamGuardAttachHooks, stream);
+  if (existing === undefined) {
+    WeakMapPrototypeSet(writableStreamGuardAttachHooks, stream, hook);
+  } else {
+    WeakMapPrototypeSet(writableStreamGuardAttachHooks, stream, (guard) => {
+      existing(guard);
+      hook(guard);
+    });
+  }
+  const parts = WeakMapPrototypeGet(writableStreamUseGuardPartLists, stream);
+  if (parts !== undefined) {
+    for (let i = 0; i < parts.length; i++) hook(parts[i]);
+  }
+}
+
+function markWritableStreamTrustedCallback(callback) {
+  WeakMapPrototypeSet(trustedWritableCallbacks, callback, true);
+  return callback;
+}
+
+function captureWebStreamCallbackRecord(callback) {
+  const trusted = WeakMapPrototypeGet(trustedWritableCallbacks, callback) ===
+    true;
+  return {
+    __proto__: null,
+    callbackContext: trusted ? undefined : op_oden_callback_context(callback),
+    trusted,
+  };
 }
 
 /** @template T */
@@ -377,16 +601,26 @@ function uponPromise(promise, onFulfilled, onRejected) {
 const queueInternalAccessToken = ObjectCreate(null);
 const queueCleanupAccessToken = ObjectCreate(null);
 
-function runReadableQueueUseGuards(queue, accessToken) {
+function runStreamQueueUseGuards(queue, accessToken) {
   // The token authenticates the captured internal call path; it is never an
   // authorization bypass. Reflected internal algorithms can run under an
   // untrusted actor, so both public and internal operations recheck.
   void accessToken;
-  if (!hasProtectedReadableQueues) return;
-  const streams = WeakMapPrototypeGet(readableQueueUseStreams, queue);
-  if (streams === undefined) return;
-  for (let i = 0; i < streams.length; i++) {
-    runReadableStreamUseGuard(streams[i]);
+  if (hasProtectedReadableQueues) {
+    const streams = WeakMapPrototypeGet(readableQueueUseStreams, queue);
+    if (streams !== undefined) {
+      for (let i = 0; i < streams.length; i++) {
+        runReadableStreamUseGuard(streams[i]);
+      }
+    }
+  }
+  if (hasProtectedWritableQueues) {
+    const streams = WeakMapPrototypeGet(writableQueueUseStreams, queue);
+    if (streams !== undefined) {
+      for (let i = 0; i < streams.length; i++) {
+        runWritableStreamUseGuard(streams[i]);
+      }
+    }
   }
 }
 
@@ -403,14 +637,14 @@ class Queue {
   }
 
   enqueue(value, accessToken = undefined) {
-    runReadableQueueUseGuards(this, accessToken);
+    runStreamQueueUseGuards(this, accessToken);
     return this.#enqueueWithSize(value, 1);
   }
 
   // Stores the chunk size inline in the list node instead of a separate
   // { value, size } wrapper, so a sized enqueue costs a single allocation.
   enqueueWithSize(value, size, accessToken = undefined) {
-    runReadableQueueUseGuards(this, accessToken);
+    runStreamQueueUseGuards(this, accessToken);
     return this.#enqueueWithSize(value, size);
   }
 
@@ -427,7 +661,7 @@ class Queue {
   }
 
   dequeue(accessToken = undefined) {
-    runReadableQueueUseGuards(this, accessToken);
+    runStreamQueueUseGuards(this, accessToken);
     const node = this.#dequeueNode();
     return node === null ? null : node.value;
   }
@@ -435,7 +669,7 @@ class Queue {
   // Returns the internal { value, size, next } node. Only for use by
   // dequeueValue(), which needs both the value and its size.
   dequeueNode(accessToken = undefined) {
-    runReadableQueueUseGuards(this, accessToken);
+    runStreamQueueUseGuards(this, accessToken);
     return this.#dequeueNode();
   }
 
@@ -454,7 +688,7 @@ class Queue {
   }
 
   peek(accessToken = undefined) {
-    runReadableQueueUseGuards(this, accessToken);
+    runStreamQueueUseGuards(this, accessToken);
     if (this.#head === null) {
       return null;
     }
@@ -463,12 +697,12 @@ class Queue {
   }
 
   get size() {
-    runReadableQueueUseGuards(this, undefined);
+    runStreamQueueUseGuards(this, undefined);
     return this.#size;
   }
 
   getSize(accessToken = undefined) {
-    runReadableQueueUseGuards(this, accessToken);
+    runStreamQueueUseGuards(this, accessToken);
     return this.#size;
   }
 
@@ -484,6 +718,20 @@ class Queue {
       throw new TypeError("Invalid readable queue cleanup access");
     }
     return this.#head === null ? null : this.#head.value;
+  }
+
+  cleanupEnqueueWithSize(value, size, accessToken = undefined) {
+    if (accessToken !== queueCleanupAccessToken) {
+      throw new TypeError("Invalid readable queue cleanup access");
+    }
+    return this.#enqueueWithSize(value, size);
+  }
+
+  cleanupDequeueNode(accessToken = undefined) {
+    if (accessToken !== queueCleanupAccessToken) {
+      throw new TypeError("Invalid readable queue cleanup access");
+    }
+    return this.#dequeueNode();
   }
 
   cleanupDrain(callback, accessToken = undefined) {
@@ -514,6 +762,9 @@ const queuePrototypeGetSize = Queue.prototype.getSize;
 const queuePrototypeIsInternalQueue = Queue.prototype.isInternalQueue;
 const queuePrototypeCleanupSize = Queue.prototype.cleanupSize;
 const queuePrototypeCleanupPeek = Queue.prototype.cleanupPeek;
+const queuePrototypeCleanupEnqueueWithSize =
+  Queue.prototype.cleanupEnqueueWithSize;
+const queuePrototypeCleanupDequeueNode = Queue.prototype.cleanupDequeueNode;
 const queuePrototypeCleanupDrain = Queue.prototype.cleanupDrain;
 
 function isInternalQueue(queue) {
@@ -573,6 +824,20 @@ function queueCleanupSize(queue) {
 
 function queueCleanupPeek(queue) {
   return ReflectApply(queuePrototypeCleanupPeek, queue, [
+    queueCleanupAccessToken,
+  ]);
+}
+
+function queueCleanupEnqueueWithSize(queue, value, size) {
+  return ReflectApply(queuePrototypeCleanupEnqueueWithSize, queue, [
+    value,
+    size,
+    queueCleanupAccessToken,
+  ]);
+}
+
+function queueCleanupDequeueNode(queue) {
+  return ReflectApply(queuePrototypeCleanupDequeueNode, queue, [
     queueCleanupAccessToken,
   ]);
 }
@@ -1030,7 +1295,9 @@ function protectReadableReader(reader, stream) {
   addReadableUseStream(readableReaderUseStreams, reader, stream);
   sealProtectedReadableSlot(reader, _stream);
   const canonicalSlots = WeakMapPrototypeGet(canonicalReadableSlots, reader);
-  if (canonicalSlots !== undefined && ReflectHas(canonicalSlots, _readRequests)) {
+  if (
+    canonicalSlots !== undefined && ReflectHas(canonicalSlots, _readRequests)
+  ) {
     sealProtectedReadableSlot(reader, _readRequests);
     protectReadableQueue(canonicalSlots[_readRequests], stream);
   }
@@ -1085,11 +1352,71 @@ function protectReadableStreamGraph(stream) {
   protectReadableReader(reader, stream);
 }
 
+function protectWritableQueue(queue, stream) {
+  if (queue === undefined) return;
+  if (typeof queue !== "object" || queue === null || !isInternalQueue(queue)) {
+    throw new TypeError("Cannot protect an invalid writable stream queue");
+  }
+  hasProtectedWritableQueues = true;
+  addReadableUseStream(writableQueueUseStreams, queue, stream);
+}
+
+function protectWritableController(controller, stream) {
+  if (controller === undefined) return;
+  addReadableUseStream(writableControllerUseStreams, controller, stream);
+  sealProtectedReadableSlot(controller, _stream);
+  sealProtectedReadableSlot(controller, _queue);
+  sealProtectedReadableSlot(controller, _strategySizeAlgorithm);
+  sealProtectedReadableSlot(controller, _writeAlgorithm);
+  sealProtectedReadableSlot(controller, _closeAlgorithm);
+  sealProtectedReadableSlot(controller, _abortAlgorithm);
+  sealProtectedReadableSlot(controller, _signal);
+  protectWritableQueue(getCanonicalReadableSlot(controller, _queue), stream);
+}
+
+function protectWritableWriter(writer, stream) {
+  if (writer === undefined) return;
+  addReadableUseStream(writableWriterUseStreams, writer, stream);
+  sealProtectedReadableSlot(writer, _stream);
+  sealProtectedReadableSlot(writer, _readyPromise);
+  sealProtectedReadableSlot(writer, _closedPromise);
+}
+
+function protectWritableStreamGraph(stream) {
+  const controller = getCanonicalReadableSlot(stream, _controller);
+  const writer = getCanonicalReadableSlot(stream, _writer);
+  sealProtectedReadableSlot(stream, _controller);
+  sealProtectedReadableSlot(stream, _writer);
+  sealProtectedReadableSlot(stream, _identityBypassTS);
+  protectWritableController(controller, stream);
+  protectWritableWriter(writer, stream);
+}
+
+function protectTransformStreamGraph(stream) {
+  sealProtectedReadableSlot(stream, _writable);
+  sealProtectedReadableSlot(stream, _readable);
+  sealProtectedReadableSlot(stream, _controller);
+  const controller = getCanonicalReadableSlot(stream, _controller);
+  if (controller === undefined) return;
+  sealProtectedReadableSlot(controller, _stream);
+  sealProtectedReadableSlot(controller, _transformAlgorithm);
+  sealProtectedReadableSlot(controller, _flushAlgorithm);
+  sealProtectedReadableSlot(controller, _cancelAlgorithm);
+}
+
 function protectQueueForReadableOwner(ownerMap, owner, queue) {
   const streams = WeakMapPrototypeGet(ownerMap, owner);
   if (streams === undefined) return;
   for (let i = 0; i < streams.length; i++) {
     protectReadableQueue(queue, streams[i]);
+  }
+}
+
+function protectQueueForWritableOwner(owner, queue) {
+  const streams = WeakMapPrototypeGet(writableControllerUseStreams, owner);
+  if (streams === undefined) return;
+  for (let i = 0; i < streams.length; i++) {
+    protectWritableQueue(queue, streams[i]);
   }
 }
 
@@ -1100,6 +1427,7 @@ function setReadableControllerQueue(controller, slot, queue) {
     controller,
     queue,
   );
+  protectQueueForWritableOwner(controller, queue);
 }
 
 function setReadableControllerSizeAlgorithm(controller, sizeAlgorithm) {
@@ -1148,6 +1476,111 @@ function invokeReadableControllerSizeAlgorithm(
       webidl.converters["unrestricted double"],
       "Failed to execute `sizeAlgorithm`",
     );
+  } finally {
+    setAsyncContext(priorContext);
+  }
+}
+
+function invokeWritableControllerAlgorithm(
+  controller,
+  algorithm,
+  callbackRecords,
+  args,
+) {
+  const stream = controller[_stream];
+  if (
+    !hasProtectedWritableStreams ||
+    WeakMapPrototypeGet(writableStreamUseGuards, stream) === undefined
+  ) {
+    return ReflectApply(algorithm, undefined, args);
+  }
+  const callbackRecord = WeakMapPrototypeGet(callbackRecords, algorithm);
+  if (callbackRecord === undefined || callbackRecord.trusted === true) {
+    runWritableStreamUseGuard(stream);
+    return ReflectApply(algorithm, undefined, args);
+  }
+  const priorContext = getAsyncContext();
+  setAsyncContext(callbackRecord.callbackContext);
+  try {
+    runWritableStreamUseGuard(stream);
+    return ReflectApply(algorithm, undefined, args);
+  } finally {
+    setAsyncContext(priorContext);
+  }
+}
+
+function invokeWritableControllerCleanupAlgorithm(
+  algorithm,
+  callbackRecords,
+  args,
+) {
+  const callbackRecord = WeakMapPrototypeGet(callbackRecords, algorithm);
+  if (callbackRecord === undefined || callbackRecord.trusted === true) {
+    return ReflectApply(algorithm, undefined, args);
+  }
+  const priorContext = getAsyncContext();
+  setAsyncContext(callbackRecord.callbackContext);
+  try {
+    return ReflectApply(algorithm, undefined, args);
+  } finally {
+    setAsyncContext(priorContext);
+  }
+}
+
+function invokeTransformControllerAlgorithm(controller, algorithm, chunk) {
+  const transform = controller[_stream];
+  const writable = transform[_writable];
+  if (
+    !hasProtectedWritableStreams ||
+    WeakMapPrototypeGet(writableStreamUseGuards, writable) === undefined
+  ) {
+    return ReflectApply(algorithm, undefined, [chunk, controller]);
+  }
+  const callbackRecord = WeakMapPrototypeGet(
+    transformAlgorithmCallbackRecords,
+    algorithm,
+  );
+  if (callbackRecord === undefined) {
+    runWritableStreamUseGuard(writable);
+    return ReflectApply(algorithm, undefined, [chunk, controller]);
+  }
+  if (callbackRecord.trusted === true) {
+    runWritableStreamUseGuard(writable);
+    return ReflectApply(algorithm, undefined, [chunk, controller]);
+  }
+  const priorContext = getAsyncContext();
+  setAsyncContext(callbackRecord.callbackContext);
+  try {
+    runWritableStreamUseGuard(writable);
+    return ReflectApply(algorithm, undefined, [chunk, controller]);
+  } finally {
+    setAsyncContext(priorContext);
+  }
+}
+
+function invokeTransformControllerLifecycleAlgorithm(
+  controller,
+  algorithm,
+  args,
+  guardDelivery,
+) {
+  const callbackRecord = WeakMapPrototypeGet(
+    transformAlgorithmCallbackRecords,
+    algorithm,
+  );
+  if (callbackRecord === undefined) {
+    return ReflectApply(algorithm, undefined, args);
+  }
+  const writable = controller[_stream][_writable];
+  if (callbackRecord.trusted === true) {
+    if (guardDelivery) runWritableStreamUseGuard(writable);
+    return ReflectApply(algorithm, undefined, args);
+  }
+  const priorContext = getAsyncContext();
+  setAsyncContext(callbackRecord.callbackContext);
+  try {
+    if (guardDelivery) runWritableStreamUseGuard(writable);
+    return ReflectApply(algorithm, undefined, args);
   } finally {
     setAsyncContext(priorContext);
   }
@@ -1308,6 +1741,15 @@ function dequeueValue(container) {
   }
   return node.value;
 }
+
+function dequeueCleanupValue(container) {
+  assert(container[_queue] && typeof container[_queueTotalSize] === "number");
+  assert(queueCleanupSize(container[_queue]));
+  const node = queueCleanupDequeueNode(container[_queue]);
+  container[_queueTotalSize] -= node.size;
+  if (container[_queueTotalSize] < 0) container[_queueTotalSize] = 0;
+  return node.value;
+}
 /**
  * @template T
  * @param {{ [_queue]: Array<ValueWithSize<T | _close>>, [_queueTotalSize]: number }} container
@@ -1460,7 +1902,7 @@ function initializeTransformStream(
     return transformStreamDefaultSinkCloseAlgorithm(stream);
   }
 
-  stream[_writable] = createWritableStream(
+  const writable = createWritableStream(
     startAlgorithm,
     writeAlgorithm,
     closeAlgorithm,
@@ -1468,6 +1910,7 @@ function initializeTransformStream(
     writableHighWaterMark,
     writableSizeAlgorithm,
   );
+  setProtectedReadableSlot(stream, _writable, writable);
 
   function pullAlgorithm() {
     return transformStreamDefaultSourcePullAlgorithm(stream);
@@ -1477,30 +1920,33 @@ function initializeTransformStream(
     return transformStreamDefaultSourceCancelAlgorithm(stream, reason);
   }
 
-  stream[_readable] = createReadableStream(
+  const readable = createReadableStream(
     startAlgorithm,
     pullAlgorithm,
     cancelAlgorithm,
     readableHighWaterMark,
     readableSizeAlgorithm,
   );
+  setProtectedReadableSlot(stream, _readable, readable);
+  WeakMapPrototypeSet(writableTransformOwners, writable, stream);
 
   stream[_backpressure] = stream[_backpressureChangePromise] = undefined;
   transformStreamSetBackpressure(stream, true);
-  stream[_controller] = undefined;
+  setProtectedReadableSlot(stream, _controller, undefined);
 }
 
 /** @param {WritableStream} stream */
 function initializeWritableStream(stream) {
   stream[_state] = "writable";
   stream[_storedError] =
-    stream[_writer] =
-    stream[_controller] =
     stream[_inFlightWriteRequest] =
     stream[_closeRequest] =
     stream[_inFlightCloseRequest] =
     stream[_pendingAbortRequest] =
       undefined;
+  setProtectedReadableSlot(stream, _writer, undefined);
+  setProtectedReadableSlot(stream, _controller, undefined);
+  setProtectedReadableSlot(stream, _identityBypassTS, undefined);
   stream[_writeRequests] = new Queue();
   stream[_backpressure] = false;
   stream[_isClosedPromise] = new Deferred();
@@ -2447,7 +2893,9 @@ function readableByteStreamControllerEnqueue(controller, chunk) {
     } else {
       assert(queueSize(controller[_queue]) === 0);
       if (queueSize(controller[_pendingPullIntos]) !== 0) {
-        assert(queuePeek(controller[_pendingPullIntos]).readerType === "default");
+        assert(
+          queuePeek(controller[_pendingPullIntos]).readerType === "default",
+        );
         readableByteStreamControllerShiftPendingPullInto(controller);
       }
       const transferredView = new Uint8Array(
@@ -3907,6 +4355,18 @@ function readableStreamPipeTo(
   assert(!isReadableStreamLocked(source));
   assert(!isWritableStreamLocked(dest));
 
+  // A pipe is a destination transition. Attach every constituent before
+  // inspecting resource backing, acquiring a writer, or allowing any
+  // queue/callback to observe a chunk; object passage never substitutes the
+  // destination's actor. Propagating the aggregate runner would create a new
+  // constituent and can recurse when bidirectional adapter bridges meet.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  forEachReadableStreamUseGuard(
+    source,
+    (guard) => setWritableStreamUseGuard(dest, guard),
+  );
+  trackReadableStreamPipeDestination(source, dest);
+
   // Fast path: when both ends are resource-backed, offload the whole streaming
   // operation to Rust. An `AbortSignal` is supported via a cancel handle, but
   // an already-aborted one is left to the slow path so its synchronous teardown
@@ -3921,15 +4381,18 @@ function readableStreamPipeTo(
     (signal === undefined || !signal.aborted) &&
     source[_state] === "readable" && dest[_state] === "writable"
   ) {
-    return fastPipeTo(
-      source,
-      dest,
-      srcBacking,
-      dstBacking,
-      preventClose,
-      preventAbort,
-      preventCancel,
-      signal,
+    return SafePromisePrototypeFinally(
+      fastPipeTo(
+        source,
+        dest,
+        srcBacking,
+        dstBacking,
+        preventClose,
+        preventAbort,
+        preventCancel,
+        signal,
+      ),
+      () => untrackReadableStreamPipeDestination(source, dest),
     );
   }
 
@@ -4267,6 +4730,7 @@ function readableStreamPipeTo(
    * @param {any=} error
    */
   function finalize(isError, error) {
+    untrackReadableStreamPipeDestination(source, dest);
     writableStreamDefaultWriterRelease(writer);
     readableStreamDefaultReaderRelease(reader);
 
@@ -4372,11 +4836,10 @@ function readableStreamTee(stream, cloneForBranch2) {
   } else {
     branches = readableStreamDefaultTee(stream, cloneForBranch2);
   }
-  const guard = WeakMapPrototypeGet(readableStreamUseGuards, stream);
-  if (guard !== undefined) {
+  registerReadableStreamGuardAttachHook(stream, (guard) => {
     setReadableStreamUseGuard(branches[0], guard);
     setReadableStreamUseGuard(branches[1], guard);
-  }
+  });
   return branches;
 }
 
@@ -5221,11 +5684,15 @@ function setUpTransformStreamDefaultController(
 ) {
   assert(ObjectPrototypeIsPrototypeOf(TransformStreamPrototype, stream));
   assert(stream[_controller] === undefined);
-  controller[_stream] = stream;
-  stream[_controller] = controller;
-  controller[_transformAlgorithm] = transformAlgorithm;
-  controller[_flushAlgorithm] = flushAlgorithm;
-  controller[_cancelAlgorithm] = cancelAlgorithm;
+  setProtectedReadableSlot(controller, _stream, stream);
+  setProtectedReadableSlot(stream, _controller, controller);
+  setProtectedReadableSlot(
+    controller,
+    _transformAlgorithm,
+    transformAlgorithm,
+  );
+  setProtectedReadableSlot(controller, _flushAlgorithm, flushAlgorithm);
+  setProtectedReadableSlot(controller, _cancelAlgorithm, cancelAlgorithm);
   controller[_isIdentityTransform] = isIdentityTransform;
 }
 
@@ -5257,6 +5724,7 @@ function setUpTransformStreamDefaultControllerFromTransformer(
   let cancelAlgorithm = _defaultCancelAlgorithm;
   if (transformerDict.transform !== undefined) {
     const transformCallback = transformerDict.transform;
+    const callbackRecord = captureWebStreamCallbackRecord(transformCallback);
     // Synchronous-transform fast path: a transform() that enqueues and returns
     // undefined (or any non-thenable) completes without a wrapper promise from
     // the Promise<undefined> converter. Returning undefined signals synchronous
@@ -5277,8 +5745,16 @@ function setUpTransformStreamDefaultControllerFromTransformer(
       }
       return PromiseResolve(rv);
     };
+    WeakMapPrototypeSet(
+      transformAlgorithmCallbackRecords,
+      transformAlgorithm,
+      callbackRecord,
+    );
   }
   if (transformerDict.flush !== undefined) {
+    const callbackRecord = captureWebStreamCallbackRecord(
+      transformerDict.flush,
+    );
     flushAlgorithm = (controller) =>
       webidl.invokeCallbackFunction(
         transformerDict.flush,
@@ -5288,8 +5764,16 @@ function setUpTransformStreamDefaultControllerFromTransformer(
         "Failed to execute 'flushAlgorithm' on 'TransformStreamDefaultController'",
         true,
       );
+    WeakMapPrototypeSet(
+      transformAlgorithmCallbackRecords,
+      flushAlgorithm,
+      callbackRecord,
+    );
   }
   if (transformerDict.cancel !== undefined) {
+    const callbackRecord = captureWebStreamCallbackRecord(
+      transformerDict.cancel,
+    );
     cancelAlgorithm = (reason) =>
       webidl.invokeCallbackFunction(
         transformerDict.cancel,
@@ -5299,6 +5783,11 @@ function setUpTransformStreamDefaultControllerFromTransformer(
         "Failed to execute 'cancelAlgorithm' on 'TransformStreamDefaultController'",
         true,
       );
+    WeakMapPrototypeSet(
+      transformAlgorithmCallbackRecords,
+      cancelAlgorithm,
+      callbackRecord,
+    );
   }
   setUpTransformStreamDefaultController(
     stream,
@@ -5309,7 +5798,7 @@ function setUpTransformStreamDefaultControllerFromTransformer(
     transformerDict.transform === undefined,
   );
   if (transformerDict.transform === undefined) {
-    stream[_writable][_identityBypassTS] = stream;
+    setProtectedReadableSlot(stream[_writable], _identityBypassTS, stream);
   }
 }
 
@@ -5336,16 +5825,20 @@ function setUpWritableStreamDefaultController(
 ) {
   assert(isWritableStream(stream));
   assert(stream[_controller] === undefined);
-  controller[_stream] = stream;
-  stream[_controller] = controller;
+  setProtectedReadableSlot(controller, _stream, stream);
+  setProtectedReadableSlot(stream, _controller, controller);
   resetQueue(controller);
-  controller[_signal] = newSignal();
+  setProtectedReadableSlot(controller, _signal, newSignal());
   controller[_started] = false;
-  controller[_strategySizeAlgorithm] = sizeAlgorithm;
+  setProtectedReadableSlot(
+    controller,
+    _strategySizeAlgorithm,
+    sizeAlgorithm,
+  );
   controller[_strategyHWM] = highWaterMark;
-  controller[_writeAlgorithm] = writeAlgorithm;
-  controller[_closeAlgorithm] = closeAlgorithm;
-  controller[_abortAlgorithm] = abortAlgorithm;
+  setProtectedReadableSlot(controller, _writeAlgorithm, writeAlgorithm);
+  setProtectedReadableSlot(controller, _closeAlgorithm, closeAlgorithm);
+  setProtectedReadableSlot(controller, _abortAlgorithm, abortAlgorithm);
   const backpressure = writableStreamDefaultControllerGetBackpressure(
     controller,
   );
@@ -5398,6 +5891,9 @@ function setUpWritableStreamDefaultControllerFromUnderlyingSink(
       );
   }
   if (underlyingSinkDict.write !== undefined) {
+    const callbackRecord = captureWebStreamCallbackRecord(
+      underlyingSinkDict.write,
+    );
     writeAlgorithm = (chunk) =>
       webidl.invokeCallbackFunction(
         underlyingSinkDict.write,
@@ -5407,8 +5903,16 @@ function setUpWritableStreamDefaultControllerFromUnderlyingSink(
         "Failed to execute 'writeAlgorithm' on 'WritableStreamDefaultController'",
         true,
       );
+    WeakMapPrototypeSet(
+      writableWriteAlgorithmCallbackRecords,
+      writeAlgorithm,
+      callbackRecord,
+    );
   }
   if (underlyingSinkDict.close !== undefined) {
+    const callbackRecord = captureWebStreamCallbackRecord(
+      underlyingSinkDict.close,
+    );
     closeAlgorithm = () =>
       webidl.invokeCallbackFunction(
         underlyingSinkDict.close,
@@ -5418,8 +5922,16 @@ function setUpWritableStreamDefaultControllerFromUnderlyingSink(
         "Failed to execute 'closeAlgorithm' on 'WritableStreamDefaultController'",
         true,
       );
+    WeakMapPrototypeSet(
+      writableWriteAlgorithmCallbackRecords,
+      closeAlgorithm,
+      callbackRecord,
+    );
   }
   if (underlyingSinkDict.abort !== undefined) {
+    const callbackRecord = captureWebStreamCallbackRecord(
+      underlyingSinkDict.abort,
+    );
     abortAlgorithm = (reason) =>
       webidl.invokeCallbackFunction(
         underlyingSinkDict.abort,
@@ -5429,6 +5941,11 @@ function setUpWritableStreamDefaultControllerFromUnderlyingSink(
         "Failed to execute 'abortAlgorithm' on 'WritableStreamDefaultController'",
         true,
       );
+    WeakMapPrototypeSet(
+      writableWriteAlgorithmCallbackRecords,
+      abortAlgorithm,
+      callbackRecord,
+    );
   }
   setUpWritableStreamDefaultController(
     stream,
@@ -5451,37 +5968,42 @@ function setUpWritableStreamDefaultWriter(writer, stream) {
   if (isWritableStreamLocked(stream) === true) {
     throw new TypeError("The stream is already locked");
   }
-  writer[_stream] = stream;
-  stream[_writer] = writer;
+  setProtectedReadableSlot(writer, _stream, stream);
+  setProtectedReadableSlot(stream, _writer, writer);
+  setProtectedReadableSlot(writer, _readyPromise, undefined);
+  setProtectedReadableSlot(writer, _closedPromise, undefined);
+  if (WeakMapPrototypeGet(writableStreamUseGuards, stream) !== undefined) {
+    protectWritableWriter(writer, stream);
+  }
   const state = stream[_state];
   if (state === "writable") {
     if (
       writableStreamCloseQueuedOrInFlight(stream) === false &&
       stream[_backpressure] === true
     ) {
-      writer[_readyPromise] = new Deferred();
+      setProtectedReadableSlot(writer, _readyPromise, new Deferred());
     } else {
-      writer[_readyPromise] = new Deferred();
+      setProtectedReadableSlot(writer, _readyPromise, new Deferred());
       writer[_readyPromise].resolve(undefined);
     }
-    writer[_closedPromise] = new Deferred();
+    setProtectedReadableSlot(writer, _closedPromise, new Deferred());
   } else if (state === "erroring") {
-    writer[_readyPromise] = new Deferred();
+    setProtectedReadableSlot(writer, _readyPromise, new Deferred());
     writer[_readyPromise].reject(stream[_storedError]);
     setPromiseIsHandledToTrue(writer[_readyPromise].promise);
-    writer[_closedPromise] = new Deferred();
+    setProtectedReadableSlot(writer, _closedPromise, new Deferred());
   } else if (state === "closed") {
-    writer[_readyPromise] = new Deferred();
+    setProtectedReadableSlot(writer, _readyPromise, new Deferred());
     writer[_readyPromise].resolve(undefined);
-    writer[_closedPromise] = new Deferred();
+    setProtectedReadableSlot(writer, _closedPromise, new Deferred());
     writer[_closedPromise].resolve(undefined);
   } else {
     assert(state === "errored");
     const storedError = stream[_storedError];
-    writer[_readyPromise] = new Deferred();
+    setProtectedReadableSlot(writer, _readyPromise, new Deferred());
     writer[_readyPromise].reject(storedError);
     setPromiseIsHandledToTrue(writer[_readyPromise].promise);
-    writer[_closedPromise] = new Deferred();
+    setProtectedReadableSlot(writer, _closedPromise, new Deferred());
     writer[_closedPromise].reject(storedError);
     setPromiseIsHandledToTrue(writer[_closedPromise].promise);
   }
@@ -5489,9 +6011,9 @@ function setUpWritableStreamDefaultWriter(writer, stream) {
 
 /** @param {TransformStreamDefaultController} controller */
 function transformStreamDefaultControllerClearAlgorithms(controller) {
-  controller[_transformAlgorithm] = undefined;
-  controller[_flushAlgorithm] = undefined;
-  controller[_cancelAlgorithm] = undefined;
+  setProtectedReadableSlot(controller, _transformAlgorithm, undefined);
+  setProtectedReadableSlot(controller, _flushAlgorithm, undefined);
+  setProtectedReadableSlot(controller, _cancelAlgorithm, undefined);
 }
 
 /**
@@ -5562,7 +6084,20 @@ function transformStreamDefaultControllerPerformTransform(controller, chunk) {
     }
     return resolvedPromise();
   }
-  const transformPromise = transformAlgorithm(chunk, controller);
+  let transformPromise;
+  try {
+    transformPromise = invokeTransformControllerAlgorithm(
+      controller,
+      transformAlgorithm,
+      chunk,
+    );
+  } catch (error) {
+    // A delivery guard can reject synchronously before the user transform is
+    // invoked. Error both sides exactly as an asynchronously rejected
+    // transform would, so a pending read cannot hang after refusal.
+    transformStreamError(controller[_stream], error);
+    return PromiseReject(error);
+  }
   if (transformPromise === undefined) {
     // The transform completed synchronously (see the transformAlgorithm set up
     // in setUpTransformStreamDefaultControllerFromTransformer): the chunk was
@@ -5601,7 +6136,12 @@ function transformStreamDefaultSinkAbortAlgorithm(stream, reason) {
   }
   const readable = stream[_readable];
   controller[_finishPromise] = new Deferred();
-  const cancelPromise = controller[_cancelAlgorithm](reason);
+  const cancelPromise = invokeTransformControllerLifecycleAlgorithm(
+    controller,
+    controller[_cancelAlgorithm],
+    [reason],
+    false,
+  );
   transformStreamDefaultControllerClearAlgorithms(controller);
   transformPromiseWith(cancelPromise, () => {
     if (readable[_state] === "errored") {
@@ -5630,7 +6170,20 @@ function transformStreamDefaultSinkCloseAlgorithm(stream) {
   }
   const readable = stream[_readable];
   controller[_finishPromise] = new Deferred();
-  const flushPromise = controller[_flushAlgorithm](controller);
+  let flushPromise;
+  try {
+    flushPromise = invokeTransformControllerLifecycleAlgorithm(
+      controller,
+      controller[_flushAlgorithm],
+      [controller],
+      true,
+    );
+  } catch (error) {
+    transformStreamDefaultControllerClearAlgorithms(controller);
+    readableStreamDefaultControllerError(readable[_controller], error);
+    controller[_finishPromise].reject(error);
+    return controller[_finishPromise].promise;
+  }
   transformStreamDefaultControllerClearAlgorithms(controller);
   transformPromiseWith(flushPromise, () => {
     if (readable[_state] === "errored") {
@@ -5689,7 +6242,12 @@ function transformStreamDefaultSourceCancelAlgorithm(stream, reason) {
   }
   const writable = stream[_writable];
   controller[_finishPromise] = new Deferred();
-  const cancelPromise = controller[_cancelAlgorithm](reason);
+  const cancelPromise = invokeTransformControllerLifecycleAlgorithm(
+    controller,
+    controller[_cancelAlgorithm],
+    [reason],
+    false,
+  );
   transformStreamDefaultControllerClearAlgorithms(controller);
   transformPromiseWith(cancelPromise, () => {
     if (writable[_state] === "errored") {
@@ -5893,27 +6451,28 @@ function writableStreamDefaultControllerAdvanceQueueIfNeeded(controller) {
     writableStreamFinishErroring(stream);
     return;
   }
-  if (queueSize(controller[_queue]) === 0) {
+  if (queueCleanupSize(controller[_queue]) === 0) {
+    return;
+  }
+  const cleanupValue = queueCleanupPeek(controller[_queue]);
+  if (cleanupValue === _close) {
+    writableStreamDefaultControllerProcessClose(controller);
     return;
   }
   const value = peekQueueValue(controller);
-  if (value === _close) {
-    writableStreamDefaultControllerProcessClose(controller);
-  } else {
-    writableStreamDefaultControllerProcessWrite(controller, value);
-  }
+  writableStreamDefaultControllerProcessWrite(controller, value);
 }
 
 function writableStreamDefaultControllerClearAlgorithms(controller) {
-  controller[_writeAlgorithm] = undefined;
-  controller[_closeAlgorithm] = undefined;
-  controller[_abortAlgorithm] = undefined;
-  controller[_strategySizeAlgorithm] = undefined;
+  setProtectedReadableSlot(controller, _writeAlgorithm, undefined);
+  setProtectedReadableSlot(controller, _closeAlgorithm, undefined);
+  setProtectedReadableSlot(controller, _abortAlgorithm, undefined);
+  setProtectedReadableSlot(controller, _strategySizeAlgorithm, undefined);
 }
 
 /** @param {WritableStreamDefaultController} controller */
 function writableStreamDefaultControllerClose(controller) {
-  enqueueValueWithSize(controller, _close, 0);
+  queueCleanupEnqueueWithSize(controller[_queue], _close, 0);
   writableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
 }
 
@@ -5956,12 +6515,18 @@ function writableStreamDefaultControllerGetBackpressure(controller) {
  * @returns {number}
  */
 function writableStreamDefaultControllerGetChunkSize(controller, chunk) {
-  if (controller[_strategySizeAlgorithm] === defaultSizeAlgorithm) {
+  const sizeAlgorithm = controller[_strategySizeAlgorithm];
+  if (sizeAlgorithm === defaultSizeAlgorithm) {
     return 1;
   }
   let value;
   try {
-    value = controller[_strategySizeAlgorithm](chunk);
+    value = invokeWritableControllerAlgorithm(
+      controller,
+      sizeAlgorithm,
+      readableSizeAlgorithmCallbackRecords,
+      [chunk],
+    );
   } catch (e) {
     writableStreamDefaultControllerErrorIfNeeded(controller, e);
     return 1;
@@ -5981,9 +6546,13 @@ function writableStreamDefaultControllerGetDesiredSize(controller) {
 function writableStreamDefaultControllerProcessClose(controller) {
   const stream = controller[_stream];
   writableStreamMarkCloseRequestInFlight(stream);
-  dequeueValue(controller);
-  assert(queueSize(controller[_queue]) === 0);
-  const sinkClosePromise = controller[_closeAlgorithm]();
+  assert(dequeueCleanupValue(controller) === _close);
+  assert(queueCleanupSize(controller[_queue]) === 0);
+  const sinkClosePromise = invokeWritableControllerCleanupAlgorithm(
+    controller[_closeAlgorithm],
+    writableWriteAlgorithmCallbackRecords,
+    [],
+  );
   writableStreamDefaultControllerClearAlgorithms(controller);
   uponPromise(sinkClosePromise, () => {
     writableStreamFinishInFlightClose(stream);
@@ -6000,7 +6569,17 @@ function writableStreamDefaultControllerProcessClose(controller) {
 function writableStreamDefaultControllerProcessWrite(controller, chunk) {
   const stream = controller[_stream];
   writableStreamMarkFirstWriteRequestInFlight(stream);
-  const sinkWritePromise = controller[_writeAlgorithm](chunk, controller);
+  let sinkWritePromise;
+  try {
+    sinkWritePromise = invokeWritableControllerAlgorithm(
+      controller,
+      controller[_writeAlgorithm],
+      writableWriteAlgorithmCallbackRecords,
+      [chunk, controller],
+    );
+  } catch (error) {
+    sinkWritePromise = PromiseReject(error);
+  }
   // The reaction handlers are created once per controller (lazily, so
   // never-written streams don't pay for them) instead of per chunk. They
   // include the assertion-rethrow wrapping that uponPromise() would
@@ -6120,7 +6699,7 @@ function writableStreamDefaultWriterEnsureClosedPromiseRejected(
   error,
 ) {
   if (writer[_closedPromise].state !== "pending") {
-    writer[_closedPromise] = new Deferred();
+    setProtectedReadableSlot(writer, _closedPromise, new Deferred());
   }
   // Mark the promise as handled before rejecting it. Otherwise the rejection is
   // momentarily observable as unhandled, which trips a debugger configured to
@@ -6138,7 +6717,7 @@ function writableStreamDefaultWriterEnsureReadyPromiseRejected(
   error,
 ) {
   if (writer[_readyPromise].state !== "pending") {
-    writer[_readyPromise] = new Deferred();
+    setProtectedReadableSlot(writer, _readyPromise, new Deferred());
   }
   // Mark the promise as handled before rejecting it. Otherwise the rejection is
   // momentarily observable as unhandled, which trips a debugger configured to
@@ -6179,8 +6758,8 @@ function writableStreamDefaultWriterRelease(writer) {
     writer,
     releasedError,
   );
-  stream[_writer] = undefined;
-  writer[_stream] = undefined;
+  setProtectedReadableSlot(stream, _writer, undefined);
+  setProtectedReadableSlot(writer, _stream, undefined);
 }
 
 /**
@@ -6192,6 +6771,12 @@ function writableStreamDefaultWriterRelease(writer) {
 function writableStreamDefaultWriterWrite(writer, chunk) {
   const stream = writer[_stream];
   assert(stream !== undefined);
+  // Write admission is itself a destination transition. Guard before the
+  // chunk reaches a strategy callback or a private queue: an in-flight root
+  // write must not let a later package write wait in the queue and then run
+  // from the root write's promise continuation.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  runWritableStreamUseGuard(stream);
   const controller = stream[_controller];
   const chunkSize = writableStreamDefaultControllerGetChunkSize(
     controller,
@@ -6218,6 +6803,14 @@ function writableStreamDefaultWriterWrite(writer, chunk) {
   const promise = writableStreamAddWriteRequest(stream);
   writableStreamDefaultControllerWrite(controller, chunk, chunkSize);
   return promise;
+}
+
+function writableStreamDefaultWriterReadyPromise(writer) {
+  return writer[_readyPromise].promise;
+}
+
+function writableStreamDefaultWriterClosedPromise(writer) {
+  return writer[_closedPromise].promise;
 }
 
 /** @param {WritableStream} stream */
@@ -6397,7 +6990,7 @@ function writableStreamUpdateBackpressure(stream, backpressure) {
   const writer = stream[_writer];
   if (writer !== undefined && backpressure !== stream[_backpressure]) {
     if (backpressure === true) {
-      writer[_readyPromise] = new Deferred();
+      setProtectedReadableSlot(writer, _readyPromise, new Deferred());
     } else {
       assert(backpressure === false);
       writer[_readyPromise].resolve(undefined);
@@ -6806,9 +7399,9 @@ class ReadableStream {
       prefix,
     );
     const source = asyncIterable;
-    const sourceGuard = isReadableStream(source)
-      ? WeakMapPrototypeGet(readableStreamUseGuards, source)
-      : WeakMapPrototypeGet(readableStreamIteratorUseGuards, source);
+    const sourceStream = isReadableStream(source)
+      ? source
+      : WeakMapPrototypeGet(readableStreamIteratorUseStreams, source);
     asyncIterable = webidl.converters["async iterable<any>"](
       asyncIterable,
       prefix,
@@ -6831,8 +7424,11 @@ class ReadableStream {
       // deno-lint-ignore prefer-primordials
       await iter.return(reason);
     }, 0);
-    if (sourceGuard !== undefined) {
-      setReadableStreamUseGuard(stream, sourceGuard);
+    if (sourceStream !== undefined) {
+      registerReadableStreamGuardAttachHook(
+        sourceStream,
+        (guard) => setReadableStreamUseGuard(stream, guard),
+      );
     }
     return stream;
   }
@@ -6917,10 +7513,10 @@ class ReadableStream {
     if (isWritableStreamLocked(writable)) {
       throw new TypeError("Target WritableStream is already locked");
     }
-    const useGuard = WeakMapPrototypeGet(readableStreamUseGuards, this);
-    if (useGuard !== undefined) {
-      setReadableStreamUseGuard(readable, useGuard);
-    }
+    registerReadableStreamGuardAttachHook(
+      this,
+      (guard) => setReadableStreamUseGuard(readable, guard),
+    );
     const promise = readableStreamPipeTo(
       this,
       writable,
@@ -7010,10 +7606,7 @@ class ReadableStream {
     const reader = acquireReadableStreamDefaultReader(this);
     iterator[_reader] = reader;
     iterator[_preventCancel] = preventCancel;
-    const useGuard = WeakMapPrototypeGet(readableStreamUseGuards, this);
-    if (useGuard !== undefined) {
-      WeakMapPrototypeSet(readableStreamIteratorUseGuards, iterator, useGuard);
-    }
+    WeakMapPrototypeSet(readableStreamIteratorUseStreams, iterator, this);
     return iterator;
   }
 
@@ -7230,6 +7823,16 @@ class ReadableStreamDefaultReader {
 webidl.configureInterface(ReadableStreamDefaultReader);
 const ReadableStreamDefaultReaderPrototype =
   ReadableStreamDefaultReader.prototype;
+const readableStreamDefaultReaderReadMethod =
+  ReadableStreamDefaultReaderPrototype.read;
+
+function readableStreamDefaultReaderReadPromise(reader) {
+  return ReflectApply(readableStreamDefaultReaderReadMethod, reader, []);
+}
+
+function readableStreamDefaultReaderClosedPromise(reader) {
+  return reader[_closedPromise].promise;
+}
 
 // See ReadableStreamDefaultReadRequest: one allocation per read(view)
 // rather than four.
@@ -8467,7 +9070,11 @@ class WritableStreamDefaultController {
    * @returns {Promise<void>}
    */
   [_abortSteps](reason) {
-    const result = this[_abortAlgorithm](reason);
+    const result = invokeWritableControllerCleanupAlgorithm(
+      this[_abortAlgorithm],
+      writableWriteAlgorithmCallbackRecords,
+      [reason],
+    );
     writableStreamDefaultControllerClearAlgorithms(this);
     return result;
   }
@@ -8669,6 +9276,12 @@ function readableStreamTransferReceivingSteps(port) {
  * @param port {MessagePort}
  */
 function writableStreamTransferSteps(value, port) {
+  if (WeakMapPrototypeGet(writableStreamUseGuards, value) !== undefined) {
+    throw new DOMException(
+      "Cannot transfer a terminal-authority WritableStream",
+      "DataCloneError",
+    );
+  }
   if (isWritableStreamLocked(value)) {
     throw new DOMException(
       "Cannot transfer a locked WritableStream",
@@ -8720,10 +9333,14 @@ function transformStreamTransferSteps(value, portR, portW) {
  */
 function transformStreamTransferReceivingSteps(portR, portW) {
   const stream = new TransformStream(_brand);
-  stream[_readable] = new ReadableStream(_brand);
-  setUpCrossRealmTransformReadable(stream[_readable], portR);
-  stream[_writable] = new WritableStream(_brand);
-  setUpCrossRealmTransformWritable(stream[_writable], portW);
+  const readable = new ReadableStream(_brand);
+  setProtectedReadableSlot(stream, _readable, readable);
+  setUpCrossRealmTransformReadable(readable, portR);
+  const writable = new WritableStream(_brand);
+  setProtectedReadableSlot(stream, _writable, writable);
+  setProtectedReadableSlot(stream, _controller, undefined);
+  WeakMapPrototypeSet(writableTransformOwners, writable, stream);
+  setUpCrossRealmTransformWritable(writable, portW);
   return stream;
 }
 
@@ -9282,6 +9899,7 @@ return {
   kNodeMessagingTransfer,
   // Exposed in global runtime scope
   acquireReadableStreamDefaultReader,
+  acquireWritableStreamDefaultWriter,
   ByteLengthQueuingStrategy,
   CountQueuingStrategy,
   createProxy,
@@ -9291,6 +9909,7 @@ return {
   errorReadableStream,
   getReadableStreamResourceBacking,
   getReadableStreamUseGuard,
+  getWritableStreamUseGuard,
   getReadableStreamStoredError,
   getWritableStreamResourceBacking,
   isReadableByteStreamController,
@@ -9301,6 +9920,7 @@ return {
   isReadableStreamDisturbed,
   isReadableStreamLocked,
   isReadableStreamDefaultReader,
+  markWritableStreamTrustedCallback,
   ReadableByteStreamController,
   ReadableStream,
   ReadableStreamBYOBReader,
@@ -9342,6 +9962,8 @@ return {
   readableStreamDefaultControllerHasBackpressure,
   readableStreamDefaultControllerShouldCallPull,
   ReadableStreamDefaultReader,
+  readableStreamDefaultReaderClosedPromise,
+  readableStreamDefaultReaderReadPromise,
   readableStreamDisturb,
   readableStreamError,
   readableStreamForRid,
@@ -9359,7 +9981,10 @@ return {
   readableStreamTee,
   readableStreamThrowIfErrored,
   resourceForReadableStream,
+  registerReadableStreamGuardAttachHook,
+  registerWritableStreamGuardAttachHook,
   setReadableStreamUseGuard,
+  setWritableStreamUseGuard,
   setUpReadableByteStreamController,
   setUpReadableByteStreamControllerFromSource,
   setUpReadableStreamBYOBReader,
@@ -9372,6 +9997,12 @@ return {
   writableStreamClose,
   WritableStreamDefaultController,
   WritableStreamDefaultWriter,
+  writableStreamDefaultWriterAbort,
+  writableStreamDefaultWriterClose,
+  writableStreamDefaultWriterClosedPromise,
+  writableStreamDefaultWriterReadyPromise,
+  writableStreamDefaultWriterRelease,
+  writableStreamDefaultWriterWrite,
   writableStreamForRid,
 };
 })();

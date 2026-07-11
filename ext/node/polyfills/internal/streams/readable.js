@@ -436,32 +436,37 @@ function setReadableStateDecoder(state, value) {
   else state[kState] &= ~kDecoder;
 }
 
-function protectReadableState(stream) {
+function protectReadableState(stream, guard = undefined) {
   const state = WeakMapPrototypeGet(originalReadableStates, stream);
-  if (state === undefined || getGuardedReadableState(state) !== undefined) {
-    return;
+  if (state === undefined) return;
+  if (getGuardedReadableState(state) === undefined) {
+    const publicBuffer = state.buffer;
+    const privateBuffer = ArrayPrototypeSlice(
+      publicBuffer,
+      state.bufferIndex,
+    );
+    const decoder = (state[kState] & kDecoder) !== 0
+      ? transferStringDecoder(state[kDecoderValue])
+      : null;
+    // Clear every retained reference synchronously before the guard becomes
+    // visible. The public fields remain compatibility-shaped decoys; all
+    // engine paths switch to the closure-private record below.
+    publicBuffer.length = 0;
+    state.buffer = [];
+    state.bufferIndex = 0;
+    state[kDecoderValue] = null;
+    WeakMapPrototypeSet(guardedReadableStates, state, {
+      buffer: privateBuffer,
+      bufferIndex: 0,
+      decoder,
+      stream,
+    });
   }
-  const publicBuffer = state.buffer;
-  const privateBuffer = ArrayPrototypeSlice(
-    publicBuffer,
-    state.bufferIndex,
-  );
-  const decoder = (state[kState] & kDecoder) !== 0
-    ? transferStringDecoder(state[kDecoderValue])
-    : null;
-  // Clear every retained reference synchronously before the guard becomes
-  // visible. The public fields remain compatibility-shaped decoys; all engine
-  // paths switch to the closure-private record below.
-  publicBuffer.length = 0;
-  state.buffer = [];
-  state.bufferIndex = 0;
-  state[kDecoderValue] = null;
-  WeakMapPrototypeSet(guardedReadableStates, state, {
-    buffer: privateBuffer,
-    bufferIndex: 0,
-    decoder,
-    stream,
-  });
+  if (guard !== undefined) {
+    for (let i = 0; i < state.pipes.length; i++) {
+      setStreamUseGuard(state.pipes[i], guard);
+    }
+  }
 }
 
 function installReadableDeliveryHook(stream) {
@@ -752,7 +757,10 @@ function ReadableState(options, stream, isDuplex) {
     this.encoding = options.encoding;
   }
 
-  registerStreamGuardAttachHook(stream, () => protectReadableState(stream));
+  registerStreamGuardAttachHook(
+    stream,
+    (guard) => protectReadableState(stream, guard),
+  );
   registerStreamDeliveryPreflight(
     stream,
     () => prepareEventListenerDelivery(stream, "data"),
@@ -1540,7 +1548,6 @@ Readable.prototype._read = function (n) {
 
 Readable.prototype.pipe = function (dest, pipeOpts) {
   runReadableUseGuard(this);
-  const sourceGuard = getReadableUseGuard(this);
   if (
     dest !== null && (typeof dest === "object" || typeof dest === "function")
   ) {
@@ -2481,33 +2488,17 @@ function lazyWebStreams() {
 }
 
 Readable.fromWeb = function (readableStream, options) {
-  const readable = lazyWebStreams().newStreamReadableFromReadableStream(
+  return lazyWebStreams().newStreamReadableFromReadableStream(
     readableStream,
     options,
   );
-  const { getReadableStreamUseGuard } = core.loadExtScript(
-    "ext:deno_web/06_streams.js",
-  );
-  const sourceGuard = getReadableStreamUseGuard(readableStream);
-  if (sourceGuard !== undefined) {
-    setReadableUseGuard(readable, sourceGuard);
-  }
-  return readable;
 };
 
 Readable.toWeb = function (streamReadable, options) {
-  const readable = lazyWebStreams().newReadableStreamFromStreamReadable(
+  return lazyWebStreams().newReadableStreamFromStreamReadable(
     streamReadable,
     options,
   );
-  const sourceGuard = getReadableUseGuard(streamReadable);
-  if (sourceGuard !== undefined) {
-    const { setReadableStreamUseGuard } = core.loadExtScript(
-      "ext:deno_web/06_streams.js",
-    );
-    setReadableStreamUseGuard(readable, sourceGuard);
-  }
-  return readable;
 };
 
 Readable.wrap = function (src, options) {

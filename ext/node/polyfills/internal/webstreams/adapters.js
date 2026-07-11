@@ -1,7 +1,57 @@
 // deno-lint-ignore-file
 // Copyright 2018-2026 the Deno authors. MIT license.
 (function () {
-const { core } = __bootstrap;
+const { core, primordials } = __bootstrap;
+const {
+  ArrayBufferIsView,
+  ArrayPrototypeMap,
+  FunctionPrototypeCall,
+  PromisePrototypeThen,
+  PromiseResolve,
+  PromiseWithResolvers,
+  SafePromiseAll,
+  SafePromisePrototypeFinally,
+  Uint8Array,
+} = primordials;
+const {
+  captureDeliveryCallback,
+  captureTrustedDeliveryCallback,
+  markStreamCleanupDeliveryCallback,
+  markStreamTrustedDeliveryCallback,
+  markTrustedDeliveryCallback,
+  registerStreamGuardAttachHook,
+  runCapturedCleanup,
+  runCapturedDelivery,
+  setStreamUseGuard,
+} = core.loadExtScript("ext:deno_node/internal/streams/oden_delivery.js");
+const { pushReadableChunk } = core.loadExtScript(
+  "ext:deno_node/internal/streams/readable.js",
+);
+const {
+  acquireReadableStreamDefaultReader,
+  acquireWritableStreamDefaultWriter,
+  markWritableStreamTrustedCallback,
+  readableByteStreamControllerClose,
+  readableByteStreamControllerEnqueue,
+  readableByteStreamControllerError,
+  readableByteStreamControllerGetDesiredSize,
+  readableStreamDefaultReaderClosedPromise,
+  readableStreamDefaultReaderReadPromise,
+  readableStreamDefaultControllerClose,
+  readableStreamDefaultControllerEnqueue,
+  readableStreamDefaultControllerError,
+  readableStreamDefaultControllerGetDesiredSize,
+  readableStreamReaderGenericCancel,
+  registerReadableStreamGuardAttachHook,
+  registerWritableStreamGuardAttachHook,
+  setReadableStreamUseGuard,
+  setWritableStreamUseGuard,
+  writableStreamDefaultWriterAbort,
+  writableStreamDefaultWriterClose,
+  writableStreamDefaultWriterClosedPromise,
+  writableStreamDefaultWriterReadyPromise,
+  writableStreamDefaultWriterWrite,
+} = core.loadExtScript("ext:deno_web/06_streams.js");
 const { destroy, destroyer } = core.loadExtScript(
   "ext:deno_node/internal/streams/destroy.js",
 );
@@ -34,6 +84,19 @@ const {
 const lazyProcess = core.createLazyLoader("node:process");
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const lazyStream = core.createLazyLoader("node:stream");
+const {
+  isRegisteredWritable,
+  isWritablePublicWrite,
+  writableNeedsDrain,
+} = core.loadExtScript("ext:deno_node/internal/streams/writable.js");
+
+function uponPromise(promise, onFulfilled, onRejected) {
+  return PromisePrototypeThen(promise, onFulfilled, onRejected);
+}
+
+function destroyNodeStream(stream, error) {
+  return FunctionPrototypeCall(destroy, stream, error);
+}
 
 function isWritableStream(object) {
   return object instanceof WritableStream;
@@ -68,7 +131,7 @@ function newStreamReadableFromReadableStream(
   }
   validateBoolean(objectMode, "options.objectMode");
 
-  const reader = readableStream.getReader();
+  const reader = acquireReadableStreamDefaultReader(readableStream);
   let closed = false;
 
   const readable = new (lazyStream().Readable)({
@@ -78,15 +141,20 @@ function newStreamReadableFromReadableStream(
     signal,
 
     read() {
-      reader.read().then(
+      uponPromise(
+        readableStreamDefaultReaderReadPromise(reader),
         (chunk) => {
-          if (chunk.done) {
-            readable.push(null);
-          } else {
-            readable.push(chunk.value);
+          try {
+            if (chunk.done) {
+              pushReadableChunk(readable, null);
+            } else {
+              pushReadableChunk(readable, chunk.value);
+            }
+          } catch (error) {
+            destroyNodeStream(readable, error);
           }
         },
-        (error) => destroy.call(readable, error),
+        (error) => destroyNodeStream(readable, error),
       );
     },
 
@@ -107,7 +175,11 @@ function newStreamReadableFromReadableStream(
       }
 
       if (!closed) {
-        reader.cancel(error).then(done, done);
+        uponPromise(
+          readableStreamReaderGenericCancel(reader, error),
+          done,
+          done,
+        );
         return;
       }
 
@@ -115,13 +187,21 @@ function newStreamReadableFromReadableStream(
     },
   });
 
-  reader.closed.then(
+  registerStreamGuardAttachHook(readable, (guard) => {
+    setReadableStreamUseGuard(readableStream, guard);
+  });
+  registerReadableStreamGuardAttachHook(readableStream, (guard) => {
+    setStreamUseGuard(readable, guard);
+  });
+
+  uponPromise(
+    readableStreamDefaultReaderClosedPromise(reader),
     () => {
       closed = true;
     },
     (error) => {
       closed = true;
-      destroy.call(readable, error);
+      destroyNodeStream(readable, error);
     },
   );
 
@@ -151,7 +231,7 @@ function newStreamWritableFromWritableStream(
   validateBoolean(objectMode, "options.objectMode");
   validateBoolean(decodeStrings, "options.decodeStrings");
 
-  const writer = writableStream.getWriter();
+  const writer = acquireWritableStreamDefaultWriter(writableStream);
   let closed = false;
 
   const writable = new (lazyStream().Writable)({
@@ -171,15 +251,23 @@ function newStreamWritableFromWritableStream(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() => destroy.call(writable, error));
+          lazyProcess().default.nextTick(() =>
+            destroyNodeStream(writable, error)
+          );
         }
       }
 
-      writer.ready.then(
+      uponPromise(
+        writableStreamDefaultWriterReadyPromise(writer),
         () =>
-          Promise.all(
-            chunks.map((data) => writer.write(data.chunk)),
-          ).then(done, done),
+          uponPromise(
+            SafePromiseAll(
+              ArrayPrototypeMap(chunks, (data) =>
+                writableStreamDefaultWriterWrite(writer, data.chunk)),
+            ),
+            done,
+            done,
+          ),
         done,
       );
     },
@@ -198,12 +286,18 @@ function newStreamWritableFromWritableStream(
         try {
           callback(error);
         } catch (error) {
-          destroy(this, duplex, error);
+          destroyNodeStream(writable, error);
         }
       }
 
-      writer.ready.then(
-        () => writer.write(chunk).then(done, done),
+      uponPromise(
+        writableStreamDefaultWriterReadyPromise(writer),
+        () =>
+          uponPromise(
+            writableStreamDefaultWriterWrite(writer, chunk),
+            done,
+            done,
+          ),
         done,
       );
     },
@@ -226,9 +320,17 @@ function newStreamWritableFromWritableStream(
 
       if (!closed) {
         if (error != null) {
-          writer.abort(error).then(done, done);
+          uponPromise(
+            writableStreamDefaultWriterAbort(writer, error),
+            done,
+            done,
+          );
         } else {
-          writer.close().then(done, done);
+          uponPromise(
+            writableStreamDefaultWriterClose(writer),
+            done,
+            done,
+          );
         }
         return;
       }
@@ -246,23 +348,41 @@ function newStreamWritableFromWritableStream(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() => destroy.call(writable, error));
+          lazyProcess().default.nextTick(() =>
+            destroyNodeStream(writable, error)
+          );
         }
       }
 
       if (!closed) {
-        writer.close().then(done, done);
+        uponPromise(
+          writableStreamDefaultWriterClose(writer),
+          done,
+          done,
+        );
       }
     },
   });
 
-  writer.closed.then(
+  markStreamTrustedDeliveryCallback(writable, writable._write);
+  markStreamTrustedDeliveryCallback(writable, writable._writev);
+  markStreamCleanupDeliveryCallback(writable, writable._final);
+
+  registerStreamGuardAttachHook(writable, (guard) => {
+    setWritableStreamUseGuard(writableStream, guard);
+  });
+  registerWritableStreamGuardAttachHook(writableStream, (guard) => {
+    setStreamUseGuard(writable, guard);
+  });
+
+  uponPromise(
+    writableStreamDefaultWriterClosedPromise(writer),
     () => {
       closed = true;
     },
     (error) => {
       closed = true;
-      destroy.call(writable, error);
+      destroyNodeStream(writable, error);
     },
   );
 
@@ -309,8 +429,8 @@ function newStreamDuplexFromReadableWritablePair(
     throw new ERR_INVALID_ARG_VALUE(encoding, "options.encoding");
   }
 
-  const writer = writableStream.getWriter();
-  const reader = readableStream.getReader();
+  const writer = acquireWritableStreamDefaultWriter(writableStream);
+  const reader = acquireReadableStreamDefaultReader(readableStream);
   let writableClosed = false;
   let readableClosed = false;
 
@@ -333,15 +453,23 @@ function newStreamDuplexFromReadableWritablePair(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() => destroy(duplex, error));
+          lazyProcess().default.nextTick(() =>
+            destroyNodeStream(duplex, error)
+          );
         }
       }
 
-      writer.ready.then(
+      uponPromise(
+        writableStreamDefaultWriterReadyPromise(writer),
         () =>
-          Promise.all(
-            chunks.map((data) => writer.write(data.chunk)),
-          ).then(done, done),
+          uponPromise(
+            SafePromiseAll(
+              ArrayPrototypeMap(chunks, (data) =>
+                writableStreamDefaultWriterWrite(writer, data.chunk)),
+            ),
+            done,
+            done,
+          ),
         done,
       );
     },
@@ -360,12 +488,18 @@ function newStreamDuplexFromReadableWritablePair(
         try {
           callback(error);
         } catch (error) {
-          destroy(duplex, error);
+          destroyNodeStream(duplex, error);
         }
       }
 
-      writer.ready.then(
-        () => writer.write(chunk).then(done, done),
+      uponPromise(
+        writableStreamDefaultWriterReadyPromise(writer),
+        () =>
+          uponPromise(
+            writableStreamDefaultWriterWrite(writer, chunk),
+            done,
+            done,
+          ),
         done,
       );
     },
@@ -380,25 +514,36 @@ function newStreamDuplexFromReadableWritablePair(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() => destroy(duplex, error));
+          lazyProcess().default.nextTick(() =>
+            destroyNodeStream(duplex, error)
+          );
         }
       }
 
       if (!writableClosed) {
-        writer.close().then(done, done);
+        uponPromise(
+          writableStreamDefaultWriterClose(writer),
+          done,
+          done,
+        );
       }
     },
 
     read() {
-      reader.read().then(
+      uponPromise(
+        readableStreamDefaultReaderReadPromise(reader),
         (chunk) => {
-          if (chunk.done) {
-            duplex.push(null);
-          } else {
-            duplex.push(chunk.value);
+          try {
+            if (chunk.done) {
+              pushReadableChunk(duplex, null);
+            } else {
+              pushReadableChunk(duplex, chunk.value);
+            }
+          } catch (error) {
+            destroyNodeStream(duplex, error);
           }
         },
-        (error) => destroy(duplex, error),
+        (error) => destroyNodeStream(duplex, error),
       );
     },
 
@@ -420,21 +565,25 @@ function newStreamDuplexFromReadableWritablePair(
 
       async function closeWriter() {
         if (!writableClosed) {
-          await writer.abort(error);
+          await writableStreamDefaultWriterAbort(writer, error);
         }
       }
 
       async function closeReader() {
         if (!readableClosed) {
-          await reader.cancel(error);
+          await readableStreamReaderGenericCancel(reader, error);
         }
       }
 
       if (!writableClosed || !readableClosed) {
-        Promise.all([
-          closeWriter(),
-          closeReader(),
-        ]).then(done, done);
+        uponPromise(
+          SafePromiseAll([
+            closeWriter(),
+            closeReader(),
+          ]),
+          done,
+          done,
+        );
         return;
       }
 
@@ -442,25 +591,42 @@ function newStreamDuplexFromReadableWritablePair(
     },
   });
 
-  writer.closed.then(
+  markStreamTrustedDeliveryCallback(duplex, duplex._write);
+  markStreamTrustedDeliveryCallback(duplex, duplex._writev);
+  markStreamCleanupDeliveryCallback(duplex, duplex._final);
+
+  registerStreamGuardAttachHook(duplex, (guard) => {
+    setReadableStreamUseGuard(readableStream, guard);
+    setWritableStreamUseGuard(writableStream, guard);
+  });
+  registerReadableStreamGuardAttachHook(readableStream, (guard) => {
+    setStreamUseGuard(duplex, guard);
+  });
+  registerWritableStreamGuardAttachHook(writableStream, (guard) => {
+    setStreamUseGuard(duplex, guard);
+  });
+
+  uponPromise(
+    writableStreamDefaultWriterClosedPromise(writer),
     () => {
       writableClosed = true;
     },
     (error) => {
       writableClosed = true;
       readableClosed = true;
-      destroy(duplex, error);
+      destroyNodeStream(duplex, error);
     },
   );
 
-  reader.closed.then(
+  uponPromise(
+    readableStreamDefaultReaderClosedPromise(reader),
     () => {
       readableClosed = true;
     },
     (error) => {
       writableClosed = true;
       readableClosed = true;
-      destroy(duplex, error);
+      destroyNodeStream(duplex, error);
     },
   );
 
@@ -516,19 +682,28 @@ function newReadableStreamFromStreamReadable(
   };
 
   const strategy = evaluateStrategyOrFallback(options?.strategy);
+  const isByteStream = options?.type === "bytes";
 
   let controller;
 
   function onData(chunk) {
     // Copy the Buffer to detach it from the pool.
-    if (Buffer.isBuffer(chunk) && !objectMode) {
+    if (ArrayBufferIsView(chunk) && !objectMode) {
       chunk = new Uint8Array(chunk);
     }
-    controller.enqueue(chunk);
-    if (controller.desiredSize <= 0) {
+    if (isByteStream) {
+      readableByteStreamControllerEnqueue(controller, chunk);
+    } else {
+      readableStreamDefaultControllerEnqueue(controller, chunk);
+    }
+    const desiredSize = isByteStream
+      ? readableByteStreamControllerGetDesiredSize(controller)
+      : readableStreamDefaultControllerGetDesiredSize(controller);
+    if (desiredSize <= 0) {
       streamReadable.pause();
     }
   }
+  markTrustedDeliveryCallback(onData);
 
   streamReadable.pause();
 
@@ -549,17 +724,22 @@ function newReadableStreamFromStreamReadable(
     // that happen to emit an error event again after finished is called.
     streamReadable.on("error", () => {});
     if (error) {
-      return controller.error(error);
+      return isByteStream
+        ? readableByteStreamControllerError(controller, error)
+        : readableStreamDefaultControllerError(controller, error);
     }
     if (isCanceled) {
       return;
     }
-    controller.close();
+    if (isByteStream) {
+      readableByteStreamControllerClose(controller);
+    } else {
+      readableStreamDefaultControllerClose(controller);
+    }
   });
 
   streamReadable.on("data", onData);
 
-  const isByteStream = options?.type === "bytes";
   const underlyingSource = {
     start(c) {
       controller = c;
@@ -577,7 +757,14 @@ function newReadableStreamFromStreamReadable(
   if (isByteStream) {
     underlyingSource.type = "bytes";
   }
-  return new ReadableStream(underlyingSource, strategy);
+  const readable = new ReadableStream(underlyingSource, strategy);
+  registerStreamGuardAttachHook(streamReadable, (guard) => {
+    setReadableStreamUseGuard(readable, guard);
+  });
+  registerReadableStreamGuardAttachHook(readable, (guard) => {
+    setStreamUseGuard(streamReadable, guard);
+  });
+  return readable;
 }
 
 function newWritableStreamFromStreamWritable(streamWritable) {
@@ -602,6 +789,16 @@ function newWritableStreamFromStreamWritable(streamWritable) {
     writable.close();
     return writable;
   }
+
+  const nodeWrite = streamWritable.write;
+  const capturedNodeWrite = isWritablePublicWrite(nodeWrite) &&
+      isRegisteredWritable(streamWritable)
+    ? captureTrustedDeliveryCallback(nodeWrite)
+    : captureDeliveryCallback(nodeWrite);
+  const nodeEnd = streamWritable.end;
+  const capturedNodeEnd = typeof nodeEnd === "function"
+    ? captureDeliveryCallback(nodeEnd)
+    : undefined;
 
   const highWaterMark = streamWritable.writableHighWaterMark;
   const strategy = streamWritable.writableObjectMode
@@ -655,35 +852,65 @@ function newWritableStreamFromStreamWritable(streamWritable) {
 
   streamWritable.on("drain", onDrain);
 
-  return new WritableStream({
+  const underlyingSink = {
     start(c) {
       controller = c;
     },
 
     async write(chunk) {
-      if (streamWritable.writableNeedDrain || !streamWritable.write(chunk)) {
-        backpressurePromise = Promise.withResolvers();
-        return backpressurePromise.promise.finally(() => {
-          backpressurePromise = undefined;
-        });
+      if (
+        writableNeedsDrain(streamWritable) ||
+        !runCapturedDelivery(
+          streamWritable,
+          capturedNodeWrite,
+          streamWritable,
+          [chunk],
+        )
+      ) {
+        backpressurePromise = PromiseWithResolvers();
+        return SafePromisePrototypeFinally(
+          backpressurePromise.promise,
+          () => {
+            backpressurePromise = undefined;
+          },
+        );
       }
     },
 
     abort(reason) {
-      destroy(streamWritable, reason);
+      destroyNodeStream(streamWritable, reason);
     },
 
     close() {
       if (closed === undefined && !isWritableEnded(streamWritable)) {
-        closed = Promise.withResolvers();
-        streamWritable.end();
+        closed = PromiseWithResolvers();
+        if (capturedNodeEnd === undefined) {
+          closed.resolve();
+        } else {
+          runCapturedCleanup(
+            capturedNodeEnd,
+            streamWritable,
+            [],
+          );
+        }
         return closed.promise;
       }
 
       controller = undefined;
-      return Promise.resolve();
+      return PromiseResolve();
     },
-  }, strategy);
+  };
+  markWritableStreamTrustedCallback(underlyingSink.write);
+  markWritableStreamTrustedCallback(underlyingSink.close);
+  markWritableStreamTrustedCallback(underlyingSink.abort);
+  const writable = new WritableStream(underlyingSink, strategy);
+  registerStreamGuardAttachHook(streamWritable, (guard) => {
+    setWritableStreamUseGuard(writable, guard);
+  });
+  registerWritableStreamGuardAttachHook(writable, (guard) => {
+    setStreamUseGuard(streamWritable, guard);
+  });
+  return writable;
 }
 
 function newReadableWritablePairFromDuplex(

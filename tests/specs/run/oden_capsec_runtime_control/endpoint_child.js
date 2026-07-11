@@ -137,6 +137,11 @@ function pendingRequestFixtures(queueMethods) {
 
 async function openNodeInspectorResponse() {
   const socket = await openNodeInspectorSocket();
+  await writeNodeInspectorRequest(socket);
+  return socket;
+}
+
+async function writeNodeInspectorRequest(socket) {
   await bounded(
     new Promise((resolve, reject) => {
       socket.write(
@@ -146,7 +151,6 @@ async function openNodeInspectorResponse() {
     }),
     "Node inspector request",
   );
-  return socket;
 }
 
 async function openNodeInspectorSocket() {
@@ -462,6 +466,11 @@ const explicitIteratorNodeSocket = await openNodeInspectorResponse();
 const fromNodeSocket = await openNodeInspectorResponse();
 const wrapNodeSocket = await openNodeInspectorResponse();
 const nodeToWebSocket = await openNodeInspectorResponse();
+const actorBoundNodeSocket = await openNodeInspectorSocket();
+const nodeHttpSocket = await openNodeInspectorSocket();
+const nodeHttp2Socket = await openNodeInspectorSocket();
+nodeHttpSocket.on("error", () => {});
+nodeHttp2Socket.on("error", () => {});
 const nodeToWebStream = Readable.toWeb(nodeToWebSocket);
 const denoReadableConn = await Deno.connect({ hostname: "127.0.0.1", port });
 const readableStreamFromResponse = await fetch(httpUrl);
@@ -481,6 +490,7 @@ try {
     dnsWsUrl,
     denoConn,
     httpUrl,
+    port,
     readDenoConn,
     readNodeSocket,
     getReaderResponse,
@@ -493,6 +503,8 @@ try {
     iteratorNodeSocket,
     pipeNodeSocket,
     nodeToWebStream,
+    nodeHttpSocket,
+    nodeHttp2Socket,
     webToNodeStream,
     denoReadableStream: denoReadableConn.readable,
     protectedFetchBackingStream: backingResponse.body,
@@ -521,6 +533,14 @@ try {
     rootDnsResponse,
     wsUrl,
   });
+  result.independentlyGrantedPackageSocket = await allowedEndpointProbe
+    .passedNodeSocket(actorBoundNodeSocket);
+  try {
+    await writeNodeInspectorRequest(actorBoundNodeSocket);
+    result.rootActorBoundSocketAfterPackage = "ALLOWED";
+  } catch {
+    result.rootActorBoundSocketAfterPackage = "BROKEN";
+  }
   result.defaultReadRequestPrototypePoisoning = requestPrototypeProof.default;
   result.iteratorReadRequestPrototypePoisoning = requestPrototypeProof.iterator;
   result.byobReadRequestPrototypePoisoning = requestPrototypeProof.byob;
@@ -640,6 +660,13 @@ try {
   );
   console.log(JSON.stringify(result));
 } finally {
+  try {
+    actorBoundNodeSocket.destroy();
+  } catch {
+    // A failed provenance check must still leave cleanup available.
+  }
+  nodeHttpSocket.destroy();
+  nodeHttp2Socket.destroy();
   try {
     responseReader?.releaseLock();
   } catch {
