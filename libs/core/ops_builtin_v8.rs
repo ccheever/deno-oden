@@ -278,6 +278,20 @@ pub fn op_oden_schedule_context<'s>(
   crate::error::oden_build_schedule_context(scope)
 }
 
+/// Oden: capture the complete principal set that must be restored before a
+/// trusted adapter delivers bytes or another authority-bearing value to a JS
+/// callback. Unlike an ordinary schedule snapshot, this includes the
+/// callback's loader-authenticated script identity before the callback has
+/// received its arguments.
+/// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+#[op2(reentrant)]
+pub fn op_oden_callback_context<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  callback: v8::Local<'s, v8::Function>,
+) -> v8::Local<'s, v8::Value> {
+  crate::error::oden_build_callback_context(scope, callback)
+}
+
 pub struct EvalContextError<'s> {
   thrown: v8::Local<'s, v8::Value>,
   is_native_error: bool,

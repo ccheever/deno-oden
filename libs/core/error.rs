@@ -1118,6 +1118,62 @@ pub fn oden_build_schedule_context<'s>(
     return cped;
   }
   let locators = oden_schedule_principals_from_stack(scope);
+  oden_build_schedule_context_from_locators(scope, cped, locators)
+}
+
+/// Build a callback-delivery context from both the registering call chain and
+/// the callback's own loader-authenticated script identity. Stream and event
+/// adapters use this before handing bytes to a callback: restoring the result
+/// makes the callback principal part of the constrained set even though the
+/// authorization check necessarily runs before the callback receives its
+/// arguments.
+///
+/// An unregistered callback is represented by a stable fail-closed locator.
+/// Treating it as ambient root would let bound, native-looking, or otherwise
+/// originless functions erase the recipient at a byte-delivery boundary.
+/// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+pub fn oden_build_callback_context<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  callback: v8::Local<'s, v8::Function>,
+) -> v8::Local<'s, v8::Value> {
+  let cped = scope.get_continuation_preserved_embedder_data();
+  if !oden_capsec_armed() {
+    return cped;
+  }
+
+  let mut locators = oden_schedule_principals_from_stack(scope);
+  // A trusted adapter may register another callback while itself running from
+  // a detached continuation. Preserve that already authenticated scheduler
+  // set as constrained provenance instead of replacing it with the adapter's
+  // live runtime frames.
+  for locator in oden_read_schedule_slot(scope) {
+    if !locators.contains(&locator) {
+      locators.push(locator);
+    }
+  }
+  let script_id = callback.script_id();
+  let callback_locator = if script_id >= 0 {
+    // SAFETY: `scope` is active for this lookup; the pointer is retained only
+    // as the isolate-scoped registry key used throughout CPED attribution.
+    let isolate = unsafe { scope.as_raw_isolate_ptr() };
+    oden_script_locator(oden_isolate_key(isolate), script_id as usize)
+  } else {
+    None
+  };
+  let callback_locator = callback_locator
+    .unwrap_or_else(|| "oden:unattributed-callback".to_string());
+  if !locators.contains(&callback_locator) {
+    locators.push(callback_locator);
+  }
+
+  oden_build_schedule_context_from_locators(scope, cped, locators)
+}
+
+fn oden_build_schedule_context_from_locators<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  cped: v8::Local<'s, v8::Value>,
+  locators: Vec<String>,
+) -> v8::Local<'s, v8::Value> {
   if locators.is_empty() {
     return cped;
   }
