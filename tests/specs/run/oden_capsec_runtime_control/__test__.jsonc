@@ -111,6 +111,11 @@
       "output": "node_composition_barrier_driver.out",
       "exitCode": 0
     },
+    "mixed_actors_and_nested_package_schedules_do_not_borrow_admission": {
+      "args": "run --allow-all node_admission_context_order.js",
+      "output": "node_admission_context_order.out",
+      "exitCode": 0
+    },
     "trusted_runtime_tooling_emits_exact_guard_audits": {
       "args": "run --allow-all trusted_tooling_driver.js",
       "output": "trusted_tooling_driver.out",

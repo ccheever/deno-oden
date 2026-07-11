@@ -34,6 +34,7 @@ const activeStreamUseGuardPartList = [];
 const activeStreamUseAdmissionContexts = [];
 let streamUseGuardScopeDepth = 0;
 let forceStreamUseGuardRecheckDepth = 0;
+let untrustedDeliveryCallbackDepth = 0;
 const streamGuardAttachHooks = new SafeWeakMap();
 const streamDeliveryPreflights = new SafeWeakMap();
 const activeStreamDeliveryPreflights = new SafeWeakSet();
@@ -102,6 +103,12 @@ function streamUseGuardRunner(stream) {
             activeStreamUseGuardPartContexts,
             part,
           );
+          if (
+            partContext !== undefined && context !== undefined &&
+            partContext !== context
+          ) {
+            throw new TypeError("stream use guard actors differ");
+          }
           if (partContext !== undefined) context = partContext;
           continue;
         }
@@ -116,6 +123,12 @@ function streamUseGuardRunner(stream) {
             part,
             partContext,
           );
+        }
+        if (
+          partContext !== undefined && context !== undefined &&
+          partContext !== context
+        ) {
+          throw new TypeError("stream use guard actors differ");
         }
         if (partContext !== undefined) context = partContext;
       }
@@ -339,12 +352,23 @@ function streamUseAdmissionContext(stream, admission) {
   // A synchronous public guard may authenticate from the live call stack even
   // when no raw schedule context exists yet. Preserve the context returned by
   // that exact successful guard as the fallback for its loader continuations.
+  // Multiple constituents may collapse only when they returned the exact same
+  // unforgeable snapshot. Choosing either distinct snapshot would lend that
+  // actor's authority to the other constituent and make attachment order part
+  // of the security decision.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  let context;
   for (let i = 0; i < admission.contexts.length; i++) {
-    if (admission.contexts[i] !== undefined) {
-      return admission.contexts[i];
+    const partContext = admission.contexts[i];
+    if (
+      partContext !== undefined && context !== undefined &&
+      partContext !== context
+    ) {
+      throw new TypeError("stream use admission actors differ");
     }
+    if (partContext !== undefined) context = partContext;
   }
-  return undefined;
+  return context;
 }
 
 function runWithStreamUseAdmission(stream, admission, callback) {
@@ -473,12 +497,27 @@ function captureTrustedDeliveryCallback(callback, invoke = callback) {
 
 // Internal continuations resume the actor that initiated an operation, rather
 // than the module provenance of the core callback used to implement it.
+function selectCurrentDeliveryContext(scheduleContext) {
+  // Package callbacks execute with their own restored CPED but can remain
+  // nested inside a trusted operation admission. Never let that admission
+  // replace their scheduling actor. Loader-only continuations retain the
+  // scoped admission that authorized the operation.
+  if (untrustedDeliveryCallbackDepth > 0) return scheduleContext;
+  return activeStreamUseAdmissionContexts[
+    activeStreamUseAdmissionContexts.length - 1
+  ] ?? scheduleContext;
+}
+
 function captureCurrentDeliveryCallback(callback, invoke = callback) {
+  // A live package frame is more specific than an enclosing trusted admission.
+  // Capture it first so package work scheduled inside a root-admitted operation
+  // cannot inherit the root actor. The admission remains a scoped fallback for
+  // loader-only continuations whose engine snapshot is genuinely absent.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  const scheduleContext = core.ops.op_oden_schedule_context();
   return {
     callback: invoke,
-    context: activeStreamUseAdmissionContexts[
-      activeStreamUseAdmissionContexts.length - 1
-    ] ?? core.ops.op_oden_schedule_context(),
+    context: selectCurrentDeliveryContext(scheduleContext),
     preflight: undefined,
     trusted: true,
   };
@@ -551,13 +590,13 @@ function runCapturedDelivery(stream, captured, receiver, args) {
     }
     if (captured.context === undefined) {
       runCapturedPreflight(stream, captured);
-      return ReflectApply(captured.callback, receiver, args);
+      return invokeCapturedCallback(captured, receiver, args);
     }
     const previous = core.getAsyncContext();
     core.setAsyncContext(captured.context);
     try {
       runCapturedPreflight(stream, captured);
-      return ReflectApply(captured.callback, receiver, args);
+      return invokeCapturedCallback(captured, receiver, args);
     } finally {
       core.setAsyncContext(previous);
     }
@@ -567,14 +606,26 @@ function runCapturedDelivery(stream, captured, receiver, args) {
     : runWithForcedStreamUseGuardRecheck(deliver);
 }
 
+function invokeCapturedCallback(captured, receiver, args) {
+  if (captured.trusted !== false || captured.context === undefined) {
+    return ReflectApply(captured.callback, receiver, args);
+  }
+  untrustedDeliveryCallbackDepth++;
+  try {
+    return ReflectApply(captured.callback, receiver, args);
+  } finally {
+    untrustedDeliveryCallbackDepth--;
+  }
+}
+
 function runCapturedCallback(captured, receiver, args) {
   if (captured.context === undefined) {
-    return ReflectApply(captured.callback, receiver, args);
+    return invokeCapturedCallback(captured, receiver, args);
   }
   const previous = core.getAsyncContext();
   core.setAsyncContext(captured.context);
   try {
-    return ReflectApply(captured.callback, receiver, args);
+    return invokeCapturedCallback(captured, receiver, args);
   } finally {
     core.setAsyncContext(previous);
   }
