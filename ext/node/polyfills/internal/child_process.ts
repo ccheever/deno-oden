@@ -153,6 +153,15 @@ const {
 // Private marker for an internal environment overlay that must be applied on
 // top of native inheritance rather than interpreted as a user replacement.
 const kInheritEnv = Symbol("kInheritEnv");
+const kNeedsOwnedCleanup = Symbol("kNeedsOwnedCleanup");
+// @ref LLP 0010#revision-11-patch-profile [implements] — Timeout/abort cleanup is reachable only through trusted, non-exported internals.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [constrained-by] — The bound closure preserves the exact owned child resource across async cleanup.
+const childCleanupKillers = new SafeWeakMap();
+
+function killChildForCleanup(child, signal) {
+  const cleanupKill = childCleanupKillers.get(child);
+  return cleanupKill === undefined ? false : cleanupKill(signal);
+}
 
 // Precompiled regular expressions (captured as SafeRegExp so the prototype
 // can't be tampered with at runtime).
@@ -365,7 +374,45 @@ class ChildProcess extends EventEmitter {
     if (childProcessSpawnChannel.hasSubscribers) {
       childProcessSpawnChannel.start.publish({ process: this, options });
     }
+    const timeout = options.timeout;
+    const killSignal = options.killSignal ?? "SIGTERM";
+    const needsOwnedCleanup = timeout != null && timeout > 0 ||
+      options.signal || options[kNeedsOwnedCleanup] === true;
+    const cleanupSignalName = needsOwnedCleanup
+      ? toDenoSignal(killSignal)
+      : killSignal;
+    if (
+      needsOwnedCleanup && cleanupSignalName !== "SIGTERM" &&
+      cleanupSignalName !== "SIGKILL"
+    ) {
+      op_oden_guard_deny_only_surface(
+        "process",
+        "signal",
+        `owned-child-cleanup:${cleanupSignalName}`,
+        "node:child_process timeout/AbortSignal killSignal",
+      );
+    }
     this.#spawnInternal(file, args || [], options);
+    if (needsOwnedCleanup && this.#process !== undefined) {
+      childCleanupKillers.set(
+        this,
+        (signal) => this.#killForCleanup(signal),
+      );
+    }
+
+    if (timeout != null && timeout > 0) {
+      let timeoutId = setTimeout(() => {
+        timeoutId = null;
+        this.#killForCleanup(killSignal);
+      }, timeout);
+
+      this.once("exit", () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+      });
+    }
   }
 
   /**
@@ -640,7 +687,7 @@ class ChildProcess extends EventEmitter {
         const killSignal = options.killSignal ?? "SIGTERM";
         const onAbortListener = () => {
           try {
-            if (this.kill(killSignal)) {
+            if (this.#killForCleanup(killSignal)) {
               this.emit(
                 "error",
                 new AbortError(
@@ -835,30 +882,46 @@ class ChildProcess extends EventEmitter {
       }
     }
 
+    return this.#kill(signal, false);
+  }
+
+  #killForCleanup(signal) {
+    return this.#kill(signal, true);
+  }
+
+  #kill(signal, forCleanup) {
     if (this.killed) {
       return false;
     }
 
     let signalName = signal == null ? "SIGTERM" : toDenoSignal(signal);
-    this.#closePipes();
+    if (
+      forCleanup && signalName !== "SIGTERM" && signalName !== "SIGKILL"
+    ) {
+      forCleanup = false;
+    }
     try {
-      this.#process.kill(signalName);
+      if (forCleanup) {
+        this.#process.cleanupKill(signalName);
+      } else {
+        this.#process.kill(signalName);
+      }
     } catch (err) {
       if (isWindows) {
         // On Windows, unsupported signals fall back to SIGKILL
         // (matching Node's TerminateProcess behavior).
         try {
-          this.#process.kill("SIGKILL");
+          if (forCleanup) {
+            this.#process.cleanupKill("SIGKILL");
+          } else {
+            this.#process.kill("SIGKILL");
+          }
           signalName = "SIGKILL";
         } catch (err2) {
           const alreadyClosed =
             ObjectPrototypeIsPrototypeOf(TypeErrorPrototype, err2) ||
             ObjectPrototypeIsPrototypeOf(
               Deno.errors.NotFound.prototype,
-              err2,
-            ) ||
-            ObjectPrototypeIsPrototypeOf(
-              Deno.errors.PermissionDenied.prototype,
               err2,
             );
           if (!alreadyClosed) {
@@ -872,10 +935,6 @@ class ChildProcess extends EventEmitter {
           ObjectPrototypeIsPrototypeOf(
             Deno.errors.NotFound.prototype,
             err,
-          ) ||
-          ObjectPrototypeIsPrototypeOf(
-            Deno.errors.PermissionDenied.prototype,
-            err,
           );
         if (!alreadyClosed) {
           throw err;
@@ -884,6 +943,7 @@ class ChildProcess extends EventEmitter {
         return false;
       }
     }
+    this.#closePipes();
 
     /* Cancel any pending IPC I/O */
     if (this[kCanDisconnect]) {
@@ -2994,6 +3054,8 @@ function setupChannel(
 return {
   ChildProcess,
   kInheritEnv,
+  kNeedsOwnedCleanup,
+  killChildForCleanup,
   mapValues,
   stdioStringToArray,
   getValidStdio,

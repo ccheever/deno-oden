@@ -248,6 +248,7 @@ deno_core::extension!(
     op_spawn_wait,
     op_spawn_sync,
     op_spawn_kill,
+    op_spawn_kill_for_cleanup,
     op_spawn_child_ref,
     op_spawn_child_unref,
     deprecated::op_run,
@@ -459,6 +460,9 @@ pub enum ProcessError {
   #[class(type)]
   #[error("Child process has already terminated.")]
   ChildProcessAlreadyTerminated,
+  #[class(type)]
+  #[error("Owned child cleanup only supports SIGTERM and SIGKILL.")]
+  InvalidChildCleanupSignal,
   #[class(type)]
   #[error("Invalid pid")]
   InvalidPid,
@@ -1868,6 +1872,16 @@ enum SignalArg {
 }
 
 impl SignalArg {
+  fn is_terminal_cleanup_signal(&self) -> bool {
+    match self {
+      Self::String(signal) => {
+        signal.eq_ignore_ascii_case("SIGTERM")
+          || signal.eq_ignore_ascii_case("SIGKILL")
+      }
+      Self::Int(signal) => *signal == 15 || *signal == 9,
+    }
+  }
+
   fn display(&self) -> String {
     match self {
       Self::String(signal) => signal.clone(),
@@ -1907,6 +1921,27 @@ fn op_spawn_kill(
       signal.triggers_inspector(),
       "ChildProcess.kill",
     )?;
+    deprecated::kill(child_resource.pid as i32, &signal)?;
+    return Ok(());
+  }
+  Err(ProcessError::ChildProcessAlreadyTerminated)
+}
+
+// @ref LLP 0010#revision-11-patch-profile [implements] — Trusted child cleanup is a separate, non-exported runtime-control path.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [constrained-by] — Cleanup is bound to the retained child resource and cannot target an arbitrary PID.
+#[op2(stack_trace)]
+fn op_spawn_kill_for_cleanup(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  #[serde] signal: SignalArg,
+) -> Result<(), ProcessError> {
+  if let Ok(child_resource) = state.resource_table.get::<ChildResource>(rid) {
+    // SIGTERM and SIGKILL only terminate the already-owned child. Reject all
+    // other signals defensively: those can invoke arbitrary process behavior
+    // and must use the ordinary package-visible signal path instead.
+    if !signal.is_terminal_cleanup_signal() {
+      return Err(ProcessError::InvalidChildCleanupSignal);
+    }
     deprecated::kill(child_resource.pid as i32, &signal)?;
     return Ok(());
   }

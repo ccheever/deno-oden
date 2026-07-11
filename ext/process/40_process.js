@@ -11,6 +11,7 @@ const {
   op_spawn_child_ref,
   op_spawn_child_unref,
   op_spawn_kill,
+  op_spawn_kill_for_cleanup,
   op_spawn_sync,
   op_spawn_wait,
 } = core.ops;
@@ -342,6 +343,9 @@ function nodeSpawnChild(command, {
     status,
     kill(signal) {
       op_spawn_kill(child.rid, signal);
+    },
+    cleanupKill(signal) {
+      op_spawn_kill_for_cleanup(child.rid, signal);
     },
     ref() {
       if (!waitComplete) {

@@ -16,6 +16,8 @@ const {
   ChildProcess,
   ChildProcessOptions,
   kInheritEnv,
+  kNeedsOwnedCleanup,
+  killChildForCleanup,
   normalizeSpawnArguments,
   setupChannel,
   stdioStringToArray,
@@ -314,22 +316,6 @@ function spawn(
   const child = new ChildProcess();
   child.spawn(options);
 
-  const timeout = options?.timeout;
-  if (timeout != null && timeout > 0) {
-    const killSignal = options?.killSignal ?? "SIGTERM";
-    let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-      timeoutId = null;
-      child.kill(killSignal as string);
-    }, timeout);
-
-    child.once("exit", () => {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-        timeoutId = null;
-      }
-    });
-  }
-
   return child;
 }
 
@@ -597,10 +583,14 @@ function execFile(
     gid: execOptions.gid,
     shell: execOptions.shell,
     signal: execOptions.signal,
+    killSignal: execOptions.killSignal,
     uid: execOptions.uid,
     windowsHide: execOptions.windowsHide !== false,
     windowsVerbatimArguments: !!execOptions.windowsVerbatimArguments,
   };
+  // deno-lint-ignore no-explicit-any
+  (spawnOptions as any)[kNeedsOwnedCleanup] = execOptions.timeout > 0 ||
+    execOptions.maxBuffer !== Infinity;
 
   const child = spawn(file, args, spawnOptions);
 
@@ -711,7 +701,7 @@ function execFile(
 
     killed = true;
     try {
-      child.kill(execOptions.killSignal);
+      killChildForCleanup(child, execOptions.killSignal);
     } catch (e) {
       if (e) {
         ex = e as ChildProcessError;
