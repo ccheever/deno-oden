@@ -236,6 +236,12 @@ mod impl_ {
     #[error(transparent)]
     Canceled(#[from] deno_core::Canceled),
     #[class(inherit)]
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[class(inherit)]
+    #[error(transparent)]
+    Capsec(#[from] deno_permissions::PermissionCheckError),
+    #[class(inherit)]
     #[error("failed to serialize json value: {0}")]
     SerdeJson(serde_json::Error),
     #[class(type)]
@@ -250,12 +256,45 @@ mod impl_ {
   /// associated handle to transfer.
   const NO_RAW_FD: i32 = -1;
 
+  #[cfg(not(unix))]
   fn raw_fd_to_option(raw_fd: i32) -> Option<i32> {
     if raw_fd == NO_RAW_FD {
       None
     } else {
       Some(raw_fd)
     }
+  }
+
+  #[cfg(unix)]
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] — SCM_RIGHTS object passage cannot transfer inspector authority.
+  fn prepare_ipc_raw_fd(
+    raw_fd: i32,
+  ) -> Result<Option<std::os::fd::OwnedFd>, IpcError> {
+    use std::os::fd::AsRawFd;
+    use std::os::fd::FromRawFd;
+
+    if raw_fd == NO_RAW_FD {
+      return Ok(None);
+    }
+
+    // Duplicate first so classification and the later sendmsg operate on one
+    // retained kernel object, not a reusable JavaScript-supplied integer.
+    // SAFETY: fcntl borrows raw_fd and either fails or returns a new owned fd.
+    let retained = unsafe { libc::fcntl(raw_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if retained < 0 {
+      return Err(io::Error::last_os_error().into());
+    }
+    // The IPC write op takes ownership of the supplied fd. Close that caller
+    // copy after the atomic dup; the retained copy remains valid for the op.
+    // SAFETY: successful F_DUPFD_CLOEXEC proved raw_fd was open at this point.
+    unsafe { libc::close(raw_fd) };
+    // SAFETY: retained is the fresh descriptor returned by fcntl above.
+    let retained = unsafe { std::os::fd::OwnedFd::from_raw_fd(retained) };
+    deno_permissions::oden_capsec_check_raw_inet_stream_fd_transfer(
+      retained.as_raw_fd(),
+      "node:child_process IPC handle send",
+    )?;
+    Ok(Some(retained))
   }
 
   #[op2]
@@ -270,6 +309,11 @@ mod impl_ {
     // exceeded its limit. Used as backpressure signal in JS.
     queue_ok: v8::Local<'a, v8::Array>,
   ) -> Result<impl Future<Output = Result<(), io::Error>> + use<>, IpcError> {
+    #[cfg(unix)]
+    let raw_fd = prepare_ipc_raw_fd(raw_fd)?;
+    #[cfg(not(unix))]
+    let raw_fd = raw_fd_to_option(raw_fd);
+
     let mut serialized = Vec::with_capacity(64);
     let mut ser = serde_json::Serializer::new(&mut serialized);
     serialize_v8_value(scope, value, &mut ser).map_err(IpcError::SerdeJson)?;
@@ -286,7 +330,8 @@ mod impl_ {
       let Ok(v) = false.to_v8(scope);
       queue_ok.set_index(scope, 0, v);
     }
-    let raw_fd = raw_fd_to_option(raw_fd);
+    #[cfg(unix)]
+    let raw_fd = raw_fd.map(std::os::fd::IntoRawFd::into_raw_fd);
     Ok(async move {
       let cancel = stream.cancel.clone();
       let result = stream
@@ -475,6 +520,11 @@ mod impl_ {
     // See `op_node_ipc_write_json` for the queue_ok contract.
     queue_ok: v8::Local<'a, v8::Array>,
   ) -> Result<impl Future<Output = Result<(), io::Error>> + use<>, IpcError> {
+    #[cfg(unix)]
+    let raw_fd = prepare_ipc_raw_fd(raw_fd)?;
+    #[cfg(not(unix))]
+    let raw_fd = raw_fd_to_option(raw_fd);
+
     let constants = state.borrow().borrow::<AdvancedIpcConstants>().clone();
     let serializer = AdvancedSerializer::new(scope, constants);
     let serialized = serializer.serialize(scope, value)?;
@@ -490,7 +540,8 @@ mod impl_ {
       let Ok(v) = false.to_v8(scope);
       queue_ok.set_index(scope, 0, v);
     }
-    let raw_fd = raw_fd_to_option(raw_fd);
+    #[cfg(unix)]
+    let raw_fd = raw_fd.map(std::os::fd::IntoRawFd::into_raw_fd);
     Ok(async move {
       let cancel = stream.cancel.clone();
       let result = stream

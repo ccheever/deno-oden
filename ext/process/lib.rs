@@ -174,25 +174,23 @@ impl<'de> Deserialize<'de> for StdioOrFd {
 }
 
 impl StdioOrFd {
-  pub fn as_stdio(&self) -> Result<StdStdio, ProcessError> {
+  pub fn as_stdio(&self, api_name: &str) -> Result<StdStdio, ProcessError> {
     match &self {
       StdioOrFd::Stdio(val) => Ok(val.as_stdio()),
       StdioOrFd::Fd(fd) => {
         #[cfg(unix)]
         {
-          // SAFETY: we dup the fd so the original remains open for the caller.
-          let new_fd = unsafe { libc::dup(*fd) };
-          if new_fd < 0 {
-            return Err(ProcessError::Io(std::io::Error::last_os_error()));
-          }
-          // SAFETY: new_fd is a valid, freshly duplicated file descriptor.
-          let owned_fd =
-            unsafe { std::os::unix::io::OwnedFd::from_raw_fd(new_fd) };
-          clear_nonblocking(new_fd).map_err(ProcessError::Io)?;
+          use std::os::fd::AsRawFd;
+
+          let owned_fd = duplicate_child_stdio_fd(*fd, 0, api_name)?;
+          clear_nonblocking(owned_fd.as_raw_fd()).map_err(ProcessError::Io)?;
           Ok(StdStdio::from(owned_fd))
         }
         #[cfg(windows)]
         {
+          deno_permissions::oden_capsec_check_raw_inet_stream_fd_transfer(
+            *fd, api_name,
+          )?;
           // SAFETY: *fd is a valid CRT file descriptor obtained from fs.openSync
           let handle = unsafe { libc::get_osfhandle(*fd as _) };
           if handle == -1 {
@@ -215,6 +213,31 @@ impl StdioOrFd {
   pub fn is_ipc(&self) -> bool {
     matches!(self, StdioOrFd::Stdio(Stdio::IpcForInternalUse))
   }
+}
+
+#[cfg(unix)]
+// @ref LLP 0001#the-inherited-hole-checklist [implements] — Child stdio descriptor redirects validate the concrete object before spawn.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [constrained-by] — Socket possession and object passage do not delegate authority.
+fn duplicate_child_stdio_fd(
+  fd: i32,
+  minimum_fd: i32,
+  api_name: &str,
+) -> Result<std::os::fd::OwnedFd, ProcessError> {
+  // Duplicate before classification so the checked kernel object is the exact
+  // object retained through spawn, even if another thread closes or reuses the
+  // caller's numeric descriptor.
+  // SAFETY: fcntl borrows `fd`; failure is reported before constructing the
+  // OwnedFd. F_DUPFD_CLOEXEC creates a new owned descriptor on success.
+  let new_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, minimum_fd) };
+  if new_fd < 0 {
+    return Err(ProcessError::Io(std::io::Error::last_os_error()));
+  }
+  // SAFETY: `new_fd` is the fresh descriptor returned above.
+  let owned_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(new_fd) };
+  deno_permissions::oden_capsec_check_raw_inet_stream_fd_transfer(
+    new_fd, api_name,
+  )?;
+  Ok(owned_fd)
 }
 
 #[allow(clippy::disallowed_types, reason = "definition")]
@@ -704,7 +727,7 @@ fn create_command(
   } else if args.input.is_some() {
     command.stdin(StdStdio::piped());
   } else {
-    command.stdin(args.stdio.stdin.as_stdio()?);
+    command.stdin(args.stdio.stdin.as_stdio(api_name)?);
   }
 
   command.stdout(match args.stdio.stdout {
@@ -712,14 +735,14 @@ fn create_command(
       let cs = state.borrow::<ChildProcessStdio>();
       StdStdio::from(cs.stdout.try_clone().map_err(ProcessError::Io)?)
     }
-    value => value.as_stdio()?,
+    value => value.as_stdio(api_name)?,
   });
   command.stderr(match args.stdio.stderr {
     StdioOrFd::Stdio(Stdio::Inherit) => {
       let cs = state.borrow::<ChildProcessStdio>();
       StdStdio::from(cs.stderr.try_clone().map_err(ProcessError::Io)?)
     }
-    value => value.as_stdio()?,
+    value => value.as_stdio(api_name)?,
   });
 
   #[cfg(unix)]
@@ -771,6 +794,8 @@ fn create_command(
       ipc_rid = Some(pipe_rid);
     }
 
+    let minimum_source_fd =
+      args.extra_stdio.len().min((i32::MAX - 3) as usize) as i32 + 3;
     for (i, stdio) in args.extra_stdio.into_iter().enumerate() {
       // index 0 in `extra_stdio` actually refers to fd 3
       // because we handle stdin,stdout,stderr specially
@@ -784,12 +809,17 @@ fn create_command(
           extra_pipe_fds.push(Some(fd1 as i64));
         }
         StdioOrFd::Fd(fd) => {
+          use std::os::fd::IntoRawFd;
+
+          let fd = duplicate_child_stdio_fd(fd, minimum_source_fd, api_name)?
+            .into_raw_fd();
           // Dup the caller's fd onto the target fd slot in the child. The
           // trailing `true` requests that O_NONBLOCK be cleared on the dup'd
           // fd: Deno opens piped stdio non-blocking for async reads from JS,
           // but a child doing blocking reads on the inherited fd would
           // otherwise fail with EAGAIN.
           fds_to_dup.push((fd, target_fd, true));
+          fds_to_close.push(fd);
           child_extra_stdio_fds.push(target_fd);
           extra_pipe_fds.push(None);
         }
@@ -929,6 +959,9 @@ fn create_command(
           extra_pipe_fds.push(Some(crt_fd as i64));
         }
         StdioOrFd::Fd(fd) => {
+          deno_permissions::oden_capsec_check_raw_inet_stream_fd_transfer(
+            fd, api_name,
+          )?;
           // SAFETY: fd is a valid CRT file descriptor passed from the JS stdio array
           let handle = unsafe { libc::get_osfhandle(fd as _) };
           if handle == -1 {
@@ -1637,7 +1670,7 @@ fn op_spawn_sync(
       "spawnSync timeout/maxBuffer killSignal",
     )?;
   }
-  let (mut command, _, _, _) = create_command(
+  let (mut command, _, _, handles_to_close) = create_command(
     state,
     args,
     "Deno.Command().outputSync()",
@@ -1661,14 +1694,18 @@ fn op_spawn_sync(
     command.process_group(0);
   }
 
-  let mut child = match command.spawn() {
+  let spawn_result = command.spawn();
+  for handle in handles_to_close {
+    deno_io::close_raw_handle(handle);
+  }
+  let mut child = match spawn_result {
     Ok(child) => child,
     // A shebang-less script (or other file the kernel can't exec directly)
     // fails with `ENOEXEC` on Linux; retry it through `/bin/sh` to match the
     // POSIX `execvp` / Node.js behavior.
     #[cfg(unix)]
     Err(err) if err.raw_os_error() == Some(libc::ENOEXEC) => {
-      let (mut command, _, _, _) = create_command(
+      let (mut command, _, _, handles_to_close) = create_command(
         state,
         retry_args,
         "Deno.Command().outputSync()",
@@ -1678,7 +1715,11 @@ fn op_spawn_sync(
       if timeout.is_some_and(|t| t > 0) {
         command.process_group(0);
       }
-      command.spawn().map_err(|e| ProcessError::SpawnFailed {
+      let spawn_result = command.spawn();
+      for handle in handles_to_close {
+        deno_io::close_raw_handle(handle);
+      }
+      spawn_result.map_err(|e| ProcessError::SpawnFailed {
         command: command.get_program().to_string_lossy().into_owned(),
         error: Box::new(e.into()),
       })?
@@ -2102,20 +2143,20 @@ mod deprecated {
     }
 
     // TODO: make this work with other resources, eg. sockets
-    c.stdin(run_args.stdin.as_stdio()?);
+    c.stdin(run_args.stdin.as_stdio("Deno.run()")?);
     c.stdout(match run_args.stdout {
       StdioOrFd::Stdio(Stdio::Inherit) => {
         let cs = state.borrow::<ChildProcessStdio>();
         StdStdio::from(cs.stdout.try_clone().map_err(ProcessError::Io)?)
       }
-      value => value.as_stdio()?,
+      value => value.as_stdio("Deno.run()")?,
     });
     c.stderr(match run_args.stderr {
       StdioOrFd::Stdio(Stdio::Inherit) => {
         let cs = state.borrow::<ChildProcessStdio>();
         StdStdio::from(cs.stderr.try_clone().map_err(ProcessError::Io)?)
       }
-      value => value.as_stdio()?,
+      value => value.as_stdio("Deno.run()")?,
     });
 
     // We want to kill child when it's closed

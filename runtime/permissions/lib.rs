@@ -917,6 +917,143 @@ fn oden_capsec_is_protected_inspector_endpoint(ip: IpAddr, port: u16) -> bool {
     })
 }
 
+#[cfg(unix)]
+fn oden_capsec_fd_is_inet_stream(
+  fd: std::os::fd::RawFd,
+) -> Result<bool, std::io::Error> {
+  let mut socket_type: libc::c_int = 0;
+  let mut option_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+  // SAFETY: `socket_type` and `option_len` are valid getsockopt output
+  // arguments and the descriptor is borrowed only for this call.
+  let result = unsafe {
+    libc::getsockopt(
+      fd,
+      libc::SOL_SOCKET,
+      libc::SO_TYPE,
+      (&mut socket_type as *mut libc::c_int).cast(),
+      &mut option_len,
+    )
+  };
+  if result != 0 {
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ENOTSOCK) {
+      return Ok(false);
+    }
+    return Err(error);
+  }
+  if option_len as usize != std::mem::size_of::<libc::c_int>()
+    || socket_type != libc::SOCK_STREAM
+  {
+    return Ok(false);
+  }
+
+  // A local address is enough to distinguish INET from Unix/vsock stream
+  // sockets. We intentionally do not match its tuple against the live
+  // inspector registry: listener shutdown would declassify retained streams,
+  // and endpoint reuse would falsely classify unrelated future streams.
+  let mut storage = std::mem::MaybeUninit::<libc::sockaddr_storage>::zeroed();
+  let mut len =
+    std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+  // SAFETY: the storage and length satisfy getsockname's output contract. The
+  // descriptor is borrowed only for the duration of the call.
+  let result = unsafe {
+    libc::getsockname(
+      fd,
+      storage.as_mut_ptr().cast::<libc::sockaddr>(),
+      &mut len,
+    )
+  };
+  if result != 0 {
+    return Err(std::io::Error::last_os_error());
+  }
+  if (len as usize) < std::mem::size_of::<libc::sa_family_t>() {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::InvalidData,
+      "kernel returned a truncated socket address",
+    ));
+  }
+  // SAFETY: the successful syscall initialized at least the family field.
+  let storage = unsafe { storage.assume_init() };
+  Ok(matches!(
+    storage.ss_family as libc::c_int,
+    libc::AF_INET | libc::AF_INET6
+  ))
+}
+
+/// Refuse raw-descriptor passage of an INET stream while capsec is armed.
+///
+/// This deliberately classifies the borrowed OS descriptor rather than any
+/// JavaScript handle or provenance claim. There is no portable query for a
+/// persistent socket identity that survives dup while distinguishing endpoint
+/// reuse, so the fail-closed contract categorically closes all raw INET stream
+/// passage.
+/// Files, pipes, Unix sockets, UDP, and other non-INET-stream descriptors keep
+/// their existing behavior.
+// @ref LLP 0001#the-inherited-hole-checklist [implements] — Numeric descriptors are guessable; validate the concrete object before child/IPC passage.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] — Socket object passage does not transfer authority.
+pub fn oden_capsec_check_raw_inet_stream_fd_transfer(
+  #[cfg_attr(not(unix), allow(unused_variables))] fd: i32,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    return Ok(());
+  }
+
+  #[cfg(not(unix))]
+  {
+    let _ = api_name;
+    return Ok(());
+  }
+
+  #[cfg(unix)]
+  {
+    oden_capsec_readiness_gate()?;
+    let inet_stream = oden_capsec_fd_is_inet_stream(fd).map_err(
+      |error| {
+        PermissionCheckError::PermissionDenied(PermissionDeniedError {
+          access: format!("{api_name} classification of raw descriptor {fd}"),
+          name: "capsec",
+          custom_message: Some(format!(
+            "oden capsec: refusing raw descriptor passage because its native socket identity could not be classified: {error}"
+          )),
+          state: PermissionState::Denied,
+        })
+      },
+    )?;
+    if !inet_stream {
+      return Ok(());
+    }
+
+    let target = format!("raw-inet-stream-fd:{fd}");
+    let mut principals =
+      OdenPolicy::constrained_principals(&oden_capsec_principal_set());
+    if principals.is_empty() {
+      principals.push(oden_capsec_principal());
+    }
+    for principal in principals {
+      oden_capsec_audit_record(
+        &principal.label(),
+        "inspector",
+        "activate",
+        &target,
+        "DENY(raw INET stream fd passage)",
+        None,
+      );
+    }
+    Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("{api_name} access to {target:?}"),
+        name: "capsec",
+        custom_message: Some(
+          "oden capsec: raw INET stream sockets cannot be transferred while capability security is armed"
+            .to_string(),
+        ),
+        state: PermissionState::Denied,
+      },
+    ))
+  }
+}
+
 /// Recheck a protected inspector endpoint when an already-connected stream is
 /// used. Connection possession, pooling, or object passage cannot delegate a
 /// terminal inspector row.
@@ -10100,6 +10237,86 @@ mod tests {
   use sys_traits::EnvCurrentDir;
 
   use super::*;
+
+  #[cfg(unix)]
+  #[test]
+  fn native_fd_classifier_closes_all_inet_stream_passage_by_object_type() {
+    use std::os::fd::AsRawFd;
+    use std::os::fd::FromRawFd;
+
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+      .expect("bind INET listener");
+    let endpoint = listener.local_addr().unwrap();
+    let client =
+      std::net::TcpStream::connect(endpoint).expect("connect INET client");
+    let (accepted, _) = listener.accept().expect("accept INET client");
+    let ordinary_listener =
+      std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .expect("bind ordinary listener");
+    let udp = std::net::UdpSocket::bind(endpoint)
+      .expect("TCP and UDP may share the same numeric endpoint");
+    let (unix_stream, _) = std::os::unix::net::UnixStream::pair().unwrap();
+    let file = std::fs::File::open("Cargo.toml").unwrap();
+    let mut pipe_fds = [-1; 2];
+    // SAFETY: pipe_fds has exactly the two output slots required by pipe().
+    assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+    // SAFETY: both descriptors were freshly returned by pipe().
+    let pipe_read = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe_fds[0]) };
+    // SAFETY: both descriptors were freshly returned by pipe().
+    let _pipe_write = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe_fds[1]) };
+
+    assert!(
+      oden_capsec_fd_is_inet_stream(listener.as_raw_fd()).unwrap(),
+      "INET listeners are categorically closed"
+    );
+    assert!(
+      oden_capsec_fd_is_inet_stream(client.as_raw_fd()).unwrap(),
+      "INET clients are categorically closed"
+    );
+    assert!(
+      oden_capsec_fd_is_inet_stream(accepted.as_raw_fd()).unwrap(),
+      "accepted INET streams are categorically closed"
+    );
+
+    // Model the fake-facade attack: JavaScript supplies only a guessed raw
+    // integer, but the native duplicate still identifies the same socket.
+    // SAFETY: fcntl either fails or returns a new owned descriptor.
+    let dup =
+      unsafe { libc::fcntl(client.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    assert!(dup >= 0);
+    // SAFETY: dup is the fresh descriptor returned above.
+    let dup = unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) };
+    assert!(oden_capsec_fd_is_inet_stream(dup.as_raw_fd()).unwrap());
+
+    // Model inspector shutdown/unregistration while the connected file
+    // descriptions and their duplicates remain live. Classification stays
+    // closed because it never consults the mutable endpoint registry.
+    drop(listener);
+    assert!(oden_capsec_fd_is_inet_stream(client.as_raw_fd()).unwrap());
+    assert!(oden_capsec_fd_is_inet_stream(accepted.as_raw_fd()).unwrap());
+    assert!(oden_capsec_fd_is_inet_stream(dup.as_raw_fd()).unwrap());
+
+    assert!(
+      oden_capsec_fd_is_inet_stream(ordinary_listener.as_raw_fd()).unwrap(),
+      "endpoint reuse and unrelated TCP cannot evade the categorical close"
+    );
+    assert!(
+      !oden_capsec_fd_is_inet_stream(udp.as_raw_fd()).unwrap(),
+      "UDP remains compatible"
+    );
+    assert!(
+      !oden_capsec_fd_is_inet_stream(unix_stream.as_raw_fd()).unwrap(),
+      "Unix streams remain compatible"
+    );
+    assert!(
+      !oden_capsec_fd_is_inet_stream(file.as_raw_fd()).unwrap(),
+      "ordinary files remain compatible"
+    );
+    assert!(
+      !oden_capsec_fd_is_inet_stream(pipe_read.as_raw_fd()).unwrap(),
+      "ordinary pipes remain compatible"
+    );
+  }
 
   #[test]
   fn cped_principal_selection_skips_ambient_wrappers() {
