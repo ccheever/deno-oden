@@ -2503,23 +2503,35 @@ function synchronizeListeners() {
 internals.dispatchProcessBeforeExitEvent = dispatchProcessBeforeExitEvent;
 internals.dispatchProcessExitEvent = dispatchProcessExitEvent;
 
-// Resolves the value for `process.argv[1]` from `Deno.mainModule`. Converting a
-// `file:` URL to a path can throw (e.g. `URIError: URI malformed` when the path
-// contains invalid percent-encoding), and this runs during bootstrap where an
-// uncaught throw aborts the runtime with a panic. Fall back to the raw
-// specifier so a non-decodable main module can't crash the process.
+// Resolves the value for `process.argv[1]` from trusted bootstrap metadata or
+// `Deno.mainModule`. Converting a `file:` URL to a path can throw (e.g.
+// `URIError: URI malformed` when the path contains invalid percent-encoding),
+// and this runs during bootstrap where an uncaught throw aborts the runtime
+// with a panic. Fall back to the raw specifier so a non-decodable main module
+// can't crash the process.
+//
+// Node workers do not expose their entry through `Deno.mainModule`. Their
+// runtime-supplied module specifier must therefore win before the legacy cwd
+// fallback. Calling public `Deno.cwd()` from worker bootstrap is both
+// unnecessary and, under capsec, correctly rejected as unattributed
+// runtime-control inspection.
+// @ref LLP 0010#revision-11-patch-profile [implements] -- Trusted worker bootstrap consumes its private entry identity instead of bypassing package-facing cwd mediation.
 function mainModuleArgv(
-  mainModule: string | undefined = Deno.mainModule,
+  workerModuleSpecifier: string | null,
 ): string {
   if (Deno.build.standalone) {
     return Deno.execPath();
   }
+  const mainModule = workerModuleSpecifier ?? Deno.mainModule;
   if (mainModule?.startsWith("file:")) {
     try {
       return pathFromURL(new URL(mainModule));
     } catch {
       return mainModule;
     }
+  }
+  if (workerModuleSpecifier !== null) {
+    return workerModuleSpecifier;
   }
   return join(Deno.cwd(), "$deno$node.mjs");
 }
@@ -2533,6 +2545,7 @@ internals.__bootstrapNodeProcess = function (
   nodeDebug: string,
   warmup = false,
   runningOnMainThread = true,
+  moduleSpecifier: string | null = null,
 ) {
   if (!warmup) {
     // Idempotent: under node-defer this runs either from node:process's own
@@ -2555,7 +2568,7 @@ internals.__bootstrapNodeProcess = function (
     op_stream_base_register_state(streamBaseState);
     argv0 = argv0Val || "";
     argv[0] = Deno.execPath();
-    argv[1] = mainModuleArgv();
+    argv[1] = mainModuleArgv(moduleSpecifier);
     // Manually concatenate these arrays to avoid triggering the getter
     for (let i = 0; i < args.length; i++) {
       argv[i + 2] = args[i];
@@ -2792,6 +2805,7 @@ if (internals.__nodeBootstrapArgs !== undefined) {
     a.nodeDebug ?? "",
     false,
     a.runningOnMainThread,
+    a.moduleSpecifier,
   );
   // NOTE: the full worker_threads init (`__initWorkerThreads`, which aliases
   // globalThis.MessageChannel/MessagePort to the node classes) is NOT run

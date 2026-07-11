@@ -1553,27 +1553,37 @@ function setupCrossThreadMessaging() {
     ensureCrossThreadMessaging();
   }
 
-  lazyProcess().default.on("newListener", (eventName: string) => {
-    if (eventName === "workerMessage") {
-      workerMessageListenerCount++;
-      ensureCrossThreadMessaging();
-      op_node_worker_thread_set_listener_count(
-        threadId,
-        workerMessageListenerCount,
-      );
-    }
-  });
-  lazyProcess().default.on("removeListener", (eventName: string) => {
-    if (eventName === "workerMessage") {
-      if (workerMessageListenerCount > 0) workerMessageListenerCount--;
-      if (crossThreadSetUp) {
+  // These hooks are runtime bookkeeping, not package observation of the
+  // protected process meta-events. Use the private process bootstrap path so
+  // an unattributed worker bootstrap does not weaken or trip the public guard.
+  // @ref LLP 0010#revision-11-patch-profile [implements] -- Trusted worker bookkeeping stays on a non-exported runtime-control path.
+  internals.nodeProcessAddListenerInternal(
+    "newListener",
+    (eventName: string) => {
+      if (eventName === "workerMessage") {
+        workerMessageListenerCount++;
+        ensureCrossThreadMessaging();
         op_node_worker_thread_set_listener_count(
           threadId,
           workerMessageListenerCount,
         );
       }
-    }
-  });
+    },
+  );
+  internals.nodeProcessAddListenerInternal(
+    "removeListener",
+    (eventName: string) => {
+      if (eventName === "workerMessage") {
+        if (workerMessageListenerCount > 0) workerMessageListenerCount--;
+        if (crossThreadSetUp) {
+          op_node_worker_thread_set_listener_count(
+            threadId,
+            workerMessageListenerCount,
+          );
+        }
+      }
+    },
+  );
 }
 
 function ensureCrossThreadMessaging() {

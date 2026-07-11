@@ -3368,6 +3368,7 @@ function initialize(args) {
       nodeDebug ?? "",
       false,
       runningOnMainThread,
+      moduleSpecifier,
     );
     internals.__initWorkerThreads(
       runningOnMainThread,

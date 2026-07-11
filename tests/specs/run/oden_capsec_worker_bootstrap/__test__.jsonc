@@ -1,0 +1,18 @@
+{
+  // Runtime-owned Node worker bootstrap uses the worker's trusted entry
+  // specifier. It must not invoke the package-facing cwd inspection gate from
+  // an unattributed frame in any armed mode.
+  "tests": {
+    "node_worker_bootstrap_uses_trusted_entry": {
+      "args": "run --allow-all main.js",
+      "variants": {
+        "enforce": { "POLICY": "enforce.json" },
+        "audit": { "POLICY": "audit.json" },
+        "permissive": { "POLICY": "permissive.json" }
+      },
+      "envs": { "ODEN_CAPSEC_POLICY": "${POLICY}" },
+      "output": "main.out",
+      "exitCode": 0
+    }
+  }
+}
