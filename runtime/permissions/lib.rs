@@ -498,6 +498,30 @@ pub fn oden_capsec_guard_deny_only_surface(
   ))
 }
 
+/// Record the root half of a conjunctive effect that occurs outside the stock
+/// permission container. The deny-only guard keeps this helper unusable by a
+/// constrained principal even if an internal op reference is passed around.
+pub fn oden_capsec_record_root_ambient_effect(
+  family: &str,
+  action: &str,
+  target: &str,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  oden_capsec_guard_deny_only_surface(family, action, target, api_name)?;
+  if oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
+    oden_capsec_readiness_gate()?;
+    oden_capsec_audit_record(
+      "root/runtime",
+      family,
+      action,
+      target,
+      "allow(ambient)",
+      None,
+    );
+  }
+  Ok(())
+}
+
 /// Authorize an inspector activation route from the exact Rev1.1 static floor.
 /// Programmatic package callers must each hold `inspector:activate`; session
 /// overlays and handles cannot satisfy this terminal predicate. Startup and
@@ -537,12 +561,17 @@ pub fn oden_capsec_check_inspector_activation(
       labels,
     )
   };
+  let programmatic_root = labels.is_empty() && !exact_root_static_row;
   let audit_labels = if labels.is_empty() {
     vec!["root/runtime".to_string()]
   } else {
     labels
   };
-  let verdict = if allowed {
+  let verdict = if allowed && exact_root_static_row {
+    "allow(exact-root static inspector row)"
+  } else if allowed && programmatic_root {
+    "allow(ambient programmatic root)"
+  } else if allowed {
     "allow(exact-static inspector row)"
   } else {
     "DENY(exact-static inspector row required)"
@@ -625,6 +654,33 @@ pub fn oden_capsec_check_inspector_listener_startup(
   Ok(())
 }
 
+/// Programmatic root activation is distinct from an externally delivered host
+/// signal: it uses the ordinary root definition channel, while still recording
+/// the conjunctive listener effect before bind.
+pub fn oden_capsec_check_inspector_listener_programmatic(
+  target: &str,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  oden_capsec_check_inspector_activation(target, api_name, false)?;
+  oden_capsec_record_inspector_root_network_effect("listen", target)
+}
+
+fn oden_programmatic_inspector_signal_channel()
+-> &'static tokio::sync::broadcast::Sender<()> {
+  static CHANNEL: OnceLock<tokio::sync::broadcast::Sender<()>> =
+    OnceLock::new();
+  CHANNEL.get_or_init(|| tokio::sync::broadcast::channel(16).0)
+}
+
+pub fn oden_capsec_subscribe_programmatic_inspector_signal()
+-> tokio::sync::broadcast::Receiver<()> {
+  oden_programmatic_inspector_signal_channel().subscribe()
+}
+
+pub fn oden_capsec_trigger_programmatic_inspector_signal() {
+  let _ = oden_programmatic_inspector_signal_channel().send(());
+}
+
 /// Record a trusted runtime-control network effect that is part of an
 /// inspector activation but occurs outside a PermissionsContainer (for
 /// example the desktop DevTools multiplexer).
@@ -653,8 +709,8 @@ struct OdenProtectedInspectorEndpoints {
   pending: std::collections::HashMap<IpAddr, usize>,
 }
 
-fn oden_protected_inspector_endpoints(
-) -> &'static Mutex<OdenProtectedInspectorEndpoints> {
+fn oden_protected_inspector_endpoints()
+-> &'static Mutex<OdenProtectedInspectorEndpoints> {
   static ENDPOINTS: OnceLock<Mutex<OdenProtectedInspectorEndpoints>> =
     OnceLock::new();
   ENDPOINTS.get_or_init(Default::default)
@@ -768,12 +824,14 @@ fn oden_capsec_check_protected_inspector_endpoint(
 
 fn oden_capsec_is_protected_inspector_endpoint(ip: IpAddr, port: u16) -> bool {
   let endpoints = oden_protected_inspector_endpoints().lock();
-  endpoints.pending.keys().any(|pending_ip| {
-    pending_ip.is_unspecified() || *pending_ip == ip
-  }) || endpoints.exact.keys().any(|endpoint| {
-    endpoint.port() == port
-      && (endpoint.ip().is_unspecified() || endpoint.ip() == ip)
-  })
+  endpoints
+    .pending
+    .keys()
+    .any(|pending_ip| pending_ip.is_unspecified() || *pending_ip == ip)
+    || endpoints.exact.keys().any(|endpoint| {
+      endpoint.port() == port
+        && (endpoint.ip().is_unspecified() || endpoint.ip() == ip)
+    })
 }
 
 /// Recheck a protected inspector endpoint when an already-connected stream is
@@ -783,12 +841,7 @@ pub fn oden_capsec_check_protected_inspector_stream_use(
   endpoint: SocketAddr,
   api_name: &str,
 ) -> Result<(), PermissionCheckError> {
-  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE)
-    || !oden_capsec_is_protected_inspector_endpoint(
-      endpoint.ip(),
-      endpoint.port(),
-    )
-  {
+  if !oden_capsec_profile_is(ODEN_CAPSEC_PROFILE) {
     return Ok(());
   }
   oden_capsec_check_inspector_activation(
@@ -796,6 +849,44 @@ pub fn oden_capsec_check_protected_inspector_stream_use(
     api_name,
     false,
   )
+}
+
+/// Snapshot the protected-endpoint property when a connection becomes a live
+/// resource. The returned endpoint is an immutable resource tag: listener
+/// shutdown cannot declassify already-buffered inspector bytes, while a later
+/// unrelated connection at a reused address receives no tag.
+pub fn oden_capsec_protected_inspector_stream_tag(
+  endpoint: SocketAddr,
+) -> Option<SocketAddr> {
+  (oden_capsec_profile_is(ODEN_CAPSEC_PROFILE)
+    && oden_capsec_is_protected_inspector_endpoint(
+      endpoint.ip(),
+      endpoint.port(),
+    ))
+  .then_some(endpoint)
+}
+
+/// JS-backed stream wrappers retain this endpoint string after the native
+/// resource has delivered a chunk into a queue. Re-evaluate at the reader
+/// boundary so buffered bytes, tee branches, and Response clones cannot turn
+/// object passage into inspector authority.
+pub fn oden_capsec_check_protected_inspector_stream_target(
+  target: &str,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  let Ok(endpoint) = target.parse::<SocketAddr>() else {
+    return Err(PermissionCheckError::PermissionDenied(
+      PermissionDeniedError {
+        access: format!("{api_name} access to invalid endpoint {target:?}"),
+        name: "capsec",
+        custom_message: Some(
+          "oden capsec: invalid protected stream endpoint".to_string(),
+        ),
+        state: PermissionState::Denied,
+      },
+    ));
+  };
+  oden_capsec_check_protected_inspector_stream_use(endpoint, api_name)
 }
 
 /// Preflight a signal as one conjunctive effect set. SIGUSR1 is not merely a
@@ -1187,9 +1278,15 @@ fn oden_capsec_active() -> bool {
   oden_capsec_armed()
 }
 
+pub fn oden_capsec_is_control_env_name(name: &str) -> bool {
+  EnvVarNameRef::new(Cow::Borrowed(name))
+    .as_ref()
+    .starts_with("ODEN_CAPSEC_")
+}
+
 fn oden_capsec_is_control_request(req: &OdenRequest, aggregate: bool) -> bool {
   matches!(req.family, OdenFamily::Env)
-    && (aggregate || req.target.starts_with("ODEN_CAPSEC_"))
+    && oden_capsec_is_control_env_name(&req.target)
     || matches!(req.family, OdenFamily::Fs)
       && (aggregate && oden_capsec_has_control_root()
         || oden_capsec_is_control_path(&req.target))
@@ -3454,11 +3551,8 @@ fn oden_capsec_policy_file() -> Option<&'static OdenPolicyFile> {
 fn oden_capsec_root_static_grants(req: &OdenRequest) -> bool {
   oden_capsec_policy_file()
     .and_then(|file| {
-      OdenGrant::parse_many_for_profile(
-        &file.root_grants,
-        ODEN_CAPSEC_PROFILE,
-      )
-      .ok()
+      OdenGrant::parse_many_for_profile(&file.root_grants, ODEN_CAPSEC_PROFILE)
+        .ok()
     })
     .is_some_and(|grants| self::oden_policy::covers(&grants, req))
 }
@@ -3541,11 +3635,8 @@ fn oden_parse_policy_file(
   let root_grants =
     OdenGrant::parse_many_for_profile(&file.root_grants, ODEN_CAPSEC_PROFILE)
       .map_err(|err| {
-        format!(
-          "{}#rootGrants: invalid capsec grant: {err}",
-          path.display()
-        )
-      })?;
+      format!("{}#rootGrants: invalid capsec grant: {err}", path.display())
+    })?;
   if root_grants
     .iter()
     .any(|grant| grant.family != OdenFamily::Inspector)
@@ -3563,13 +3654,15 @@ fn oden_parse_policy_file(
         path.display()
       ));
     }
-    OdenGrant::parse_many_for_profile(grant_str, ODEN_CAPSEC_PROFILE).map_err(|err| {
-      format!(
-        "{}#grants[{:?}]: invalid capsec grant: {err}",
-        path.display(),
-        selector
-      )
-    })?;
+    OdenGrant::parse_many_for_profile(grant_str, ODEN_CAPSEC_PROFILE).map_err(
+      |err| {
+        format!(
+          "{}#grants[{:?}]: invalid capsec grant: {err}",
+          path.display(),
+          selector
+        )
+      },
+    )?;
   }
   OdenGrant::parse_many(&file.deny_ceiling).map_err(|err| {
     format!(

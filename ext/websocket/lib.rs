@@ -56,6 +56,7 @@ use http::header::SEC_WEBSOCKET_PROTOCOL;
 use http::header::SEC_WEBSOCKET_VERSION;
 use http::header::UPGRADE;
 use hyper_util::client::legacy::connect::Connection;
+use hyper_util::client::legacy::connect::HttpInfo;
 use once_cell::sync::Lazy;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
@@ -218,7 +219,14 @@ async fn handshake_websocket(
   uri: Uri,
   protocols: &str,
   headers: Option<Vec<(ByteString, ByteString)>>,
-) -> Result<(WebSocket<WebSocketStream>, http::HeaderMap), HandshakeError> {
+) -> Result<
+  (
+    WebSocket<WebSocketStream>,
+    http::HeaderMap,
+    Option<std::net::SocketAddr>,
+  ),
+  HandshakeError,
+> {
   let parts = uri.into_parts();
   let Some(authority) = parts.authority else {
     return Err(HandshakeError::MissingHost);
@@ -265,13 +273,35 @@ async fn handshake_http1(
   path_and_query: &http::uri::PathAndQuery,
   protocols: &str,
   headers: &Option<Vec<(ByteString, ByteString)>>,
-) -> Result<(WebSocket<WebSocketStream>, http::HeaderMap), HandshakeError> {
+) -> Result<
+  (
+    WebSocket<WebSocketStream>,
+    http::HeaderMap,
+    Option<std::net::SocketAddr>,
+  ),
+  HandshakeError,
+> {
   let connection_uri = Uri::builder()
     .scheme(scheme)
     .authority(authority.clone())
     .path_and_query(path_and_query.clone())
     .build()?;
   let connection = client.connect(connection_uri, SocketUse::Http1Only).await?;
+  let mut connection_extensions = http::Extensions::new();
+  connection
+    .connected()
+    .get_extras(&mut connection_extensions);
+  let network_peer = connection_extensions
+    .remove::<deno_fetch::dns::OdenProtectedInspectorPeer>()
+    .map(|tag| tag.0)
+    .or_else(|| {
+      connection_extensions
+        .remove::<HttpInfo>()
+        .map(|info| info.remote_addr())
+        .and_then(
+          deno_permissions::oden_capsec_protected_inspector_stream_tag,
+        )
+    });
 
   let is_proxied = connection.connected().is_proxied();
   let host = match authority.port() {
@@ -312,7 +342,8 @@ async fn handshake_http1(
     .body(http_body_util::Empty::new())
     .map_err(HandshakeError::Http)?;
 
-  handshake_connection(request, connection).await
+  let (stream, headers) = handshake_connection(request, connection).await?;
+  Ok((stream, headers, network_peer))
 }
 
 #[allow(clippy::too_many_arguments, reason = "TODO: improve")]
@@ -322,8 +353,30 @@ async fn handshake_http2(
   uri: Uri,
   protocols: &str,
   headers: &Option<Vec<(ByteString, ByteString)>>,
-) -> Result<(WebSocket<WebSocketStream>, http::HeaderMap), HandshakeError> {
+) -> Result<
+  (
+    WebSocket<WebSocketStream>,
+    http::HeaderMap,
+    Option<std::net::SocketAddr>,
+  ),
+  HandshakeError,
+> {
   let connection = client.connect(uri.clone(), SocketUse::Http2Only).await?;
+  let mut connection_extensions = http::Extensions::new();
+  connection
+    .connected()
+    .get_extras(&mut connection_extensions);
+  let network_peer = connection_extensions
+    .remove::<deno_fetch::dns::OdenProtectedInspectorPeer>()
+    .map(|tag| tag.0)
+    .or_else(|| {
+      connection_extensions
+        .remove::<HttpInfo>()
+        .map(|info| info.remote_addr())
+        .and_then(
+          deno_permissions::oden_capsec_protected_inspector_stream_tag,
+        )
+    });
   if !connection.connected().is_negotiated_h2() {
     return Err(HandshakeError::NoH2Alpn);
   }
@@ -352,7 +405,7 @@ async fn handshake_http2(
   stream.set_writev(false);
   // TODO(mmastrac): we should be able to use a zero masking key over HTTPS
   // stream.set_auto_apply_mask(false);
-  Ok((stream, headers))
+  Ok((stream, headers, network_peer))
 }
 
 async fn handshake_connection<
@@ -456,7 +509,7 @@ pub async fn op_ws_create(
   #[smi] client_rid: Option<u32>,
 ) -> Result<CreateResponse, WebsocketError> {
   let parsed_url = url::Url::parse(&url).map_err(WebsocketError::Url)?;
-  let network_peer = parsed_url.host().and_then(|host| {
+  let url_network_peer = parsed_url.host().and_then(|host| {
     let ip = match host {
       url::Host::Ipv4(ip) => std::net::IpAddr::V4(ip),
       url::Host::Ipv6(ip) => std::net::IpAddr::V6(ip),
@@ -465,15 +518,12 @@ pub async fn op_ws_create(
     parsed_url
       .port_or_known_default()
       .map(|port| std::net::SocketAddr::new(ip, port))
-  });
+  })
+  .and_then(deno_permissions::oden_capsec_protected_inspector_stream_tag);
   let (client, allow_host) = {
     let mut s = state.borrow_mut();
     s.borrow_mut::<PermissionsContainer>()
-      .check_net_url(
-        NetPermissionAction::Connect,
-        &parsed_url,
-        &api_name,
-      )
+      .check_net_url(NetPermissionAction::Connect, &parsed_url, &api_name)
       .expect(
         "Permission check should have been done in op_ws_check_permission",
       );
@@ -512,10 +562,11 @@ pub async fn op_ws_create(
   let handshake =
     handshake_websocket(client, allow_host, uri, &protocols, headers)
       .map_err(WebsocketError::ConnectionFailed);
-  let (stream, response) = match cancel_resource {
+  let (stream, response, connected_network_peer) = match cancel_resource {
     Some(rc) => handshake.try_or_cancel(rc).await?,
     None => handshake.await?,
   };
+  let network_peer = connected_network_peer.or(url_network_peer);
 
   if let Some(cancel_rid) = cancel_handle
     && let Ok(res) = state.borrow_mut().resource_table.take_any(cancel_rid)
@@ -599,10 +650,6 @@ pub struct ServerWebSocket {
 }
 
 impl ServerWebSocket {
-  fn new(ws: WebSocket<WebSocketStream>) -> Self {
-    Self::new_with_guard_and_peer(ws, None, None)
-  }
-
   fn new_client(
     ws: WebSocket<WebSocketStream>,
     network_peer: Option<std::net::SocketAddr>,

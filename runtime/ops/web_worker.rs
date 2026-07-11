@@ -106,9 +106,7 @@ fn op_worker_maybe_wait_for_debugger(
     "worker debugger wait helper",
     true,
   )?;
-  if let Some(mut wait) =
-    state.try_borrow_mut::<WaitForWorkerDebuggerOnMessage>()
-  {
+  if let Some(wait) = state.try_borrow_mut::<WaitForWorkerDebuggerOnMessage>() {
     wait.0 = false;
   }
 

@@ -5563,6 +5563,16 @@ pub fn inspect_value_parser(host_and_port: &str) -> Result<SocketAddr, String> {
     return Err("Inspector address cannot be empty".to_string());
   }
 
+  // Clap invokes this parser before CliFactory gets a chance to start the
+  // inspector server. Gate the authored startup request here so hostname DNS
+  // resolution cannot precede the exact-root inspector decision.
+  deno_runtime::deno_permissions::oden_capsec_check_inspector_activation(
+    &format!("startup:--inspect:{host_and_port}"),
+    "inspector startup flag parser",
+    true,
+  )
+  .map_err(|error| error.to_string())?;
+
   if let Some(port_part) = host_and_port.strip_prefix(':') {
     let port = if port_part.is_empty() {
       DEFAULT_PORT

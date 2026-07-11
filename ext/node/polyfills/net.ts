@@ -24,6 +24,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_oden_check_protected_inspector_stream_use } = core.ops;
 
 const { BlockList, SocketAddress } = core.loadExtScript(
   "ext:deno_node/internal/blocklist.mjs",
@@ -41,6 +42,9 @@ const {
   normalizedArgsSymbol,
 } = core.loadExtScript("ext:deno_node/internal/net.ts");
 const { Duplex } = core.createLazyLoader("node:stream")();
+const { setReadableUseGuard } = core.loadExtScript(
+  "ext:deno_node/internal/streams/readable.js",
+);
 const {
   asyncIdSymbol,
   defaultTriggerAsyncIdScope,
@@ -542,6 +546,17 @@ function _afterConnectImpl(
   socket._sockname = null;
 
   if (status === 0) {
+    const protectedInspectorPeer = socket._handle
+      ?.protectedInspectorPeer?.();
+    if (typeof protectedInspectorPeer === "string") {
+      setReadableUseGuard(socket, () => {
+        op_oden_check_protected_inspector_stream_use(
+          protectedInspectorPeer,
+          "node:net.Socket readable consumption",
+        );
+      });
+    }
+
     if (socket.readable && !readable) {
       // deno-lint-ignore prefer-primordials -- Readable stream method, not Array.prototype.push
       socket.push(null);
@@ -572,7 +587,12 @@ function _afterConnectImpl(
 
     // Start the first read, or get an immediate EOF.
     // this doesn't actually consume any bytes, because len=0.
-    if (readable && !socket.isPaused()) {
+    if (
+      readable && !socket.isPaused() &&
+      (typeof protectedInspectorPeer !== "string" ||
+        socket.listenerCount("data") > 0 ||
+        socket.listenerCount("readable") > 0)
+    ) {
       socket.read(0);
     }
   } else {

@@ -675,24 +675,35 @@ impl WebWorker {
     // The uv loop is auto-created and registered by JsRuntime::new_inner.
 
     if let Some(main_session_tx) = services.main_inspector_session_tx.get() {
-      let (main_proxy, worker_proxy) =
-        deno_core::create_worker_inspector_session_pair(
-          options.main_module.to_string(),
-        );
+      let authorized =
+        deno_permissions::oden_capsec_check_inspector_activation(
+          "runtime:web-worker-session-pair",
+          "worker inspector session pair",
+          false,
+        )
+        .is_ok();
+      if authorized {
+        let (main_proxy, worker_proxy) =
+          deno_core::create_worker_inspector_session_pair(
+            options.main_module.to_string(),
+          );
 
-      // Send worker proxy to the main runtime
-      if main_session_tx.unbounded_send(main_proxy).is_err() {
-        log::debug!("Failed to send inspector session proxy to main runtime");
-      }
+        // Send worker proxy to the main runtime
+        if main_session_tx.unbounded_send(main_proxy).is_err() {
+          log::debug!("Failed to send inspector session proxy to main runtime");
+        }
 
-      // Send worker proxy to the worker runtime
-      if js_runtime
-        .inspector()
-        .get_session_sender()
-        .unbounded_send(worker_proxy)
-        .is_err()
-      {
-        log::debug!("Failed to send inspector session proxy to worker runtime");
+        // Send worker proxy to the worker runtime
+        if js_runtime
+          .inspector()
+          .get_session_sender()
+          .unbounded_send(worker_proxy)
+          .is_err()
+        {
+          log::debug!(
+            "Failed to send inspector session proxy to worker runtime"
+          );
+        }
       }
     }
 

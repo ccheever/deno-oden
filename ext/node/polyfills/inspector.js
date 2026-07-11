@@ -58,6 +58,9 @@ const {
   JSONStringify,
   SafeMap,
   SafeMapIterator,
+  Proxy,
+  ReflectApply,
+  ReflectGet,
   StringPrototypeStartsWith,
   StringPrototypeToLowerCase,
   TypeError,
@@ -330,7 +333,21 @@ const DOMStorage = {
     broadcastToFrontend("DOMStorage.registerStorage", params),
 };
 
-const inspectorConsole = op_get_extras_binding_object().console;
+const inspectorConsoleTarget = op_get_extras_binding_object().console;
+const inspectorConsole = new Proxy(inspectorConsoleTarget, {
+  get(target, property, receiver) {
+    // `op_inspector_enabled` performs the terminal inspector check. Wrap the
+    // returned methods too so a root-obtained reference cannot be passed to an
+    // ungranted package and invoked later.
+    op_inspector_enabled();
+    const value = ReflectGet(target, property, receiver);
+    if (typeof value !== "function") return value;
+    return function (...args) {
+      op_inspector_enabled();
+      return ReflectApply(value, target, args);
+    };
+  },
+});
 
 return {
   close,

@@ -2,12 +2,14 @@ import { createRequire } from "node:module";
 import asyncHooks from "node:async_hooks";
 import diagnostics from "node:diagnostics_channel";
 import os from "node:os";
+import { spawn } from "node:child_process";
 
 const require = createRequire(import.meta.url);
 const probe = require("deny-probe");
 const existingRootListener = () => {};
 const laterRootListener = () => {};
 Deno.addSignalListener("SIGUSR2", existingRootListener);
+const rootChild = spawn(Deno.execPath(), ["eval", "setTimeout(() => {}, 10_000)"]);
 
 try {
   const rootHook = asyncHooks.createHook({ init() {} });
@@ -20,6 +22,7 @@ try {
     title: process.title,
     rootHook,
     rootChannel,
+    rootChild,
   });
 
   Deno.addSignalListener("SIGHUP", laterRootListener);
@@ -40,6 +43,7 @@ try {
   result.diagnosticsUnchanged = !rootChannel.hasSubscribers ? "DENIED" : "LEAKED";
   console.log(JSON.stringify(result));
 } finally {
+  rootChild.kill("SIGTERM");
   Deno.removeSignalListener("SIGUSR2", existingRootListener);
   try {
     Deno.removeSignalListener("SIGHUP", laterRootListener);

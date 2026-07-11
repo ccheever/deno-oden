@@ -712,13 +712,21 @@ impl MainWorker {
     // The uv loop is auto-created and registered by JsRuntime::new_inner.
 
     if let Some(server) = get_inspector_server() {
-      let inspector_url = server.register_inspector(
-        main_module.to_string(),
-        js_runtime.inspector(),
-        options.should_break_on_first_statement
-          || options.should_wait_for_inspector_session,
-      );
-      js_runtime.op_state().borrow_mut().put(inspector_url);
+      if deno_permissions::oden_capsec_check_inspector_activation(
+        "runtime:worker-registration",
+        "runtime inspector registration",
+        true,
+      )
+      .is_ok()
+      {
+        let inspector_url = server.register_inspector(
+          main_module.to_string(),
+          js_runtime.inspector(),
+          options.should_break_on_first_statement
+            || options.should_wait_for_inspector_session,
+        );
+        js_runtime.op_state().borrow_mut().put(inspector_url);
+      }
     }
 
     let (
@@ -1033,13 +1041,17 @@ impl MainWorker {
       "inspector:local-session",
       "runtime local inspector session",
     )
-    .unwrap_or_else(|error| panic!("capsec refused local inspector session: {error}"));
+    .unwrap_or_else(|error| {
+      panic!("capsec refused local inspector session: {error}")
+    });
     deno_permissions::oden_capsec_check_inspector_activation(
       "runtime:local-session",
       "runtime local inspector session",
       false,
     )
-    .unwrap_or_else(|error| panic!("capsec refused local inspector session: {error}"));
+    .unwrap_or_else(|error| {
+      panic!("capsec refused local inspector session: {error}")
+    });
     self.js_runtime.maybe_init_inspector();
     let insp = self.js_runtime.inspector();
 

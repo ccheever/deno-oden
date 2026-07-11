@@ -556,6 +556,7 @@ class GCProfiler {
   stop() {
     const handle = this[kGCHandle];
     if (handle === null) return undefined;
+    guardV8("GCProfiler.stop");
     this[kGCHandle] = null;
     const endTime = DateNow();
     const result = op_v8_gc_profiler_stop(handle);
@@ -571,6 +572,7 @@ class GCProfiler {
   [SymbolDispose]() {
     const handle = this[kGCHandle];
     if (handle === null) return undefined;
+    guardV8("GCProfiler.dispose");
     this[kGCHandle] = null;
     // Ignore the report; dispose() must return undefined.
     op_v8_gc_profiler_stop(handle);

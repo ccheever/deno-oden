@@ -128,13 +128,17 @@ impl CoverageCollector {
       "coverage:precise",
       "coverage collector",
     )
-    .unwrap_or_else(|error| panic!("capsec refused coverage collector: {error}"));
+    .unwrap_or_else(|error| {
+      panic!("capsec refused coverage collector: {error}")
+    });
     deno_permissions::oden_capsec_check_inspector_activation(
       "runtime:coverage-session",
       "coverage inspector session",
       false,
     )
-    .unwrap_or_else(|error| panic!("capsec refused coverage inspector session: {error}"));
+    .unwrap_or_else(|error| {
+      panic!("capsec refused coverage inspector session: {error}")
+    });
     let state = CoverageCollectorState::new(coverage_dir);
 
     js_runtime.maybe_init_inspector();

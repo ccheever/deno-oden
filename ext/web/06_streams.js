@@ -111,6 +111,35 @@ const { assert, AssertionError } = core.loadExtScript(
   "ext:deno_web/00_infra.js",
 );
 
+// A native resource can enqueue bytes before a later caller consumes them.
+// Keep a closure-private per-use guard on the stream itself so reader calls,
+// BYOB reads, and tee/clone branches re-enter the authority decision before
+// any queued bytes are delivered.
+const readableStreamUseGuards = new SafeWeakMap();
+const readableStreamIteratorUseGuards = new SafeWeakMap();
+
+function setReadableStreamUseGuard(stream, guard) {
+  assert(isReadableStream(stream));
+  const existing = WeakMapPrototypeGet(readableStreamUseGuards, stream);
+  if (existing === undefined || existing === guard) {
+    WeakMapPrototypeSet(readableStreamUseGuards, stream, guard);
+  } else {
+    WeakMapPrototypeSet(readableStreamUseGuards, stream, () => {
+      existing();
+      guard();
+    });
+  }
+}
+
+function runReadableStreamUseGuard(stream) {
+  const guard = WeakMapPrototypeGet(readableStreamUseGuards, stream);
+  if (guard !== undefined) guard();
+}
+
+function getReadableStreamUseGuard(stream) {
+  return WeakMapPrototypeGet(readableStreamUseGuards, stream);
+}
+
 /** @template T */
 class Deferred {
   /** @type {Promise<T>} */
@@ -1336,10 +1365,12 @@ function readableStreamForRidUnrefableUnref(stream) {
 }
 
 function getReadableStreamResourceBacking(stream) {
+  runReadableStreamUseGuard(stream);
   return stream[_resourceBacking];
 }
 
 function getReadableStreamResourceBackingUnrefable(stream) {
+  runReadableStreamUseGuard(stream);
   return stream[_resourceBackingUnrefable];
 }
 
@@ -2307,6 +2338,12 @@ function readableStreamDefaultcontrollerShouldCallPull(controller) {
 function readableStreamBYOBReaderRead(reader, view, min, readIntoRequest) {
   const stream = reader[_stream];
   assert(stream);
+  try {
+    runReadableStreamUseGuard(stream);
+  } catch (error) {
+    readIntoRequest.errorSteps(error);
+    return;
+  }
   stream[_disturbed] = true;
   if (stream[_state] === "errored") {
     readIntoRequest.errorSteps(stream[_storedError]);
@@ -2954,6 +2991,12 @@ function readableByteStreamControllerConvertPullIntoDescriptor(
 function readableStreamDefaultReaderRead(reader, readRequest) {
   const stream = reader[_stream];
   assert(stream);
+  try {
+    runReadableStreamUseGuard(stream);
+  } catch (error) {
+    readRequest.errorSteps(error);
+    return;
+  }
   stream[_disturbed] = true;
   const state = stream[_state];
   if (state === "closed") {
@@ -3364,10 +3407,21 @@ function readableStreamPipeTo(
         pump();
       }
     },
-    // Source close/error is finalized by the isOrBecomes{Closed,Errored}
-    // handlers installed below; the pump simply stops re-arming.
+    // Source close is finalized by the installed closed handler. A per-use
+    // authority guard can reject a read without transitioning the source to
+    // errored, so handle that error directly or the pipe would never settle.
     closeSteps: noopHandler,
-    errorSteps: noopHandler,
+    errorSteps(error) {
+      if (preventAbort === false) {
+        shutdownWithAction(
+          () => writableStreamAbort(dest, error),
+          true,
+          error,
+        );
+      } else {
+        shutdown(true, error);
+      }
+    },
   };
 
   function pump() {
@@ -3666,16 +3720,24 @@ function readableStreamBYOBReaderErrorReadIntoRequests(reader, e) {
 function readableStreamTee(stream, cloneForBranch2) {
   assert(isReadableStream(stream));
   assert(typeof cloneForBranch2 === "boolean");
+  runReadableStreamUseGuard(stream);
+  let branches;
   if (
     ObjectPrototypeIsPrototypeOf(
       ReadableByteStreamControllerPrototype,
       stream[_controller],
     )
   ) {
-    return readableByteStreamTee(stream);
+    branches = readableByteStreamTee(stream);
   } else {
-    return readableStreamDefaultTee(stream, cloneForBranch2);
+    branches = readableStreamDefaultTee(stream, cloneForBranch2);
   }
+  const guard = WeakMapPrototypeGet(readableStreamUseGuards, stream);
+  if (guard !== undefined) {
+    setReadableStreamUseGuard(branches[0], guard);
+    setReadableStreamUseGuard(branches[1], guard);
+  }
+  return branches;
 }
 
 /**
@@ -5800,6 +5862,11 @@ const readableStreamAsyncIteratorPrototype = ObjectSetPrototypeOf({
         controller[_pendingPullIntos] === undefined &&
         controller[_queue].size !== 0
       ) {
+        try {
+          runReadableStreamUseGuard(stream);
+        } catch (error) {
+          return PromiseReject(error);
+        }
         stream[_disturbed] = true;
         const chunk = dequeueValue(controller);
         if (controller[_closeRequested] && controller[_queue].size === 0) {
@@ -6059,6 +6126,10 @@ class ReadableStream {
       1,
       prefix,
     );
+    const source = asyncIterable;
+    const sourceGuard = isReadableStream(source)
+      ? WeakMapPrototypeGet(readableStreamUseGuards, source)
+      : WeakMapPrototypeGet(readableStreamIteratorUseGuards, source);
     asyncIterable = webidl.converters["async iterable<any>"](
       asyncIterable,
       prefix,
@@ -6081,6 +6152,9 @@ class ReadableStream {
       // deno-lint-ignore prefer-primordials
       await iter.return(reason);
     }, 0);
+    if (sourceGuard !== undefined) {
+      setReadableStreamUseGuard(stream, sourceGuard);
+    }
     return stream;
   }
 
@@ -6117,6 +6191,7 @@ class ReadableStream {
    */
   getReader(options = undefined) {
     webidl.assertBranded(this, ReadableStreamPrototype);
+    runReadableStreamUseGuard(this);
     const prefix = "Failed to execute 'getReader' on 'ReadableStream'";
     if (options !== undefined) {
       options = webidl.converters.ReadableStreamGetReaderOptions(
@@ -6162,6 +6237,10 @@ class ReadableStream {
     }
     if (isWritableStreamLocked(writable)) {
       throw new TypeError("Target WritableStream is already locked");
+    }
+    const useGuard = WeakMapPrototypeGet(readableStreamUseGuards, this);
+    if (useGuard !== undefined) {
+      setReadableStreamUseGuard(readable, useGuard);
     }
     const promise = readableStreamPipeTo(
       this,
@@ -6209,14 +6288,18 @@ class ReadableStream {
         new TypeError("destination WritableStream is already locked."),
       );
     }
-    return readableStreamPipeTo(
-      this,
-      destination,
-      preventClose,
-      preventAbort,
-      preventCancel,
-      signal,
-    );
+    try {
+      return readableStreamPipeTo(
+        this,
+        destination,
+        preventClose,
+        preventAbort,
+        preventCancel,
+        signal,
+      );
+    } catch (error) {
+      return PromiseReject(error);
+    }
   }
 
   /** @returns {[ReadableStream<R>, ReadableStream<R>]} */
@@ -6232,6 +6315,7 @@ class ReadableStream {
    */
   values(options = undefined) {
     webidl.assertBranded(this, ReadableStreamPrototype);
+    runReadableStreamUseGuard(this);
     let preventCancel = false;
     if (options !== undefined) {
       const prefix = "Failed to execute 'values' on 'ReadableStream'";
@@ -6247,6 +6331,10 @@ class ReadableStream {
     const reader = acquireReadableStreamDefaultReader(this);
     iterator[_reader] = reader;
     iterator[_preventCancel] = preventCancel;
+    const useGuard = WeakMapPrototypeGet(readableStreamUseGuards, this);
+    if (useGuard !== undefined) {
+      WeakMapPrototypeSet(readableStreamIteratorUseGuards, iterator, useGuard);
+    }
     return iterator;
   }
 
@@ -6366,6 +6454,11 @@ class ReadableStreamDefaultReader {
         controller[_pendingPullIntos] === undefined &&
         controller[_queue].size !== 0
       ) {
+        try {
+          runReadableStreamUseGuard(stream);
+        } catch (error) {
+          return PromiseReject(error);
+        }
         stream[_disturbed] = true;
         const chunk = dequeueValue(controller);
         if (controller[_closeRequested] && controller[_queue].size === 0) {
@@ -7820,6 +7913,12 @@ function setUpCrossRealmTransformWritable(stream, port) {
  * @param port {MessagePort}
  */
 function readableStreamTransferSteps(value, port) {
+  if (WeakMapPrototypeGet(readableStreamUseGuards, value) !== undefined) {
+    throw new DOMException(
+      "Cannot transfer a terminal-authority ReadableStream",
+      "DataCloneError",
+    );
+  }
   if (isReadableStreamLocked(value)) {
     throw new DOMException(
       "Cannot transfer a locked ReadableStream",
@@ -8430,6 +8529,7 @@ return {
   Deferred,
   errorReadableStream,
   getReadableStreamResourceBacking,
+  getReadableStreamUseGuard,
   getReadableStreamStoredError,
   getWritableStreamResourceBacking,
   isReadableByteStreamController,
@@ -8498,6 +8598,7 @@ return {
   readableStreamTee,
   readableStreamThrowIfErrored,
   resourceForReadableStream,
+  setReadableStreamUseGuard,
   setUpReadableByteStreamController,
   setUpReadableByteStreamControllerFromSource,
   setUpReadableStreamBYOBReader,

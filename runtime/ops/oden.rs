@@ -29,6 +29,8 @@ deno_core::extension!(
     op_oden_compartment_endowments,
     op_oden_guard_surface,
     op_oden_guard_deny_only_surface,
+    op_oden_record_root_ambient_effect,
+    op_oden_check_protected_inspector_stream_use,
     op_oden_attestation,
   ],
 );
@@ -41,7 +43,7 @@ deno_core::extension!(
 #[string]
 pub fn op_oden_attestation() -> &'static str {
   debug_assert_eq!(deno_permissions::ODEN_CAPSEC_PROFILE, "oden/capsec/1.1");
-  r#"{"schema":2,"profile":"oden/capsec/1.1","semantics":"oden-capsec-2026-07-10","features":["action-sensitive-env","action-sensitive-network","canonical-fs","closed-op-inventory","compartment-principal-key-v2","default-closed-escape-hatches","layer2-run-fastpath","protected-metadata-final-peer","resource-ownership","typed-local-import-gate"]}"#
+  r#"{"schema":2,"profile":"oden/capsec/1.1","semantics":"oden-capsec-2026-07-10","features":["action-sensitive-env","action-sensitive-network","canonical-fs","closed-op-inventory","compartment-principal-key-v2","default-closed-escape-hatches","layer2-run-fastpath","native-runtime-control-gates","protected-metadata-final-peer","resource-ownership","typed-local-import-gate"]}"#
 }
 
 /// Default-deny a capability surface that has no safe scoped grant yet.
@@ -68,6 +70,28 @@ pub fn op_oden_guard_deny_only_surface(
 ) -> Result<(), PermissionCheckError> {
   deno_permissions::oden_capsec_guard_deny_only_surface(
     &family, &action, &target, &api_name,
+  )
+}
+
+#[op2(fast, stack_trace)]
+pub fn op_oden_record_root_ambient_effect(
+  #[string] family: String,
+  #[string] action: String,
+  #[string] target: String,
+  #[string] api_name: String,
+) -> Result<(), PermissionCheckError> {
+  deno_permissions::oden_capsec_record_root_ambient_effect(
+    &family, &action, &target, &api_name,
+  )
+}
+
+#[op2(fast, stack_trace)]
+pub fn op_oden_check_protected_inspector_stream_use(
+  #[string] target: String,
+  #[string] api_name: String,
+) -> Result<(), PermissionCheckError> {
+  deno_permissions::oden_capsec_check_protected_inspector_stream_target(
+    &target, &api_name,
   )
 }
 

@@ -1690,9 +1690,10 @@ async fn run_desktop(
       &format!("startup:desktop-inspector:{addr}"),
       "desktop inspector startup",
     )?;
-    let reservation = deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
-      addr,
-    );
+    let reservation =
+      deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
+        addr,
+      );
     let server = deno_runtime::deno_inspector_server::create_inspector_server(
       addr,
       "deno-desktop",

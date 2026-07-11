@@ -658,12 +658,13 @@ pub async fn op_net_connect_tcp_inner(
   let remote_addr = tcp_stream.peer_addr()?;
 
   let mut state_ = state.borrow_mut();
-  let rid = state_
-    .resource_table
-    .add(TcpStreamResource::new_with_network_peer(
-      tcp_stream.into_split(),
-      remote_addr,
-    ));
+  let rid =
+    state_
+      .resource_table
+      .add(TcpStreamResource::new_with_network_peer(
+        tcp_stream.into_split(),
+        remote_addr,
+      ));
 
   Ok((rid, IpAddr::from(local_addr), IpAddr::from(remote_addr)))
 }

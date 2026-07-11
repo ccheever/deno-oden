@@ -58,6 +58,7 @@ const {
   op_node_ipc_write_json,
   op_node_parse_shell_args,
   op_node_translate_cli_args,
+  op_oden_guard_deny_only_surface,
 } = core.ops;
 const {
   ArrayIsArray,
@@ -1900,6 +1901,24 @@ function spawnSync(
     windowsVerbatimArguments = false,
     windowsHide = true,
   } = options;
+  if (
+    (timeout > 0 || maxBuffer != null) &&
+    killSignal != null &&
+    !(
+      (typeof killSignal === "string" &&
+        (StringPrototypeToUpperCase(killSignal) === "SIGTERM" ||
+          StringPrototypeToUpperCase(killSignal) === "SIGKILL")) ||
+      (typeof killSignal === "number" &&
+        (killSignal === 15 || killSignal === 9))
+    )
+  ) {
+    op_oden_guard_deny_only_surface(
+      "process",
+      "signal",
+      `spawnSync-watchdog:${killSignal}`,
+      "node:child_process.spawnSync killSignal",
+    );
+  }
   let command = options.file || "";
   let args = options.args || [];
   const normalizedStdio = normalizeStdioOption(stdio);

@@ -54,6 +54,21 @@ where
       rd: rd.into(),
       wr: wr.into(),
       cancel_handle: Default::default(),
+      network_peer:
+        deno_permissions::oden_capsec_protected_inspector_stream_tag(peer),
+    }
+  }
+
+  /// Preserve a protected-inspector tag already captured by another wrapper
+  /// while transferring ownership of the same underlying connection.
+  pub fn new_with_protected_inspector_peer(
+    (rd, wr): (R, W),
+    peer: SocketAddr,
+  ) -> Self {
+    Self {
+      rd: rd.into(),
+      wr: wr.into(),
+      cancel_handle: Default::default(),
       network_peer: Some(peer),
     }
   }

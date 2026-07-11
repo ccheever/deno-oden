@@ -1,8 +1,13 @@
 const here = new URL(".", import.meta.url);
 
-async function probe(policy) {
+async function probe(policy, programmatic = false) {
   const child = new Deno.Command(Deno.execPath(), {
-    args: ["run", "--allow-all", new URL("signal_child.js", here).pathname],
+    args: [
+      "run",
+      "--allow-all",
+      new URL("signal_child.js", here).pathname,
+      ...(programmatic ? ["self"] : []),
+    ],
     env: {
       ...Deno.env.toObject(),
       ODEN_CAPSEC_POLICY: new URL(policy, here).pathname,
@@ -19,7 +24,7 @@ async function probe(policy) {
     stdout += decoder.decode(chunk.value, { stream: true });
   }
   if (!stdout.includes("READY\n")) throw new Error("child exited before readiness");
-  Deno.kill(child.pid, "SIGUSR1");
+  if (!programmatic) Deno.kill(child.pid, "SIGUSR1");
   while (true) {
     const chunk = await reader.read();
     if (chunk.done) break;
@@ -33,4 +38,5 @@ async function probe(policy) {
 console.log(JSON.stringify({
   noRoot: await probe("capsec_no_root.json"),
   root: await probe("capsec_root.json"),
+  programmaticRoot: await probe("capsec_no_root.json", true),
 }));

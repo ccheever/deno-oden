@@ -73,7 +73,10 @@ pub fn op_signal_bind_internal(
   bind_signal(state, sig)
 }
 
-fn bind_signal(state: &mut OpState, sig: &str) -> Result<ResourceId, SignalError> {
+fn bind_signal(
+  state: &mut OpState,
+  sig: &str,
+) -> Result<ResourceId, SignalError> {
   let signo = deno_signals::signal_str_to_int(sig)?;
   if deno_signals::is_forbidden(signo) {
     return Err(SignalError::SignalNotAllowed(sig.to_string()));

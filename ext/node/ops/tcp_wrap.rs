@@ -370,6 +370,27 @@ impl TCPWrap {
       ))
     }
   }
+
+  fn refresh_network_peer(&self) {
+    let tcp = self.tcp_ptr();
+    if tcp.is_null() {
+      return;
+    }
+    // SAFETY: tcp is live and storage follows uv_tcp_getpeername's contract.
+    unsafe {
+      let mut storage = std::mem::MaybeUninit::<socket2::SockAddr>::uninit();
+      let mut len = std::mem::size_of::<socket2::SockAddr>() as i32;
+      if uv_compat::uv_tcp_getpeername(
+        tcp,
+        storage.as_mut_ptr() as *mut _,
+        &mut len,
+      ) == 0
+        && let Some(peer) = storage.assume_init().as_socket()
+      {
+        self.base.set_network_peer(peer);
+      }
+    }
+  }
 }
 
 // -- ops --
@@ -634,27 +655,6 @@ impl TCPWrap {
     result
   }
 
-  fn refresh_network_peer(&self) {
-    let tcp = self.tcp_ptr();
-    if tcp.is_null() {
-      return;
-    }
-    // SAFETY: tcp is live and storage follows uv_tcp_getpeername's contract.
-    unsafe {
-      let mut storage = std::mem::MaybeUninit::<socket2::SockAddr>::uninit();
-      let mut len = std::mem::size_of::<socket2::SockAddr>() as i32;
-      if uv_compat::uv_tcp_getpeername(
-        tcp,
-        storage.as_mut_ptr() as *mut _,
-        &mut len,
-      ) == 0
-        && let Some(peer) = storage.assume_init().as_socket()
-      {
-        self.base.set_network_peer(peer);
-      }
-    }
-  }
-
   /// Take the underlying TCP stream from this handle and place it in the
   /// resource table as a `TcpStreamResource`. This detaches the stream
   /// from libuv. Returns the resource ID of the stream, which can then
@@ -675,7 +675,7 @@ impl TCPWrap {
     })?;
     let (read_half, write_half) = tcp_stream.into_split();
     let resource = match self.base.network_peer() {
-      Some(peer) => TcpStreamResource::new_with_network_peer(
+      Some(peer) => TcpStreamResource::new_with_protected_inspector_peer(
         (read_half, write_half),
         peer,
       ),

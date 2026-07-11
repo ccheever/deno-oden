@@ -342,16 +342,16 @@ function nodeSpawnChild(command, {
       op_spawn_kill(child.rid, signal);
     },
     ref() {
-      core.refOpPromise(waitPromise);
       if (!waitComplete) {
         op_spawn_child_ref(child.rid);
       }
+      core.refOpPromise(waitPromise);
     },
     unref() {
-      core.unrefOpPromise(waitPromise);
       if (!waitComplete) {
         op_spawn_child_unref(child.rid);
       }
+      core.unrefOpPromise(waitPromise);
     },
   };
 }
@@ -583,21 +583,21 @@ class ChildProcess {
   }
 
   ref() {
-    core.refOpPromise(this.#waitPromise);
-    if (this.#stdout) readableStreamForRidUnrefableRef(this.#stdout);
-    if (this.#stderr) readableStreamForRidUnrefableRef(this.#stderr);
     if (!this.#waitComplete) {
       op_spawn_child_ref(this.#rid);
     }
+    core.refOpPromise(this.#waitPromise);
+    if (this.#stdout) readableStreamForRidUnrefableRef(this.#stdout);
+    if (this.#stderr) readableStreamForRidUnrefableRef(this.#stderr);
   }
 
   unref() {
-    core.unrefOpPromise(this.#waitPromise);
-    if (this.#stdout) readableStreamForRidUnrefableUnref(this.#stdout);
-    if (this.#stderr) readableStreamForRidUnrefableUnref(this.#stderr);
     if (!this.#waitComplete) {
       op_spawn_child_unref(this.#rid);
     }
+    core.unrefOpPromise(this.#waitPromise);
+    if (this.#stdout) readableStreamForRidUnrefableUnref(this.#stdout);
+    if (this.#stderr) readableStreamForRidUnrefableUnref(this.#stderr);
   }
 }
 

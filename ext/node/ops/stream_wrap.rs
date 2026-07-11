@@ -274,7 +274,10 @@ impl LibUvStreamWrap {
   }
 
   pub(crate) fn set_network_peer(&self, peer: SocketAddr) {
-    self.handle_data.network_peer.set(Some(peer));
+    self
+      .handle_data
+      .network_peer
+      .set(deno_permissions::oden_capsec_protected_inspector_stream_tag(peer));
   }
 
   pub(crate) fn network_peer(&self) -> Option<SocketAddr> {
@@ -1274,6 +1277,16 @@ impl LibUvStreamWrap {
     self.read_start_with_handle(this, scope, op_state)
   }
 
+  #[string]
+  #[rename("protectedInspectorPeer")]
+  pub fn protected_inspector_peer(&self) -> Option<String> {
+    self
+      .handle_data
+      .network_peer
+      .get()
+      .map(|peer| peer.to_string())
+  }
+
   #[fast]
   #[reentrant]
   pub fn read_stop(&self, _scope: &mut v8::PinScope) -> i32 {
@@ -1841,9 +1854,8 @@ impl LibUvStreamWrap {
     state_array: v8::Local<v8::Int32Array>,
     encoding: StringEncoding,
   ) -> i32 {
-    if !self.check_protected_network_peer(
-      "Node connected stream string write",
-    ) {
+    if !self.check_protected_network_peer("Node connected stream string write")
+    {
       return UV_EACCES;
     }
     let stream = self.stream_ptr();

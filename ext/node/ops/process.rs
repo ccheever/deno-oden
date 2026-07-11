@@ -284,6 +284,14 @@ pub fn op_node_process_kill(
       .borrow_mut::<PermissionsContainer>()
       .check_run_all("process.kill")?;
   }
+  if deno_permissions::oden_capsec_profile_is(
+    deno_permissions::ODEN_CAPSEC_PROFILE,
+  ) && pid == std::process::id() as i32
+    && inspector_trigger
+  {
+    deno_permissions::oden_capsec_trigger_programmatic_inspector_signal();
+    return Ok(0);
+  }
   Ok(kill(pid, sig))
 }
 
@@ -298,6 +306,12 @@ pub fn op_process_abort() -> Result<(), deno_permissions::PermissionCheckError>
     "inspect",
     "process.abort/core",
     "process.abort",
+  )?;
+  deno_permissions::oden_capsec_record_root_ambient_effect(
+    "fs",
+    "write",
+    "os-configured-core-dump",
+    "process.abort core artifact",
   )?;
   std::process::abort();
 }

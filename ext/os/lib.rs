@@ -282,6 +282,15 @@ fn op_env(
     env::vars_os()
       .filter_map(|kv| {
         let (k, v) = map_kv(kv)?;
+        // The inherited Oden handoff is scrubbed before V8 starts, and the
+        // reserved namespace remains non-enumerable if root later recreates a
+        // similarly named variable. Aggregate enumeration therefore excludes
+        // the control plane instead of rejecting every safe environment key.
+        if deno_permissions::oden_capsec_armed()
+          && deno_permissions::oden_capsec_is_control_env_name(&k)
+        {
+          return None;
+        }
         let state = if grant_all {
           PermissionState::Granted
         } else {

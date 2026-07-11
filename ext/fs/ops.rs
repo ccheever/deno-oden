@@ -122,7 +122,7 @@ fn open_options_to_access_kind(open_options: &OpenOptions) -> OpenAccessKind {
   }
 }
 
-#[op2]
+#[op2(stack_trace)]
 #[string]
 pub fn op_fs_cwd(state: &mut OpState) -> Result<String, FsOpsError> {
   deno_permissions::oden_capsec_guard_deny_only_surface(

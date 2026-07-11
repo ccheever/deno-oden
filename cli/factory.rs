@@ -1033,14 +1033,16 @@ impl CliFactory {
         &format!("startup:--inspect:{host}"),
         "inspector startup flag",
       )?;
-      let reservation = deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
-        host,
-      );
-      let server = deno_runtime::deno_inspector_server::create_inspector_server(
-        host,
-        name,
-        publish_uid,
-      )?;
+      let reservation =
+        deno_runtime::deno_permissions::oden_capsec_reserve_inspector_endpoint(
+          host,
+        );
+      let server =
+        deno_runtime::deno_inspector_server::create_inspector_server(
+          host,
+          name,
+          publish_uid,
+        )?;
       reservation.commit(server.host);
     }
     Ok(())

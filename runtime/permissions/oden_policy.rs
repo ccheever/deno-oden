@@ -789,6 +789,7 @@ impl Policy {
     }
   }
 
+  #[cfg(test)]
   pub fn grant(
     &mut self,
     selector: &str,

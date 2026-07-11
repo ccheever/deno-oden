@@ -31,6 +31,11 @@
       "if": "unix",
       "output": "signal_driver.out",
       "exitCode": 0
+    },
+    "protected_inspector_endpoint_is_nondelegable": {
+      "args": "run --allow-all endpoint_driver.js",
+      "output": "endpoint_driver.out",
+      "exitCode": 0
     }
   }
 }

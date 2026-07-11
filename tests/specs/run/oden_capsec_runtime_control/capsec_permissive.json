@@ -1,1 +1,1 @@
-{ "mode": "permissive", "grants": {} }
+{ "mode": "permissive", "grants": { "deny-probe": "run:/bin/sh" } }

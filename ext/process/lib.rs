@@ -287,20 +287,13 @@ impl Drop for ChildResource {
     if self.kill_on_drop.get() {
       #[cfg(unix)]
       {
-        // Send SIGKILL to the child process. Best-effort; ignore errors
-        // (e.g. the process may have already exited).
-        // SAFETY: libc::kill is safe to call with any pid/signal combination;
-        // it simply returns an error for invalid inputs.
-        unsafe {
-          libc::kill(self.pid as i32, libc::SIGKILL);
-        }
+        // Tokio terminates the exact child retained by this resource. It does
+        // not reopen an ambient process-control channel by numeric PID.
+        let _ = self.child.get_mut().start_kill();
       }
       #[cfg(windows)]
       {
-        let _ = deno_subprocess_windows::process_kill(
-          self.pid as i32,
-          /* SIGTERM */ 15,
-        );
+        let _ = self.child.get_mut().kill_blocking();
       }
     }
   }
@@ -1106,14 +1099,9 @@ fn spawn_child(
   let child_rid = state.resource_table.add(ChildResource {
     child: RefCell::new(child),
     pid,
-    // Rev1.1 never performs a package-triggerable bare-PID signal from Drop.
-    // Root may explicitly re-enable its own cleanup through ref().
-    kill_on_drop: Cell::new(
-      !detached
-        && !deno_permissions::oden_capsec_profile_is(
-          deno_permissions::ODEN_CAPSEC_PROFILE,
-        ),
-    ),
+    // Automatic cleanup is resource-owned and uses the retained process
+    // handle. It is therefore distinct from an ambient process:signal effect.
+    kill_on_drop: Cell::new(!detached),
   });
 
   Ok(Child {
@@ -1183,12 +1171,7 @@ fn spawn_child_node(
   let child_rid = state.resource_table.add(ChildResource {
     child: RefCell::new(child),
     pid,
-    kill_on_drop: Cell::new(
-      !detached
-        && !deno_permissions::oden_capsec_profile_is(
-          deno_permissions::ODEN_CAPSEC_PROFILE,
-        ),
-    ),
+    kill_on_drop: Cell::new(!detached),
   });
 
   Ok(NodeChild {
@@ -1768,7 +1751,8 @@ fn op_spawn_sync(
     }
 
     let overflow = killed_by_max_buffer.load(Ordering::SeqCst);
-    let deadline_reached = deadline.is_some_and(|limit| started.elapsed() >= limit);
+    let deadline_reached =
+      deadline.is_some_and(|limit| started.elapsed() >= limit);
     if overflow || deadline_reached {
       timed_out = deadline_reached;
       #[cfg(unix)]
@@ -1906,19 +1890,28 @@ fn op_spawn_kill(
 
 /// Disable kill-on-drop for a child process, allowing it to outlive the parent.
 /// Called from JS `ChildProcess.unref()`.
-#[op2(fast)]
+#[op2(fast, stack_trace)]
 fn op_spawn_child_unref(
   state: &mut OpState,
   #[smi] rid: ResourceId,
-) -> Result<(), deno_core::error::ResourceError> {
-  let resource = state.resource_table.get::<ChildResource>(rid)?;
+) -> Result<(), ProcessError> {
+  let resource = state
+    .resource_table
+    .get::<ChildResource>(rid)
+    .map_err(ProcessError::Resource)?;
+  deno_permissions::oden_capsec_guard_deny_only_surface(
+    "process",
+    "signal",
+    &format!("pid:{}:disable-kill-on-drop", resource.pid),
+    "ChildProcess.unref cleanup mutation",
+  )?;
   resource.kill_on_drop.set(false);
   Ok(())
 }
 
 /// Re-enable kill-on-drop for a child process.
 /// Called from JS `ChildProcess.ref()`.
-#[op2(fast)]
+#[op2(fast, stack_trace)]
 fn op_spawn_child_ref(
   state: &mut OpState,
   #[smi] rid: ResourceId,
@@ -2296,6 +2289,14 @@ mod deprecated {
       state
         .borrow_mut::<PermissionsContainer>()
         .check_run_all(&api_name)?;
+    }
+    if deno_permissions::oden_capsec_profile_is(
+      deno_permissions::ODEN_CAPSEC_PROFILE,
+    ) && pid == std::process::id() as i32
+      && signal.triggers_inspector()
+    {
+      deno_permissions::oden_capsec_trigger_programmatic_inspector_signal();
+      return Ok(());
     }
     kill(pid, &signal)
   }

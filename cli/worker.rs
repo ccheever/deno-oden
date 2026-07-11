@@ -195,23 +195,50 @@ impl CliMainWorker {
       std::rc::Rc::downgrade(&self.worker.js_runtime().inspector());
     let op_state = self.worker.js_runtime().op_state();
     let main_module = self.worker.main_module().to_string();
+    let mut programmatic_signal = deno_runtime::deno_permissions::oden_capsec_subscribe_programmatic_inspector_signal();
+    // Install the OS handler before user code can publish a readiness marker.
+    // In capsec mode the exact-root decision is part of the security boundary,
+    // so it must be ready from the first application instruction.
+    let Ok(mut sigusr1) = deno_signals::signal_stream(libc::SIGUSR1) else {
+      return;
+    };
+    let grace_period = if deno_runtime::deno_permissions::oden_capsec_profile_is(
+      deno_runtime::deno_permissions::ODEN_CAPSEC_PROFILE,
+    ) {
+      std::time::Duration::ZERO
+    } else {
+      GRACE_PERIOD
+    };
 
     deno_core::unsync::spawn(async move {
-      tokio::time::sleep(GRACE_PERIOD).await;
-      let Ok(mut sigusr1) = deno_signals::signal_stream(libc::SIGUSR1) else {
-        return;
-      };
-      while sigusr1.recv().await.is_some() {
+      tokio::time::sleep(grace_period).await;
+      loop {
+        let exact_root = tokio::select! {
+          result = sigusr1.recv() => {
+            if result.is_none() { return; }
+            true
+          }
+          result = programmatic_signal.recv() => {
+            if result.is_err() { continue; }
+            false
+          }
+        };
         // A host signal has no package stack to attribute. Rev1.1 therefore
         // requires the exact root-scoped static row before creating a listener
         // or holding an inspector session.
         // @ref LLP 0019#inspector [implements]
-        if deno_runtime::deno_permissions::oden_capsec_check_inspector_listener_startup(
-          "host-signal:SIGUSR1:127.0.0.1:9229",
-          "SIGUSR1 inspector activation",
-        )
-        .is_err()
-        {
+        let authorization = if exact_root {
+          deno_runtime::deno_permissions::oden_capsec_check_inspector_listener_startup(
+            "host-signal:SIGUSR1:127.0.0.1:9229",
+            "SIGUSR1 inspector activation",
+          )
+        } else {
+          deno_runtime::deno_permissions::oden_capsec_check_inspector_listener_programmatic(
+            "programmatic-root-signal:SIGUSR1:127.0.0.1:9229",
+            "programmatic root SIGUSR1 inspector activation",
+          )
+        };
+        if authorization.is_err() {
           continue;
         }
         // The runtime is gone (the program finished); stop listening.

@@ -609,6 +609,9 @@ pub struct FetchResponse {
   /// `headers` describe the encoded wire body, not the body behind
   /// `response_rid`.
   pub body_decoded: bool,
+  /// Concrete connected peer retained by the JS body stream so reader calls
+  /// can recheck protected inspector authority after native bytes are queued.
+  pub network_peer: Option<String>,
   /// This field is populated if some error occurred which needs to be
   /// reconstructed in the JS side to set the error _cause_.
   /// In the tuple, the first element is an error message and the second one is
@@ -664,17 +667,32 @@ pub async fn op_fetch_send(
   };
 
   let status = res.status();
-  let network_peer = request.url.host().and_then(|host| {
-    let ip = match host {
-      url::Host::Ipv4(ip) => std::net::IpAddr::V4(ip),
-      url::Host::Ipv6(ip) => std::net::IpAddr::V6(ip),
-      url::Host::Domain(_) => return None,
-    };
-    request
-      .url
-      .port_or_known_default()
-      .map(|port| std::net::SocketAddr::new(ip, port))
-  });
+  let network_peer = res
+    .extensions()
+    .get::<dns::OdenProtectedInspectorPeer>()
+    .map(|tag| tag.0)
+    .or_else(|| {
+      res
+        .extensions()
+        .get::<HttpInfo>()
+        .map(HttpInfo::remote_addr)
+        .or_else(|| {
+          request.url.host().and_then(|host| {
+            let ip = match host {
+              url::Host::Ipv4(ip) => std::net::IpAddr::V4(ip),
+              url::Host::Ipv6(ip) => std::net::IpAddr::V6(ip),
+              url::Host::Domain(_) => return None,
+            };
+            request
+              .url
+              .port_or_known_default()
+              .map(|port| std::net::SocketAddr::new(ip, port))
+          })
+        })
+        .and_then(
+          deno_permissions::oden_capsec_protected_inspector_stream_tag,
+        )
+    });
   let url = request.url.into();
   let mut res_headers = Vec::new();
   for (key, val) in res.headers().iter() {
@@ -684,14 +702,16 @@ pub async fn op_fetch_send(
   let content_length = hyper::body::Body::size_hint(res.body()).exact();
   let body_decoded = res.extensions().get::<BodyDecoded>().is_some();
 
-  let response_rid = state
-    .borrow_mut()
-    .resource_table
-    .add(FetchResponseResource::new(
-      res,
-      content_length,
-      network_peer,
-    ));
+  let response_rid =
+    state
+      .borrow_mut()
+      .resource_table
+      .add(FetchResponseResource::new(
+        res,
+        content_length,
+        network_peer,
+      ));
+  let network_peer = network_peer.map(|peer| peer.to_string());
 
   Ok(FetchResponse {
     status: status.as_u16(),
@@ -701,6 +721,7 @@ pub async fn op_fetch_send(
     response_rid,
     content_length,
     body_decoded,
+    network_peer,
     error: None,
   })
 }

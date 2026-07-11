@@ -16,9 +16,14 @@ use hickory_resolver::TokioResolver;
 use http::Uri;
 use http::uri::Scheme;
 use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::connect::Connected;
+use hyper_util::client::legacy::connect::Connection;
 use hyper_util::client::legacy::connect::dns::GaiResolver;
 use hyper_util::client::legacy::connect::dns::Name;
 use hyper_util::rt::TokioIo;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
+use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tower::Service;
@@ -177,6 +182,73 @@ pub struct PermissionedHttpConnector {
   net_action: NetPermissionAction,
 }
 
+/// Connection-lifetime proof captured at the resolved-peer decision. Hyper
+/// carries this value through TLS, pooling, and every response extension.
+#[derive(Clone, Copy, Debug)]
+pub struct OdenProtectedInspectorPeer(pub SocketAddr);
+
+#[derive(Debug)]
+pub struct PermissionedTcpStream {
+  inner: TcpStream,
+  protected_inspector_peer: Option<OdenProtectedInspectorPeer>,
+}
+
+impl AsyncRead for PermissionedTcpStream {
+  fn poll_read(
+    mut self: Pin<&mut Self>,
+    cx: &mut task::Context<'_>,
+    buf: &mut ReadBuf<'_>,
+  ) -> Poll<io::Result<()>> {
+    Pin::new(&mut self.inner).poll_read(cx, buf)
+  }
+}
+
+impl AsyncWrite for PermissionedTcpStream {
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut task::Context<'_>,
+    buf: &[u8],
+  ) -> Poll<io::Result<usize>> {
+    Pin::new(&mut self.inner).poll_write(cx, buf)
+  }
+
+  fn poll_flush(
+    mut self: Pin<&mut Self>,
+    cx: &mut task::Context<'_>,
+  ) -> Poll<io::Result<()>> {
+    Pin::new(&mut self.inner).poll_flush(cx)
+  }
+
+  fn poll_shutdown(
+    mut self: Pin<&mut Self>,
+    cx: &mut task::Context<'_>,
+  ) -> Poll<io::Result<()>> {
+    Pin::new(&mut self.inner).poll_shutdown(cx)
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    self.inner.is_write_vectored()
+  }
+
+  fn poll_write_vectored(
+    mut self: Pin<&mut Self>,
+    cx: &mut task::Context<'_>,
+    bufs: &[io::IoSlice<'_>],
+  ) -> Poll<io::Result<usize>> {
+    Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+  }
+}
+
+impl Connection for PermissionedTcpStream {
+  fn connected(&self) -> Connected {
+    let connected = self.inner.connected();
+    match self.protected_inspector_peer {
+      Some(tag) => connected.extra(tag),
+      None => connected,
+    }
+  }
+}
+
 impl PermissionedHttpConnector {
   pub fn new(
     resolver: Resolver,
@@ -237,13 +309,41 @@ fn check_resolved(
   action: NetPermissionAction,
   ip: &IpAddr,
   port: u16,
-) -> Result<(), BoxError> {
+) -> Result<Option<SocketAddr>, BoxError> {
   permissions
     .clone()
     .check_net_resolved(action, ip, port, "fetch()")
     .map_err(|e| {
       io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()).into()
-    })
+    })?;
+  Ok(
+    deno_permissions::oden_capsec_protected_inspector_stream_tag(
+      SocketAddr::new(*ip, port),
+    ),
+  )
+}
+
+fn wrap_connection(
+  connection: TokioIo<TcpStream>,
+  permissions: Option<&PermissionsContainer>,
+  action: NetPermissionAction,
+  preflight_tags: &[SocketAddr],
+) -> Result<TokioIo<PermissionedTcpStream>, BoxError> {
+  let peer = connection.inner().peer_addr().ok();
+  let mut protected_inspector_peer = peer
+    .filter(|peer| preflight_tags.contains(peer))
+    .map(OdenProtectedInspectorPeer);
+  if protected_inspector_peer.is_none()
+    && let (Some(permissions), Some(peer)) = (permissions, peer)
+    && let Some(tag) =
+      check_resolved(permissions, action, &peer.ip(), peer.port())?
+  {
+    protected_inspector_peer = Some(OdenProtectedInspectorPeer(tag));
+  }
+  Ok(TokioIo::new(PermissionedTcpStream {
+    inner: connection.into_inner(),
+    protected_inspector_peer,
+  }))
 }
 
 /// Extracts the connection host (with IPv6 brackets stripped) and the
@@ -266,7 +366,7 @@ fn bare_host_and_port(uri: &Uri) -> Option<(&str, u16)> {
 }
 
 impl Service<Uri> for PermissionedHttpConnector {
-  type Response = TokioIo<TcpStream>;
+  type Response = TokioIo<PermissionedTcpStream>;
   type Error = BoxError;
   type Future =
     Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
@@ -283,7 +383,13 @@ impl Service<Uri> for PermissionedHttpConnector {
     Box::pin(async move {
       let Some(permissions) = &this.permissions else {
         let mut connector = this.http_connector(this.resolver.clone());
-        return connector.call(uri).await.map_err(Into::into);
+        let connection = connector.call(uri).await.map_err(Into::into)?;
+        return wrap_connection(
+          connection,
+          None,
+          this.net_action,
+          &[],
+        );
       };
 
       let Some((bare_host, port)) = bare_host_and_port(&uri) else {
@@ -295,9 +401,18 @@ impl Service<Uri> for PermissionedHttpConnector {
       if let Ok(ip) = bare_host.parse::<IpAddr>() {
         // IP literal: `HttpConnector` connects to it directly without
         // consulting the resolver.
-        check_resolved(permissions, this.net_action, &ip, port)?;
+        let preflight_tags =
+          check_resolved(permissions, this.net_action, &ip, port)?
+            .into_iter()
+            .collect::<Vec<_>>();
         let mut connector = this.http_connector(this.resolver.clone());
-        return connector.call(uri).await.map_err(Into::into);
+        let connection = connector.call(uri).await.map_err(Into::into)?;
+        return wrap_connection(
+          connection,
+          Some(permissions),
+          this.net_action,
+          &preflight_tags,
+        );
       }
 
       let name = Name::from_str(bare_host).map_err(|e| -> BoxError {
@@ -310,13 +425,24 @@ impl Service<Uri> for PermissionedHttpConnector {
         .await
         .map_err(|e| -> BoxError { DnsError(e).into() })?
         .collect();
+      let mut preflight_tags = Vec::new();
       for addr in &addrs {
-        check_resolved(permissions, this.net_action, &addr.ip(), port)?;
+        if let Some(tag) =
+          check_resolved(permissions, this.net_action, &addr.ip(), port)?
+        {
+          preflight_tags.push(tag);
+        }
       }
 
       let mut connector =
         this.http_connector(Resolver::custom(Arc::new(PreResolved(addrs))));
-      connector.call(uri).await.map_err(Into::into)
+      let connection = connector.call(uri).await.map_err(Into::into)?;
+      wrap_connection(
+        connection,
+        Some(permissions),
+        this.net_action,
+        &preflight_tags,
+      )
     })
   }
 }
@@ -354,7 +480,8 @@ impl CheckDst for PermissionedHttpConnector {
         return Ok(());
       };
       if let Ok(ip) = bare_host.parse::<IpAddr>() {
-        return check_resolved(permissions, this.net_action, &ip, port);
+        return check_resolved(permissions, this.net_action, &ip, port)
+          .map(|_| ());
       }
       let Ok(name) = Name::from_str(bare_host) else {
         return Ok(());

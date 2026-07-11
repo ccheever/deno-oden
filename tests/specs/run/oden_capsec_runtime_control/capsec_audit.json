@@ -1,1 +1,1 @@
-{ "mode": "audit", "grants": {} }
+{ "mode": "audit", "grants": { "deny-probe": "run:/bin/sh" } }

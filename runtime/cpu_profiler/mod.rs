@@ -245,7 +245,9 @@ impl CpuProfiler {
       "CPU profiler inspector session",
       false,
     )
-    .unwrap_or_else(|error| panic!("capsec refused CPU profiler inspector session: {error}"));
+    .unwrap_or_else(|error| {
+      panic!("capsec refused CPU profiler inspector session: {error}")
+    });
     let state = CpuProfilerState::new(
       cpu_prof_dir,
       filename,

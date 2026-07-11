@@ -95,11 +95,14 @@ const {
   ObjectSetPrototypeOf,
   Promise,
   SafeSet,
+  SafeWeakMap,
   Symbol,
   SymbolAsyncDispose,
   SymbolAsyncIterator,
   SymbolSpecies,
   TypedArrayPrototypeSet,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet,
 } = primordials;
 
 Readable.ReadableState = ReadableState;
@@ -113,6 +116,29 @@ const FastBuffer = Buffer[SymbolSpecies];
 ObjectSetPrototypeOf(Readable.prototype, Stream.prototype);
 ObjectSetPrototypeOf(Readable, Stream);
 const nop = () => {};
+
+// Protected native sockets can otherwise prefetch into this module's JS
+// buffer under the creator's context and later expose those bytes through a
+// passed Readable. Keep a closure-private per-consumer guard and run it before
+// any public operation can start flow or dequeue buffered data.
+const readableUseGuards = new SafeWeakMap();
+
+function setReadableUseGuard(stream, guard) {
+  const existing = WeakMapPrototypeGet(readableUseGuards, stream);
+  if (existing === undefined || existing === guard) {
+    WeakMapPrototypeSet(readableUseGuards, stream, guard);
+  } else {
+    WeakMapPrototypeSet(readableUseGuards, stream, () => {
+      existing();
+      guard();
+    });
+  }
+}
+
+function runReadableUseGuard(stream) {
+  const guard = WeakMapPrototypeGet(readableUseGuards, stream);
+  if (guard !== undefined) guard();
+}
 
 const { errorOrDestroy } = destroyImpl;
 
@@ -705,6 +731,7 @@ function howMuchToRead(n, state) {
 
 // You can override either this method, or the async _read(n) below.
 Readable.prototype.read = function (n) {
+  runReadableUseGuard(this);
   debug("read", n);
   // Same as parseInt(undefined, 10), however V8 7.3 performance regressed
   // in this scenario, so we are doing it manually.
@@ -990,6 +1017,7 @@ Readable.prototype._read = function (n) {
 };
 
 Readable.prototype.pipe = function (dest, pipeOpts) {
+  runReadableUseGuard(this);
   const src = this;
   const state = this._readableState;
 
@@ -1217,6 +1245,9 @@ Readable.prototype.unpipe = function (dest) {
 // Set up data events if they are asked for
 // Ensure readable listeners eventually get something.
 Readable.prototype.on = function (ev, fn) {
+  if (ev === "data" || ev === "readable") {
+    runReadableUseGuard(this);
+  }
   const res = Stream.prototype.on.call(this, ev, fn);
   const state = this._readableState;
 
@@ -1320,6 +1351,7 @@ function nReadingNextTick(self) {
 // pause() and resume() are remnants of the legacy readable stream API
 // If the user uses them, then switch into old mode.
 Readable.prototype.resume = function () {
+  runReadableUseGuard(this);
   const state = this._readableState;
   if ((state[kState] & kDestroyed) !== 0) {
     return this;
@@ -1389,6 +1421,10 @@ function flow(stream) {
 // This is *not* part of the readable stream interface.
 // It is an ugly unfortunate mess of history.
 Readable.prototype.wrap = function (stream) {
+  const sourceGuard = WeakMapPrototypeGet(readableUseGuards, stream);
+  if (sourceGuard !== undefined) {
+    setReadableUseGuard(this, sourceGuard);
+  }
   let paused = false;
 
   // TODO (ronag): Should this.destroy(err) emit
@@ -1438,10 +1474,12 @@ Readable.prototype.wrap = function (stream) {
 };
 
 Readable.prototype[SymbolAsyncIterator] = function () {
+  runReadableUseGuard(this);
   return streamToAsyncIterator(this);
 };
 
 Readable.prototype.iterator = function (options) {
+  runReadableUseGuard(this);
   if (options !== undefined) {
     validateObject(options, "options");
   }
@@ -1839,7 +1877,12 @@ function endWritableNT(stream) {
 }
 
 Readable.from = function (iterable, opts) {
-  return lazyFrom().default(Readable, iterable, opts);
+  const readable = lazyFrom().default(Readable, iterable, opts);
+  const sourceGuard = WeakMapPrototypeGet(readableUseGuards, iterable);
+  if (sourceGuard !== undefined) {
+    setReadableUseGuard(readable, sourceGuard);
+  }
+  return readable;
 };
 
 let webStreamsAdapters;
@@ -1853,17 +1896,33 @@ function lazyWebStreams() {
 }
 
 Readable.fromWeb = function (readableStream, options) {
-  return lazyWebStreams().newStreamReadableFromReadableStream(
+  const readable = lazyWebStreams().newStreamReadableFromReadableStream(
     readableStream,
     options,
   );
+  const { getReadableStreamUseGuard } = core.loadExtScript(
+    "ext:deno_web/06_streams.js",
+  );
+  const sourceGuard = getReadableStreamUseGuard(readableStream);
+  if (sourceGuard !== undefined) {
+    setReadableUseGuard(readable, sourceGuard);
+  }
+  return readable;
 };
 
 Readable.toWeb = function (streamReadable, options) {
-  return lazyWebStreams().newReadableStreamFromStreamReadable(
+  const readable = lazyWebStreams().newReadableStreamFromStreamReadable(
     streamReadable,
     options,
   );
+  const sourceGuard = WeakMapPrototypeGet(readableUseGuards, streamReadable);
+  if (sourceGuard !== undefined) {
+    const { setReadableStreamUseGuard } = core.loadExtScript(
+      "ext:deno_web/06_streams.js",
+    );
+    setReadableStreamUseGuard(readable, sourceGuard);
+  }
+  return readable;
 };
 
 Readable.wrap = function (src, options) {
@@ -1877,5 +1936,11 @@ Readable.wrap = function (src, options) {
   }).wrap(src);
 };
 
-return { default: Readable, Readable };
+return {
+  default: Readable,
+  getReadableUseGuard: (stream) =>
+    WeakMapPrototypeGet(readableUseGuards, stream),
+  Readable,
+  setReadableUseGuard,
+};
 })();

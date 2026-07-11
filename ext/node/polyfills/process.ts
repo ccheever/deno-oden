@@ -1158,18 +1158,15 @@ process._debugEnd = function _debugEnd() {
 
 /**
  * Undocumented but public Node API: starts the inspector in another process by
- * sending `SIGUSR1` to it. On the current process, this would (in Node) open
- * the inspector; we don't yet support reopening the inspector from JS, so for
- * `pid === process.pid` we no-op rather than throwing, matching the
- * "safe when no inspector is active" contract callers rely on.
+ * sending `SIGUSR1` to it. The native signal preflight treats a self-directed
+ * SIGUSR1 as the conjunctive process:signal + inspector:activate effect and
+ * routes an authorized self activation through the internal inspector channel.
  */
 process._debugProcess = function _debugProcess(pid) {
   if (typeof pid !== "number") {
     throw new ERR_INVALID_ARG_TYPE("pid", "number", pid);
   }
-  if (pid !== process.pid) {
-    process.kill(pid, "SIGUSR1");
-  }
+  process.kill(pid, "SIGUSR1");
 };
 
 /** https://nodejs.org/api/process.html#process_process_chdir_directory */

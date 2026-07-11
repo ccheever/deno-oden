@@ -1,0 +1,7 @@
+{
+  "mode": "enforce",
+  "rootGrants": "inspector:activate",
+  "grants": {
+    "endpoint-denied": "network:fetch:*,network:connect:*"
+  }
+}

@@ -8,6 +8,7 @@ const {
   op_fetch_send,
   op_pipe,
   op_wasm_streaming_set_url,
+  op_oden_check_protected_inspector_stream_use,
 } = core.ops;
 const {
   ArrayPrototypePush,
@@ -48,6 +49,7 @@ const {
   readableStreamForRid,
   ReadableStreamPrototype,
   resourceForReadableStream,
+  setReadableStreamUseGuard,
 } = core.loadExtScript("ext:deno_web/06_streams.js");
 const { extractBody, InnerBody } = core.loadExtScript(
   "ext:deno_fetch/22_body.js",
@@ -363,8 +365,16 @@ function opFetchSend(rid) {
  * @param {AbortSignal} [terminator]
  * @returns {ReadableStream<Uint8Array>}
  */
-function createResponseBodyStream(responseBodyRid, terminator) {
+function createResponseBodyStream(responseBodyRid, terminator, networkPeer) {
   const readable = readableStreamForRid(responseBodyRid);
+  if (networkPeer != null) {
+    setReadableStreamUseGuard(readable, () => {
+      op_oden_check_protected_inspector_stream_use(
+        networkPeer,
+        "fetch response body reader",
+      );
+    });
+  }
 
   function onAbort() {
     errorReadableStream(readable, terminator.reason);
@@ -705,7 +715,11 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
         });
       }
     } else {
-      let bodyStream = createResponseBodyStream(resp.responseRid, terminator);
+      let bodyStream = createResponseBodyStream(
+        resp.responseRid,
+        terminator,
+        resp.networkPeer,
+      );
       // Tee the response body so the inspector can drain a copy in the
       // background for `Network.dataReceived` + `loadingFinished` /
       // `getResponseBody`, while the user still consumes the original.
