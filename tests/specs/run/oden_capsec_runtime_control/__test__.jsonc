@@ -75,6 +75,11 @@
       "output": "node_delivery_barrier_driver.out",
       "exitCode": 0
     },
+    "protected_writable_callbacks_keep_registration_provenance": {
+      "args": "run --allow-all writable_callback_provenance_driver.js",
+      "output": "writable_callback_provenance_driver.out",
+      "exitCode": 0
+    },
     "protected_stream_scalars_are_not_package_dispatch_surfaces": {
       "args": "run --allow-all stream_scalar_state_driver.js",
       "output": "stream_scalar_state_driver.out",

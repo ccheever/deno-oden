@@ -1,0 +1,5 @@
+{
+  "mode": "enforce",
+  "rootGrants": "inspector:activate",
+  "deputyClasses": ["env"]
+}
