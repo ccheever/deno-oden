@@ -501,10 +501,28 @@ pub struct Rev2Definition {
   pub occurrence_schema: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2TargetStatus {
+  pub target: &'static str,
+  pub feature_set: &'static str,
+  pub profile_claim: &'static str,
+  pub enforced: usize,
+  pub closed: usize,
+  pub absent: usize,
+  pub unsupported: usize,
+}
+
 pub const REV2_PROFILE: &str = "oden/capsec/2";
 pub const REV2_VOCAB_DIGEST: &str = "sha256-nJUMGJMnQHvU7ZKI3dz3aGCDSQ-2V5-Y2Qz_HhOTU7s";
 pub const REV2_REGISTRY_DIGEST: &str = "sha256-duI6taMggm2shC_TN6MLnuYAvUO4xt-8sfMvG00DoDw";
 pub const REV2_ADVERTISED_TARGETS: &[&str] = &[];
+
+pub const REV2_TARGET_STATUS: &[Rev2TargetStatus] = &[
+  Rev2TargetStatus { target: "x86_64-unknown-linux-gnu", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:098dd31bbe147a4be79d2d19ec3eeaadee5f7579f2f86cc52b78d41d640d2bc5;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
+  Rev2TargetStatus { target: "aarch64-unknown-linux-gnu", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,upgrade;cfg:sha256:2215dcca89932ecf67370ba53dfcbf8cb3f720e09441dff76871815e93bd274c;graph:sha256:374f7752b02eba64a8adba1e69ef5470955b68e6fb8cd981d147b63564efa74a;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
+  Rev2TargetStatus { target: "x86_64-apple-darwin", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,upgrade;cfg:sha256:fdfd9dc24cb0c588308450d2fc622110258ab9b4cd22a2994287469428c5906d;graph:sha256:70c59306b3bad231fd720219d0e13f81209a73d06becda3396ce7cd874e4e65d;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
+  Rev2TargetStatus { target: "aarch64-apple-darwin", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:ec9814662a8939e4330e7ff9835b514d6c530778c399fe4d32ce10dd217c32ba;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
+];
 
 pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
   "coverageEdges": [
