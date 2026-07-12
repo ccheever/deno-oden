@@ -18,6 +18,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::oden_rev2_executable::OdenRev2InstalledExecutableContext;
 use crate::rev2::AuthoritySelectorInput;
 use crate::rev2::CanonicalAuthoritySelector;
 use crate::rev2::EngineIdentity;
@@ -72,6 +73,11 @@ pub struct OdenRev2RetainedObject {
   binding_id: String,
   source_id: String,
   role: Option<String>,
+  principal: Option<PrincipalRef>,
+  canonical_path: PathBuf,
+  object_identity: String,
+  canonical_content_identity: Option<String>,
+  provenance_digest: Option<String>,
   file: Arc<File>,
 }
 
@@ -91,9 +97,53 @@ impl OdenRev2RetainedObject {
   pub fn file(&self) -> &File {
     &self.file
   }
+
+  pub(crate) fn principal(&self) -> Option<&PrincipalRef> {
+    self.principal.as_ref()
+  }
+
+  pub(crate) fn canonical_path(&self) -> &std::path::Path {
+    &self.canonical_path
+  }
+
+  pub(crate) fn object_identity(&self) -> &str {
+    &self.object_identity
+  }
+
+  pub(crate) fn canonical_content_identity(&self) -> Option<&str> {
+    self.canonical_content_identity.as_deref()
+  }
+
+  pub(crate) fn provenance_digest(&self) -> Option<&str> {
+    self.provenance_digest.as_deref()
+  }
+
+  #[cfg(test)]
+  pub(crate) fn executable_for_test(
+    binding_id: impl Into<String>,
+    source_id: impl Into<String>,
+    role: impl Into<String>,
+    canonical_content_identity: impl Into<String>,
+    provenance_digest: impl Into<String>,
+    canonical_path: PathBuf,
+    file: File,
+  ) -> Self {
+    Self {
+      binding_id: binding_id.into(),
+      source_id: source_id.into(),
+      role: Some(role.into()),
+      principal: None,
+      canonical_path,
+      object_identity: "unix-dev-ino:00000000000000000000000000000000"
+        .to_string(),
+      canonical_content_identity: Some(canonical_content_identity.into()),
+      provenance_digest: Some(provenance_digest.into()),
+      file: Arc::new(file),
+    }
+  }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct OdenRev2LoadedPolicyContext {
   state: OdenRev2LoadState,
   target: String,
@@ -109,7 +159,22 @@ pub struct OdenRev2LoadedPolicyContext {
   advertised: bool,
   blockers: Arc<[String]>,
   retained_objects: Arc<[OdenRev2RetainedObject]>,
+  installed_executables: OdenRev2InstalledExecutableContext,
   snapshot: Arc<Value>,
+}
+
+pub(crate) struct OdenRev2LoadedPolicyParts {
+  pub(crate) target: String,
+  pub(crate) feature_set: String,
+  pub(crate) policy_digest: String,
+  pub(crate) project_digest: String,
+  pub(crate) armed_snapshot_digest: String,
+  pub(crate) execution_role: String,
+  pub(crate) run_nonce: String,
+  pub(crate) channel_epoch: String,
+  pub(crate) retained_objects: Arc<[OdenRev2RetainedObject]>,
+  pub(crate) installed_executables: OdenRev2InstalledExecutableContext,
+  pub(crate) snapshot: Value,
 }
 
 impl OdenRev2LoadedPolicyContext {
@@ -157,8 +222,56 @@ impl OdenRev2LoadedPolicyContext {
     &self.retained_objects
   }
 
-  pub fn snapshot(&self) -> &Value {
-    &self.snapshot
+  #[allow(
+    dead_code,
+    reason = "the first C04 slice installs images before the subsequent runtime protocol consumes them"
+  )]
+  pub(crate) fn installed_executables(
+    &self,
+  ) -> &OdenRev2InstalledExecutableContext {
+    &self.installed_executables
+  }
+
+  pub(crate) fn install_immutable_executables(
+    &mut self,
+    control_root: &std::path::Path,
+  ) -> Result<(), String> {
+    self
+      .installed_executables
+      .install_once(&self.retained_objects, control_root)
+  }
+
+  pub(crate) fn into_runtime_parts(
+    self,
+  ) -> Result<OdenRev2LoadedPolicyParts, String> {
+    if self.state != OdenRev2LoadState::Armable {
+      return Err("OD-CAP-REV2-RUNTIME-CONTEXT-NOT-ARMABLE".to_string());
+    }
+    if !self.installed_executables.is_installed() {
+      return Err(
+        "OD-CAP-REV2-RUNTIME-CONTEXT-EXECUTABLES-UNINSTALLED".to_string(),
+      );
+    }
+    let snapshot = Arc::try_unwrap(self.snapshot)
+      .map_err(|_| "OD-CAP-REV2-RUNTIME-CONTEXT-SNAPSHOT-SHARED".to_string())?;
+    Ok(OdenRev2LoadedPolicyParts {
+      target: self.target,
+      feature_set: self.feature_set,
+      policy_digest: self.policy_digest,
+      project_digest: self.project_digest,
+      armed_snapshot_digest: self.armed_snapshot_digest,
+      execution_role: self.execution_role,
+      run_nonce: self.run_nonce,
+      channel_epoch: self.channel_epoch,
+      retained_objects: self.retained_objects,
+      installed_executables: self.installed_executables,
+      snapshot,
+    })
+  }
+
+  #[cfg(test)]
+  pub(crate) fn snapshot_weak_for_test(&self) -> std::sync::Weak<Value> {
+    Arc::downgrade(&self.snapshot)
   }
 
   pub fn evidence(&self) -> Value {
@@ -199,7 +312,7 @@ impl OdenRev2LoadedPolicyContext {
 }
 
 #[derive(Clone, Copy)]
-struct TargetStatus<'a> {
+pub(crate) struct TargetStatus<'a> {
   target: &'a str,
   feature_set: &'a str,
   profile_claim: &'a str,
@@ -610,6 +723,7 @@ fn verify_snapshot(
     advertised: target_status.advertised,
     blockers: blockers.into(),
     retained_objects: retained_objects.into(),
+    installed_executables: OdenRev2InstalledExecutableContext::empty(),
     snapshot: Arc::new(snapshot.clone()),
   })
 }
@@ -973,25 +1087,35 @@ fn validate_root_bindings(
     if !binding_ids.insert(binding_id.to_string()) {
       return Err("OD-CAP-REV2-ROOT-BINDING-ID".to_string());
     }
-    required_digest(object, "bindingProvenanceDigest")?;
+    let binding_provenance_digest =
+      required_digest(object, "bindingProvenanceDigest")?;
     let key =
       root_requirement_key(source_id, logical_root, principal.as_ref())?;
     if !supplied.insert(key) {
       return Err("OD-CAP-REV2-ROOT-BINDING-DUPLICATE".to_string());
     }
+    let canonical_path_value = object
+      .get("canonicalPath")
+      .ok_or_else(|| "OD-CAP-REV2-ROOT-BINDING-PATH".to_string())?;
+    let object_identity_value = object
+      .get("objectIdentity")
+      .ok_or_else(|| "OD-CAP-REV2-ROOT-BINDING-OBJECT".to_string())?;
+    let canonical_path = parse_tagged_path(canonical_path_value)?;
+    let object_identity = platform_object_identity(object_identity_value)?;
     let file = validate_and_open_bound_object(
-      object
-        .get("canonicalPath")
-        .ok_or_else(|| "OD-CAP-REV2-ROOT-BINDING-PATH".to_string())?,
-      object
-        .get("objectIdentity")
-        .ok_or_else(|| "OD-CAP-REV2-ROOT-BINDING-OBJECT".to_string())?,
+      canonical_path_value,
+      object_identity_value,
       true,
     )?;
     retained.push(OdenRev2RetainedObject {
       binding_id: binding_id.to_string(),
       source_id: source_id.to_string(),
       role: None,
+      principal,
+      canonical_path,
+      object_identity,
+      canonical_content_identity: None,
+      provenance_digest: Some(binding_provenance_digest.to_string()),
       file: Arc::new(file),
     });
   }
@@ -1054,14 +1178,18 @@ fn validate_executable_bindings(
     if !binding_ids.insert(binding_id.to_string()) {
       return Err("OD-CAP-REV2-EXECUTABLE-ID".to_string());
     }
-    required_digest(object, "provenanceDigest")?;
+    let provenance_digest = required_digest(object, "provenanceDigest")?;
+    let canonical_path_value = object
+      .get("canonicalPath")
+      .ok_or_else(|| "OD-CAP-REV2-EXECUTABLE-PATH".to_string())?;
+    let object_identity_value = object
+      .get("objectIdentity")
+      .ok_or_else(|| "OD-CAP-REV2-EXECUTABLE-OBJECT".to_string())?;
+    let canonical_path = parse_tagged_path(canonical_path_value)?;
+    let object_identity = platform_object_identity(object_identity_value)?;
     let file = validate_and_open_bound_object(
-      object
-        .get("canonicalPath")
-        .ok_or_else(|| "OD-CAP-REV2-EXECUTABLE-PATH".to_string())?,
-      object
-        .get("objectIdentity")
-        .ok_or_else(|| "OD-CAP-REV2-EXECUTABLE-OBJECT".to_string())?,
+      canonical_path_value,
+      object_identity_value,
       false,
     )?;
     verify_opened_executable_content(&file, content)?;
@@ -1069,6 +1197,11 @@ fn validate_executable_bindings(
       binding_id: binding_id.to_string(),
       source_id: source_id.to_string(),
       role: Some(role.to_string()),
+      principal,
+      canonical_path,
+      object_identity,
+      canonical_content_identity: Some(content.to_string()),
+      provenance_digest: Some(provenance_digest.to_string()),
       file: Arc::new(file),
     });
   }
@@ -1704,6 +1837,17 @@ fn validate_and_open_bound_object(
   Ok(file)
 }
 
+fn platform_object_identity(value: &Value) -> Result<String, String> {
+  let identity =
+    exact_object(value, &["kind", "value"], "OD-CAP-REV2-BOUND-OBJECT-SHAPE")?;
+  require_string(identity, "kind", "platform-object")?;
+  identity
+    .get("value")
+    .and_then(Value::as_str)
+    .map(ToString::to_string)
+    .ok_or_else(|| "OD-CAP-REV2-BOUND-OBJECT-IDENTITY".to_string())
+}
+
 #[cfg(unix)]
 fn verify_opened_executable_content(
   file: &File,
@@ -1921,10 +2065,10 @@ fn reject_display_or_source_fields(value: &Value) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
   use super::*;
 
-  fn embedded_compiled_target()
+  pub(crate) fn embedded_compiled_target()
   -> &'static crate::rev2_registry_generated::Rev2TargetStatus {
     let target =
       compiled_target().expect("test host has a generated Rev2 target");
@@ -1957,7 +2101,7 @@ mod tests {
     super::verify_authenticated_envelope(bytes, key, &test_build_identity())
   }
 
-  fn candidate_snapshot(
+  pub(crate) fn candidate_snapshot(
     target: TargetStatus<'_>,
     report: Option<&str>,
   ) -> Value {
@@ -2013,7 +2157,7 @@ mod tests {
     snapshot
   }
 
-  fn envelope(snapshot: Value, key: &[u8; 32]) -> Vec<u8> {
+  pub(crate) fn envelope(snapshot: Value, key: &[u8; 32]) -> Vec<u8> {
     let key_id =
       format!("sha256-{}", URL_SAFE_NO_PAD.encode(Sha256::digest(key)));
     let mut signer = <Hmac<Sha256> as Mac>::new_from_slice(key).unwrap();
@@ -2033,7 +2177,7 @@ mod tests {
     .unwrap()
   }
 
-  fn refresh_digests(snapshot: &mut Value) {
+  pub(crate) fn refresh_digests(snapshot: &mut Value) {
     let policy = snapshot["canonicalPolicy"].as_object_mut().unwrap();
     policy.remove("policyDigest");
     let policy_digest =
@@ -2052,7 +2196,55 @@ mod tests {
     snapshot["armedSnapshotDigest"] = Value::String(digest);
   }
 
-  fn candidate_with_env_policy(target: TargetStatus<'_>) -> Value {
+  pub(crate) fn hermetic_target() -> TargetStatus<'static> {
+    let embedded = embedded_compiled_target();
+    TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: "test-conformant",
+      conformance_report_digest: Some(REV2_REGISTRY_DIGEST),
+      enforced: 996,
+      closed: 0,
+      absent: 0,
+      unsupported: 0,
+      advertised: false,
+      hermetic: true,
+    }
+  }
+
+  pub(crate) fn verify_armable_snapshot(
+    mut snapshot: Value,
+    key: &[u8; 32],
+  ) -> Result<OdenRev2LoadedPolicyContext, String> {
+    snapshot["conformanceReportDigest"] =
+      Value::String(REV2_REGISTRY_DIGEST.to_string());
+    refresh_digests(&mut snapshot);
+    let authenticated =
+      parse_authenticated_snapshot(&envelope(snapshot, key), key)?;
+    verify_snapshot(&authenticated, hermetic_target())
+  }
+
+  pub(crate) fn verified_unarmed_empty_context(
+    key: &[u8; 32],
+  ) -> OdenRev2LoadedPolicyContext {
+    let embedded = embedded_compiled_target();
+    let target = TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: embedded.profile_claim,
+      conformance_report_digest: None,
+      enforced: embedded.enforced,
+      closed: embedded.closed,
+      absent: embedded.absent,
+      unsupported: embedded.unsupported,
+      advertised: false,
+      hermetic: false,
+    };
+    let snapshot = candidate_snapshot(target, None);
+    verify_authenticated_envelope(&envelope(snapshot, key), key).unwrap()
+  }
+
+  pub(crate) fn candidate_with_env_policy(target: TargetStatus<'_>) -> Value {
     let mut snapshot = candidate_snapshot(target, None);
     let principal = PrincipalRef {
       kind: PrincipalKind::Package,
@@ -2085,7 +2277,7 @@ mod tests {
   }
 
   #[cfg(unix)]
-  fn candidate_with_executable_policy(
+  pub(crate) fn candidate_with_executable_policy(
     target: TargetStatus<'_>,
     object_path: &std::path::Path,
     interpreter_path: &std::path::Path,
@@ -2162,7 +2354,7 @@ mod tests {
   }
 
   #[cfg(unix)]
-  fn file_sha256_digest(path: &std::path::Path) -> String {
+  pub(crate) fn file_sha256_digest(path: &std::path::Path) -> String {
     format!(
       "sha256-{}",
       URL_SAFE_NO_PAD.encode(Sha256::digest(std::fs::read(path).unwrap()))
@@ -2170,7 +2362,7 @@ mod tests {
   }
 
   #[cfg(unix)]
-  fn platform_identity(path: &std::path::Path) -> Value {
+  pub(crate) fn platform_identity(path: &std::path::Path) -> Value {
     use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::metadata(path).unwrap();
     serde_json::json!({
@@ -2553,6 +2745,16 @@ mod tests {
         .iter()
         .any(|object| object.role() == Some("object"))
     );
+    let retained_object = context
+      .retained_objects()
+      .iter()
+      .find(|retained| retained.role() == Some("object"))
+      .unwrap();
+    assert_eq!(
+      retained_object.provenance_digest(),
+      Some(REV2_REGISTRY_DIGEST)
+    );
+    assert_eq!(retained_object.canonical_path(), object);
     let inode = std::fs::metadata(&object).unwrap().ino();
     std::fs::write(&object, b"console.log('mutated');\n").unwrap();
     assert_eq!(std::fs::metadata(&object).unwrap().ino(), inode);

@@ -33,6 +33,10 @@ const MAX_OPERATION_COMMITTED_STAGES: usize = 256;
 const MAX_OPERATION_CAPTURED_SOURCE_ENTRIES: usize = 16_384;
 const MAX_OPERATION_NEGATIVE_INVENTORY_ENTRIES: usize = 4_096;
 const MAX_PROVISIONAL_RESOURCE_ENTRIES: usize = 1_024;
+const MAX_RISK_AUTHORITIES: usize = 4_096;
+const MAX_RISK_FIELDS_PER_SCOPE: usize = 64;
+const MAX_RISK_STRING_BYTES: usize = 4_096;
+const MAX_RISK_ARRAY_ITEMS: usize = 4_096;
 const I_JSON_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -183,7 +187,9 @@ pub struct HandleSelectorInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProtectedExceptionInput {
     pub source_id: String,
-    pub reason: String,
+    pub predicate_id: String,
+    pub reason_digest: String,
+    pub canonical_row_digest: String,
     pub selector: AuthoritySelectorInput,
 }
 
@@ -348,6 +354,131 @@ pub struct StageDecision {
 pub struct MaskedEffectOmission {
     pub effect: CanonicalEffect,
     pub reason_codes: Vec<String>,
+}
+
+/// One host-captured normalized authority row for advisory risk evaluation.
+///
+/// `fields` uses the exact generated risk-field names (for example,
+/// `resource.name`). Definition-owned facts such as lifecycle and globality
+/// are always taken from the authenticated runtime vocabulary. This type has
+/// no wire deserializer and private fields: JavaScript and review-packet input
+/// cannot manufacture or omit classifier facts. The trusted host projection
+/// from canonical policy must eventually own complete fact derivation.
+///
+/// This intentionally does not implement `Deserialize`:
+///
+/// ```compile_fail
+/// use oden_policy::rev2::RiskAuthorityInput;
+/// let _: RiskAuthorityInput = serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RiskAuthorityInput {
+    capability: String,
+    fields: BTreeMap<String, Value>,
+}
+
+impl RiskAuthorityInput {
+    #[cfg(test)]
+    fn capture_host(
+        capability: impl Into<String>,
+        fields: BTreeMap<String, Value>,
+    ) -> Result<Self, CoreError> {
+        let capability = capability.into();
+        if capability.is_empty()
+            || capability.len() > 256
+            || fields.len() > MAX_RISK_FIELDS_PER_SCOPE
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "host risk projection has an invalid capability or field bound",
+            ));
+        }
+        Ok(Self { capability, fields })
+    }
+}
+
+/// Complete host-captured canonical-policy projection for one pure risk
+/// evaluation.
+///
+/// Global fields are authority-wide classifier facts. They are evaluated only
+/// by registry rules whose attachment is `global`; definition rules are
+/// selected from each authority row's generated `riskRuleIds`. There is no
+/// serde/oracle constructor. Only in-module exhaustive tests can currently
+/// assemble these facts; production stays sealed until a trusted canonical
+/// policy projection can derive every field.
+///
+/// No such constructor is exposed yet. The generated contract supplies direct
+/// selector fields and definition lifecycle/globality, but it does not yet
+/// supply all semantics needed for a complete projection:
+///
+/// - a generated source/sink role for each definition;
+/// - the row positions included in complete-policy risk and the projection of
+///   protected row metadata into `resource.protected`;
+/// - a projection from canonical path `{ root, kind, path }` resources to
+///   `resource.logicalPath` and `resource.objectClass` (the current special-file
+///   data also lacks the credential/loader-control/protected classes named by
+///   the rule);
+/// - canonical distinct-scope, path-scope, peer-class, and port counting
+///   algorithms, including duplicate/principal treatment; and
+/// - selected public-suffix data plus the registrable-domain counting
+///   algorithm (the generated input is currently `not-selected`).
+///
+/// Partial projection would silently omit applicable rules, so construction
+/// stays module-private until those items land in the reviewed generated
+/// dataset.
+///
+/// This intentionally does not implement `Deserialize`:
+///
+/// ```compile_fail
+/// use oden_policy::rev2::RiskEvaluationInput;
+/// let _: RiskEvaluationInput = serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RiskEvaluationInput {
+    identity: EngineIdentity,
+    authorities: Vec<RiskAuthorityInput>,
+    global_fields: BTreeMap<String, Value>,
+}
+
+impl RiskEvaluationInput {
+    #[cfg(test)]
+    fn capture_host(
+        authorities: Vec<RiskAuthorityInput>,
+        global_fields: BTreeMap<String, Value>,
+    ) -> Result<Self, CoreError> {
+        if authorities.len() > MAX_RISK_AUTHORITIES
+            || global_fields.len() > MAX_RISK_FIELDS_PER_SCOPE
+            || (authorities.is_empty() && !global_fields.is_empty())
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "host risk projection exceeds bounds or gives facts to an empty policy",
+            ));
+        }
+        Ok(Self {
+            identity: EngineIdentity::embedded(),
+            authorities,
+            global_fields,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RiskReason {
+    pub rule_id: String,
+    pub reason_code: String,
+    pub minimum_tier: u8,
+}
+
+/// Advisory-only risk result. It is not an authorization input and the
+/// decision evaluator never reads it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RiskEvaluation {
+    pub base_tier: u8,
+    pub tier: u8,
+    pub reasons: Vec<RiskReason>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -695,6 +826,9 @@ struct RuntimePayload {
 struct Definition {
     id: String,
     lifecycle: String,
+    globality: String,
+    base_risk: u8,
+    risk_rule_ids: Vec<String>,
     resource_schema_id: String,
     occurrence_schema_id: String,
     positive_projection_id: String,
@@ -798,13 +932,93 @@ struct Rules {
     match_evaluation_spec: MatchEvaluationSpec,
     #[serde(default)]
     predicates: Vec<Value>,
+    protected_receipt_schema: Option<Value>,
+    risk_rules: Vec<RiskRule>,
+    risk_evaluation_spec: RiskEvaluationSpec,
+    #[serde(default)]
+    sensitive_environment_names: Vec<String>,
+    #[serde(default)]
+    loader_control_environment_names: Vec<String>,
+    ambient_network_config_neutralization: Option<Value>,
     ip_address_classes: Option<IpAddressClasses>,
+    #[serde(default)]
+    system_information_kinds: Vec<Value>,
+    public_suffix_input: Value,
+    #[serde(default)]
+    special_files: Vec<SpecialFile>,
     #[serde(default)]
     derivation_rules: Vec<Value>,
     #[serde(default)]
     dispositions: Vec<Value>,
     #[serde(default)]
     lifetime_contracts: Vec<Value>,
+    #[serde(default)]
+    reason_codes: Vec<ReasonCodeDefinition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RiskRule {
+    id: String,
+    attachment: String,
+    minimum_tier: u8,
+    reason_code: String,
+    trigger: RiskTrigger,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RiskTrigger {
+    kind: String,
+    fields: Vec<String>,
+    values: Vec<String>,
+    threshold: Option<u64>,
+    classifier_data_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RiskEvaluationSpec {
+    fields: Vec<RiskFieldSpec>,
+    trigger_kinds: Vec<RiskTriggerSpec>,
+    classifier_data_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RiskFieldSpec {
+    name: String,
+    #[serde(rename = "type")]
+    value_type: String,
+    format: String,
+    canonicalization: String,
+    required: bool,
+    schema_ref: Option<String>,
+    allowed_values: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RiskTriggerSpec {
+    kind: String,
+    allowed_field_types: Vec<String>,
+    values: String,
+    threshold: String,
+    classifier_data: String,
+    algorithm: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SpecialFile {
+    classification: String,
+    path: String,
+    platform: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReasonCodeDefinition {
+    id: String,
+    class: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -890,6 +1104,7 @@ struct MatchOperation {
 #[serde(rename_all = "camelCase")]
 struct IpAddressClasses {
     classes: Vec<IpClass>,
+    ipv4_mapped_ipv6: String,
     metadata_exact: Vec<String>,
 }
 
@@ -911,7 +1126,9 @@ struct NormalizedNamedSelector {
 #[serde(rename_all = "camelCase")]
 struct NormalizedProtectedException {
     source_id: String,
-    reason: String,
+    predicate_id: String,
+    reason_digest: String,
+    canonical_row_digest: String,
     selector: CanonicalAuthoritySelector,
 }
 
@@ -955,7 +1172,7 @@ pub struct Rev2Core {
     state: Arc<Rev2State>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct Rev2State {
     payload: RuntimePayload,
@@ -964,6 +1181,16 @@ pub struct Rev2State {
     schemas: BTreeMap<String, TypedSchema>,
     projections: BTreeMap<String, Projection>,
     match_operations: BTreeMap<String, String>,
+    risk_rules: BTreeMap<String, RiskRule>,
+    risk_fields: BTreeMap<String, RiskFieldSpec>,
+    global_risk_rule_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+struct RiskIndex {
+    rules: BTreeMap<String, RiskRule>,
+    fields: BTreeMap<String, RiskFieldSpec>,
+    global_rule_ids: Vec<String>,
 }
 
 impl Deref for Rev2Core {
@@ -1084,6 +1311,7 @@ impl Rev2Core {
                 ));
             }
         }
+        let risk_index = validate_runtime_risk_contract(&payload, &definitions)?;
         Ok(Self {
             state: Arc::new(Rev2State {
                 payload,
@@ -1092,6 +1320,9 @@ impl Rev2Core {
                 schemas,
                 projections,
                 match_operations,
+                risk_rules: risk_index.rules,
+                risk_fields: risk_index.fields,
+                global_risk_rule_ids: risk_index.global_rule_ids,
             }),
         })
     }
@@ -1120,6 +1351,129 @@ impl Rev2Core {
             ));
         }
         Ok(())
+    }
+
+    /// Evaluate generated review risk without consulting or mutating any
+    /// authorization state.
+    ///
+    /// @ref LLP 0019#risk-and-review [implements] — Base tiers and every
+    /// applicable promotion reason come from the authenticated runtime
+    /// vocabulary; risk output never participates in allow/deny precedence.
+    pub fn evaluate_risk(
+        &self,
+        input: &RiskEvaluationInput,
+    ) -> Result<RiskEvaluation, CoreError> {
+        self.validate_identity(&input.identity)?;
+        if input.authorities.len() > MAX_RISK_AUTHORITIES {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "risk evaluation has an over-bound authority set",
+            ));
+        }
+        if input.authorities.is_empty() {
+            if !input.global_fields.is_empty() {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "an empty canonical policy cannot carry global risk facts",
+                ));
+            }
+            return Ok(RiskEvaluation {
+                base_tier: 0,
+                tier: 0,
+                reasons: Vec::new(),
+            });
+        }
+
+        let mut base_tier = 0;
+        let mut reasons: BTreeMap<(String, String), RiskReason> = BTreeMap::new();
+        for authority in &input.authorities {
+            if authority.capability.is_empty() || authority.capability.len() > 256 {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "risk authority capability is empty or over-bound",
+                ));
+            }
+            let definition = self.definition(&authority.capability)?;
+            base_tier = base_tier.max(definition.base_risk);
+            let mut fields = self.validate_risk_field_scope(&authority.fields)?;
+            fields.insert(
+                "definition.lifecycle".to_string(),
+                Value::String(definition.lifecycle.clone()),
+            );
+            fields.insert(
+                "definition.globality".to_string(),
+                Value::String(definition.globality.clone()),
+            );
+            for rule_id in &definition.risk_rule_ids {
+                let rule = self.risk_rules.get(rule_id).ok_or_else(|| {
+                    CoreError::new(
+                        REASON_SCHEMA_INVALID,
+                        format!("definition {} names unknown risk rule {rule_id}", definition.id),
+                    )
+                })?;
+                if risk_rule_applies(
+                    rule,
+                    &fields,
+                    &self.payload.policy_rules_and_classifiers,
+                )? {
+                    insert_risk_reason(&mut reasons, rule)?;
+                }
+            }
+        }
+
+        let global_fields = self.validate_risk_field_scope(&input.global_fields)?;
+        for rule_id in &self.global_risk_rule_ids {
+            let rule = self.risk_rules.get(rule_id).ok_or_else(|| {
+                CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    format!("global risk index names unknown rule {rule_id}"),
+                )
+            })?;
+            if risk_rule_applies(
+                rule,
+                &global_fields,
+                &self.payload.policy_rules_and_classifiers,
+            )? {
+                insert_risk_reason(&mut reasons, rule)?;
+            }
+        }
+
+        let reasons: Vec<RiskReason> = reasons.into_values().collect();
+        let tier = reasons
+            .iter()
+            .fold(base_tier, |tier, reason| tier.max(reason.minimum_tier));
+        Ok(RiskEvaluation {
+            base_tier,
+            tier,
+            reasons,
+        })
+    }
+
+    fn validate_risk_field_scope(
+        &self,
+        fields: &BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>, CoreError> {
+        if fields.len() > MAX_RISK_FIELDS_PER_SCOPE {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "risk field scope exceeds its generated-field bound",
+            ));
+        }
+        let mut validated = BTreeMap::new();
+        for (name, value) in fields {
+            if name.starts_with("definition.") {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    format!("risk field {name} is derived from the runtime definition"),
+                ));
+            }
+            let spec = self.risk_fields.get(name).ok_or_else(|| {
+                CoreError::new(REASON_SCHEMA_INVALID, format!("unknown risk field {name}"))
+            })?;
+            validate_risk_field_value(spec, value)?;
+            validated.insert(name.clone(), value.clone());
+        }
+        Ok(validated)
     }
 
     pub fn normalize_selector(
@@ -1547,16 +1901,12 @@ impl Rev2Core {
             PrincipalRequirement::Exact,
             "escalation ceiling",
         )?;
-        let mut static_floor = self.normalize_named_selectors(
+        let static_floor = self.normalize_named_selectors(
             &input.static_floor,
             SelectorPolarity::Positive,
             PrincipalRequirement::Exact,
             "static floor",
         )?;
-        for row in &mut static_floor {
-            row.source_id = canonical_row_digest(&row.selector)?;
-        }
-        static_floor.sort_by(|left, right| left.source_id.cmp(&right.source_id));
         let handles = self.normalize_handle_selectors(input)?;
         let session_grants = self.normalize_named_selectors(
             &input.session_grants,
@@ -1575,14 +1925,16 @@ impl Rev2Core {
         for row in &input.protected_exceptions {
             if row.source_id.trim().is_empty()
                 || row.source_id.len() > 1024
-                || row.reason.trim().is_empty()
-                || row.reason.len() > 4096
+                || row.predicate_id.trim().is_empty()
+                || row.predicate_id.len() > 256
             {
                 return Err(CoreError::new(
                     REASON_SCHEMA_INVALID,
-                    "protected exceptions require source identity and reason",
+                    "protected exception source or predicate identity is invalid",
                 ));
             }
+            validate_digest_string(&row.reason_digest)?;
+            validate_digest_string(&row.canonical_row_digest)?;
             if !protected_ids.insert(row.source_id.clone()) {
                 return Err(CoreError::new(
                     REASON_SCHEMA_INVALID,
@@ -1596,9 +1948,41 @@ impl Rev2Core {
                     "protected exception requires an exact principal",
                 ));
             }
+            let definition = self.definition(&selector.capability)?;
+            if definition.protected_receipt_predicate_id.as_deref()
+                != Some(row.predicate_id.as_str())
+                || !self.generated_protected_predicate_exists(&row.predicate_id)
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "protected exception names no generated definition predicate",
+                ));
+            }
+            let expected_digest = protected_row_digest(
+                &row.source_id,
+                &selector,
+                &row.predicate_id,
+                &row.reason_digest,
+            )?;
+            if row.canonical_row_digest != expected_digest {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "protected exception canonical row digest is invalid",
+                ));
+            }
+            if !static_floor.iter().any(|static_row| {
+                static_row.source_id == row.source_id && static_row.selector == selector
+            }) {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "protected exception does not match its exact static row",
+                ));
+            }
             protected_exceptions.push(NormalizedProtectedException {
                 source_id: row.source_id.clone(),
-                reason: row.reason.clone(),
+                predicate_id: row.predicate_id.clone(),
+                reason_digest: row.reason_digest.clone(),
+                canonical_row_digest: row.canonical_row_digest.clone(),
                 selector,
             });
         }
@@ -1664,14 +2048,6 @@ impl Rev2Core {
                 ));
             }
         }
-        for row in &protected_exceptions {
-            if !binding_source_ids.insert(row.source_id.clone()) {
-                return Err(CoreError::new(
-                    REASON_SCHEMA_INVALID,
-                    format!("ambiguous policy source identity {}", row.source_id),
-                ));
-            }
-        }
         let mut receipt_digests = BTreeSet::new();
         for digest in &input.validated_receipt_row_digests {
             validate_digest_string(digest)?;
@@ -1681,6 +2057,16 @@ impl Rev2Core {
                     format!("duplicate validated receipt row digest {digest}"),
                 ));
             }
+        }
+        let expected_receipt_digests: BTreeSet<String> = protected_exceptions
+            .iter()
+            .map(|exception| exception.canonical_row_digest.clone())
+            .collect();
+        if receipt_digests != expected_receipt_digests {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "validated receipt rows do not exactly cover protected canonical rows",
+            ));
         }
         let mut path_bindings = Vec::new();
         let mut binding_keys = BTreeSet::new();
@@ -1883,9 +2269,7 @@ impl Rev2Core {
         if self.is_metadata_effect(effect)? {
             let mut exception = None;
             for row in &policy.protected_exceptions {
-                if row.reason.trim().is_empty()
-                    || !selector_principal_matches(&row.selector, principal, false)
-                {
+                if !selector_principal_matches(&row.selector, principal, false) {
                     continue;
                 }
                 if self.metadata_exception_exactly_matches(
@@ -1902,7 +2286,8 @@ impl Rev2Core {
                 return Ok(deny(4, REASON_PROTECTED));
             };
             protected_static = policy.static_floor.iter().find(|row| {
-                row.selector == exception.selector
+                row.source_id == exception.source_id
+                    && row.selector == exception.selector
                     && selector_principal_matches(&row.selector, principal, false)
             });
             if protected_static.is_none() {
@@ -1961,8 +2346,15 @@ impl Rev2Core {
             let positive_required_ok = !definition.positive_required || exact_static.is_some();
             let receipt_ok = match &definition.protected_receipt_predicate_id {
                 None => true,
-                Some(_) => exact_static.is_some_and(|row| {
-                    policy.validated_receipt_row_digests.contains(&row.source_id)
+                Some(predicate_id) => exact_static.is_some_and(|row| {
+                    policy.protected_exceptions.iter().any(|exception| {
+                        exception.source_id == row.source_id
+                            && exception.selector == row.selector
+                            && exception.predicate_id == *predicate_id
+                            && policy
+                                .validated_receipt_row_digests
+                                .contains(&exception.canonical_row_digest)
+                    })
                 }),
             };
             // No root-edge predicate is advertised by the current generated
@@ -1982,15 +2374,11 @@ impl Rev2Core {
                 return Ok(deny(8, REASON_POSITIVE_PREDICATE));
             }
             let row = exact_static.expect("every current positive predicate requires static row");
-            let mut source_id = row.source_id.clone();
-            if definition.protected_receipt_predicate_id.is_some() {
-                source_id.push_str("+validated-receipt");
-            }
             return Ok(allow(
                 8,
                 PositiveSource {
                     kind: "predicate-static-row".to_string(),
-                    source_id,
+                    source_id: row.source_id.clone(),
                     generation: None,
                 },
             ));
@@ -2417,6 +2805,33 @@ impl Rev2Core {
             .predicates
             .iter()
             .any(|row| row.get("id").and_then(Value::as_str) == Some(predicate_id))
+    }
+
+    fn generated_protected_predicate_exists(&self, predicate_id: &str) -> bool {
+        let rules = &self.payload.policy_rules_and_classifiers;
+        let predicate = rules.predicates.iter().find(|row| {
+            row.get("id").and_then(Value::as_str) == Some(predicate_id)
+        });
+        let Some(predicate) = predicate else {
+            return false;
+        };
+        if predicate.get("kind").and_then(Value::as_str) != Some("definition-positive")
+            || predicate
+                .pointer("/evaluator/algorithm")
+                .and_then(Value::as_str)
+                != Some("authenticated-protected-receipt")
+        {
+            return false;
+        }
+        let schema_id = rules
+            .protected_receipt_schema
+            .as_ref()
+            .and_then(|schema| schema.get("id"))
+            .and_then(Value::as_str);
+        matches!(
+            (generated_id_version(predicate_id), schema_id.and_then(generated_id_version)),
+            (Some(predicate_version), Some(schema_version)) if predicate_version == schema_version
+        )
     }
 
     fn generated_disposition_exists(&self, disposition_id: &str) -> bool {
@@ -4172,8 +4587,10 @@ fn positive_inventory(policy: &NormalizedPolicy) -> Result<BTreeSet<String>, Cor
     }
     for exception in &policy.protected_exceptions {
         let value = serde_json::json!({
+            "canonicalRowDigest": exception.canonical_row_digest,
             "kind": "protected-exception",
-            "reason": exception.reason,
+            "predicateId": exception.predicate_id,
+            "reasonDigest": exception.reason_digest,
             "selector": exception.selector,
             "sourceId": exception.source_id,
             "runNonce": policy.run_nonce,
@@ -4499,6 +4916,7 @@ fn selector_principal_matches(
     }
 }
 
+#[cfg(test)]
 fn canonical_row_digest(selector: &CanonicalAuthoritySelector) -> Result<String, CoreError> {
     let principal = selector.principal.as_ref().ok_or_else(|| {
         CoreError::new(REASON_SCHEMA_INVALID, "canonical positive row has no principal")
@@ -4511,6 +4929,32 @@ fn canonical_row_digest(selector: &CanonicalAuthoritySelector) -> Result<String,
         "vocabDigest": REV2_VOCAB_DIGEST,
     });
     domain_digest("oden:capsec:canonical-row:2", &row)
+}
+
+fn protected_row_digest(
+    source_id: &str,
+    selector: &CanonicalAuthoritySelector,
+    predicate_id: &str,
+    reason_digest: &str,
+) -> Result<String, CoreError> {
+    let preimage = serde_json::json!({
+        "sourceId": source_id,
+        "selector": selector,
+        "predicateId": predicate_id,
+        "reasonDigest": reason_digest,
+    });
+    domain_digest("oden:capsec:protected-row:2", &preimage)
+}
+
+fn generated_id_version(id: &str) -> Option<&str> {
+    let (_, version) = id.rsplit_once('/')?;
+    if version.is_empty()
+        || version.starts_with('0')
+        || !version.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(version)
 }
 
 // @ref LLP 0019#canonical-policy-artifact [implements] — Digest inputs use
@@ -4542,7 +4986,7 @@ fn canonicalize_value(value: &Value) -> Result<Value, CoreError> {
 
 fn validate_i_json_number(number: &serde_json::Number) -> Result<(), CoreError> {
     if let Some(value) = number.as_i64() {
-        if value < -I_JSON_SAFE_INTEGER_MAX || value > I_JSON_SAFE_INTEGER_MAX {
+        if !(-I_JSON_SAFE_INTEGER_MAX..=I_JSON_SAFE_INTEGER_MAX).contains(&value) {
             return Err(CoreError::new(
                 REASON_SCHEMA_INVALID,
                 "I-JSON integer exceeds the exact IEEE-754 safe range",
@@ -4662,7 +5106,7 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
     where
         E: de::Error,
     {
-        if value < -I_JSON_SAFE_INTEGER_MAX || value > I_JSON_SAFE_INTEGER_MAX {
+        if !(-I_JSON_SAFE_INTEGER_MAX..=I_JSON_SAFE_INTEGER_MAX).contains(&value) {
             return Err(E::custom(
                 "I-JSON integer exceeds the exact IEEE-754 safe range",
             ));
@@ -5029,6 +5473,514 @@ where
         }
     }
     Ok(out)
+}
+
+fn validate_runtime_risk_contract(
+    payload: &RuntimePayload,
+    definitions: &BTreeMap<String, Definition>,
+) -> Result<RiskIndex, CoreError> {
+    let rules = &payload.policy_rules_and_classifiers;
+    if !rules.public_suffix_input.is_object() {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "runtime public-suffix risk input is not a retained object",
+        ));
+    }
+    if rules.risk_rules.is_empty() || rules.risk_rules.len() > 256 {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "runtime risk-rule set is empty or over-bound",
+        ));
+    }
+    let risk_fields = unique_by_id(
+        rules.risk_evaluation_spec.fields.iter().cloned(),
+        |field| &field.name,
+    )?;
+    if risk_fields.is_empty() || risk_fields.len() > MAX_RISK_FIELDS_PER_SCOPE {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "runtime risk-field set is empty or over-bound",
+        ));
+    }
+    for field in risk_fields.values() {
+        if !matches!(field.value_type.as_str(), "boolean" | "integer" | "string" | "string-array")
+            || !field.format.starts_with("risk-input:")
+            || !matches!(field.canonicalization.as_str(), "identity" | "deduplicate-sort-canonical")
+            || field.required
+            || field.schema_ref.is_some()
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("risk field {} has an unsupported generated contract", field.name),
+            ));
+        }
+    }
+
+    let trigger_specs = unique_by_id(
+        rules.risk_evaluation_spec.trigger_kinds.iter().cloned(),
+        |spec| &spec.kind,
+    )?;
+    let classifier_ids: BTreeSet<&str> = rules
+        .risk_evaluation_spec
+        .classifier_data_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if classifier_ids.len() != rules.risk_evaluation_spec.classifier_data_ids.len() {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "runtime risk classifier IDs are not unique",
+        ));
+    }
+    for classifier_id in &classifier_ids {
+        if !risk_classifier_data_is_present(rules, classifier_id) {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("runtime risk classifier {classifier_id} has no retained data"),
+            ));
+        }
+    }
+    for spec in trigger_specs.values() {
+        if risk_algorithm_for_kind(&spec.kind) != Some(spec.algorithm.as_str())
+            || spec.allowed_field_types.is_empty()
+            || spec.allowed_field_types.iter().any(|value_type| {
+                !matches!(value_type.as_str(), "boolean" | "integer" | "string" | "string-array")
+            })
+            || !matches!(spec.values.as_str(), "required" | "forbidden")
+            || !matches!(spec.threshold.as_str(), "required" | "forbidden")
+            || !matches!(spec.classifier_data.as_str(), "required" | "optional" | "forbidden")
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("risk trigger kind {} has an unsupported generated contract", spec.kind),
+            ));
+        }
+    }
+
+    let reason_codes: BTreeMap<&str, &str> = rules
+        .reason_codes
+        .iter()
+        .map(|row| (row.id.as_str(), row.class.as_str()))
+        .collect();
+    if reason_codes.len() != rules.reason_codes.len() {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "runtime reason-code IDs are not unique",
+        ));
+    }
+    let risk_rules = unique_by_id(rules.risk_rules.iter().cloned(), |rule| &rule.id)?;
+    let mut used_trigger_kinds = BTreeSet::new();
+    let mut used_classifier_ids = BTreeSet::new();
+    for rule in risk_rules.values() {
+        if !matches!(rule.attachment.as_str(), "definition" | "global")
+            || rule.minimum_tier > 4
+            || rule.reason_code.is_empty()
+            || reason_codes.get(rule.reason_code.as_str()) != Some(&"risk")
+            || rule.trigger.fields.is_empty()
+            || rule.trigger.fields.len() > MAX_RISK_FIELDS_PER_SCOPE
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("risk rule {} has an invalid tier, attachment, or reason", rule.id),
+            ));
+        }
+        let trigger_spec = trigger_specs.get(&rule.trigger.kind).ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("risk rule {} names unknown trigger kind {}", rule.id, rule.trigger.kind),
+            )
+        })?;
+        used_trigger_kinds.insert(rule.trigger.kind.as_str());
+        let trigger_fields: BTreeSet<&str> =
+            rule.trigger.fields.iter().map(String::as_str).collect();
+        let trigger_values: BTreeSet<&str> =
+            rule.trigger.values.iter().map(String::as_str).collect();
+        if trigger_fields.len() != rule.trigger.fields.len()
+            || trigger_values.len() != rule.trigger.values.len()
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("risk rule {} repeats a field or value", rule.id),
+            ));
+        }
+        for field_name in &rule.trigger.fields {
+            let field = risk_fields.get(field_name).ok_or_else(|| {
+                CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    format!("risk rule {} names unknown field {field_name}", rule.id),
+                )
+            })?;
+            if !trigger_spec.allowed_field_types.contains(&field.value_type) {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    format!(
+                        "risk trigger {} rejects field type {}",
+                        rule.id, field.value_type
+                    ),
+                ));
+            }
+        }
+        validate_risk_trigger_slot(
+            &rule.id,
+            "values",
+            !rule.trigger.values.is_empty(),
+            &trigger_spec.values,
+        )?;
+        validate_risk_trigger_slot(
+            &rule.id,
+            "threshold",
+            rule.trigger.threshold.is_some(),
+            &trigger_spec.threshold,
+        )?;
+        validate_risk_trigger_slot(
+            &rule.id,
+            "classifierDataId",
+            rule.trigger.classifier_data_id.is_some(),
+            &trigger_spec.classifier_data,
+        )?;
+        if let Some(classifier_id) = &rule.trigger.classifier_data_id {
+            if !classifier_ids.contains(classifier_id.as_str())
+                || !risk_classifier_is_supported(&rule.trigger.kind, classifier_id)
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    format!("risk rule {} names unsupported classifier {classifier_id}", rule.id),
+                ));
+            }
+            used_classifier_ids.insert(classifier_id.as_str());
+        }
+    }
+    if used_trigger_kinds.len() != trigger_specs.len()
+        || used_classifier_ids.len() != classifier_ids.len()
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "runtime risk trigger or classifier registry is incomplete",
+        ));
+    }
+
+    let mut referenced_definition_rules = BTreeSet::new();
+    for definition in definitions.values() {
+        if definition.base_risk > 4 {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("definition {} has out-of-range base risk", definition.id),
+            ));
+        }
+        for (field_name, value) in [
+            ("definition.lifecycle", definition.lifecycle.as_str()),
+            ("definition.globality", definition.globality.as_str()),
+        ] {
+            let field = risk_fields.get(field_name).ok_or_else(|| {
+                CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    format!("runtime risk schema omits derived field {field_name}"),
+                )
+            })?;
+            validate_risk_field_value(field, &Value::String(value.to_string()))?;
+        }
+        let unique_rule_ids: BTreeSet<&str> =
+            definition.risk_rule_ids.iter().map(String::as_str).collect();
+        if unique_rule_ids.len() != definition.risk_rule_ids.len() {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("definition {} repeats a risk rule", definition.id),
+            ));
+        }
+        for rule_id in &definition.risk_rule_ids {
+            let rule = risk_rules.get(rule_id).ok_or_else(|| {
+                CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    format!("definition {} names unknown risk rule {rule_id}", definition.id),
+                )
+            })?;
+            if rule.attachment != "definition" {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    format!("definition {} attaches global risk rule {rule_id}", definition.id),
+                ));
+            }
+            referenced_definition_rules.insert(rule_id.as_str());
+        }
+    }
+    let declared_definition_rules: BTreeSet<&str> = risk_rules
+        .values()
+        .filter(|rule| rule.attachment == "definition")
+        .map(|rule| rule.id.as_str())
+        .collect();
+    if referenced_definition_rules != declared_definition_rules {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "runtime definition risk-rule references are incomplete",
+        ));
+    }
+    let mut global_risk_rule_ids: Vec<String> = risk_rules
+        .values()
+        .filter(|rule| rule.attachment == "global")
+        .map(|rule| rule.id.clone())
+        .collect();
+    global_risk_rule_ids.sort_by(|left, right| {
+        let left_rule = &risk_rules[left];
+        let right_rule = &risk_rules[right];
+        (left_rule.reason_code.as_str(), left_rule.id.as_str())
+            .cmp(&(right_rule.reason_code.as_str(), right_rule.id.as_str()))
+    });
+    if global_risk_rule_ids.is_empty() {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "runtime vocabulary has no global risk rules",
+        ));
+    }
+    Ok(RiskIndex {
+        rules: risk_rules,
+        fields: risk_fields,
+        global_rule_ids: global_risk_rule_ids,
+    })
+}
+
+fn risk_algorithm_for_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "accretion-threshold" | "count-at-least" => Some("numeric-at-least"),
+        "field-equals" => Some("equals-any"),
+        "field-member-in" => Some("member-in-values"),
+        "named-set-member" => Some("classifier-member"),
+        "path-classifier" => Some("classifier-path-match"),
+        "source-sink-composition" => Some("source-sink-threshold"),
+        _ => None,
+    }
+}
+
+fn risk_classifier_data_is_present(rules: &Rules, classifier_id: &str) -> bool {
+    match classifier_id {
+        "ambientNetworkConfigNeutralization" => {
+            rules.ambient_network_config_neutralization.is_some()
+        }
+        "ipAddressClasses" => rules.ip_address_classes.as_ref().is_some_and(|classes| {
+            classes.ipv4_mapped_ipv6
+                == "normalize-to-effective-ipv4-before-classification"
+        }),
+        "loaderControlEnvironmentNames" => !rules.loader_control_environment_names.is_empty(),
+        "sensitiveEnvironmentNames" => !rules.sensitive_environment_names.is_empty(),
+        "specialFiles" => !rules.special_files.is_empty(),
+        "systemInformationKinds" => !rules.system_information_kinds.is_empty(),
+        _ => false,
+    }
+}
+
+fn risk_classifier_is_supported(kind: &str, classifier_id: &str) -> bool {
+    matches!(
+        (kind, classifier_id),
+        ("field-member-in", "ambientNetworkConfigNeutralization")
+            | ("field-member-in", "ipAddressClasses")
+            | ("field-member-in", "systemInformationKinds")
+            | ("named-set-member", "loaderControlEnvironmentNames")
+            | ("named-set-member", "sensitiveEnvironmentNames")
+            | ("path-classifier", "specialFiles")
+    )
+}
+
+fn validate_risk_trigger_slot(
+    rule_id: &str,
+    slot: &str,
+    present: bool,
+    disposition: &str,
+) -> Result<(), CoreError> {
+    let valid = match disposition {
+        "required" => present,
+        "forbidden" => !present,
+        "optional" => true,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            format!("risk rule {rule_id} violates its {slot} contract"),
+        ))
+    }
+}
+
+fn validate_risk_field_value(spec: &RiskFieldSpec, value: &Value) -> Result<(), CoreError> {
+    let valid = match spec.value_type.as_str() {
+        "boolean" => value.is_boolean(),
+        "integer" => value
+            .as_u64()
+            .is_some_and(|integer| integer <= I_JSON_SAFE_INTEGER_MAX as u64),
+        "string" => value
+            .as_str()
+            .is_some_and(|string| string.len() <= MAX_RISK_STRING_BYTES),
+        "string-array" => value.as_array().is_some_and(|values| {
+            values.len() <= MAX_RISK_ARRAY_ITEMS
+                && values.iter().all(|entry| {
+                    entry
+                        .as_str()
+                        .is_some_and(|string| string.len() <= MAX_RISK_STRING_BYTES)
+                })
+        }),
+        _ => false,
+    };
+    if !valid {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            format!("risk field {} has the wrong type or exceeds its bound", spec.name),
+        ));
+    }
+    if let Some(allowed_values) = &spec.allowed_values {
+        let allowed = match value {
+            Value::String(value) => allowed_values.contains(value),
+            Value::Bool(value) => allowed_values.iter().any(|allowed| allowed == &value.to_string()),
+            _ => true,
+        };
+        if !allowed {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("risk field {} is outside its generated value domain", spec.name),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn insert_risk_reason(
+    reasons: &mut BTreeMap<(String, String), RiskReason>,
+    rule: &RiskRule,
+) -> Result<(), CoreError> {
+    let key = (rule.reason_code.clone(), rule.id.clone());
+    let reason = RiskReason {
+        rule_id: rule.id.clone(),
+        reason_code: rule.reason_code.clone(),
+        minimum_tier: rule.minimum_tier,
+    };
+    if let Some(previous) = reasons.insert(key, reason.clone()) {
+        if previous != reason {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("risk rule {} produced inconsistent reasons", rule.id),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn risk_rule_applies(
+    rule: &RiskRule,
+    fields: &BTreeMap<String, Value>,
+    rules: &Rules,
+) -> Result<bool, CoreError> {
+    match rule.trigger.kind.as_str() {
+        "field-equals" => Ok(rule.trigger.fields.iter().any(|field| {
+            fields.get(field).is_some_and(|value| {
+                rule.trigger.values.iter().any(|expected| match value {
+                    Value::Bool(actual) => expected == &actual.to_string(),
+                    Value::String(actual) => expected == actual,
+                    _ => false,
+                })
+            })
+        })),
+        "field-member-in" => Ok(rule.trigger.fields.iter().any(|field| {
+            fields.get(field).is_some_and(|value| {
+                risk_string_values(value).any(|actual| rule.trigger.values.iter().any(|expected| expected == actual))
+            })
+        })),
+        "named-set-member" => {
+            let classifier_id = rule.trigger.classifier_data_id.as_deref().ok_or_else(|| {
+                CoreError::new(REASON_SCHEMA_INVALID, format!("risk rule {} has no classifier", rule.id))
+            })?;
+            Ok(rule.trigger.fields.iter().any(|field| {
+                fields.get(field).is_some_and(|value| {
+                    risk_string_values(value)
+                        .any(|actual| risk_named_classifier_contains(rules, classifier_id, actual))
+                })
+            }))
+        }
+        "path-classifier" => Ok(risk_path_classifier_applies(rule, fields, rules)),
+        "count-at-least" => {
+            let threshold = rule.trigger.threshold.ok_or_else(|| {
+                CoreError::new(REASON_SCHEMA_INVALID, format!("risk rule {} has no threshold", rule.id))
+            })?;
+            Ok(rule.trigger.fields.iter().any(|field| {
+                fields.get(field).and_then(Value::as_u64).is_some_and(|value| value >= threshold)
+            }))
+        }
+        "accretion-threshold" => {
+            let threshold = rule.trigger.threshold.ok_or_else(|| {
+                CoreError::new(REASON_SCHEMA_INVALID, format!("risk rule {} has no threshold", rule.id))
+            })?;
+            let total = rule.trigger.fields.iter().try_fold(0_u64, |total, field| {
+                total.checked_add(fields.get(field).and_then(Value::as_u64).unwrap_or(0))
+                    .ok_or_else(|| CoreError::new(REASON_SCHEMA_INVALID, "risk accretion count overflow"))
+            })?;
+            Ok(total >= threshold)
+        }
+        "source-sink-composition" => {
+            let threshold = rule.trigger.threshold.ok_or_else(|| {
+                CoreError::new(REASON_SCHEMA_INVALID, format!("risk rule {} has no threshold", rule.id))
+            })?;
+            let mut matched = BTreeSet::new();
+            for field in &rule.trigger.fields {
+                if let Some(value) = fields.get(field) {
+                    for actual in risk_string_values(value) {
+                        if rule.trigger.values.iter().any(|expected| expected == actual) {
+                            matched.insert(actual);
+                        }
+                    }
+                }
+            }
+            Ok(matched.len() as u64 >= threshold)
+        }
+        unknown => Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            format!("risk rule {} has unsupported trigger kind {unknown}", rule.id),
+        )),
+    }
+}
+
+fn risk_string_values(value: &Value) -> impl Iterator<Item = &str> {
+    value
+        .as_str()
+        .into_iter()
+        .chain(value.as_array().into_iter().flatten().filter_map(Value::as_str))
+}
+
+fn risk_named_classifier_contains(rules: &Rules, classifier_id: &str, value: &str) -> bool {
+    match classifier_id {
+        "loaderControlEnvironmentNames" => rules
+            .loader_control_environment_names
+            .iter()
+            .any(|candidate| candidate == value),
+        "sensitiveEnvironmentNames" => rules
+            .sensitive_environment_names
+            .iter()
+            .any(|candidate| candidate == value),
+        _ => false,
+    }
+}
+
+fn risk_path_classifier_applies(
+    rule: &RiskRule,
+    fields: &BTreeMap<String, Value>,
+    rules: &Rules,
+) -> bool {
+    if fields
+        .get("resource.objectClass")
+        .and_then(Value::as_str)
+        .is_some_and(|class| rule.trigger.values.iter().any(|expected| expected == class))
+    {
+        return true;
+    }
+    let Some(path) = fields.get("resource.logicalPath").and_then(Value::as_str) else {
+        return false;
+    };
+    rules.special_files.iter().any(|special| {
+        special.path == path
+            && !special.platform.is_empty()
+            && rule
+                .trigger
+                .values
+                .iter()
+                .any(|expected| expected == &special.classification)
+    })
 }
 
 fn validate_edge_semantics(edge_id: &str, semantics: &EdgeSemantics) -> Result<(), CoreError> {
@@ -5719,6 +6671,129 @@ mod tests {
         .unwrap()
     }
 
+    fn protected_core() -> Rev2Core {
+        const PREDICATE: &str = "predicate.protected-receipt/2";
+        let embedded = Rev2Core::embedded().unwrap();
+        let mut state = (*embedded.state).clone();
+        state
+            .definitions
+            .get_mut("network:fetch")
+            .unwrap()
+            .protected_receipt_predicate_id = Some(PREDICATE.to_string());
+        state
+            .payload
+            .policy_rules_and_classifiers
+            .predicates
+            .push(json!({
+                "id": PREDICATE,
+                "kind": "definition-positive",
+                "evaluator": { "algorithm": "authenticated-protected-receipt" },
+            }));
+        state
+            .payload
+            .policy_rules_and_classifiers
+            .protected_receipt_schema = Some(json!({
+                "id": "oden/capsec-protected-receipt/2",
+            }));
+        Rev2Core {
+            state: Arc::new(state),
+        }
+    }
+
+    fn protected_exception(
+        core: &Rev2Core,
+        source_id: &str,
+        selector: AuthoritySelectorInput,
+        reason: &str,
+    ) -> ProtectedExceptionInput {
+        let predicate_id = "predicate.protected-receipt/2".to_string();
+        let reason_digest = domain_digest(
+            "oden:capsec:protected-reason:2",
+            &Value::String(reason.to_string()),
+        )
+        .unwrap();
+        let canonical_selector = core
+            .normalize_selector(&selector, SelectorPolarity::Positive)
+            .unwrap();
+        let canonical_row_digest = protected_row_digest(
+            source_id,
+            &canonical_selector,
+            &predicate_id,
+            &reason_digest,
+        )
+        .unwrap();
+        ProtectedExceptionInput {
+            source_id: source_id.to_string(),
+            predicate_id,
+            reason_digest,
+            canonical_row_digest,
+            selector,
+        }
+    }
+
+    fn risk_fields(rows: Vec<(&str, Value)>) -> BTreeMap<String, Value> {
+        rows.into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+            .collect()
+    }
+
+    fn risk_authority(
+        capability: &str,
+        rows: Vec<(&str, Value)>,
+    ) -> RiskAuthorityInput {
+        RiskAuthorityInput::capture_host(capability, risk_fields(rows)).unwrap()
+    }
+
+    fn exhaustive_risk_input() -> RiskEvaluationInput {
+        RiskEvaluationInput::capture_host(
+            vec![
+                risk_authority("cron:schedule", vec![]),
+                risk_authority("env:process-write", vec![]),
+                risk_authority("ffi:load", vec![]),
+                risk_authority(
+                    "network:connect",
+                    vec![
+                        ("resource.peerClasses", json!(["metadata"])),
+                        ("resource.route.kind", json!("forward-proxy")),
+                        ("normalizedAuthority.distinctScopes", json!(8)),
+                    ],
+                ),
+                risk_authority(
+                    "env:write",
+                    vec![("resource.name", json!("NODE_OPTIONS"))],
+                ),
+                risk_authority(
+                    "env:read",
+                    vec![("resource.name", json!("OPENAI_API_KEY"))],
+                ),
+                risk_authority(
+                    "fs:read",
+                    vec![
+                        ("resource.logicalPath", json!("$HOME/.ssh/id_ed25519")),
+                        ("resource.objectClass", json!("credential")),
+                    ],
+                ),
+                risk_authority(
+                    "stdio:read",
+                    vec![("resource.source", json!("terminal"))],
+                ),
+                risk_authority(
+                    "sys:read",
+                    vec![("resource.kind", json!("user-info"))],
+                ),
+            ],
+            risk_fields(vec![
+                ("authority.effects", json!(["source", "sink"])),
+                ("resource.protected", json!(true)),
+                ("normalizedAuthority.pathScopes", json!(1)),
+                ("normalizedAuthority.registrableDomains", json!(1)),
+                ("normalizedAuthority.ports", json!(1)),
+                ("normalizedAuthority.peerClasses", json!(0)),
+            ]),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn embedded_payload_is_self_authenticating_and_n_is_exact() {
         let core = Rev2Core::embedded().unwrap();
@@ -5737,6 +6812,133 @@ mod tests {
         );
         let duplicate = parse_strict_json(r#"{"a":1,"a":2}"#).unwrap_err();
         assert_eq!(duplicate.reason_code, REASON_SCHEMA_INVALID);
+    }
+
+    #[test]
+    fn runtime_risk_contract_is_complete_and_unknown_rules_fail_closed() {
+        let core = Rev2Core::embedded().unwrap();
+        assert_eq!(core.risk_rules.len(), 14);
+        assert_eq!(
+            core.risk_rules.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "risk.authority-accretion",
+                "risk.cross-capability-composition",
+                "risk.deny-only",
+                "risk.endpoint-class",
+                "risk.env-loader-control-name",
+                "risk.env-sensitive-name",
+                "risk.path-sensitive",
+                "risk.protected-resource-exception",
+                "risk.route",
+                "risk.scope-breadth",
+                "risk.shared-process-mutation",
+                "risk.stdio-source",
+                "risk.system-info-kind",
+                "risk.terminal",
+            ]
+        );
+
+        let value = parse_strict_json(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
+        let mut payload: RuntimePayload = serde_json::from_value(value).unwrap();
+        payload.definitions[0]
+            .risk_rule_ids
+            .push("risk.unknown-runtime-rule".to_string());
+        let definitions =
+            unique_by_id(payload.definitions.iter().cloned(), |row| &row.id).unwrap();
+        let error = validate_runtime_risk_contract(&payload, &definitions).unwrap_err();
+        assert_eq!(error.reason_code, REASON_SCHEMA_INVALID);
+        assert!(error.message.contains("unknown risk rule"));
+    }
+
+    #[test]
+    fn empty_canonical_policy_has_deterministic_tier_zero_risk() {
+        let core = Rev2Core::embedded().unwrap();
+        let empty = RiskEvaluationInput::capture_host(Vec::new(), BTreeMap::new()).unwrap();
+        assert_eq!(
+            core.evaluate_risk(&empty).unwrap(),
+            RiskEvaluation {
+                base_tier: 0,
+                tier: 0,
+                reasons: Vec::new(),
+            }
+        );
+        assert!(RiskEvaluationInput::capture_host(
+            Vec::new(),
+            risk_fields(vec![("resource.protected", json!(true))]),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn all_runtime_risk_rules_coapply_in_canonical_order_and_permutations_are_stable() {
+        let core = Rev2Core::embedded().unwrap();
+        let input = exhaustive_risk_input();
+        let result = core.evaluate_risk(&input).unwrap();
+        assert_eq!(result.base_tier, 4);
+        assert_eq!(result.tier, 4);
+        assert_eq!(result.reasons.len(), 14);
+        assert_eq!(
+            result
+                .reasons
+                .iter()
+                .map(|reason| (reason.reason_code.as_str(), reason.rule_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("OD-RISK-AUTHORITY-ACCRETION", "risk.authority-accretion"),
+                ("OD-RISK-CROSS-CAPABILITY", "risk.cross-capability-composition"),
+                ("OD-RISK-DENY-ONLY", "risk.deny-only"),
+                ("OD-RISK-ENDPOINT-CLASS", "risk.endpoint-class"),
+                ("OD-RISK-ENV-LOADER-CONTROL", "risk.env-loader-control-name"),
+                ("OD-RISK-ENV-SENSITIVE", "risk.env-sensitive-name"),
+                ("OD-RISK-PATH-SENSITIVE", "risk.path-sensitive"),
+                ("OD-RISK-PROTECTED-EXCEPTION", "risk.protected-resource-exception"),
+                ("OD-RISK-ROUTE", "risk.route"),
+                ("OD-RISK-SCOPE-BREADTH", "risk.scope-breadth"),
+                ("OD-RISK-SHARED-MUTATION", "risk.shared-process-mutation"),
+                ("OD-RISK-STDIO-SOURCE", "risk.stdio-source"),
+                ("OD-RISK-SYSTEM-INFO", "risk.system-info-kind"),
+                ("OD-RISK-TERMINAL", "risk.terminal"),
+            ]
+        );
+
+        let mut permuted = input.clone();
+        permuted.authorities.reverse();
+        permuted.global_fields.insert(
+            "authority.effects".to_string(),
+            json!(["sink", "source", "sink"]),
+        );
+        assert_eq!(core.evaluate_risk(&permuted).unwrap(), result);
+    }
+
+    #[test]
+    fn risk_is_advisory_and_invalid_or_spoofed_fields_fail_closed() {
+        let core = Rev2Core::embedded().unwrap();
+        let principal = package("risk-advisory");
+        let request = stage("risk-advisory", vec![principal], vec![env_effect("TOKEN")]);
+        let policy = policy(Mode::Enforce);
+        let before = core.decide_stage(&request, &policy).unwrap();
+        assert_eq!(before.outcome, Outcome::Deny);
+
+        let risk = core.evaluate_risk(&exhaustive_risk_input()).unwrap();
+        assert_eq!(risk.tier, 4);
+        let after = core.decide_stage(&request, &policy).unwrap();
+        assert_eq!(after, before);
+
+        let mut spoofed = exhaustive_risk_input();
+        spoofed.authorities[0].fields.insert(
+            "definition.lifecycle".to_string(),
+            json!("authorable"),
+        );
+        assert_eq!(
+            core.evaluate_risk(&spoofed).unwrap_err().reason_code,
+            REASON_SCHEMA_INVALID
+        );
+        let mut unknown = exhaustive_risk_input();
+        unknown.global_fields.insert("attacker.field".to_string(), json!(1));
+        assert_eq!(
+            core.evaluate_risk(&unknown).unwrap_err().reason_code,
+            REASON_SCHEMA_INVALID
+        );
     }
 
     #[test]
@@ -5856,6 +7058,15 @@ mod tests {
             assert!(error.message.contains("unknown oracle request field"));
         }
         assert!(validate_oracle_request_envelope(&json!({ "operation": "unknown" })).is_err());
+
+        let risk_wire = json!({
+            "operation": "evaluateRisk",
+            "authorities": [],
+            "globalFields": {},
+        });
+        let error = validate_oracle_request_envelope(&risk_wire).unwrap_err();
+        assert_eq!(error.reason_code, REASON_SCHEMA_INVALID);
+        assert_eq!(error.message, "unknown oracle operation evaluateRisk");
     }
 
     #[test]
@@ -5926,17 +7137,24 @@ mod tests {
             .decide_stage(&stage("read", vec![b, a], vec![env_effect("TOKEN")]), &policy)
             .unwrap();
         assert_eq!(allowed.outcome, Outcome::Allow);
-        assert!(allowed.effects[0].dimensions.iter().all(|dimension| {
-            dimension.stratum == 9
-                && dimension
-                    .positive_source
-                    .as_ref()
-                    .is_some_and(|source| source.source_id.starts_with("sha256-"))
-        }));
+        assert_eq!(
+            allowed.effects[0]
+                .dimensions
+                .iter()
+                .map(|dimension| (
+                    dimension.stratum,
+                    dimension
+                        .positive_source
+                        .as_ref()
+                        .map(|source| source.source_id.as_str()),
+                ))
+                .collect::<Vec<_>>(),
+            vec![(9, Some("a-row")), (9, Some("b-row"))],
+        );
     }
 
     #[test]
-    fn canonical_static_source_digest_binds_full_principal_kind_and_key() {
+    fn canonical_policy_row_digest_binds_full_principal_kind_and_key() {
         let core = Rev2Core::embedded().unwrap();
         let key = "shared-principal-key";
         let package_selector = core
@@ -6388,7 +7606,7 @@ mod tests {
 
     #[test]
     fn protected_exception_is_a_negative_only_continuation() {
-        let core = Rev2Core::embedded().unwrap();
+        let core = protected_core();
         let principal = package("metadata-client");
         let authority = fetch_selector(principal.clone(), "169.254.169.254", "metadata");
         let request = stage(
@@ -6402,33 +7620,28 @@ mod tests {
         let guarded = core.decide_stage(&request, &static_only).unwrap();
         assert_eq!(guarded.effects[0].dimensions[0].stratum, 4);
 
-        let mut exception_only = policy(Mode::Enforce);
-        exception_only.protected_exceptions.push(ProtectedExceptionInput {
-            source_id: "metadata-exception".to_string(),
-            reason: "instance role".to_string(),
-            selector: authority.clone(),
-        });
-        let still_ungranted = core.decide_stage(&request, &exception_only).unwrap();
-        assert_eq!(still_ungranted.effects[0].dimensions[0].stratum, 4);
-
-        let mut broad_floor = exception_only.clone();
-        broad_floor.static_floor.push(named(
-            "metadata-broad",
-            selector(
-                Some(principal.clone()),
-                "network:fetch",
-                json!({
-                    "host": { "kind": "cidr", "value": "169.254.0.0/16" },
-                    "peerClasses": ["metadata"],
-                    "port": { "kind": "any" },
-                    "route": { "attestation": null, "endpoint": null, "kind": "direct" },
-                    "schemes": ["http", "https"],
-                }),
-            ),
-        ));
-        let broad_refused = core.decide_stage(&request, &broad_floor).unwrap();
-        assert_eq!(broad_refused.outcome, Outcome::Deny);
-        assert_eq!(broad_refused.effects[0].dimensions[0].stratum, 4);
+        let exception = protected_exception(
+            &core,
+            "metadata-row",
+            authority.clone(),
+            "instance role credentials",
+        );
+        let mut excepted = policy(Mode::Enforce);
+        excepted.static_floor.push(named("metadata-row", authority.clone()));
+        excepted
+            .validated_receipt_row_digests
+            .push(exception.canonical_row_digest.clone());
+        excepted.protected_exceptions.push(exception);
+        let allowed = core.decide_stage(&request, &excepted).unwrap();
+        assert_eq!(allowed.outcome, Outcome::Allow);
+        assert_eq!(allowed.effects[0].dimensions[0].stratum, 8);
+        assert_eq!(
+            allowed.effects[0].dimensions[0]
+                .positive_source
+                .as_ref()
+                .map(|source| source.source_id.as_str()),
+            Some("metadata-row"),
+        );
 
         let dns_authority = fetch_host_selector(
             Some(principal.clone()),
@@ -6438,11 +7651,16 @@ mod tests {
         );
         let mut dns_exception = policy(Mode::Enforce);
         dns_exception.static_floor.push(named("dns-static", dns_authority.clone()));
-        dns_exception.protected_exceptions.push(ProtectedExceptionInput {
-            source_id: "dns-exception".to_string(),
-            reason: "must never clear metadata by DNS".to_string(),
-            selector: dns_authority,
-        });
+        let dns_protected = protected_exception(
+            &core,
+            "dns-static",
+            dns_authority,
+            "must never clear metadata by DNS",
+        );
+        dns_exception
+            .validated_receipt_row_digests
+            .push(dns_protected.canonical_row_digest.clone());
+        dns_exception.protected_exceptions.push(dns_protected);
         let dns_refused = core
             .decide_stage(
                 &stage(
@@ -6456,15 +7674,134 @@ mod tests {
         assert_eq!(dns_refused.outcome, Outcome::Deny);
         assert_eq!(dns_refused.effects[0].dimensions[0].stratum, 4);
 
-        exception_only
-            .static_floor
-            .push(named("metadata-row", authority.clone()));
-        exception_only.principal_denials.push(named(
-            "specific-denial",
-            authority,
-        ));
-        let denied_after_exception = core.decide_stage(&request, &exception_only).unwrap();
+        let mut revoked = excepted.clone();
+        revoked
+            .session_revocations
+            .push(named("revoked-metadata", authority.clone()));
+        let denied_after_revocation = core.decide_stage(&request, &revoked).unwrap();
+        assert_eq!(denied_after_revocation.effects[0].dimensions[0].stratum, 7);
+
+        excepted
+            .principal_denials
+            .push(named("specific-denial", authority));
+        let denied_after_exception = core.decide_stage(&request, &excepted).unwrap();
         assert_eq!(denied_after_exception.effects[0].dimensions[0].stratum, 6);
+    }
+
+    #[test]
+    fn protected_exception_identity_preimage_and_receipt_substitution_fail_closed() {
+        let core = protected_core();
+        let principal = package("metadata-adversary");
+        let authority = fetch_selector(principal, "169.254.169.254", "metadata");
+        let valid = protected_exception(
+            &core,
+            "metadata-row",
+            authority.clone(),
+            "instance role credentials",
+        );
+        assert!(!serde_json::to_string(&valid)
+            .unwrap()
+            .contains("instance role credentials"));
+        assert!(serde_json::from_value::<ProtectedExceptionInput>(json!({
+            "sourceId": "metadata-row",
+            "reason": "instance role credentials",
+            "selector": valid.selector.clone(),
+        }))
+        .is_err());
+
+        let evaluate = |exception: ProtectedExceptionInput, receipt_digest: String| {
+            let mut policy = policy(Mode::Enforce);
+            policy.static_floor.push(named("metadata-row", authority.clone()));
+            policy.protected_exceptions.push(exception);
+            policy.validated_receipt_row_digests.push(receipt_digest);
+            core.decide_stage(
+                &stage(
+                    "protected-adversary",
+                    vec![authority.principal.clone().unwrap()],
+                    vec![fetch_effect("169.254.169.254")],
+                ),
+                &policy,
+            )
+        };
+
+        let mut wrong_source = valid.clone();
+        wrong_source.source_id = "metadata-substituted-source".to_string();
+        let canonical = core
+            .normalize_selector(&wrong_source.selector, SelectorPolarity::Positive)
+            .unwrap();
+        wrong_source.canonical_row_digest = protected_row_digest(
+            &wrong_source.source_id,
+            &canonical,
+            &wrong_source.predicate_id,
+            &wrong_source.reason_digest,
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate(wrong_source.clone(), wrong_source.canonical_row_digest)
+                .unwrap_err()
+                .reason_code,
+            REASON_SCHEMA_INVALID,
+        );
+
+        let mut wrong_selector = valid.clone();
+        wrong_selector.selector.resource["port"]["exact"] = json!(443);
+        let wrong_canonical = core
+            .normalize_selector(&wrong_selector.selector, SelectorPolarity::Positive)
+            .unwrap();
+        wrong_selector.canonical_row_digest = protected_row_digest(
+            &wrong_selector.source_id,
+            &wrong_canonical,
+            &wrong_selector.predicate_id,
+            &wrong_selector.reason_digest,
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate(wrong_selector.clone(), wrong_selector.canonical_row_digest)
+                .unwrap_err()
+                .reason_code,
+            REASON_SCHEMA_INVALID,
+        );
+
+        let mut wrong_predicate = valid.clone();
+        wrong_predicate.predicate_id = "predicate.exact-static-row-required/2".to_string();
+        wrong_predicate.canonical_row_digest = protected_row_digest(
+            &wrong_predicate.source_id,
+            &canonical,
+            &wrong_predicate.predicate_id,
+            &wrong_predicate.reason_digest,
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate(wrong_predicate.clone(), wrong_predicate.canonical_row_digest)
+                .unwrap_err()
+                .reason_code,
+            REASON_SCHEMA_INVALID,
+        );
+
+        let mut wrong_reason = valid.clone();
+        wrong_reason.reason_digest = REV2_REGISTRY_DIGEST.to_string();
+        assert_eq!(
+            evaluate(wrong_reason, valid.canonical_row_digest.clone())
+                .unwrap_err()
+                .reason_code,
+            REASON_SCHEMA_INVALID,
+        );
+
+        let mut wrong_row = valid.clone();
+        wrong_row.canonical_row_digest = REV2_VOCAB_DIGEST.to_string();
+        assert_eq!(
+            evaluate(wrong_row, REV2_VOCAB_DIGEST.to_string())
+                .unwrap_err()
+                .reason_code,
+            REASON_SCHEMA_INVALID,
+        );
+
+        assert_eq!(
+            evaluate(valid, REV2_REGISTRY_DIGEST.to_string())
+                .unwrap_err()
+                .reason_code,
+            REASON_SCHEMA_INVALID,
+        );
     }
 
     #[test]
@@ -6472,10 +7809,6 @@ mod tests {
         let core = Rev2Core::embedded().unwrap();
         let principal = package("reader");
         let authority = path_selector(principal.clone(), "/project/data");
-        let canonical = core
-            .normalize_selector(&authority, SelectorPolarity::Positive)
-            .unwrap();
-        let source_id = canonical_row_digest(&canonical).unwrap();
         let request = stage(
             "path",
             vec![principal.clone()],
@@ -6487,7 +7820,7 @@ mod tests {
 
         let mut bound = unbound.clone();
         bound.path_bindings.push(PathBindingInput {
-            source_id,
+            source_id: "path-row".to_string(),
             root_binding_id: "root-binding:1".to_string(),
             final_object_identities: vec![json!({
                 "kind": "platform-object",
@@ -6495,7 +7828,15 @@ mod tests {
             })],
             parent_identities: vec![],
         });
-        assert_eq!(core.decide_stage(&request, &bound).unwrap().outcome, Outcome::Allow);
+        let allowed = core.decide_stage(&request, &bound).unwrap();
+        assert_eq!(allowed.outcome, Outcome::Allow);
+        assert_eq!(
+            allowed.effects[0].dimensions[0]
+                .positive_source
+                .as_ref()
+                .map(|source| source.source_id.as_str()),
+            Some("path-row"),
+        );
         let alias = stage(
             "alias",
             vec![principal],
@@ -6509,12 +7850,6 @@ mod tests {
         let core = Rev2Core::embedded().unwrap();
         let principal = package("alias-reader");
         let positive = path_selector(principal.clone(), "/project");
-        let positive_id = canonical_row_digest(
-            &core
-                .normalize_selector(&positive, SelectorPolarity::Positive)
-                .unwrap(),
-        )
-        .unwrap();
         let mut rules = policy(Mode::Enforce);
         rules.static_floor.push(named("positive", positive));
         rules.process_denials.push(named(
@@ -6529,7 +7864,7 @@ mod tests {
                 }),
             ),
         ));
-        for source_id in [positive_id, "deny-object".to_string()] {
+        for source_id in ["positive".to_string(), "deny-object".to_string()] {
             rules.path_bindings.push(PathBindingInput {
                 source_id,
                 root_binding_id: "root-binding:1".to_string(),
@@ -7442,7 +8777,7 @@ mod tests {
 
     #[test]
     fn staged_operation_rejects_late_protected_exception_join() {
-        let core = Rev2Core::embedded().unwrap();
+        let core = protected_core();
         let principal = package("late-exception");
         let metadata = fetch_selector(principal.clone(), "169.254.169.254", "metadata");
         let mut rules = policy(Mode::Enforce);
@@ -7481,11 +8816,16 @@ mod tests {
                 .unwrap(),
             CommitResult::Committed { .. }
         ));
-        rules.protected_exceptions.push(ProtectedExceptionInput {
-            source_id: "late-exception".to_string(),
-            reason: "must not join a running actor".to_string(),
-            selector: metadata,
-        });
+        let exception = protected_exception(
+            &core,
+            "metadata",
+            metadata,
+            "must not join a running actor",
+        );
+        rules
+            .validated_receipt_row_digests
+            .push(exception.canonical_row_digest.clone());
+        rules.protected_exceptions.push(exception);
         assert!(matches!(
             operation
                 .authorize_next(
@@ -7798,14 +9138,10 @@ mod tests {
         let core = Rev2Core::embedded().unwrap();
         let principal = package("actor");
         let authority = path_selector(principal.clone(), "/project/data");
-        let canonical = core
-            .normalize_selector(&authority, SelectorPolarity::Positive)
-            .unwrap();
-        let source_id = canonical_row_digest(&canonical).unwrap();
         let mut policy = policy(Mode::Enforce);
         policy.static_floor.push(named("path", authority));
         policy.path_bindings.push(PathBindingInput {
-            source_id,
+            source_id: "path".to_string(),
             root_binding_id: "root-binding:1".to_string(),
             final_object_identities: vec![
                 json!({ "kind": "platform-object", "value": "file:a" }),

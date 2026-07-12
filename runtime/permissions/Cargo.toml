@@ -33,7 +33,11 @@ parking_lot.workspace = true
 rand.workspace = true
 ryu-js.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# @ref LLP 0019#canonical-policy-artifact [implements] -- The embedded Rev2
+# RFC 8785 core relies on serde_json's exact decimal-to-f64
+# round-trip parser. Do not depend on feature unification from the CLI binary:
+# deno_permissions must preserve the same numeric semantics when built alone.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
 sys_traits.workspace = true
 thiserror.workspace = true

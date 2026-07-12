@@ -47,7 +47,11 @@ mod oden_handle;
 mod oden_policy;
 mod oden_principal_index;
 mod oden_protected;
+mod oden_rev2_authority;
+mod oden_rev2_context;
+mod oden_rev2_executable;
 mod oden_rev2_policy;
+mod oden_rev2_protocol;
 mod oden_rev2_runtime;
 pub mod prompter;
 mod runtime_descriptor_parser;
@@ -1933,7 +1937,16 @@ fn oden_capsec_consume_rev2_snapshot(
   if bytes.len() > ODEN_CAPSEC_REV2_ENVELOPE_READ_CAP as usize {
     return Err("OD-CAP-REV2-SNAPSHOT-BOUNDS".to_string());
   }
-  oden_rev2_policy::verify_authenticated_envelope(&bytes, &key, build_identity)
+  let mut context = oden_rev2_policy::verify_authenticated_envelope(
+    &bytes,
+    &key,
+    build_identity,
+  )?;
+  if context.state() == OdenRev2LoadState::Armable {
+    // @ref LLP 0019#c04-immutable-execution-installation-and-entry [implements] -- C04 converts the exact C03-retained descriptors into immutable native execution images before V8; failure keeps the candidate unarmed.
+    context.install_immutable_executables(&control_root)?;
+  }
+  Ok(context)
 }
 
 #[allow(
