@@ -502,8 +502,8 @@ pub struct Rev2Definition {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-tW002exGz6EDYoSUsCDSOvhKZDVRzngHuouhia4s9Es";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-JzDIGh2amCfPiSZCApczhRiFT72Cnmn0vMch8lBVh84";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-YjPVwcRILiACzYDdH2EXCvPGe2eJl-OyZhHo5IYzgJE";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-GgPDJ6qodxHgre2BSUvo2Fq9R0ephiW1JU1nIdw8H04";
 pub const REV2_ADVERTISED_TARGETS: &[&str] = &[];
 
 pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
@@ -79181,32 +79181,55 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "cargoPackages": [
               {
                 "checksum": "c56e5ee99d6e3d33bd91c5d85458b6005a22140021cc324cea84dd0e72cff3b4",
+                "features": [
+                  "compiled_data"
+                ],
                 "name": "icu_normalizer",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
                 "version": "2.2.0"
               },
               {
                 "checksum": "da3be0ae77ea334f4da67c12f149704f19f81d1adf7c51cf482943e84a2bad38",
+                "features": [],
                 "name": "icu_normalizer_data",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
                 "version": "2.2.0"
               },
               {
                 "checksum": "bee3b67d0ea5c2cca5003417989af8996f8604e34fb9ddf96208a033901e70de",
+                "features": [
+                  "compiled_data"
+                ],
                 "name": "icu_properties",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
                 "version": "2.2.0"
               },
               {
                 "checksum": "8e2bbb201e0c04f7b4b3e14382af113e17ba4f63e2c9d2ee626b720cbce54a14",
+                "features": [],
                 "name": "icu_properties_data",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
                 "version": "2.2.0"
               },
               {
                 "checksum": "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de",
+                "features": [
+                  "alloc",
+                  "compiled_data",
+                  "default",
+                  "std"
+                ],
                 "name": "idna",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
                 "version": "1.1.0"
               },
               {
                 "checksum": "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714",
+                "features": [
+                  "compiled_data"
+                ],
                 "name": "idna_adapter",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
                 "version": "1.2.2"
               }
             ],
@@ -79227,7 +79250,12 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "cargoPackages": [
               {
                 "checksum": "8f518f335dce6725a761382244631d86cf0ccb2863413590b31338feb467f9c3",
+                "features": [
+                  "default",
+                  "std"
+                ],
                 "name": "ipnet",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
                 "version": "2.9.0"
               }
             ],
