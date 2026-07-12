@@ -39,28 +39,28 @@
       "output": "node_unix_connect_denied.out",
       "exitCode": 0
     },
-    "fetch_grant_allows_first_node_http_fetch": {
-      "args": "run --allow-all --unstable-vsock --unstable-net app.js fetch node-http-fetch",
+    "fetch_grant_does_not_allow_first_node_http_connect": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js fetch node-http-connect",
       "envs": { "ODEN_CAPSEC_POLICY": "fetch.json" },
-      "output": "node_http_fetch_allowed.out",
+      "output": "node_http_connect_denied.out",
       "exitCode": 0
     },
-    "fetch_grant_allows_first_node_https_fetch": {
-      "args": "run --allow-all --unstable-vsock --unstable-net app.js fetch node-https-fetch",
+    "fetch_grant_does_not_allow_first_node_https_connect": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js fetch node-https-connect",
       "envs": { "ODEN_CAPSEC_POLICY": "fetch.json" },
-      "output": "node_https_fetch_allowed.out",
+      "output": "node_https_connect_denied.out",
       "exitCode": 0
     },
-    "connect_grant_does_not_allow_first_node_http_fetch": {
-      "args": "run --allow-all --unstable-vsock --unstable-net app.js connect node-http-fetch",
+    "connect_grant_allows_first_node_http_connect": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js connect node-http-connect",
       "envs": { "ODEN_CAPSEC_POLICY": "connect.json" },
-      "output": "node_http_fetch_denied.out",
+      "output": "node_http_connect_allowed.out",
       "exitCode": 0
     },
-    "connect_grant_does_not_allow_first_node_https_fetch": {
-      "args": "run --allow-all --unstable-vsock --unstable-net app.js connect node-https-fetch",
+    "connect_grant_allows_first_node_https_connect": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js connect node-https-connect",
       "envs": { "ODEN_CAPSEC_POLICY": "connect.json" },
-      "output": "node_https_fetch_denied.out",
+      "output": "node_https_connect_allowed.out",
       "exitCode": 0
     },
     "fetch_grant_does_not_allow_first_node_tcp_listen": {
