@@ -46,7 +46,7 @@ run the generator and commit. Drift fails the rebase canary.
 | fs:write | WriteDescriptor / WriteQueryDescriptor | canonical path or * | fs:write:<path> |
 | import:graph | ModuleLoader inner_resolve capsec gate (referrer-attributed) | resolved import specifier (data:/blob:/http(s):) | remote/data imports default-denied for package principals under enforce |
 | network:connect | NetDescriptor (typed operation action) | host, URL, vsock, or unix socket | network:connect:<endpoint> |
-| network:fetch | NetDescriptor / ImportDescriptor (typed operation action) | HTTP(S) host, redirect hop, proxy, vsock, or unix socket | network:fetch:<endpoint> |
+| network:fetch | NetDescriptor / ImportDescriptor (typed operation action) | direct HTTP(S) host/redirect, vsock, or Unix socket; attested proxy only in a later profile | network:fetch:<endpoint> |
 | network:listen | NetDescriptor (typed operation action) | bound host, vsock, or unix socket | network:listen:<endpoint> |
 | run:run | RunQueryDescriptor | command display name or * | run:<command> |
 | sys:read | SysDescriptor / SysQueryDescriptor | system-information kind or * | sys:read:<kind> |
@@ -139,13 +139,14 @@ allowed only at the two audited typed helpers named by the generator.
 ## Network resource/API action matrix
 
 Resource-creating and packet-originating APIs are registered explicitly.
-Direct rows must contain the named classified check; inherited rows must
-consume a resource authorized by the operation named in the note.
+Direct rows must contain the named classified check; categorical rows
+must contain their closed-surface guard; inherited rows consume an
+already-authorized resource named in the note.
 
 | Surface | Action | Enforcement | Rust owner | Note |
 | --- | --- | --- | --- | --- |
 | fetch() HTTP(S) | fetch | direct | ext/fetch/lib.rs:op_fetch() | URL before request |
-| fetch() custom HTTP/TCP/Unix/vsock client | fetch | direct | ext/fetch/lib.rs:op_fetch_custom_client() | logical proxy endpoint |
+| Deno.createHttpClient() forward proxy | closed | categorical | ext/fetch/lib.rs:op_fetch_custom_client() | refused in /1.1 without final-peer attestation |
 | remote KV HTTP | fetch | direct | ext/kv/remote.rs:check_net_url() | every remote request URL |
 | WebSocket permission/create | connect | direct | ext/websocket/lib.rs:op_ws_check_permission_and_cancel_handle() | initial URL |
 | WebSocket redirect/final URL | connect | direct | ext/websocket/lib.rs:op_ws_create() | connector and redirect |
@@ -167,7 +168,7 @@ consume a resource authorized by the operation named in the note.
 | Deno QUIC connect | connect | direct | ext/net/quic.rs:op_quic_endpoint_connect() | logical host plus resolved IP |
 | WebTransport connect | connect | inherited | ext/net/quic.rs:op_webtransport_connect() | authorized QUIC connection |
 | Node HTTP(S) direct connection | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | socket-exposing HTTP token is connect-class in /1.1 |
-| Node HTTP(S) proxy | connect | direct | ext/node/ops/http.rs:op_node_http_check_proxy_net() | target and proxy peer are independently connect-checked |
+| Node HTTP(S) proxy | closed | categorical | ext/node/ops/http.rs:op_node_http_check_proxy_net() | refused in /1.1 before the legacy connect-class fallback |
 | Node TCP connect | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | untokenized raw socket |
 | Node TCP bind/listen | listen | direct | ext/node/ops/tcp_wrap.rs:bind_inner() | bind before listener creation |
 | Node UDP send | connect | direct | ext/node/ops/udp.rs:op_node_udp_send() | destination plus resolved IP |
@@ -186,9 +187,8 @@ consume a resource authorized by the operation named in the note.
 | Node HTTP route: custom Agent.createConnection | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | raw Node TCP creation; raw-engine fixture custom-agent |
 | Node HTTP route: request createConnection hook | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | raw Node TCP creation; raw-engine fixture create-connection-hook |
 | Node HTTP route: redirect hop | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | each built-in agent TCP creation; raw-engine fixture redirect-hop |
-| Node HTTP route: keep-alive reuse | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | original pool socket creation; raw-engine fixture keepalive-reuse |
-| Node HTTP route: forward-proxy target | connect | direct | ext/node/ops/http.rs:op_node_http_check_proxy_net() | explicit target check; raw-engine fixture forward-proxy |
-| Node HTTP route: forward-proxy peer | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | proxy TCP creation; raw-engine fixture forward-proxy |
+| Node HTTP route: keep-alive reuse attempt | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | pool reuse closed; each request creates a checked socket; raw-engine fixture keepalive-reuse-closed |
+| Node HTTP route: forward-proxy target and peer | closed | categorical | ext/node/ops/http.rs:op_node_http_check_proxy_net() | categorically refused without final-peer attestation; raw-engine fixture forward-proxy-closed |
 | Node HTTP route: Unix-domain HTTP socket | connect | direct | ext/node/ops/pipe_wrap.rs:connect() | built-in agent pipe creation; raw-engine fixture unix-socket |
 
 ## Permission methods (closed inventory)

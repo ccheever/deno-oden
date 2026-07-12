@@ -70,7 +70,8 @@ const CAPABILITY_TAXONOMY: Record<string, TaxonomyEntry> = {
   },
   "network:fetch": {
     deno: "NetDescriptor / ImportDescriptor (typed operation action)",
-    target: "HTTP(S) host, redirect hop, proxy, vsock, or unix socket",
+    target:
+      "direct HTTP(S) host/redirect, vsock, or Unix socket; attested proxy only in a later profile",
     grant: "network:fetch:<endpoint>",
   },
   "network:listen": {
@@ -392,15 +393,17 @@ function collectNetworkChecks(): NetworkCheck[] {
 }
 
 type NetworkSurface = {
-  action: NetworkAction;
-  enforcement: "direct" | "inherited";
+  action: NetworkAction | "closed";
+  enforcement: "categorical" | "direct" | "inherited";
   file: string;
   fn: string;
+  guard?: string;
   note: string;
   surface: string;
 };
 
 type NodeHttpSocketRoute = {
+  action: "connect" | "closed";
   boundary: string;
   file: string;
   fixture: string;
@@ -412,10 +415,12 @@ const NODE_HTTP_SOCKET_FIXTURE =
   "tests/specs/run/oden_capsec_node_http_socket_closure/node_modules/node-http-closure-probe/index.js";
 
 // Every route in Node's request/response API that can reveal, delegate, or
-// reuse the transport must lead to a connect-class native boundary. Fixture
-// IDs are source-checked so adding a manifest-only claim cannot close a gap.
+// reuse the transport must lead to a connect-class native boundary or a
+// stronger categorical closure. Fixture IDs are source-checked so adding a
+// manifest-only claim cannot close a gap.
 const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
   {
+    action: "connect",
     route: "request socket event/property",
     boundary: "built-in agent TCP creation",
     file: "ext/node/ops/tcp_wrap.rs",
@@ -423,6 +428,7 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
     fixture: "request-socket-event-property",
   },
   {
+    action: "connect",
     route: "response socket write",
     boundary: "built-in agent TCP creation",
     file: "ext/node/ops/tcp_wrap.rs",
@@ -430,6 +436,7 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
     fixture: "response-socket-write",
   },
   {
+    action: "connect",
     route: "CONNECT tunnel/socket delegation",
     boundary: "built-in agent TCP creation",
     file: "ext/node/ops/tcp_wrap.rs",
@@ -437,6 +444,7 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
     fixture: "connect-tunnel-raw-write",
   },
   {
+    action: "connect",
     route: "101 Upgrade socket delegation",
     boundary: "built-in agent TCP creation",
     file: "ext/node/ops/tcp_wrap.rs",
@@ -444,6 +452,7 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
     fixture: "upgrade-raw-write",
   },
   {
+    action: "connect",
     route: "custom Agent.createConnection",
     boundary: "raw Node TCP creation",
     file: "ext/node/ops/tcp_wrap.rs",
@@ -451,6 +460,7 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
     fixture: "custom-agent",
   },
   {
+    action: "connect",
     route: "request createConnection hook",
     boundary: "raw Node TCP creation",
     file: "ext/node/ops/tcp_wrap.rs",
@@ -458,6 +468,7 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
     fixture: "create-connection-hook",
   },
   {
+    action: "connect",
     route: "redirect hop",
     boundary: "each built-in agent TCP creation",
     file: "ext/node/ops/tcp_wrap.rs",
@@ -465,27 +476,23 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
     fixture: "redirect-hop",
   },
   {
-    route: "keep-alive reuse",
-    boundary: "original pool socket creation",
+    action: "connect",
+    route: "keep-alive reuse attempt",
+    boundary: "pool reuse closed; each request creates a checked socket",
     file: "ext/node/ops/tcp_wrap.rs",
     fn: "connect",
-    fixture: "keepalive-reuse",
+    fixture: "keepalive-reuse-closed",
   },
   {
-    route: "forward-proxy target",
-    boundary: "explicit target check",
+    action: "closed",
+    route: "forward-proxy target and peer",
+    boundary: "categorically refused without final-peer attestation",
     file: "ext/node/ops/http.rs",
     fn: "op_node_http_check_proxy_net",
-    fixture: "forward-proxy",
+    fixture: "forward-proxy-closed",
   },
   {
-    route: "forward-proxy peer",
-    boundary: "proxy TCP creation",
-    file: "ext/node/ops/tcp_wrap.rs",
-    fn: "connect",
-    fixture: "forward-proxy",
-  },
-  {
+    action: "connect",
     route: "Unix-domain HTTP socket",
     boundary: "built-in agent pipe creation",
     file: "ext/node/ops/pipe_wrap.rs",
@@ -495,9 +502,10 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
 ];
 
 // Resource-creating and packet-originating network surfaces. Direct rows must
-// contain a classified check in the named function. Inherited rows name the
-// operation that consumes an already-authorized resource; those functions are
-// still existence-checked so upstream renames or removals are manifest drift.
+// contain a classified check in the named function. Categorical rows must call
+// their named closed-surface guard. Inherited rows name the operation that
+// consumes an already-authorized resource; every function is existence-checked
+// so upstream renames or removals are manifest drift.
 const NETWORK_SURFACES: NetworkSurface[] = [
   {
     surface: "fetch() HTTP(S)",
@@ -508,12 +516,13 @@ const NETWORK_SURFACES: NetworkSurface[] = [
     note: "URL before request",
   },
   {
-    surface: "fetch() custom HTTP/TCP/Unix/vsock client",
-    action: "fetch",
+    surface: "Deno.createHttpClient() forward proxy",
+    action: "closed",
     file: "ext/fetch/lib.rs",
     fn: "op_fetch_custom_client",
-    enforcement: "direct",
-    note: "logical proxy endpoint",
+    guard: "oden_capsec_reject_forward_proxy",
+    enforcement: "categorical",
+    note: "refused in /1.1 without final-peer attestation",
   },
   {
     surface: "remote KV HTTP",
@@ -685,11 +694,12 @@ const NETWORK_SURFACES: NetworkSurface[] = [
   },
   {
     surface: "Node HTTP(S) proxy",
-    action: "connect",
+    action: "closed",
     file: "ext/node/ops/http.rs",
     fn: "op_node_http_check_proxy_net",
-    enforcement: "direct",
-    note: "target and proxy peer are independently connect-checked",
+    guard: "oden_capsec_reject_forward_proxy",
+    enforcement: "categorical",
+    note: "refused in /1.1 before the legacy connect-class fallback",
   },
   {
     surface: "Node TCP connect",
@@ -791,6 +801,22 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
     const fnRe = new RegExp(`\\bfn\\s+${row.fn}\\b`);
     if (!fnRe.test(maskRust(src))) {
       errors.push(`${row.surface}: missing ${row.file}:${row.fn}()`);
+    } else if (row.enforcement === "categorical") {
+      const guard = row.guard;
+      const calls = guard
+        ? collectCalls(
+          src,
+          new RegExp(`\\b(?<name>${guard})\\s*\\(`, "g"),
+          false,
+        )
+        : [];
+      if (!guard || !calls.some((call) => call.fn === row.fn)) {
+        errors.push(
+          `${row.surface}: ${row.file}:${row.fn}() has no categorical ${
+            guard ?? "guard"
+          }`,
+        );
+      }
     } else if (
       row.enforcement === "direct" &&
       !direct.has(`${row.file}:${row.fn}:${row.action}`)
@@ -802,10 +828,24 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
   }
   const fixture = Deno.readTextFileSync(ROOT + NODE_HTTP_SOCKET_FIXTURE);
   for (const row of NODE_HTTP_SOCKET_ROUTES) {
-    if (!direct.has(`${row.file}:${row.fn}:connect`)) {
-      errors.push(
-        `${row.route}: ${row.file}:${row.fn}() has no classified connect check`,
+    const src = Deno.readTextFileSync(ROOT + row.file);
+    if (row.action === "connect") {
+      if (!direct.has(`${row.file}:${row.fn}:connect`)) {
+        errors.push(
+          `${row.route}: ${row.file}:${row.fn}() has no classified connect check`,
+        );
+      }
+    } else {
+      const closedCalls = collectCalls(
+        src,
+        /\b(?<name>oden_capsec_reject_forward_proxy)\s*\(/g,
+        false,
       );
+      if (!closedCalls.some((call) => call.fn === row.fn)) {
+        errors.push(
+          `${row.route}: ${row.file}:${row.fn}() has no categorical proxy closure`,
+        );
+      }
     }
     if (!fixture.includes(`\"${row.fixture}\"`)) {
       errors.push(
@@ -1010,9 +1050,12 @@ function renderNetworkSurfaces(): string[] {
     "Resource-creating and packet-originating APIs are registered explicitly.",
   );
   out.push(
-    "Direct rows must contain the named classified check; inherited rows must",
+    "Direct rows must contain the named classified check; categorical rows",
   );
-  out.push("consume a resource authorized by the operation named in the note.");
+  out.push(
+    "must contain their closed-surface guard; inherited rows consume an",
+  );
+  out.push("already-authorized resource named in the note.");
   out.push("");
   out.push("| Surface | Action | Enforcement | Rust owner | Note |");
   out.push("| --- | --- | --- | --- | --- |");
@@ -1022,8 +1065,9 @@ function renderNetworkSurfaces(): string[] {
     );
   }
   for (const row of NODE_HTTP_SOCKET_ROUTES) {
+    const enforcement = row.action === "closed" ? "categorical" : "direct";
     out.push(
-      `| Node HTTP route: ${row.route} | connect | direct | ${row.file}:${row.fn}() | ${row.boundary}; raw-engine fixture ${row.fixture} |`,
+      `| Node HTTP route: ${row.route} | ${row.action} | ${enforcement} | ${row.file}:${row.fn}() | ${row.boundary}; raw-engine fixture ${row.fixture} |`,
     );
   }
   out.push("");
