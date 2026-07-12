@@ -1,4 +1,5 @@
-@   IN  SOA     net      admin\.domain (
+$TTL 60
+@   3600000 IN  SOA     net      admin\.domain (
                             20     ; SERIAL
                             7200   ; REFRESH
                             600    ; RETRY

@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use hickory_proto::serialize::txt::Parser;
-use hickory_server::authority::AuthorityObject;
 use pretty_assertions::assert_eq;
 use rustls::ClientConnection;
 use rustls_tokio_stream::TlsStream;
@@ -2261,16 +2260,24 @@ fn test_resolve_dns() {
   use std::sync::Arc;
   use std::time::Duration;
 
-  use hickory_server::ServerFuture;
-  use hickory_server::authority::Catalog;
-  use hickory_server::authority::ZoneType;
+  use hickory_server::Server;
+  use hickory_server::net::runtime::TokioRuntimeProvider;
   use hickory_server::proto::rr::Name;
-  use hickory_server::store::in_memory::InMemoryAuthority;
+  use hickory_server::proto::rr::Record;
+  use hickory_server::proto::rr::RecordType;
+  use hickory_server::proto::rr::RrKey;
+  use hickory_server::store::in_memory::InMemoryZoneHandler;
+  use hickory_server::zone_handler::AxfrPolicy;
+  use hickory_server::zone_handler::Catalog;
+  use hickory_server::zone_handler::ZoneHandler;
+  use hickory_server::zone_handler::ZoneType;
   use tokio::net::TcpListener;
   use tokio::net::UdpSocket;
   use tokio::sync::oneshot;
 
   const DNS_PORT: u16 = 4553;
+  // Hickory 0.25 used a 32-message TCP response buffer implicitly.
+  const DNS_TCP_RESPONSE_BUFFER_SIZE: usize = 32;
 
   // Setup DNS server for testing
   async fn run_dns_server(tx: oneshot::Sender<()>) {
@@ -2278,29 +2285,71 @@ fn test_resolve_dns() {
       util::testdata_path().join("run/resolve_dns.zone.in"),
     )
     .unwrap();
-    let records = Parser::new(
+    let (origin, mut records) = Parser::new(
       &zone_file,
       None,
       Some(Name::from_str("example.com.").unwrap()),
     )
-    .parse();
-    if records.is_err() {
-      panic!("failed to parse: {:?}", records.err())
-    }
-    let (origin, records) = records.unwrap();
-    let authority: Vec<Arc<dyn AuthorityObject>> = vec![Arc::new(
-      InMemoryAuthority::new(origin, records, ZoneType::Primary, false)
-        .unwrap(),
-    )];
-    let mut catalog: Catalog = Catalog::new();
-    catalog.upsert(Name::root().into(), authority);
+    .parse()
+    .unwrap_or_else(|error| panic!("failed to parse DNS zone: {error}"));
+    // The fixture intentionally serves both example.com records and an
+    // absolute in-addr.arpa PTR record. Hickory 0.26 requires each catalog
+    // entry to have a handler with a matching SOA, so split those namespaces
+    // into zones and retain a root NXDOMAIN fallback for missing names.
+    let soa_record = records
+      .get(&RrKey::new(origin.clone().into(), RecordType::SOA))
+      .and_then(|records| records.records_without_rrsigs().next())
+      .cloned()
+      .expect("DNS fixture must contain an SOA record");
+    let ptr_origin = Name::from_str("1.2.3.4.IN-ADDR.ARPA.").unwrap();
+    let ptr_key = RrKey::new(ptr_origin.clone().into(), RecordType::PTR);
+    let ptr_records = records
+      .remove(&ptr_key)
+      .expect("DNS fixture must contain its absolute PTR records");
+    let root = Name::root();
+    let make_soa = |zone_origin: Name| {
+      Record::from_rdata(zone_origin, soa_record.ttl, soa_record.data.clone())
+    };
+    let ptr_zone_records = std::collections::BTreeMap::from([
+      (ptr_key, ptr_records),
+      (
+        RrKey::new(ptr_origin.clone().into(), RecordType::SOA),
+        make_soa(ptr_origin.clone()).into(),
+      ),
+    ]);
+    let root_zone_records = std::collections::BTreeMap::from([(
+      RrKey::new(root.clone().into(), RecordType::SOA),
+      make_soa(root.clone()).into(),
+    )]);
 
-    let mut server_fut = ServerFuture::new(catalog);
+    let mut catalog: Catalog = Catalog::new();
+    for (zone_origin, zone_records) in [
+      (origin, records),
+      (ptr_origin, ptr_zone_records),
+      (root, root_zone_records),
+    ] {
+      let authority: Vec<Arc<dyn ZoneHandler>> = vec![Arc::new(
+        InMemoryZoneHandler::<TokioRuntimeProvider>::new(
+          zone_origin.clone(),
+          zone_records,
+          ZoneType::Primary,
+          AxfrPolicy::Deny,
+        )
+        .unwrap(),
+      )];
+      catalog.upsert(zone_origin.into(), authority);
+    }
+
+    let mut server_fut = Server::new(catalog);
     let socket_addr = SocketAddr::from(([127, 0, 0, 1], DNS_PORT));
     let tcp_listener = TcpListener::bind(socket_addr).await.unwrap();
     let udp_socket = UdpSocket::bind(socket_addr).await.unwrap();
     server_fut.register_socket(udp_socket);
-    server_fut.register_listener(tcp_listener, Duration::from_secs(2));
+    server_fut.register_listener(
+      tcp_listener,
+      Duration::from_secs(2),
+      DNS_TCP_RESPONSE_BUFFER_SIZE,
+    );
 
     // Notifies that the DNS server is ready
     tx.send(()).unwrap();
@@ -2318,10 +2367,15 @@ fn test_resolve_dns() {
   runtime.block_on(async {
     let (ready_tx, ready_rx) = oneshot::channel();
     let dns_server_fut = run_dns_server(ready_tx);
-    let handle = tokio::spawn(dns_server_fut);
+    let mut handle = tokio::spawn(dns_server_fut);
 
     // Waits for the DNS server to be ready
-    ready_rx.await.unwrap();
+    if let Err(error) = ready_rx.await {
+      let server_result = (&mut handle).await;
+      panic!(
+        "DNS server failed before readiness ({error}): {server_result:?}"
+      );
+    }
 
     // Pass: `--allow-net`
     {
