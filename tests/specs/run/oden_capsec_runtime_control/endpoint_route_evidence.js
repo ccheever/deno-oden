@@ -177,6 +177,16 @@ const webDefaultPull = section(
   "function readableStreamDefaultControllerCallPullIfNeeded(controller)",
   "function readableStreamDefaultControllerCanCloseOrEnqueue(controller)",
 );
+const webBytePullFulfillment = section(
+  webBytePull,
+  "controller[_onPullFulfilled] = () => {",
+  "controller[_onPullRejected] = (e) => {",
+);
+const webDefaultPullFulfillment = section(
+  webDefaultPull,
+  "controller[_onPullFulfilled] = () => {",
+  "controller[_onPullRejected] = (e) => {",
+);
 const evidenceOrderProbe = "capture guard callback";
 
 function guardCaughtBeforeQueueInspection(text, streamMarker) {
@@ -189,6 +199,26 @@ function guardCaughtBeforeQueueInspection(text, streamMarker) {
   const queueIndex = text.indexOf("queueSize(controller[_queue])", guardIndex);
   return streamIndex >= 0 && tryIndex > streamIndex &&
     guardIndex > tryIndex && queueIndex > guardIndex;
+}
+
+function pullFulfillmentRetiresOnGuardDenial(
+  handler,
+  finishPull,
+  errorController,
+) {
+  return orderedAll(
+    handler,
+    "const fulfill = () => {",
+    "try {",
+    `${finishPull}(controller);`,
+    "} catch (e) {",
+    "controller[_pulling] = false;",
+    "controller[_pullAgain] = false;",
+    "WeakMapPrototypeDelete(",
+    "readableControllerPullOperationContexts,",
+    "controller,",
+    `${errorController}(controller, e);`,
+  );
 }
 
 const evidence = {
@@ -413,14 +443,21 @@ const evidence = {
     "WeakMapPrototypeDelete(readableControllerPullOperationContexts, controller);",
     "readableStreamDefaultControllerCallPullIfNeeded(controller);",
   ),
-  webPullRevocationRetiresRequests: webBytePull.includes(
-    "readableByteStreamControllerError(controller, e);",
-  ) && webBytePull.includes(
-    "controller[_pullAgain] = false;",
-  ) && webDefaultPull.includes(
-    "readableStreamDefaultControllerError(controller, e);",
-  ) && webDefaultPull.includes(
-    "controller[_pullAgain] = false;",
+  webPullRevocationRetiresRequests: pullFulfillmentRetiresOnGuardDenial(
+    webBytePullFulfillment,
+    "readableByteStreamControllerFinishPull",
+    "readableByteStreamControllerError",
+  ) && pullFulfillmentRetiresOnGuardDenial(
+    webDefaultPullFulfillment,
+    "readableStreamDefaultControllerFinishPull",
+    "readableStreamDefaultControllerError",
+  ) && !pullFulfillmentRetiresOnGuardDenial(
+    webBytePullFulfillment.replace(
+      "controller[_pullAgain] = false;",
+      "controller[missingPullAgainRetirement] = false;",
+    ),
+    "readableByteStreamControllerFinishPull",
+    "readableByteStreamControllerError",
   ),
   webPullCallbackActorSeparation: streams.includes(
     "const readableUnderlyingSourceCallbackRecords = new SafeWeakMap();",
