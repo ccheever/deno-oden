@@ -31,7 +31,7 @@
       "args": "run --allow-all --unstable-vsock --unstable-net app.js fetch node-dns-connect",
       "envs": { "ODEN_CAPSEC_POLICY": "fetch.json" },
       "output": "node_connect_denied.out",
-      "exitCode": 1
+      "exitCode": 0
     },
     "fetch_grant_does_not_allow_first_node_unix_connect": {
       "args": "run --allow-all --unstable-vsock --unstable-net app.js fetch node-unix-connect",
@@ -51,6 +51,18 @@
       "output": "node_https_connect_denied.out",
       "exitCode": 0
     },
+    "fetch_grant_does_not_allow_node_http_dns_connect": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js fetch node-http-dns-connect",
+      "envs": { "ODEN_CAPSEC_POLICY": "fetch.json" },
+      "output": "node_http_dns_connect_denied.out",
+      "exitCode": 0
+    },
+    "fetch_grant_does_not_allow_node_https_dns_connect": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js fetch node-https-dns-connect",
+      "envs": { "ODEN_CAPSEC_POLICY": "fetch.json" },
+      "output": "node_https_dns_connect_denied.out",
+      "exitCode": 0
+    },
     "connect_grant_allows_first_node_http_connect": {
       "args": "run --allow-all --unstable-vsock --unstable-net app.js connect node-http-connect",
       "envs": { "ODEN_CAPSEC_POLICY": "connect.json" },
@@ -61,6 +73,18 @@
       "args": "run --allow-all --unstable-vsock --unstable-net app.js connect node-https-connect",
       "envs": { "ODEN_CAPSEC_POLICY": "connect.json" },
       "output": "node_https_connect_allowed.out",
+      "exitCode": 0
+    },
+    "connect_grant_allows_node_http_dns_connect": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js connect node-http-dns-connect",
+      "envs": { "ODEN_CAPSEC_POLICY": "connect.json" },
+      "output": "node_http_dns_connect_allowed.out",
+      "exitCode": 0
+    },
+    "connect_grant_allows_node_https_dns_connect": {
+      "args": "run --allow-all --unstable-vsock --unstable-net app.js connect node-https-dns-connect",
+      "envs": { "ODEN_CAPSEC_POLICY": "connect.json" },
+      "output": "node_https_dns_connect_allowed.out",
       "exitCode": 0
     },
     "fetch_grant_does_not_allow_first_node_tcp_listen": {

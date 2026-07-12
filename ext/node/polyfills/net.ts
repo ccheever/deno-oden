@@ -24,6 +24,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_node_http_capsec_no_reuse } = core.ops;
 
 const { BlockList, SocketAddress } = core.loadExtScript(
   "ext:deno_node/internal/blocklist.mjs",
@@ -156,7 +157,7 @@ const nativeProtectedShutdown = TCP.prototype.shutdown;
 const nativeProtectedSetKeepAlive = TCP.prototype.setKeepAlive;
 const nativeProtectedSetNoDelay = TCP.prototype.setNoDelay;
 const nativeProtectedSetNetPermToken = TCP.prototype.setNetPermToken;
-const nativeProtectedSetOdenHttpNetToken = TCP.prototype.setOdenHttpNetToken;
+const nativeProtectedSetTcpOdenHttpNetToken = TCP.prototype.setOdenHttpNetToken;
 const nativeProtectedWriteBuffer = TCP.prototype.writeBuffer;
 const nativeProtectedWritev = TCP.prototype.writev;
 const nativeProtectedWriteUtf8String = TCP.prototype.writeUtf8String;
@@ -188,6 +189,15 @@ const {
   PipeConnectWrap,
   setupListenWrap: setupPipeListenWrap,
 } = core.loadExtScript("ext:deno_node/internal_binding/pipe_wrap.ts");
+const nativeProtectedSetPipeOdenHttpNetToken =
+  Pipe.prototype.setOdenHttpNetToken;
+const nativeProtectedPipeConnect = Pipe.prototype.connect;
+const {
+  getNativeTransport: getTlsNativeTransport,
+  getTlsSocketReinitializer,
+} = core.loadExtScript(
+  "ext:deno_node/internal_binding/tls_wrap.ts",
+);
 const { ShutdownWrap } = core.loadExtScript(
   "ext:deno_node/internal_binding/stream_wrap.ts",
 );
@@ -195,9 +205,12 @@ const { default: assert } = core.loadExtScript("ext:deno_node/assert.ts");
 const { isWindows } = core.loadExtScript("ext:deno_node/_util/os.ts");
 const { ADDRCONFIG, lookup: dnsLookup } = core.createLazyLoader("node:dns")()
   .default;
-const { kPermTokenSink } = core.loadExtScript(
-  "ext:deno_node/internal_binding/cares_wrap.ts",
-);
+const {
+  kPermTokenAction,
+  kPermTokenSink,
+  NET_ACTION_CONNECT,
+  NET_ACTION_FETCH,
+} = core.loadExtScript("ext:deno_node/internal_binding/cares_wrap.ts");
 const {
   codeMap,
   UV_ECANCELED,
@@ -279,6 +292,7 @@ const canonicalSocketOwners = new SafeWeakMap();
 const canonicalSocketHandles = new SafeWeakMap();
 const canonicalSocketAsyncContexts = new SafeWeakMap();
 const canonicalHandleAsyncContexts = new SafeWeakMap();
+const canonicalSocketDnsActions = new SafeWeakMap();
 // Once a connection is tagged, native reads for its canonical Socket stay on
 // the exact handle even if package code later mutates reflectable kHandle.
 const protectedSocketHandles = new SafeWeakMap();
@@ -425,12 +439,20 @@ function initializeConnectRequest(
   defineImmutableRequestProperty(req, "addressType", addressType);
 }
 
+function getNativeConnectHandle(handle) {
+  return getTlsNativeTransport(handle) ?? handle;
+}
+
 function installOdenHttpNetToken(socket, handle) {
   const token = WeakMapPrototypeGet(odenHttpNetTokens, socket);
   if (!token) return false;
   try {
+    handle = getNativeConnectHandle(handle);
+    const setToken = ObjectPrototypeIsPrototypeOf(Pipe.prototype, handle)
+      ? nativeProtectedSetPipeOdenHttpNetToken
+      : nativeProtectedSetTcpOdenHttpNetToken;
     FunctionPrototypeCall(
-      nativeProtectedSetOdenHttpNetToken,
+      setToken,
       handle,
       token,
     );
@@ -887,6 +909,21 @@ function _afterConnectImpl(
         WeakMapPrototypeSet(protectedSocketPreclosed, socket, true);
         _runWithoutAsyncContext(() => destroyProtectedWritable(socket, error));
       };
+      const streamHandle =
+        WeakMapPrototypeGet(canonicalSocketHandles, socket) ??
+          socket._handle;
+      if (getTlsNativeTransport(streamHandle) !== undefined) {
+        // TLSWrap encrypts outside LibUvStreamWrap's checked write surface.
+        // The native layer refuses that alternate path once the underlying
+        // transport is endpoint-protected; refuse the connection here too so
+        // the generic Socket adapter cannot accidentally bridge plaintext I/O
+        // directly onto the raw TCP handle.
+        // @ref LLP 0019#protected-metadata-endpoints [implements]
+        refuseProtectedSocket(
+          errnoException(MapPrototypeGet(codeMap, "EACCES"), "connect"),
+        );
+        return;
+      }
       if (hasProtectedReadableDecoder(socket)) {
         refuseProtectedSocket(
           errnoException(MapPrototypeGet(codeMap, "EACCES"), "setEncoding"),
@@ -1280,8 +1317,9 @@ function _internalConnect(
   flags: number = 0,
 ) {
   assert(socket.connecting);
-  const connectHandle = WeakMapPrototypeGet(canonicalSocketHandles, socket) ??
-    socket._handle;
+  const connectHandle = getNativeConnectHandle(
+    WeakMapPrototypeGet(canonicalSocketHandles, socket) ?? socket._handle,
+  );
 
   if (
     socket.blockList?.check(address, `ipv${addressType}`)
@@ -1375,7 +1413,12 @@ function _internalConnect(
     const req = new PipeConnectWrap();
     initializeConnectRequest(req, _afterConnect, address);
 
-    err = (socket._handle as Pipe).connect(req, address);
+    err = FunctionPrototypeCall(
+      nativeProtectedPipeConnect,
+      connectHandle,
+      req,
+      address,
+    );
   }
 
   if (err) {
@@ -1419,11 +1462,25 @@ function _internalConnectMultiple(context, canceled?: boolean) {
   let attemptHandle;
   if (current > 0) {
     attemptHandle = new TCP(TCPConstants.SOCKET);
-    FunctionPrototypeCall(
-      protectedSocketReinitializeHandle,
-      self,
-      attemptHandle,
-    );
+    const reinitializeTlsSocket = getTlsSocketReinitializer(self);
+    if (reinitializeTlsSocket === undefined) {
+      FunctionPrototypeCall(
+        protectedSocketReinitializeHandle,
+        self,
+        attemptHandle,
+      );
+    } else {
+      reinitializeTlsSocket(attemptHandle);
+      WeakMapPrototypeSet(canonicalSocketHandles, self, self._handle);
+      installOdenHttpNetToken(self, attemptHandle);
+    }
+    if (context.netPermToken) {
+      FunctionPrototypeCall(
+        nativeProtectedSetNetPermToken,
+        attemptHandle,
+        context.netPermToken,
+      );
+    }
   } else {
     attemptHandle = context.handle;
   }
@@ -1433,6 +1490,9 @@ function _internalConnectMultiple(context, canceled?: boolean) {
     attemptHandle,
     context.asyncContext,
   );
+  if (WeakMapPrototypeGet(canonicalSocketOwners, attemptHandle) === undefined) {
+    WeakMapPrototypeSet(canonicalSocketOwners, attemptHandle, self);
+  }
   attemptHandle[kAsyncContext] = context.asyncContext;
 
   const { localPort, port, flags } = context;
@@ -1924,9 +1984,8 @@ function _lookupAndConnect(self: Socket, options: TcpSocketConnectOptions) {
       // checks permissions against the original hostname instead of the
       // resolved IP. Only honored on the default-lookup path; a custom lookup
       // never installs a token (its IPs are checked literally).
-      const canonicalHandle = WeakMapPrototypeGet(
-        canonicalSocketHandles,
-        self,
+      const canonicalHandle = getNativeConnectHandle(
+        WeakMapPrototypeGet(canonicalSocketHandles, self),
       );
       if (usingDefaultLookup && netPermToken && canonicalHandle) {
         FunctionPrototypeCall(
@@ -1985,6 +2044,9 @@ function _lookupAndConnect(self: Socket, options: TcpSocketConnectOptions) {
     // NetPermToken; user-supplied lookups never receive it.
     if (usingDefaultLookup) {
       emitLookup[kPermTokenSink] = true;
+      emitLookup[kPermTokenAction] =
+        WeakMapPrototypeGet(canonicalSocketDnsActions, self) ??
+          NET_ACTION_CONNECT;
     }
     lookup(host, getLookupDnsOpts(), emitLookup);
   });
@@ -2013,9 +2075,8 @@ function _lookupAndConnectMultiple(
 
     function emitLookupInContext(err, addresses, _, netPermToken) {
       // Only the built-in lookup installs a token (see _lookupAndConnect).
-      const canonicalHandle = WeakMapPrototypeGet(
-        canonicalSocketHandles,
-        self,
+      const canonicalHandle = getNativeConnectHandle(
+        WeakMapPrototypeGet(canonicalSocketHandles, self),
       );
       if (usingDefaultLookup && netPermToken && canonicalHandle) {
         FunctionPrototypeCall(
@@ -2130,8 +2191,8 @@ function _lookupAndConnectMultiple(
 
       const context = {
         socket: self,
-        handle: self[kHandle],
-        currentHandle: self[kHandle],
+        handle: getNativeConnectHandle(self[kHandle]),
+        currentHandle: getNativeConnectHandle(self[kHandle]),
         asyncContext: WeakMapPrototypeGet(
           canonicalSocketAsyncContexts,
           self,
@@ -2142,6 +2203,7 @@ function _lookupAndConnectMultiple(
         localPort,
         flags: 0,
         timeout,
+        netPermToken: usingDefaultLookup ? netPermToken : undefined,
         [kTimeout]: null,
         errors: [],
       };
@@ -2158,6 +2220,9 @@ function _lookupAndConnectMultiple(
     // NetPermToken; user-supplied lookups never receive it.
     if (usingDefaultLookup) {
       emitLookup[kPermTokenSink] = true;
+      emitLookup[kPermTokenAction] =
+        WeakMapPrototypeGet(canonicalSocketDnsActions, self) ??
+          NET_ACTION_CONNECT;
     }
     lookup(host, dnsopts, emitLookup);
   });
@@ -2442,16 +2507,28 @@ Socket.prototype.connect = function (...args) {
     _initSocketHandle(this);
   }
 
+  const connectHandle = getNativeConnectHandle(
+    WeakMapPrototypeGet(canonicalSocketHandles, this) ?? this._handle,
+  );
   const validatedOdenHttpNetToken = installOdenHttpNetToken(
     this,
-    WeakMapPrototypeGet(canonicalSocketHandles, this) ?? this._handle,
+    connectHandle,
+  );
+  // Internal resolution is a stage of the parent operation: raw net and
+  // socket-exposing /1.1 HTTP are connect-class, while frozen /1 tokenized
+  // HTTP preserves its fetch-class contract.
+  // @ref LLP 0019#network-protocol-classes-remain-separate [implements]
+  WeakMapPrototypeSet(
+    canonicalSocketDnsActions,
+    this,
+    validatedOdenHttpNetToken && !op_node_http_capsec_no_reuse()
+      ? NET_ACTION_FETCH
+      : NET_ACTION_CONNECT,
   );
 
   // Capture the async context now, while we are still running synchronously
   // inside the caller's context. The DNS lookup that precedes the actual
   // connect is async and would otherwise drop it before `_afterConnect` runs.
-  const connectHandle = WeakMapPrototypeGet(canonicalSocketHandles, this) ??
-    this._handle;
   const connectAsyncContext = validatedOdenHttpNetToken
     ? odenHttpAsyncContext
     : odenScheduleAsyncContext();
@@ -2465,6 +2542,9 @@ Socket.prototype.connect = function (...args) {
     connectHandle,
     connectAsyncContext,
   );
+  if (WeakMapPrototypeGet(canonicalSocketOwners, connectHandle) === undefined) {
+    WeakMapPrototypeSet(canonicalSocketOwners, connectHandle, this);
+  }
   connectHandle[kAsyncContext] = connectAsyncContext;
 
   if (cb !== null) {

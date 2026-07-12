@@ -100,6 +100,9 @@ const DNS_ORDER_IPV6_FIRST = 2;
 // User code cannot reference this symbol, so it can neither receive the token
 // nor forge the marker. See GHSA-fhjh-jqv7-m238.
 const kPermTokenSink = Symbol("kPermTokenSink");
+const kPermTokenAction = Symbol("kPermTokenAction");
+const NET_ACTION_FETCH = 0;
+const NET_ACTION_CONNECT = 1;
 
 class GetAddrInfoReqWrap extends AsyncWrap {
   family!: number;
@@ -140,10 +143,17 @@ function getaddrinfo(
     let error = 0;
     let netPermToken: object | undefined;
     try {
+      // Built-in net.connect marks its private callback with the parent
+      // operation's action. Caller-visible node:dns remains the v1 fetch fold.
+      // @ref LLP 0019#network-protocol-classes-remain-separate [implements]
+      const action = req.callback[kPermTokenSink]
+        ? req.callback[kPermTokenAction]
+        : NET_ACTION_FETCH;
       netPermToken = await op_node_getaddrinfo(
         hostname,
         req.port || undefined,
         family,
+        action,
       );
       ArrayPrototypePush(
         addresses,
@@ -917,6 +927,9 @@ return {
   ChannelWrap,
   strerror,
   kPermTokenSink,
+  kPermTokenAction,
+  NET_ACTION_CONNECT,
+  NET_ACTION_FETCH,
   default: {
     DNS_ORDER_VERBATIM,
     DNS_ORDER_IPV4_FIRST,

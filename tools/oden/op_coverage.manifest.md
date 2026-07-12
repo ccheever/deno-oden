@@ -56,7 +56,7 @@ run the generator and commit. Drift fails the rebase canary.
 
 The balanced Rust scanner classifies every `check_net*` call. A missing,
 unknown, or implicitly selected action fails generation. `propagated` is
-allowed only at the two audited typed helpers named by the generator.
+allowed only at audited typed helpers named by the generator.
 
 | Action | Check | Enclosing function | Source | Selection |
 | --- | --- | --- | --- | --- |
@@ -90,8 +90,9 @@ allowed only at the two audited typed helpers named by the generator.
 | listen | check_net | op_quic_endpoint_create() | ext/net/quic.rs:263 | explicit |
 | connect | check_net | op_quic_endpoint_connect() | ext/net/quic.rs:570 | explicit |
 | connect | check_net_resolved | op_quic_endpoint_connect() | ext/net/quic.rs:582 | explicit |
-| fetch | check_net | op_node_getaddrinfo() | ext/node/ops/dns.rs:71 | explicit |
-| fetch | check_net | op_node_getnameinfo() | ext/node/ops/dns.rs:274 | explicit |
+| connect | check_net | op_node_getaddrinfo() | ext/node/ops/dns.rs:84 | propagated |
+| fetch | check_net | op_node_getaddrinfo() | ext/node/ops/dns.rs:84 | propagated |
+| fetch | check_net | op_node_getnameinfo() | ext/node/ops/dns.rs:287 | explicit |
 | connect | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:116 | explicit |
 | fetch | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:122 | explicit |
 | listen | check_net | op_inspector_open() | ext/node/ops/inspector.rs:106 | explicit |
@@ -178,7 +179,8 @@ registered raw-engine spec, isolated policies, and per-route goldens.
 | Node Unix pipe connect | connect | direct | ext/node/ops/pipe_wrap.rs:connect() | untokenized raw pipe |
 | Node Unix pipe bind | listen | direct | ext/node/ops/pipe_wrap.rs:bind() | bind path |
 | Node Unix pipe listen | listen | direct | ext/node/ops/pipe_wrap.rs:listen() | bound path recheck |
-| Node DNS lookup/reverse lookup | fetch | direct | ext/node/ops/dns.rs:op_node_getaddrinfo() | query target |
+| Node standalone and fetch-internal DNS lookup (v1 fold) | fetch | direct | ext/node/ops/dns.rs:op_node_getaddrinfo() | standalone query or parent fetch target |
+| Node connect-internal DNS lookup | connect | direct | ext/node/ops/dns.rs:op_node_getaddrinfo() | parent operation target |
 | Node DNS reverse lookup (v1 resolve fold) | fetch | direct | ext/node/ops/dns.rs:op_node_getnameinfo() | query target |
 | Node inspector listener | listen | direct | ext/node/ops/inspector.rs:op_inspector_open() | inspector bind host/port |
 | Node HTTP route: request socket event/property | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; registered raw-engine fixture request-socket-event-property |
@@ -336,4 +338,3 @@ covered by the layer-2-independence proof.
 - query_read_all	ext/node/ops/require.rs:45
 - query_read_all	ext/node/ops/worker_threads.rs:38
 - query_run_all	ext/process/lib.rs:1482
-

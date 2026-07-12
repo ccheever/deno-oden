@@ -39,6 +39,9 @@ pub enum DnsError {
   #[error("{0}")]
   #[property("uv_errcode" = self.code())]
   RawUvErr(i32),
+  #[class(type)]
+  #[error("Invalid internal network action: {0}")]
+  InvalidNetworkAction(i32),
   #[cfg(not(any(unix, windows)))]
   #[class(generic)]
   #[error("Unsupported platform.")]
@@ -64,12 +67,22 @@ pub async fn op_node_getaddrinfo(
   #[string] hostname: String,
   port: Option<u16>,
   #[smi] family: i32,
+  #[smi] action: i32,
 ) -> Result<NetPermToken, DnsError> {
+  // Internal DNS carries the already-selected parent action; standalone Node
+  // DNS supplies Fetch as the frozen-v1 resolve fold. The integer boundary is
+  // deliberately closed so an unclassified trusted call cannot broaden.
+  // @ref LLP 0019#network-protocol-classes-remain-separate [implements]
+  let action = match action {
+    0 => NetPermissionAction::Fetch,
+    1 => NetPermissionAction::Connect,
+    action => return Err(DnsError::InvalidNetworkAction(action)),
+  };
   {
     let mut state_ = state.borrow_mut();
     let permissions = state_.borrow_mut::<PermissionsContainer>();
     permissions.check_net(
-      NetPermissionAction::Fetch,
+      action,
       &(hostname.as_str(), port),
       "node:dns.lookup()",
     )?;

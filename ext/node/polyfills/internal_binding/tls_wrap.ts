@@ -1,8 +1,15 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // deno-lint-ignore-file no-explicit-any prefer-primordials
 (function () {
-const { core } = __bootstrap;
+const { core, primordials } = __bootstrap;
 const { PipeWrap, TLSWrap } = core.ops;
+const {
+  FunctionPrototypeCall,
+  ObjectPrototypeIsPrototypeOf,
+  SafeWeakMap,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet,
+} = primordials;
 const { kReadBytesOrError, streamBaseState } = core.loadExtScript(
   "ext:deno_node/internal_binding/stream_wrap.ts",
 );
@@ -10,6 +17,33 @@ const { kReadBytesOrError, streamBaseState } = core.loadExtScript(
 // without importing it (avoids circular dependency).
 const kJSStreamHandle = Symbol.for("kJSStreamHandle");
 const kOwner = Symbol.for("kJSStreamOwner");
+
+// TLSWrap is package-observable, but the attached native transport must remain
+// authenticated internal state. Keep that association off public properties
+// so node:net can install an HTTP operation token without trusting a proxy
+// method or `_parent` value that package code could replace.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+const nativeOdenHttpTransports = new SafeWeakMap();
+const tlsSocketReinitializers = new SafeWeakMap();
+const nativeAttach = TLSWrap.prototype.attach;
+const nativeAttachPipe = TLSWrap.prototype.attachPipe;
+
+function getNativeTransport(handle: TLSWrap) {
+  return WeakMapPrototypeGet(nativeOdenHttpTransports, handle);
+}
+
+function registerTlsSocketReinitializer(
+  socket: object,
+  reinitialize: (handle: unknown) => void,
+) {
+  if (WeakMapPrototypeGet(tlsSocketReinitializers, socket) === undefined) {
+    WeakMapPrototypeSet(tlsSocketReinitializers, socket, reinitialize);
+  }
+}
+
+function getTlsSocketReinitializer(socket: object) {
+  return WeakMapPrototypeGet(tlsSocketReinitializers, socket);
+}
 
 function installNativeOnread(res: TLSWrap, nativeHandle: any) {
   nativeHandle.onread = function (
@@ -34,12 +68,17 @@ function installNativeOnread(res: TLSWrap, nativeHandle: any) {
 }
 
 function attachNativeHandle(res: TLSWrap, nativeHandle: any) {
-  const attachResult = nativeHandle instanceof PipeWrap
-    ? res.attachPipe(nativeHandle)
-    : res.attach(nativeHandle);
+  const attachResult = ObjectPrototypeIsPrototypeOf(
+      PipeWrap.prototype,
+      nativeHandle,
+    )
+    ? FunctionPrototypeCall(nativeAttachPipe, res, nativeHandle)
+    : FunctionPrototypeCall(nativeAttach, res, nativeHandle);
   if (attachResult !== 0) {
     throw new Error(`TLS wrap attach failed: ${attachResult}`);
   }
+
+  WeakMapPrototypeSet(nativeOdenHttpTransports, res, nativeHandle);
 
   installNativeOnread(res, nativeHandle);
   res._nativeTcpHandle = nativeHandle;
@@ -192,6 +231,9 @@ function wrap(
 const _defaultExport = { TLSWrap, wrap };
 
 return {
+  getNativeTransport,
+  getTlsSocketReinitializer,
+  registerTlsSocketReinitializer,
   TLSWrap,
   wrap,
   default: _defaultExport,

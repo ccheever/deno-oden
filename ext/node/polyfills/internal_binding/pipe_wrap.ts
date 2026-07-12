@@ -45,7 +45,8 @@ const { fs } = core.loadExtScript(
   "ext:deno_node/internal_binding/constants.ts",
 );
 
-const { FunctionPrototypeCall, MapPrototypeGet } = primordials;
+const { FunctionPrototypeCall, MapPrototypeGet, ObjectDefineProperty } =
+  primordials;
 
 // Mark PipeWrap as a StreamBase handle, matching Node's StreamBase::AddMethods.
 PipeWrap.prototype.isStreamBase = true;
@@ -109,6 +110,50 @@ const nativeListen = PipeWrap.prototype.listen;
 PipeWrap.prototype.listen = function (backlog: number): number {
   return FunctionPrototypeCall(nativeListen, this, ceilPowOf2(backlog + 1));
 };
+
+// Capture the native transport surface at the first internal-binding load,
+// before `process.binding("pipe_wrap")` can expose the constructor to package
+// code. Protected node:net paths retain these exact functions even if a
+// package loads before node:net and attempts prototype poisoning.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+for (
+  const name of [
+    "accept",
+    "bind",
+    "checkProtectedInspectorUse",
+    "close",
+    "connect",
+    "fdForIpc",
+    "fchmod",
+    "getsockname",
+    "listen",
+    "open",
+    "protectedInspectorPeer",
+    "readStart",
+    "readStop",
+    "setOdenHttpNetToken",
+    "setPendingInstances",
+    "shutdown",
+    "socketTypeForIpc",
+    "useUserBuffer",
+    "writeAsciiString",
+    "writeBuffer",
+    "writeLatin1String",
+    "writeUcs2String",
+    "writeUtf8String",
+    "writev",
+  ]
+) {
+  const value = PipeWrap.prototype[name];
+  if (typeof value === "function") {
+    ObjectDefineProperty(PipeWrap.prototype, name, {
+      __proto__: null,
+      configurable: false,
+      value,
+      writable: false,
+    });
+  }
+}
 
 /**
  * Wrap the native PipeWrap.listen() to handle connection acceptance.

@@ -109,9 +109,10 @@ const { isArrayBufferView, isTypedArray } = core.loadExtScript(
   "ext:deno_node/internal/util/types.ts",
 );
 const { op_tls_canonicalize_ipv4_address } = core.ops;
-const { default: tlsWrap } = core.loadExtScript(
-  "ext:deno_node/internal_binding/tls_wrap.ts",
-);
+const {
+  default: tlsWrap,
+  registerTlsSocketReinitializer,
+} = core.loadExtScript("ext:deno_node/internal_binding/tls_wrap.ts");
 const { ownerSymbol } = core.loadExtScript(
   "ext:deno_node/internal_binding/symbols.ts",
 );
@@ -375,7 +376,7 @@ function initRead(tlsSocket, socket) {
 function TLSSocket(socket, opts) {
   const tlsOptions = { ...opts };
 
-  this._tlsOptions = tlsOptions;
+  this._tlsOptions = { ...tlsOptions };
   this._secureEstablished = false;
   this._securePending = false;
   this._newSessionPending = false;
@@ -430,7 +431,7 @@ function TLSSocket(socket, opts) {
   }
 
   FunctionPrototypeCall(net.Socket, this, {
-    handle: this._wrapHandle(wrap, handle),
+    handle: wrapTlsHandle(this, wrap, handle, tlsOptions),
     allowHalfOpen: socket ? socket.allowHalfOpen : tlsOptions.allowHalfOpen,
     autoDestroy: true,
     pauseOnCreate: tlsOptions.pauseOnConnect,
@@ -446,6 +447,9 @@ function TLSSocket(socket, opts) {
   this.on("error", this._tlsError);
 
   this._init(socket, wrap);
+  registerTlsSocketReinitializer(this, (handle) => {
+    reinitializeTlsSocket(this, handle, tlsOptions);
+  });
 
   // Implement kMaybeDestroy so that onStreamRead (stream_base_commons.ts)
   // can auto-destroy the socket when EOF is received. Without this, the
@@ -471,8 +475,8 @@ ObjectSetPrototypeOf(TLSSocket, net.Socket);
 // re-creates the TLSWrap when falling back to a different address.
 // The base Socket version replaces _handle with a raw TCP handle, which
 // doesn't have TLS methods like start(). We need to re-wrap it.
-TLSSocket.prototype[kReinitializeHandle] = function (handle) {
-  const oldHandle = this._handle;
+function reinitializeTlsSocket(socket, handle, options = socket._tlsOptions) {
+  const oldHandle = socket._handle;
   // Save callbacks from the old TLSWrap that were set up by _init() and
   // _initSocketHandle(). These need to be restored on the new TLSWrap.
   const savedOnread = oldHandle?.onread;
@@ -487,36 +491,39 @@ TLSSocket.prototype[kReinitializeHandle] = function (handle) {
   // Re-wrap the new TCP handle with a TLSWrap. This creates the
   // rustls config, attaches to the TCP handle, and sets up read
   // interception + proxy methods (connect, bind, etc.).
-  const tlsHandle = this._wrapHandle(null, handle);
+  const tlsHandle = wrapTlsHandle(socket, null, handle, options);
 
-  this._handle = tlsHandle;
-  this._handle[ownerSymbol] = this;
-  this.ssl = this._handle;
-  this[kRes] = tlsHandle;
+  socket._handle = tlsHandle;
+  socket._handle[ownerSymbol] = socket;
+  socket.ssl = socket._handle;
+  socket[kRes] = tlsHandle;
 
   // Restore callbacks on the new TLSWrap.
-  if (savedOnread) this._handle.onread = savedOnread;
+  if (savedOnread) socket._handle.onread = savedOnread;
   if (savedOnhandshakedone) {
-    this._handle.onhandshakedone = savedOnhandshakedone;
+    socket._handle.onhandshakedone = savedOnhandshakedone;
   }
   if (savedOnhandshakestart) {
-    this._handle.onhandshakestart = savedOnhandshakestart;
+    socket._handle.onhandshakestart = savedOnhandshakestart;
   }
-  if (savedOnerror) this._handle.onerror = savedOnerror;
+  if (savedOnerror) socket._handle.onerror = savedOnerror;
 
   // Re-apply verify mode and ALPN from TLS options.
-  const options = this._tlsOptions;
   const requestCert = !!options.requestCert || !options.isServer;
   const rejectUnauthorized = !!options.rejectUnauthorized;
   if (requestCert || rejectUnauthorized) {
-    this._handle.setVerifyMode(requestCert, rejectUnauthorized);
+    socket._handle.setVerifyMode(requestCert, rejectUnauthorized);
   }
   if (options.ALPNProtocols) {
-    this._handle.setAlpnProtocols(options.ALPNProtocols);
+    socket._handle.setAlpnProtocols(options.ALPNProtocols);
   }
 
-  this._undestroy();
-  this._sockname = undefined;
+  socket._undestroy();
+  socket._sockname = undefined;
+}
+
+TLSSocket.prototype[kReinitializeHandle] = function (handle) {
+  reinitializeTlsSocket(this, handle);
 };
 
 tlsWrap.TLSWrap.prototype.close = function close(cb) {
@@ -563,8 +570,12 @@ tlsWrap.TLSWrap.prototype.close = function close(cb) {
   nextTick(done);
 };
 
-TLSSocket.prototype._wrapHandle = function (wrap, handle) {
-  const options = this._tlsOptions;
+function wrapTlsHandle(
+  socket,
+  wrap,
+  handle,
+  options = socket._tlsOptions,
+) {
   if (!handle) {
     handle = options.pipe
       ? new Pipe(PipeConstants.SOCKET)
@@ -600,16 +611,16 @@ TLSSocket.prototype._wrapHandle = function (wrap, handle) {
   // If TLS initialization failed (e.g. missing cert/key), store the error
   // so it can be emitted asynchronously instead of crashing the process.
   if (res._initError) {
-    this._initError = res._initError;
+    socket._initError = res._initError;
   }
 
   res._parent = handle; // C++ "wrap" object: TCPWrap, etc.
   res._parentWrap = wrap; // JS object: net.Socket, etc.
   res._secureContext = context;
   res.reading = handle.reading;
-  res._owner = this;
-  res[ownerSymbol] = this; // For onWriteComplete to find the socket
-  this[kRes] = res;
+  res._owner = socket;
+  res[ownerSymbol] = socket; // For onWriteComplete to find the socket
+  socket[kRes] = res;
 
   // Set ownerSymbol on the parent handle so that connect callbacks
   // (which receive the TCP handle, not the TLSWrap) can find the socket.
@@ -619,7 +630,7 @@ TLSSocket.prototype._wrapHandle = function (wrap, handle) {
     !(ObjectPrototypeIsPrototypeOf(net.Socket.prototype, wrap) &&
       !wrap.remoteAddress)
   ) {
-    handle[ownerSymbol] = this;
+    handle[ownerSymbol] = socket;
   }
 
   // Proxy methods from the parent TCP handle that callers expect on _handle.
@@ -627,7 +638,6 @@ TLSSocket.prototype._wrapHandle = function (wrap, handle) {
   // stream. We proxy them explicitly here.
   const proxyMethods = [
     "setNetPermToken",
-    "setOdenHttpNetToken",
     "getsockname",
     "getpeername",
     "connect",
@@ -647,7 +657,7 @@ TLSSocket.prototype._wrapHandle = function (wrap, handle) {
   }
 
   // Proxy the reading property
-  defineHandleReading(this, handle);
+  defineHandleReading(socket, handle);
 
   // For JS streams (pull-based enc out), wrap write methods to drain
   // buffered encrypted output after each write op returns.
@@ -675,10 +685,14 @@ TLSSocket.prototype._wrapHandle = function (wrap, handle) {
   }
 
   if (wrap) {
-    wrap.on("close", () => this.destroy());
+    wrap.on("close", () => socket.destroy());
   }
 
   return res;
+}
+
+TLSSocket.prototype._wrapHandle = function (wrap, handle) {
+  return wrapTlsHandle(this, wrap, handle);
 };
 
 function defineHandleReading(socket, handle) {

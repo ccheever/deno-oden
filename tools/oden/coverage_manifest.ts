@@ -340,6 +340,7 @@ type NetworkCheck = RustCall & {
 const PROPAGATED_NETWORK_ACTIONS: Record<string, readonly NetworkAction[]> = {
   "ext/fetch/dns.rs:check_resolved": ["fetch", "connect"],
   "ext/net/ops_unix.rs:check_unix_socket_path": NETWORK_ACTIONS,
+  "ext/node/ops/dns.rs:op_node_getaddrinfo": ["fetch", "connect"],
 };
 
 function collectNetworkChecks(): NetworkCheck[] {
@@ -797,12 +798,20 @@ const NETWORK_SURFACES: NetworkSurface[] = [
     note: "bound path recheck",
   },
   {
-    surface: "Node DNS lookup/reverse lookup",
+    surface: "Node standalone and fetch-internal DNS lookup (v1 fold)",
     action: "fetch",
     file: "ext/node/ops/dns.rs",
     fn: "op_node_getaddrinfo",
     enforcement: "direct",
-    note: "query target",
+    note: "standalone query or parent fetch target",
+  },
+  {
+    surface: "Node connect-internal DNS lookup",
+    action: "connect",
+    file: "ext/node/ops/dns.rs",
+    fn: "op_node_getaddrinfo",
+    enforcement: "direct",
+    note: "parent operation target",
   },
   {
     surface: "Node DNS reverse lookup (v1 resolve fold)",
@@ -888,6 +897,52 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
   ) {
     errors.push(
       "Node HTTP Unix token must select Connect in /1.1 and preserve the unarmed Fetch fallback",
+    );
+  }
+
+  const dnsBody = rustFunctionBodyMasked(
+    Deno.readTextFileSync(ROOT + "ext/node/ops/dns.rs"),
+    "op_node_getaddrinfo",
+  ).replace(/\s+/g, " ");
+  if (
+    !/match\s+action\s*\{\s*0\s*=>\s*NetPermissionAction::Fetch\s*,\s*1\s*=>\s*NetPermissionAction::Connect\s*,\s*action\s*=>\s*return\s+Err\s*\(\s*DnsError::InvalidNetworkAction\s*\(\s*action\s*\)\s*\)/
+      .test(dnsBody)
+  ) {
+    errors.push(
+      "Node internal DNS action must use the closed 0=Fetch, 1=Connect mapping",
+    );
+  }
+
+  const nodeNetSource = Deno.readTextFileSync(
+    ROOT + "ext/node/polyfills/net.ts",
+  ).replace(/\s+/g, " ");
+  if (
+    !/WeakMapPrototypeSet\( canonicalSocketDnsActions, this, validatedOdenHttpNetToken && !op_node_http_capsec_no_reuse\(\) \? NET_ACTION_FETCH : NET_ACTION_CONNECT, \)/
+      .test(nodeNetSource)
+  ) {
+    errors.push(
+      "Node DNS selector must preserve legacy tokenized HTTP Fetch and select Connect otherwise",
+    );
+  }
+  const markedLookupActions = nodeNetSource.match(
+    /emitLookup\[kPermTokenSink\] = true; emitLookup\[kPermTokenAction\] = WeakMapPrototypeGet\(canonicalSocketDnsActions, self\) \?\? NET_ACTION_CONNECT;/g,
+  ) ?? [];
+  if (markedLookupActions.length !== 2) {
+    errors.push(
+      "Node DNS action must be installed only beside both authenticated built-in lookup markers",
+    );
+  }
+  const caresSource = Deno.readTextFileSync(
+    ROOT + "ext/node/polyfills/internal_binding/cares_wrap.ts",
+  ).replace(/\s+/g, " ");
+  if (
+    !/const action = req\.callback\[kPermTokenSink\] \? req\.callback\[kPermTokenAction\] : NET_ACTION_FETCH;/
+      .test(
+        caresSource,
+      )
+  ) {
+    errors.push(
+      "Node standalone DNS must stay Fetch while only authenticated internal lookups carry a parent action",
     );
   }
 
@@ -1146,7 +1201,7 @@ function renderNetworkChecks(network: NetworkCheck[]): string[] {
     "unknown, or implicitly selected action fails generation. `propagated` is",
   );
   out.push(
-    "allowed only at the two audited typed helpers named by the generator.",
+    "allowed only at audited typed helpers named by the generator.",
   );
   out.push("");
   out.push("| Action | Check | Enclosing function | Source | Selection |");
