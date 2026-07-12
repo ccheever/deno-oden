@@ -125,24 +125,24 @@ allowed only at audited typed helpers named by the generator.
 | connect | check_net_resolved | op_node_udp_send() | ext/node/ops/udp.rs:604 | explicit |
 | connect | check_net_url | op_ws_check_permission_and_cancel_handle() | ext/websocket/lib.rs:134 | explicit |
 | connect | check_net_url | op_ws_create() | ext/websocket/lib.rs:524 | explicit |
-| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:11704 | explicit |
-| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:12961 | explicit |
-| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:12991 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13018 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13024 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13034 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13040 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13058 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13063 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13087 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13096 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13106 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16194 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16203 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16217 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16224 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16231 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16239 | explicit |
+| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:11803 | explicit |
+| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:13060 | explicit |
+| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:13090 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13117 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13123 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13133 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13139 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13157 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13162 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13186 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13195 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13205 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16293 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16302 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16316 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16323 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16330 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16338 | explicit |
 
 ## Network resource/API action matrix
 
