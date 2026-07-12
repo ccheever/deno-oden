@@ -18,11 +18,29 @@ function ordered(text, first, second) {
   return firstIndex >= 0 && secondIndex > firstIndex;
 }
 
+function orderedAll(text, ...markers) {
+  let previous = -1;
+  for (const marker of markers) {
+    const index = text.indexOf(marker, previous + 1);
+    if (index < 0) return false;
+    previous = index;
+  }
+  return true;
+}
+
 const websocket = await source("ext/websocket/lib.rs");
 const legacyWebSocket = await source("ext/websocket/01_websocket.js");
 const streams = await source("ext/web/06_streams.js");
 const nodeReadable = await source(
   "ext/node/polyfills/internal/streams/readable.js",
+);
+const nodeDelivery = await source(
+  "ext/node/polyfills/internal/streams/oden_delivery.js",
+);
+const nodeAdmission = section(
+  nodeDelivery,
+  "function createStreamUseAdmission(stream, requestedContext = undefined)",
+  "function streamUseAdmissionContext(stream, admission)",
 );
 const nodeStream = await source("ext/node/polyfills/stream.ts");
 const nodeDuplex = await source(
@@ -159,6 +177,7 @@ const webDefaultPull = section(
   "function readableStreamDefaultControllerCallPullIfNeeded(controller)",
   "function readableStreamDefaultControllerCanCloseOrEnqueue(controller)",
 );
+const evidenceOrderProbe = "capture guard callback";
 
 function guardCaughtBeforeQueueInspection(text, streamMarker) {
   const streamIndex = text.indexOf(streamMarker);
@@ -196,13 +215,33 @@ const evidence = {
     "const generator = createAsyncIterator(stream, options, admittedOperation);",
   ) && nodeIterator.includes(
     "? createPublicReadableAsyncIterator(stream, generator)",
-  ) && nodeIterator.includes("createStreamUseAdmission(stream),") &&
+  ) && nodeIterator.includes("createStreamUseAdmission(state.stream),") &&
     nodeIterator.includes("const requests = [];") &&
     nodeIterator.includes("request.admission,") && nodeIterator.includes(
       "ReflectApply(request.method, generator, [request.value])",
     ) && nodeIterator.includes(
-      "return new Proxy(generator, {",
+      "const iterator = new Proxy(generator, {});",
     ),
+  nodeIteratorLiveRevocationRecheck: nodeIterator.match(
+        /runWithStreamUseAdmissionRecheck\(/g,
+      )?.length === 2 &&
+    nodeIterator.includes(
+      "function publicReadableAsyncIteratorNext(value)",
+    ) && nodeReadable.includes(
+      "const publicReadableAsyncIteratorStates = new SafeWeakMap();",
+    ) && nodeIterator.includes(
+      "installPublicReadableAsyncIteratorMethods(generator);",
+    ),
+  nodeAdmissionUntrustedContext: nodeAdmission.includes(
+    "untrustedDeliveryCallbackDepth > 0",
+  ) && nodeAdmission.includes(
+    "? core.ops.op_oden_schedule_context()",
+  ) && orderedAll(
+    nodeDelivery,
+    "function currentStreamUseAdmissionContext()",
+    "if (untrustedDeliveryCallbackDepth > 0)",
+    "return core.ops.op_oden_schedule_context();",
+  ),
   nodePipeReadableDestinationPropagation: ordered(
     nodePipe,
     "runReadableUseGuard(this);",
@@ -317,11 +356,24 @@ const evidence = {
     "chunkSize = invokeReadableControllerSizeAlgorithm(",
   ) && streams.includes(
     "const callbackContext = op_oden_callback_context(callback);",
-  ) && readableSizeCallback.indexOf(
-        "setAsyncContext(callbackRecord.callbackContext);",
-      ) < readableSizeCallback.indexOf("runReadableStreamUseGuard(stream);") &&
-    readableSizeCallback.indexOf("runReadableStreamUseGuard(stream);") <
-      readableSizeCallback.indexOf("callbackRecord.callback,"),
+  ) && orderedAll(
+    readableSizeCallback,
+    "return runWithActiveReadableOperationContext(",
+    "callbackRecord.callbackContext,",
+    "runReadableStreamUseGuard(stream);",
+    "callbackRecord.callback,",
+  ),
+  sourceEvidenceOrderRejectsMissingMarker: orderedAll(
+    evidenceOrderProbe,
+    "capture",
+    "guard",
+    "callback",
+  ) && !orderedAll(
+    evidenceOrderProbe,
+    "capture",
+    "missing",
+    "callback",
+  ),
   webFastPathsRejectGuardErrors: guardCaughtBeforeQueueInspection(
     webIteratorFastPath,
     "const stream = reader[_stream]",
@@ -360,6 +412,15 @@ const evidence = {
     webDefaultPull,
     "WeakMapPrototypeDelete(readableControllerPullOperationContexts, controller);",
     "readableStreamDefaultControllerCallPullIfNeeded(controller);",
+  ),
+  webPullRevocationRetiresRequests: webBytePull.includes(
+    "readableByteStreamControllerError(controller, e);",
+  ) && webBytePull.includes(
+    "controller[_pullAgain] = false;",
+  ) && webDefaultPull.includes(
+    "readableStreamDefaultControllerError(controller, e);",
+  ) && webDefaultPull.includes(
+    "controller[_pullAgain] = false;",
   ),
   webPullCallbackActorSeparation: streams.includes(
     "const readableUnderlyingSourceCallbackRecords = new SafeWeakMap();",
@@ -431,9 +492,11 @@ const evidence = {
     "#protectedNetworkPeer = null;",
   ) && net.includes(
     "lazyStreams().setReadableStreamUseGuard(readable, () => {",
-  ) && net.indexOf(
-        "lazyStreams().setReadableStreamUseGuard(readable, () => {",
-      ) < net.indexOf("this.#readable = readable;"),
+  ) && ordered(
+    net,
+    "lazyStreams().setReadableStreamUseGuard(readable, () => {",
+    "this.#readable = readable;",
+  ),
 };
 
 console.log(JSON.stringify(Object.fromEntries(

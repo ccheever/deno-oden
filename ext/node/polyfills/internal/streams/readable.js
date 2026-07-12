@@ -96,6 +96,7 @@ const {
   runCapturedDelivery,
   runStreamUseGuard,
   runWithStreamUseAdmission,
+  runWithStreamUseAdmissionRecheck,
   setStreamUseGuard,
   wrapIterableDelivery,
 } = core.loadExtScript(
@@ -157,8 +158,8 @@ const {
   NumberIsNaN,
   NumberParseInt,
   ObjectDefineProperties,
+  ObjectGetPrototypeOf,
   ObjectKeys,
-  ObjectPrototypeHasOwnProperty,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   Promise,
@@ -166,7 +167,6 @@ const {
   PromiseReject,
   Proxy,
   ReflectApply,
-  ReflectGet,
   SafeSet,
   SafeWeakMap,
   StringPrototypeSlice,
@@ -347,6 +347,11 @@ const protectedReadableOperationStates = new SafeWeakMap();
 // admission. Keeping the two override classes distinct prevents cleanup from
 // inheriting an application read admission (or vice versa).
 const admittedReadableOperationStates = new SafeWeakMap();
+// Public iterator proxies hide their branded generators while sharing the
+// same receiver-checking request methods, matching native iterator method
+// identity without exposing a late guard-attachment bypass.
+const publicReadableAsyncIteratorStates = new SafeWeakMap();
+let publicReadableAsyncIteratorMethodsInstalled = false;
 // A denied scheduled callback cannot safely clear flags on the user-reachable
 // ReadableState: a package may have replaced those scalar slots with getters.
 // Remember the retired work privately and reconcile the compatibility flags
@@ -2995,6 +3000,85 @@ function streamToAsyncIterator(stream, options, admittedOperation) {
   return iter;
 }
 
+function publicReadableAsyncIteratorNext(value) {
+  const state = WeakMapPrototypeGet(publicReadableAsyncIteratorStates, this);
+  if (state === undefined) {
+    return AsyncGeneratorPrototypeNext(this, value);
+  }
+  try {
+    return state.enqueue(
+      AsyncGeneratorPrototypeNext,
+      value,
+      createStreamUseAdmission(state.stream),
+      undefined,
+    );
+  } catch (error) {
+    return PromiseReject(error);
+  }
+}
+
+function publicReadableAsyncIteratorReturn(value) {
+  const state = WeakMapPrototypeGet(publicReadableAsyncIteratorStates, this);
+  if (state === undefined) {
+    return ReflectApply(AsyncGeneratorPrototypeReturn, this, [value]);
+  }
+  return state.enqueue(
+    AsyncGeneratorPrototypeReturn,
+    value,
+    undefined,
+    core.getAsyncContext(),
+  );
+}
+
+function publicReadableAsyncIteratorThrow(error) {
+  const state = WeakMapPrototypeGet(publicReadableAsyncIteratorStates, this);
+  if (state === undefined) {
+    return ReflectApply(AsyncGeneratorPrototypeThrow, this, [error]);
+  }
+  return state.enqueue(
+    AsyncGeneratorPrototypeThrow,
+    error,
+    undefined,
+    core.getAsyncContext(),
+  );
+}
+
+ObjectDefineProperties(publicReadableAsyncIteratorNext, {
+  name: { __proto__: null, configurable: true, value: "next" },
+});
+ObjectDefineProperties(publicReadableAsyncIteratorReturn, {
+  name: { __proto__: null, configurable: true, value: "return" },
+});
+ObjectDefineProperties(publicReadableAsyncIteratorThrow, {
+  name: { __proto__: null, configurable: true, value: "throw" },
+});
+
+function installPublicReadableAsyncIteratorMethods(generator) {
+  if (publicReadableAsyncIteratorMethodsInstalled) return;
+  const prototype = ObjectGetPrototypeOf(generator);
+  ObjectDefineProperties(prototype, {
+    next: {
+      __proto__: null,
+      configurable: true,
+      writable: true,
+      value: publicReadableAsyncIteratorNext,
+    },
+    return: {
+      __proto__: null,
+      configurable: true,
+      writable: true,
+      value: publicReadableAsyncIteratorReturn,
+    },
+    throw: {
+      __proto__: null,
+      configurable: true,
+      writable: true,
+      value: publicReadableAsyncIteratorThrow,
+    },
+  });
+  publicReadableAsyncIteratorMethodsInstalled = true;
+}
+
 function createPublicReadableAsyncIterator(stream, generator) {
   // Async-generator bodies resume from loader-only frames, so a public
   // iterator cannot safely use the context retained by generator creation.
@@ -3018,7 +3102,7 @@ function createPublicReadableAsyncIterator(stream, generator) {
         ? () => AsyncGeneratorPrototypeNext(generator, request.value)
         : () => ReflectApply(request.method, generator, [request.value]);
       if (request.admission !== undefined) {
-        result = runWithStreamUseAdmission(
+        result = runWithStreamUseAdmissionRecheck(
           stream,
           request.admission,
           invoke,
@@ -3044,6 +3128,18 @@ function createPublicReadableAsyncIterator(stream, generator) {
   }
 
   function settle(request, value, rejected) {
+    if (!rejected && request.admission !== undefined) {
+      try {
+        value = runWithStreamUseAdmissionRecheck(
+          stream,
+          request.admission,
+          () => value,
+        );
+      } catch (error) {
+        value = error;
+        rejected = true;
+      }
+    }
     ArrayPrototypeShift(requests);
     active = false;
     if (rejected) request.reject(value);
@@ -3066,48 +3162,18 @@ function createPublicReadableAsyncIterator(stream, generator) {
     });
   }
 
-  const next = (value) => {
-    try {
-      return enqueue(
-        AsyncGeneratorPrototypeNext,
-        value,
-        createStreamUseAdmission(stream),
-        undefined,
-      );
-    } catch (error) {
-      return PromiseReject(error);
-    }
-  };
-  const returnIterator = (value) =>
-    enqueue(
-      AsyncGeneratorPrototypeReturn,
-      value,
-      undefined,
-      core.getAsyncContext(),
-    );
-  const throwIterator = (error) =>
-    enqueue(
-      AsyncGeneratorPrototypeThrow,
-      error,
-      undefined,
-      core.getAsyncContext(),
-    );
-
-  // A target-hiding proxy preserves the ordinary async-generator prototype,
-  // own-key layout, and Symbol.asyncIterator behavior. Only the three request
-  // methods are intercepted; user-defined own overrides retain normal lookup.
-  return new Proxy(generator, {
-    get(target, property, receiver) {
-      if (
-        !ObjectPrototypeHasOwnProperty(target, property)
-      ) {
-        if (property === "next") return next;
-        if (property === "return") return returnIterator;
-        if (property === "throw") return throwIterator;
-      }
-      return ReflectGet(target, property, receiver);
-    },
+  // Put the shared receiver-checking methods on the generator type's immediate
+  // prototype, matching native lookup identity/name/length. A transparent
+  // target-hiding proxy keeps the branded generator inaccessible, including
+  // to methods retained before a later guard attachment.
+  installPublicReadableAsyncIteratorMethods(generator);
+  const iterator = new Proxy(generator, {});
+  WeakMapPrototypeSet(publicReadableAsyncIteratorStates, iterator, {
+    __proto__: null,
+    enqueue,
+    stream,
   });
+  return iterator;
 }
 
 async function* createAsyncIterator(stream, options, admittedOperation) {

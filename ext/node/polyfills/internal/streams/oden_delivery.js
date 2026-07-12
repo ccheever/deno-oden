@@ -306,11 +306,17 @@ function createStreamUseAdmission(stream, requestedContext = undefined) {
   const current = WeakMapPrototypeGet(streamUseGuardPartLists, stream);
   const parts = [];
   const contexts = [];
+  // A package callback can execute inside a trusted loader admission. Its
+  // live scheduling context is the new operation actor; inheriting the outer
+  // admission here would let B silently borrow A. Loader-only continuations
+  // retain the scoped admission when no untrusted callback is active.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
   const operationContext = requestedContext ??
-    activeStreamUseAdmissionContexts[
-      activeStreamUseAdmissionContexts.length - 1
-    ] ??
-    core.ops.op_oden_schedule_context();
+    (untrustedDeliveryCallbackDepth > 0
+      ? core.ops.op_oden_schedule_context()
+      : activeStreamUseAdmissionContexts[
+        activeStreamUseAdmissionContexts.length - 1
+      ] ?? core.ops.op_oden_schedule_context());
   if (current !== undefined) {
     const previous = operationContext === undefined
       ? undefined
@@ -374,6 +380,9 @@ function streamUseAdmissionContext(stream, admission) {
 }
 
 function currentStreamUseAdmissionContext() {
+  if (untrustedDeliveryCallbackDepth > 0) {
+    return core.ops.op_oden_schedule_context();
+  }
   return activeStreamUseAdmissionContexts[
     activeStreamUseAdmissionContexts.length - 1
   ];

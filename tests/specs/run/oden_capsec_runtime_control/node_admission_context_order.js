@@ -5,6 +5,7 @@ const {
   captureCurrentDeliveryCallback,
   captureDeliveryCallback,
   createStreamUseAdmission,
+  currentStreamUseAdmissionContext,
   runCapturedCallback,
   runWithStreamUseAdmission,
   setStreamUseGuard,
@@ -54,6 +55,18 @@ function deniedOutcome(promise) {
     () => "ALLOWED",
     (error) => error instanceof Deno.errors.NotCapable ? "DENIED" : "BROKEN",
   );
+}
+
+async function boundedDeniedOutcome(promise) {
+  let timeoutId;
+  const result = await Promise.race([
+    deniedOutcome(promise),
+    new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve("HUNG"), 1_000);
+    }),
+  ]);
+  clearTimeout(timeoutId);
+  return result;
 }
 
 async function concurrentNodeIteratorOutcome() {
@@ -115,7 +128,39 @@ async function acceptedConcurrentNodeIteratorOutcome() {
     const iteratorPrototype = Object.getPrototypeOf(iterator);
     const prototypeCompatible = iteratorPrototype !== asyncGeneratorPrototype &&
       Object.getPrototypeOf(iteratorPrototype) === asyncGeneratorPrototype;
+    const methodSurfaceCompatible = iterator.next === iteratorPrototype.next &&
+      iterator.return === iteratorPrototype.return &&
+      iterator.throw === iteratorPrototype.throw &&
+      iterator.next.name === prototypeProbe.next.name &&
+      iterator.next.length === prototypeProbe.next.length &&
+      iterator.return.name === prototypeProbe.return.name &&
+      iterator.return.length === prototypeProbe.return.length &&
+      iterator.throw.name === prototypeProbe.throw.name &&
+      iterator.throw.length === prototypeProbe.throw.length;
+    // The target-hiding wrapper must differ from the branded intrinsic so a
+    // method retained before late protection cannot call the hidden target.
+    // Every observable method shape and receiver failure remains controlled.
+    const targetHidingMethodDivergence =
+      iterator.next !== prototypeProbe.next &&
+      iterator.return !== prototypeProbe.return &&
+      iterator.throw !== prototypeProbe.throw;
     const asyncIteratorIdentity = iterator[Symbol.asyncIterator]() === iterator;
+    const brandingStream = new Readable({ objectMode: true, read() {} });
+    brandingStream.push("branding");
+    const brandingIterator = brandingStream.iterator({
+      destroyOnReturn: false,
+    });
+    const sharedMethods = iterator.next === brandingIterator.next &&
+      iterator.return === brandingIterator.return &&
+      iterator.throw === brandingIterator.throw;
+    let receiverBranded = false;
+    try {
+      await Reflect.apply(brandingIterator.next, {}, []);
+    } catch (error) {
+      receiverBranded = error instanceof TypeError;
+    }
+    await brandingIterator.return();
+    brandingStream.destroy();
     const wrappedNext = iterator.next;
     const ownNext = () => "OVERRIDE";
     iterator.next = ownNext;
@@ -126,12 +171,170 @@ async function acceptedConcurrentNodeIteratorOutcome() {
     return !firstResult.done && firstResult.value?.[0] === 0x2a &&
         !secondResult.done && secondResult.value?.[0] === 0x2b &&
         actorBCallsAfterSettlement > actorBCallsAtAdmission &&
-        prototypeCompatible && asyncIteratorIdentity && ownOverride &&
-        overrideRestored && Object.keys(iterator).join() === "stream"
+        prototypeCompatible && methodSurfaceCompatible &&
+        targetHidingMethodDivergence &&
+        asyncIteratorIdentity && sharedMethods && receiverBranded &&
+        ownOverride && overrideRestored &&
+        Object.keys(iterator).join() === "stream"
       ? "BOUND"
       : "BROKEN";
   } finally {
     await iterator.return();
+    stream.destroy();
+  }
+}
+
+async function revokedQueuedNodeIteratorOutcome() {
+  const actorA = {};
+  const actorB = {};
+  let actorBAllowed = true;
+  let actorBChecks = 0;
+  const stream = new Readable({ objectMode: true, read() {} });
+  stream.push("first");
+  stream.push("second");
+  setStreamUseGuard(stream, () => {
+    const actor = core.getAsyncContext();
+    if (actor === actorB) {
+      actorBChecks++;
+      if (!actorBAllowed) {
+        throw new Deno.errors.NotCapable("synthetic actor B revoked");
+      }
+    } else if (actor !== actorA) {
+      throw new Deno.errors.NotCapable("synthetic stream actor denied");
+    }
+    return actor;
+  });
+  const iterator = runInContext(
+    actorA,
+    () => stream.iterator({ destroyOnReturn: false }),
+  );
+  try {
+    const first = runInContext(actorA, () => iterator.next());
+    const revoked = runInContext(actorB, () => iterator.next());
+    const actorBChecksAtAdmission = actorBChecks;
+    actorBAllowed = false;
+    const firstResult = await first;
+    const revokedResult = await boundedDeniedOutcome(revoked);
+    const recovery = await runInContext(actorA, () => iterator.next());
+    return firstResult.value === "first" && revokedResult === "DENIED" &&
+        actorBChecks > actorBChecksAtAdmission && recovery.value === "second"
+      ? "CLOSED"
+      : "BROKEN";
+  } finally {
+    await iterator.return();
+    stream.destroy();
+  }
+}
+
+async function lateProtectedNodeIteratorOutcome() {
+  const actorA = {};
+  const actorB = {};
+  const stream = new Readable({ objectMode: true, read() {} });
+  stream.push("secret");
+  const iterator = stream.iterator({ destroyOnReturn: false });
+  const retainedNext = iterator.next;
+  setStreamUseGuard(stream, actorGuard(actorA));
+  try {
+    const denied = await boundedDeniedOutcome(
+      runInContext(
+        actorB,
+        () => Reflect.apply(retainedNext, iterator, []),
+      ),
+    );
+    const root = await runInContext(actorA, () => iterator.next());
+    return denied === "DENIED" && root.value === "secret" ? "CLOSED" : "BROKEN";
+  } finally {
+    await iterator.return();
+    stream.destroy();
+  }
+}
+
+async function revokedSettlingNodeIteratorOutcome() {
+  const actorA = {};
+  const actorB = {};
+  let actorBAllowed = true;
+  let actorBChecks = 0;
+  const stream = new Readable({ objectMode: true, read() {} });
+  stream.push("discarded");
+  stream.push("recovery");
+  setStreamUseGuard(stream, () => {
+    const actor = core.getAsyncContext();
+    if (actor === actorB) {
+      actorBChecks++;
+      if (!actorBAllowed) {
+        throw new Deno.errors.NotCapable("synthetic actor B revoked");
+      }
+    } else if (actor !== actorA) {
+      throw new Deno.errors.NotCapable("synthetic stream actor denied");
+    }
+    return actor;
+  });
+  const iterator = runInContext(
+    actorB,
+    () => stream.iterator({ destroyOnReturn: false }),
+  );
+  try {
+    const revoked = runInContext(actorB, () => iterator.next());
+    const actorBChecksAtActivation = actorBChecks;
+    actorBAllowed = false;
+    const revokedResult = await boundedDeniedOutcome(revoked);
+    const recovery = await runInContext(actorA, () => iterator.next());
+    return revokedResult === "DENIED" &&
+        actorBChecks > actorBChecksAtActivation && recovery.value === "recovery"
+      ? "CLOSED"
+      : "BROKEN";
+  } finally {
+    await iterator.return();
+    stream.destroy();
+  }
+}
+
+async function revokedQueuedNodeCleanupOutcome(method) {
+  const actorA = {};
+  const actorB = {};
+  let actorBAllowed = true;
+  const stream = new Readable({ objectMode: true, read() {} });
+  stream.push("first");
+  stream.push("must-not-deliver");
+  setStreamUseGuard(stream, () => {
+    const actor = core.getAsyncContext();
+    if (actor === actorB && !actorBAllowed) {
+      throw new Deno.errors.NotCapable("synthetic actor B revoked");
+    }
+    if (actor !== actorA && actor !== actorB) {
+      throw new Deno.errors.NotCapable("synthetic stream actor denied");
+    }
+    return actor;
+  });
+  const iterator = runInContext(
+    actorA,
+    () => stream.iterator({ destroyOnReturn: false }),
+  );
+  const injected = new Error("queued iterator throw");
+  try {
+    const first = runInContext(actorA, () => iterator.next());
+    const cleanup = runInContext(
+      actorB,
+      () =>
+        method === "return"
+          ? iterator.return("returned")
+          : iterator.throw(injected),
+    );
+    actorBAllowed = false;
+    const firstResult = await first;
+    if (firstResult.value !== "first") return "BROKEN";
+    if (method === "return") {
+      const result = await cleanup;
+      return result.done && result.value === "returned" ? "CLEAN" : "BROKEN";
+    }
+    try {
+      await cleanup;
+      return "BROKEN";
+    } catch (error) {
+      return error === injected ? "CLEAN" : "BROKEN";
+    }
+  } finally {
+    await iterator.return().catch(() => {});
     stream.destroy();
   }
 }
@@ -266,6 +469,115 @@ async function acceptedConcurrentWebPullOutcome(type) {
   }
 }
 
+async function revokedQueuedWebPullOutcome(type) {
+  const actorA = {};
+  const actorB = {};
+  const releaseActor = {};
+  let actorBAllowed = true;
+  let actorBChecks = 0;
+  let releaseFirstPull;
+  let pullCount = 0;
+  async function pull(controller) {
+    const value = ++pullCount;
+    if (type === "bytes") {
+      controller.byobRequest.view[0] = value;
+      controller.byobRequest.respond(1);
+    } else {
+      controller.enqueue(value);
+    }
+    if (value === 1) {
+      await new Promise((resolve) => releaseFirstPull = resolve);
+    }
+  }
+  markReadableStreamTrustedCallback(pull);
+  const source = type === "bytes" ? { type, pull } : { pull };
+  const stream = new ReadableStream(source, { highWaterMark: 0 });
+  setReadableStreamUseGuard(stream, () => {
+    const actor = core.getAsyncContext();
+    if (actor === actorB) {
+      actorBChecks++;
+      if (!actorBAllowed) {
+        throw new Deno.errors.NotCapable("synthetic Web actor B revoked");
+      }
+    } else if (actor !== actorA) {
+      throw new Deno.errors.NotCapable("synthetic Web stream actor denied");
+    }
+    return actor;
+  });
+  const reader = runInContext(
+    actorA,
+    () =>
+      type === "bytes"
+        ? stream.getReader({ mode: "byob" })
+        : stream.getReader(),
+  );
+  reader.closed.catch(() => {});
+  const read = () =>
+    type === "bytes" ? reader.read(new Uint8Array(8)) : reader.read();
+  try {
+    const first = runInContext(actorA, read);
+    await waitFor(() => releaseFirstPull !== undefined);
+    const firstResult = await first;
+    const queued = runInContext(actorB, read);
+    const actorBChecksAtAdmission = actorBChecks;
+    actorBAllowed = false;
+    runInContext(releaseActor, releaseFirstPull);
+    const queuedResult = await boundedDeniedOutcome(queued);
+    const firstValue = type === "bytes"
+      ? firstResult.value?.[0]
+      : firstResult.value;
+    return firstValue === 1 && queuedResult === "DENIED" &&
+        actorBChecks > actorBChecksAtAdmission && pullCount === 1
+      ? "CLOSED"
+      : "BROKEN";
+  } finally {
+    await runInContext(actorA, () => reader.cancel()).catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+function nestedUntrustedAdmissionOutcome() {
+  const actorA = {};
+  const actorB = {};
+  const outer = {};
+  const target = {};
+  const targetActors = [];
+  setStreamUseGuard(outer, actorGuard(actorA));
+  setStreamUseGuard(target, () => {
+    const actor = core.getAsyncContext();
+    targetActors.push(actor);
+    if (actor !== actorB) {
+      throw new Deno.errors.NotCapable("nested callback borrowed outer actor");
+    }
+    return actor;
+  });
+  const captured = captureDeliveryCallback(() => {
+    const admission = createStreamUseAdmission(target);
+    return admission.context === actorB &&
+        currentStreamUseAdmissionContext() === actorB
+      ? "LIVE"
+      : "BROKEN";
+  });
+  captured.context = actorB;
+  const admission = runInContext(
+    actorA,
+    () => createStreamUseAdmission(outer),
+  );
+  try {
+    const result = runWithStreamUseAdmission(
+      outer,
+      admission,
+      () => runCapturedCallback(captured, undefined, []),
+    );
+    return result === "LIVE" && targetActors.length === 1 &&
+        targetActors[0] === actorB
+      ? "LIVE"
+      : "BROKEN";
+  } catch {
+    return "BROKEN";
+  }
+}
+
 async function concurrentOperationOutcomes() {
   const previous = core.getAsyncContext();
   core.ops.op_oden_schedule_context = () => core.getAsyncContext();
@@ -273,12 +585,22 @@ async function concurrentOperationOutcomes() {
     return {
       nodeIterator: await concurrentNodeIteratorOutcome(),
       acceptedNodeIterator: await acceptedConcurrentNodeIteratorOutcome(),
+      revokedQueuedNodeIterator: await revokedQueuedNodeIteratorOutcome(),
+      lateProtectedNodeIterator: await lateProtectedNodeIteratorOutcome(),
+      revokedSettlingNodeIterator: await revokedSettlingNodeIteratorOutcome(),
+      revokedQueuedNodeReturn: await revokedQueuedNodeCleanupOutcome("return"),
+      revokedQueuedNodeThrow: await revokedQueuedNodeCleanupOutcome("throw"),
       webDefaultPull: await concurrentWebPullOutcome("default"),
       webBYOBPull: await concurrentWebPullOutcome("bytes"),
       acceptedWebDefaultPull: await acceptedConcurrentWebPullOutcome(
         "default",
       ),
       acceptedWebBYOBPull: await acceptedConcurrentWebPullOutcome("bytes"),
+      revokedQueuedWebDefaultPull: await revokedQueuedWebPullOutcome(
+        "default",
+      ),
+      revokedQueuedWebBYOBPull: await revokedQueuedWebPullOutcome("bytes"),
+      nestedUntrustedAdmission: nestedUntrustedAdmissionOutcome(),
     };
   } finally {
     core.ops.op_oden_schedule_context = originalScheduleContext;
@@ -361,8 +683,16 @@ console.log(JSON.stringify({
   missingSchedule: capturePriorityOutcome(false),
   concurrentNodeIterator: concurrent.nodeIterator,
   acceptedConcurrentNodeIterator: concurrent.acceptedNodeIterator,
+  revokedQueuedNodeIterator: concurrent.revokedQueuedNodeIterator,
+  lateProtectedNodeIterator: concurrent.lateProtectedNodeIterator,
+  revokedSettlingNodeIterator: concurrent.revokedSettlingNodeIterator,
+  revokedQueuedNodeReturn: concurrent.revokedQueuedNodeReturn,
+  revokedQueuedNodeThrow: concurrent.revokedQueuedNodeThrow,
   concurrentWebDefaultPull: concurrent.webDefaultPull,
   concurrentWebBYOBPull: concurrent.webBYOBPull,
   acceptedConcurrentWebDefaultPull: concurrent.acceptedWebDefaultPull,
   acceptedConcurrentWebBYOBPull: concurrent.acceptedWebBYOBPull,
+  revokedQueuedWebDefaultPull: concurrent.revokedQueuedWebDefaultPull,
+  revokedQueuedWebBYOBPull: concurrent.revokedQueuedWebBYOBPull,
+  nestedUntrustedAdmission: concurrent.nestedUntrustedAdmission,
 }));

@@ -2937,6 +2937,17 @@ function readableByteStreamControllerStartPull(controller) {
         try {
           readableByteStreamControllerFinishPull(controller);
         } catch (e) {
+          controller[_pulling] = false;
+          controller[_pullAgain] = false;
+          WeakMapPrototypeDelete(
+            readableControllerPullOperationContexts,
+            controller,
+          );
+          try {
+            readableByteStreamControllerError(controller, e);
+          } catch (error) {
+            rethrowAssertionErrorRejection(error);
+          }
           rethrowAssertionErrorRejection(e);
         }
       };
@@ -3565,6 +3576,17 @@ function readableStreamDefaultControllerStartPull(controller) {
         try {
           readableStreamDefaultControllerFinishPull(controller);
         } catch (e) {
+          controller[_pulling] = false;
+          controller[_pullAgain] = false;
+          WeakMapPrototypeDelete(
+            readableControllerPullOperationContexts,
+            controller,
+          );
+          try {
+            readableStreamDefaultControllerError(controller, e);
+          } catch (error) {
+            rethrowAssertionErrorRejection(error);
+          }
           rethrowAssertionErrorRejection(e);
         }
       };
