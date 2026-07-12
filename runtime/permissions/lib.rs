@@ -59,6 +59,7 @@ pub mod rev2;
 #[path = "oden_rev2_registry_generated.rs"]
 mod rev2_registry_generated;
 
+pub use oden_rev2_policy::OdenRev2CompiledBuildIdentity;
 pub use oden_rev2_policy::OdenRev2LoadState;
 pub use oden_rev2_policy::OdenRev2LoadedPolicyContext;
 pub use oden_rev2_runtime::OdenRev2ArmedContext;
@@ -1703,7 +1704,9 @@ pub fn oden_capsec_rev2_bootstrap_exit_code() -> Option<i32> {
   clippy::disallowed_methods,
   reason = "single-threaded bootstrap snapshots and removes the private inherited handoff before V8 or worker threads start"
 )]
-pub fn oden_capsec_init_control_plane() -> bool {
+pub fn oden_capsec_init_control_plane(
+  rev2_build_identity: OdenRev2CompiledBuildIdentity,
+) -> bool {
   let explicit_policy =
     std::env::var_os("ODEN_CAPSEC_POLICY").filter(|path| !path.is_empty());
   let explicit_rev2 = std::env::var_os("ODEN_CAPSEC_REV2_SNAPSHOT")
@@ -1721,7 +1724,7 @@ pub fn oden_capsec_init_control_plane() -> bool {
       // Consume/unlink any securely opened one-shot candidate even though the
       // mixed protocol is unconditionally refused. This prevents a rejected
       // handoff retaining receipt or host-binding material on disk.
-      let _ = oden_capsec_consume_rev2_snapshot(snapshot);
+      let _ = oden_capsec_consume_rev2_snapshot(snapshot, &rev2_build_identity);
       if let Some(policy) = explicit_policy.as_deref()
         && let Some(control_root) =
           oden_capsec_audit_channel().lock().control_root()
@@ -1730,7 +1733,7 @@ pub fn oden_capsec_init_control_plane() -> bool {
       }
       Err("OD-CAP-REV2-MIXED-HANDOFF".to_string())
     } else {
-      oden_capsec_consume_rev2_snapshot(snapshot)
+      oden_capsec_consume_rev2_snapshot(snapshot, &rev2_build_identity)
     };
     let evidence = match &result {
       Ok(context) => context.evidence(),
@@ -1806,11 +1809,6 @@ fn oden_capsec_consume_parent_policy(
   control_root: &Path,
 ) -> Result<(), String> {
   let policy = Path::new(policy);
-  let metadata = std::fs::symlink_metadata(policy)
-    .map_err(|error| format!("{}: {error}", policy.display()))?;
-  if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-    return Err(format!("{} is not a regular file", policy.display()));
-  }
   let parent = policy
     .parent()
     .ok_or_else(|| format!("{} has no parent", policy.display()))?;
@@ -1822,6 +1820,13 @@ fn oden_capsec_consume_parent_policy(
       policy.display(),
       control_root.display()
     ));
+  }
+  let metadata = std::fs::symlink_metadata(policy)
+    .map_err(|error| format!("{}: {error}", policy.display()))?;
+  if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+    std::fs::remove_file(policy)
+      .map_err(|error| format!("{}: {error}", policy.display()))?;
+    return Err(format!("{} is not a regular file", policy.display()));
   }
   std::fs::remove_file(policy)
     .map_err(|error| format!("{}: {error}", policy.display()))
@@ -1835,6 +1840,7 @@ const ODEN_CAPSEC_REV2_ENVELOPE_READ_CAP: u64 = 8 * 1024 * 1024;
 )]
 fn oden_capsec_consume_rev2_snapshot(
   snapshot: &std::ffi::OsStr,
+  build_identity: &OdenRev2CompiledBuildIdentity,
 ) -> Result<OdenRev2LoadedPolicyContext, String> {
   let (control_root, key) = {
     let channel = oden_capsec_audit_channel().lock();
@@ -1860,6 +1866,8 @@ fn oden_capsec_consume_rev2_snapshot(
   if !symlink_metadata.file_type().is_file()
     || symlink_metadata.file_type().is_symlink()
   {
+    std::fs::remove_file(snapshot)
+      .map_err(|_| "OD-CAP-REV2-SNAPSHOT-UNLINK".to_string())?;
     return Err("OD-CAP-REV2-SNAPSHOT-FILE-TYPE".to_string());
   }
 
@@ -1870,34 +1878,48 @@ fn oden_capsec_consume_rev2_snapshot(
     use std::os::unix::fs::OpenOptionsExt;
     options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
   }
-  let file = options
-    .open(snapshot)
-    .map_err(|_| "OD-CAP-REV2-SNAPSHOT-OPEN".to_string())?;
-  let metadata = file
-    .metadata()
-    .map_err(|_| "OD-CAP-REV2-SNAPSHOT-METADATA".to_string())?;
-  if !metadata.is_file() {
-    return Err("OD-CAP-REV2-SNAPSHOT-BOUNDS".to_string());
-  }
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::MetadataExt;
-    if symlink_metadata.dev() != metadata.dev()
-      || symlink_metadata.ino() != metadata.ino()
-    {
-      return Err("OD-CAP-REV2-SNAPSHOT-IDENTITY".to_string());
+  let file = match options.open(snapshot) {
+    Ok(file) => file,
+    Err(_) => {
+      std::fs::remove_file(snapshot)
+        .map_err(|_| "OD-CAP-REV2-SNAPSHOT-UNLINK".to_string())?;
+      return Err("OD-CAP-REV2-SNAPSHOT-OPEN".to_string());
     }
-  }
-  #[cfg(not(unix))]
-  {
-    return Err("OD-CAP-REV2-SNAPSHOT-PLATFORM".to_string());
-  }
+  };
+  let metadata = match file.metadata() {
+    Ok(metadata) => metadata,
+    Err(_) => {
+      std::fs::remove_file(snapshot)
+        .map_err(|_| "OD-CAP-REV2-SNAPSHOT-UNLINK".to_string())?;
+      return Err("OD-CAP-REV2-SNAPSHOT-METADATA".to_string());
+    }
+  };
+  let opened_identity = if !metadata.is_file() {
+    Err("OD-CAP-REV2-SNAPSHOT-BOUNDS".to_string())
+  } else {
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::MetadataExt;
+      if symlink_metadata.dev() != metadata.dev()
+        || symlink_metadata.ino() != metadata.ino()
+      {
+        Err("OD-CAP-REV2-SNAPSHOT-IDENTITY".to_string())
+      } else {
+        Ok(())
+      }
+    }
+    #[cfg(not(unix))]
+    {
+      Err("OD-CAP-REV2-SNAPSHOT-PLATFORM".to_string())
+    }
+  };
   // The authenticated control directory is parent-owned and private. Unlink
   // immediately after the no-follow open and identity comparison, so every
   // subsequent bounds/read/parse/authentication failure still consumes the
   // one-shot pathname while this retained descriptor supplies the exact bytes.
   std::fs::remove_file(snapshot)
     .map_err(|_| "OD-CAP-REV2-SNAPSHOT-UNLINK".to_string())?;
+  opened_identity?;
   if metadata.len() > ODEN_CAPSEC_REV2_ENVELOPE_READ_CAP {
     return Err("OD-CAP-REV2-SNAPSHOT-BOUNDS".to_string());
   }
@@ -1911,7 +1933,7 @@ fn oden_capsec_consume_rev2_snapshot(
   if bytes.len() > ODEN_CAPSEC_REV2_ENVELOPE_READ_CAP as usize {
     return Err("OD-CAP-REV2-SNAPSHOT-BOUNDS".to_string());
   }
-  oden_rev2_policy::verify_authenticated_envelope(&bytes, &key)
+  oden_rev2_policy::verify_authenticated_envelope(&bytes, &key, build_identity)
 }
 
 #[allow(
@@ -3001,9 +3023,10 @@ fn oden_capsec_consume_audit_key(path: &Path) -> OdenAuditKeyHandoff {
     Err(_) => return OdenAuditKeyHandoff::Broken,
   };
   // Reject non-regular objects before open so a FIFO/device can never make
-  // bootstrap block or read external bytes. A symlink is left untouched; the
-  // engine neither follows it nor removes its target.
+  // bootstrap block or read external bytes. Consume the presented directory
+  // entry without following it; removing a symlink never touches its target.
   if !expected.file_type().is_file() || expected.file_type().is_symlink() {
+    let _ = std::fs::remove_file(path);
     return OdenAuditKeyHandoff::Broken;
   }
 
@@ -3016,13 +3039,20 @@ fn oden_capsec_consume_audit_key(path: &Path) -> OdenAuditKeyHandoff {
   }
   let mut file = match options.open(path) {
     Ok(file) => file,
-    Err(_) => return OdenAuditKeyHandoff::Broken,
+    Err(_) => {
+      let _ = std::fs::remove_file(path);
+      return OdenAuditKeyHandoff::Broken;
+    }
   };
   let opened = match file.metadata() {
     Ok(metadata) => metadata,
-    Err(_) => return OdenAuditKeyHandoff::Broken,
+    Err(_) => {
+      let _ = std::fs::remove_file(path);
+      return OdenAuditKeyHandoff::Broken;
+    }
   };
   if !opened.is_file() || !oden_audit_key_same_identity(&expected, &opened) {
+    let _ = std::fs::remove_file(path);
     return OdenAuditKeyHandoff::Broken;
   }
 
@@ -3037,6 +3067,7 @@ fn oden_capsec_consume_audit_key(path: &Path) -> OdenAuditKeyHandoff {
     || current.file_type().is_symlink()
     || !oden_audit_key_same_identity(&opened, &current)
   {
+    let _ = std::fs::remove_file(path);
     return OdenAuditKeyHandoff::Broken;
   }
   if std::fs::remove_file(path).is_err() {
@@ -11030,7 +11061,7 @@ mod tests {
     clippy::disallowed_methods,
     reason = "isolated security test proves a one-shot key symlink is neither followed nor consumed"
   )]
-  fn oden_audit_key_symlink_is_refused_without_touching_target() {
+  fn oden_audit_key_symlink_is_consumed_without_touching_target() {
     use std::os::unix::fs::symlink;
 
     let dir = std::env::temp_dir().join(format!(
@@ -11048,13 +11079,45 @@ mod tests {
       oden_capsec_consume_audit_key(&path),
       OdenAuditKeyHandoff::Broken
     ));
-    assert!(
-      std::fs::symlink_metadata(&path)
-        .unwrap()
-        .file_type()
-        .is_symlink()
+    assert_eq!(
+      std::fs::symlink_metadata(&path).unwrap_err().kind(),
+      std::io::ErrorKind::NotFound
     );
     assert_eq!(std::fs::read(&target).unwrap(), vec![11; 32]);
+    std::fs::remove_dir_all(dir).unwrap();
+  }
+
+  #[cfg(unix)]
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "isolated security test constructs a rejected one-shot Rev1 policy symlink directly"
+  )]
+  fn oden_parent_policy_symlink_is_consumed_without_touching_target() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!(
+      "oden-parent-policy-symlink-{}-{}",
+      std::process::id(),
+      rand::random::<u64>()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let target = dir.join("target.json");
+    let path = dir.join("policy.json");
+    std::fs::write(&target, b"{}\n").unwrap();
+    symlink(&target, &path).unwrap();
+    let control_root = std::fs::canonicalize(&dir).unwrap();
+
+    assert!(
+      oden_capsec_consume_parent_policy(path.as_os_str(), &control_root)
+        .unwrap_err()
+        .contains("is not a regular file")
+    );
+    assert_eq!(
+      std::fs::symlink_metadata(&path).unwrap_err().kind(),
+      std::io::ErrorKind::NotFound
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"{}\n");
     std::fs::remove_dir_all(dir).unwrap();
   }
 

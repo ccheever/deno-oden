@@ -412,9 +412,314 @@ fn emit_dts_rerun_if_changed() {
   }
 }
 
+fn emit_oden_rev2_build_identity() {
+  use sha2::Digest;
+
+  let manifest_dir = std::path::PathBuf::from(
+    env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+  );
+  let workspace = manifest_dir
+    .parent()
+    .expect("deno CLI crate is inside its workspace")
+    .to_path_buf();
+  let out_dir =
+    std::path::PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+  let build_profile = out_dir
+    .ancestors()
+    .nth(3)
+    .and_then(|path| path.file_name())
+    .and_then(|name| name.to_str())
+    .filter(|name| !name.is_empty())
+    .expect("Cargo OUT_DIR contains the exact selected profile directory")
+    .to_string();
+  let manifest = std::fs::read_to_string(manifest_dir.join("Cargo.toml"))
+    .expect("read CLI Cargo.toml");
+  let mut declared_features = Vec::new();
+  let mut in_features = false;
+  for raw in manifest.lines() {
+    let line = raw.trim();
+    if line == "[features]" {
+      in_features = true;
+      continue;
+    }
+    if in_features && line.starts_with('[') {
+      break;
+    }
+    if !in_features || line.is_empty() || line.starts_with('#') {
+      continue;
+    }
+    if let Some((name, _)) = line.split_once('=') {
+      declared_features.push(name.trim().trim_matches('"').to_string());
+    }
+  }
+  let mut cargo_features = declared_features
+    .into_iter()
+    .filter(|feature| {
+      let variable = format!(
+        "CARGO_FEATURE_{}",
+        feature.to_ascii_uppercase().replace('-', "_")
+      );
+      env::var_os(variable).is_some()
+    })
+    .collect::<Vec<_>>();
+  cargo_features.sort();
+  cargo_features.dedup();
+  if cargo_features.is_empty() {
+    panic!("Rev2 build identity cannot omit the root Cargo feature set");
+  }
+
+  let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+  let target = env::var("TARGET").expect("TARGET");
+  let final_profile_cfg = if build_profile == "release" {
+    let workspace_manifest_path = workspace.join("Cargo.toml");
+    let workspace_manifest = std::fs::read_to_string(&workspace_manifest_path)
+      .expect("read workspace Cargo.toml");
+    println!(
+      "cargo:rerun-if-changed={}",
+      workspace_manifest_path.display()
+    );
+    for variable in [
+      "CARGO_PROFILE_RELEASE_PANIC",
+      "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS",
+    ] {
+      println!("cargo:rerun-if-env-changed={variable}");
+    }
+    let profile_value = |key: &str| {
+      let mut in_release = false;
+      for raw in workspace_manifest.lines() {
+        let line = raw.trim();
+        if line == "[profile.release]" {
+          in_release = true;
+          continue;
+        }
+        if in_release && line.starts_with('[') {
+          break;
+        }
+        if !in_release || line.is_empty() || line.starts_with('#') {
+          continue;
+        }
+        if let Some((name, value)) = line.split_once('=')
+          && name.trim() == key
+        {
+          return Some(
+            value
+              .split('#')
+              .next()
+              .unwrap_or_default()
+              .trim()
+              .trim_matches(['\'', '"'])
+              .to_string(),
+          );
+        }
+      }
+      None
+    };
+    let panic_strategy = env::var("CARGO_PROFILE_RELEASE_PANIC")
+      .ok()
+      .or_else(|| profile_value("panic"))
+      .unwrap_or_else(|| "unwind".to_string());
+    if !matches!(panic_strategy.as_str(), "abort" | "unwind") {
+      panic!("unsupported release panic strategy {panic_strategy:?}");
+    }
+    let debug_assertions = env::var("CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS")
+      .ok()
+      .or_else(|| profile_value("debug-assertions"))
+      .unwrap_or_else(|| "false".to_string());
+    let debug_assertions = match debug_assertions.as_str() {
+      "true" => true,
+      "false" => false,
+      value => panic!("unsupported release debug-assertions value {value:?}"),
+    };
+    Some((panic_strategy, debug_assertions))
+  } else {
+    None
+  };
+  let marker_panic_strategy = final_profile_cfg
+    .as_ref()
+    .map(|(strategy, _)| strategy.clone())
+    .unwrap_or_else(|| env::var("CARGO_CFG_PANIC").expect("CARGO_CFG_PANIC"));
+  let marker_debug_assertions = final_profile_cfg
+    .as_ref()
+    .map(|(_, enabled)| *enabled)
+    .unwrap_or_else(|| env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some());
+
+  let mut cfg_rows =
+    if let Some((panic_strategy, debug_assertions)) = &final_profile_cfg {
+      // CARGO_CFG_PANIC describes the build script itself (which always
+      // unwinds), not the final release binary. Ask the actual compiler for the
+      // target cfg after the selected profile flags and Cargo's complete encoded
+      // rustflags in their real final order. An ambient panic/debug override,
+      // direct `--cfg feature=...`, or unknown custom cfg therefore changes the
+      // embedded digest and cannot impersonate the reviewed release row.
+      println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+      println!("cargo:rerun-if-env-changed=RUSTFLAGS");
+      let mut command = std::process::Command::new(&rustc);
+      command.args([
+        "--print",
+        "cfg",
+        "--target",
+        &target,
+        "-C",
+        &format!("panic={panic_strategy}"),
+        "-C",
+        if *debug_assertions {
+          "debug-assertions=yes"
+        } else {
+          "debug-assertions=no"
+        },
+      ]);
+      if let Some(encoded) = env::var_os("CARGO_ENCODED_RUSTFLAGS") {
+        for flag in encoded.to_string_lossy().split('\u{1f}') {
+          if !flag.is_empty() {
+            command.arg(flag);
+          }
+        }
+      }
+      let output = command
+        .output()
+        .expect("run rustc --print cfg for Rev2 build identity");
+      if !output.status.success() {
+        panic!(
+          "rustc --print cfg failed for Rev2 build identity: {}",
+          String::from_utf8_lossy(&output.stderr)
+        );
+      }
+      String::from_utf8(output.stdout)
+        .expect("rustc --print cfg output is UTF-8")
+        .replace("\r\n", "\n")
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+    } else {
+      let mut rows = Vec::new();
+      for (key, value) in env::vars() {
+        let Some(name) = key.strip_prefix("CARGO_CFG_") else {
+          continue;
+        };
+        if name == "FEATURE" {
+          continue;
+        }
+        let name = name.to_ascii_lowercase();
+        if value.is_empty() {
+          if matches!(name.as_str(), "target_abi" | "target_env") {
+            rows.push(format!("{name}=\"\""));
+          } else {
+            rows.push(name);
+          }
+        } else {
+          for item in value.split(',') {
+            rows.push(format!(
+              "{name}=\"{}\"",
+              item.replace('\\', "\\\\").replace('"', "\\\"")
+            ));
+          }
+        }
+      }
+      rows
+    };
+  cfg_rows.sort();
+  cfg_rows.dedup();
+  let cfg_image = format!("{}\n", cfg_rows.join("\n"));
+  std::fs::write(out_dir.join("oden_rev2_build_cfg.txt"), &cfg_image)
+    .expect("write Rev2 build cfg witness");
+  let rust_cfg_digest =
+    format!("sha256:{:x}", sha2::Sha256::digest(cfg_image.as_bytes()));
+
+  let rustc_output = std::process::Command::new(&rustc)
+    .arg("--version")
+    .output()
+    .expect("run rustc --version for Rev2 build identity");
+  if !rustc_output.status.success() {
+    panic!("rustc --version failed for Rev2 build identity");
+  }
+  let rust_toolchain = String::from_utf8(rustc_output.stdout)
+    .expect("rustc --version is UTF-8")
+    .split_whitespace()
+    .nth(1)
+    .expect("rustc --version includes a version")
+    .to_string();
+
+  let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+  let graph_output = std::process::Command::new(cargo)
+    .current_dir(&workspace)
+    .args([
+      "tree",
+      "--locked",
+      "-p",
+      "deno",
+      "--target",
+      &target,
+      "-e",
+      "normal,build,features",
+      "--prefix",
+      "depth",
+      "--charset",
+      "ascii",
+      "--format",
+      "{p} {f}",
+      "--no-default-features",
+      "--features",
+      &cargo_features.join(","),
+    ])
+    .output()
+    .expect("run cargo tree for Rev2 build identity");
+  if !graph_output.status.success() {
+    panic!(
+      "cargo tree failed for Rev2 build identity: {}",
+      String::from_utf8_lossy(&graph_output.stderr)
+    );
+  }
+  let workspace_text = workspace.to_string_lossy().replace('\\', "/");
+  let graph = String::from_utf8(graph_output.stdout)
+    .expect("cargo tree output is UTF-8")
+    .replace('\\', "/")
+    .replace(&workspace_text, "$FORK")
+    .replace("\r\n", "\n");
+  let graph_digest =
+    format!("sha256:{:x}", sha2::Sha256::digest(graph.as_bytes()));
+
+  println!("cargo:rustc-env=ODEN_REV2_BUILD_TARGET={target}");
+  println!("cargo:rustc-env=ODEN_REV2_BUILD_RUST={rust_toolchain}");
+  println!(
+    "cargo:rustc-env=ODEN_REV2_BUILD_CARGO_FEATURES={}",
+    cargo_features.join(",")
+  );
+  println!("cargo:rustc-env=ODEN_REV2_BUILD_RUST_CFG_DIGEST={rust_cfg_digest}");
+  println!("cargo:rustc-env=ODEN_REV2_BUILD_CARGO_GRAPH_DIGEST={graph_digest}");
+  println!("cargo:rustc-env=ODEN_REV2_BUILD_PROFILE={}", build_profile);
+  println!("cargo:rustc-env=ODEN_REV2_BUILD_PANIC={marker_panic_strategy}");
+  println!(
+    "cargo:rustc-env=ODEN_REV2_BUILD_DEBUG_ASSERTIONS={marker_debug_assertions}"
+  );
+}
+
 fn main() {
   // Skip building from docs.rs.
   if env::var_os("DOCS_RS").is_some() {
+    // cli/lib.rs embeds the marker unconditionally. docs.rs never ships or
+    // executes this binary, so provide an explicitly unverifiable identity
+    // before taking the historical fast path. If such an artifact is run with
+    // a Rev2 handoff anyway, every generated release row rejects it.
+    let unavailable_digest = format!("sha256:{}", "0".repeat(64));
+    println!(
+      "cargo:rustc-env=ODEN_REV2_BUILD_TARGET={}",
+      env::var("TARGET").expect("TARGET")
+    );
+    println!("cargo:rustc-env=ODEN_REV2_BUILD_RUST=docs.rs-unverifiable");
+    println!(
+      "cargo:rustc-env=ODEN_REV2_BUILD_CARGO_FEATURES=docs.rs-unverifiable"
+    );
+    println!(
+      "cargo:rustc-env=ODEN_REV2_BUILD_RUST_CFG_DIGEST={unavailable_digest}"
+    );
+    println!(
+      "cargo:rustc-env=ODEN_REV2_BUILD_CARGO_GRAPH_DIGEST={unavailable_digest}"
+    );
+    println!("cargo:rustc-env=ODEN_REV2_BUILD_PROFILE=docs.rs");
+    println!("cargo:rustc-env=ODEN_REV2_BUILD_PANIC=docs.rs-unverifiable");
+    println!(
+      "cargo:rustc-env=ODEN_REV2_BUILD_DEBUG_ASSERTIONS=docs.rs-unverifiable"
+    );
     return;
   }
 
@@ -455,6 +760,7 @@ fn main() {
 
   println!("cargo:rustc-env=TARGET={}", env::var("TARGET").unwrap());
   println!("cargo:rustc-env=PROFILE={}", env::var("PROFILE").unwrap());
+  emit_oden_rev2_build_identity();
 
   emit_laufey_version();
 

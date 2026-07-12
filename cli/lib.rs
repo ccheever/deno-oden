@@ -827,7 +827,24 @@ pub fn main() {
   // This scrubs JS reads and ordinary child inheritance; OS initial-environment
   // snapshots may retain stale paths, but never the key or consumed policy.
   let oden_capsec_armed =
-    deno_runtime::deno_permissions::oden_capsec_init_control_plane();
+    deno_runtime::deno_permissions::oden_capsec_init_control_plane(
+      deno_runtime::deno_permissions::OdenRev2CompiledBuildIdentity {
+        target: env!("ODEN_REV2_BUILD_TARGET"),
+        rust_toolchain: env!("ODEN_REV2_BUILD_RUST"),
+        cargo_features: env!("ODEN_REV2_BUILD_CARGO_FEATURES"),
+        rust_cfg_digest: env!("ODEN_REV2_BUILD_RUST_CFG_DIGEST"),
+        cargo_feature_graph_digest: env!("ODEN_REV2_BUILD_CARGO_GRAPH_DIGEST"),
+        build_profile: env!("ODEN_REV2_BUILD_PROFILE"),
+        marker_panic_strategy: env!("ODEN_REV2_BUILD_PANIC"),
+        marker_debug_assertions: env!("ODEN_REV2_BUILD_DEBUG_ASSERTIONS"),
+        actual_panic_strategy: if cfg!(panic = "abort") {
+          "abort"
+        } else {
+          "unwind"
+        },
+        actual_debug_assertions: cfg!(debug_assertions),
+      },
+    );
   deno_core::error::oden_capsec_set_armed(oden_capsec_armed);
   if let Some(exit_code) =
     deno_runtime::deno_permissions::oden_capsec_rev2_bootstrap_exit_code()

@@ -47,6 +47,20 @@ const CLASSIFIER_INPUT_DOMAIN: &str = "oden:capsec:classifier-input:2";
 const MAX_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BINDING_ROWS: usize = 16_384;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OdenRev2CompiledBuildIdentity {
+  pub target: &'static str,
+  pub rust_toolchain: &'static str,
+  pub cargo_features: &'static str,
+  pub rust_cfg_digest: &'static str,
+  pub cargo_feature_graph_digest: &'static str,
+  pub build_profile: &'static str,
+  pub marker_panic_strategy: &'static str,
+  pub marker_debug_assertions: &'static str,
+  pub actual_panic_strategy: &'static str,
+  pub actual_debug_assertions: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OdenRev2LoadState {
   Armable,
@@ -195,6 +209,7 @@ struct TargetStatus<'a> {
   absent: usize,
   unsupported: usize,
   advertised: bool,
+  hermetic: bool,
 }
 
 #[derive(Clone)]
@@ -222,7 +237,47 @@ struct PolicyFacts {
 pub fn verify_authenticated_envelope(
   bytes: &[u8],
   one_shot_key: &[u8],
+  build_identity: &OdenRev2CompiledBuildIdentity,
 ) -> Result<OdenRev2LoadedPolicyContext, String> {
+  let snapshot = parse_authenticated_snapshot(bytes, one_shot_key)?;
+  let target = snapshot
+    .get("engineTarget")
+    .and_then(Value::as_str)
+    .ok_or_else(|| "OD-CAP-REV2-TARGET-MISSING".to_string())?;
+  if Some(target) != compiled_target() {
+    return Err("OD-CAP-REV2-TARGET-BINARY-MISMATCH".to_string());
+  }
+  if Some(build_identity.target) != compiled_target() {
+    return Err("OD-CAP-REV2-FEATURE-BINARY-MISMATCH".to_string());
+  }
+  let embedded = REV2_TARGET_STATUS
+    .iter()
+    .find(|status| status.target == target)
+    .ok_or_else(|| "OD-CAP-REV2-TARGET-UNKNOWN".to_string())?;
+  validate_compiled_build_identity(embedded, build_identity)?;
+  verify_snapshot(
+    &snapshot,
+    TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: embedded.profile_claim,
+      // A production report is a separately generated, release-bound input;
+      // none is embedded while every candidate target remains unsupported.
+      conformance_report_digest: None,
+      enforced: embedded.enforced,
+      closed: embedded.closed,
+      absent: embedded.absent,
+      unsupported: embedded.unsupported,
+      advertised: REV2_ADVERTISED_TARGETS.contains(&embedded.target),
+      hermetic: false,
+    },
+  )
+}
+
+fn parse_authenticated_snapshot(
+  bytes: &[u8],
+  one_shot_key: &[u8],
+) -> Result<Value, String> {
   if bytes.is_empty() || bytes.len() > MAX_ENVELOPE_BYTES {
     return Err("OD-CAP-REV2-ENVELOPE-BOUNDS".to_string());
   }
@@ -251,34 +306,29 @@ pub fn verify_authenticated_envelope(
   )?;
   require_string(mac, "algorithm", "hmac-sha256")?;
   verify_mac(snapshot, mac, one_shot_key)?;
+  Ok(snapshot.clone())
+}
 
-  let target = snapshot
-    .get("engineTarget")
-    .and_then(Value::as_str)
-    .ok_or_else(|| "OD-CAP-REV2-TARGET-MISSING".to_string())?;
-  if Some(target) != compiled_target() {
-    return Err("OD-CAP-REV2-TARGET-BINARY-MISMATCH".to_string());
+fn validate_compiled_build_identity(
+  expected: &crate::rev2_registry_generated::Rev2TargetStatus,
+  actual: &OdenRev2CompiledBuildIdentity,
+) -> Result<(), String> {
+  if actual.target != expected.target
+    || actual.rust_toolchain != expected.rust_toolchain
+    || actual.cargo_features != expected.cargo_features
+    || actual.rust_cfg_digest != expected.rust_cfg_digest
+    || actual.cargo_feature_graph_digest != expected.cargo_feature_graph_digest
+    || actual.build_profile != expected.build_profile
+    || actual.actual_panic_strategy != actual.marker_panic_strategy
+    || match actual.marker_debug_assertions {
+      "true" => !actual.actual_debug_assertions,
+      "false" => actual.actual_debug_assertions,
+      _ => true,
+    }
+  {
+    return Err("OD-CAP-REV2-FEATURE-BINARY-MISMATCH".to_string());
   }
-  let embedded = REV2_TARGET_STATUS
-    .iter()
-    .find(|status| status.target == target)
-    .ok_or_else(|| "OD-CAP-REV2-TARGET-UNKNOWN".to_string())?;
-  verify_snapshot(
-    snapshot,
-    TargetStatus {
-      target: embedded.target,
-      feature_set: embedded.feature_set,
-      profile_claim: embedded.profile_claim,
-      // A production report is a separately generated, release-bound input;
-      // none is embedded while every candidate target remains unsupported.
-      conformance_report_digest: None,
-      enforced: embedded.enforced,
-      closed: embedded.closed,
-      absent: embedded.absent,
-      unsupported: embedded.unsupported,
-      advertised: REV2_ADVERTISED_TARGETS.contains(&embedded.target),
-    },
-  )
+  Ok(())
 }
 
 fn compiled_target() -> Option<&'static str> {
@@ -497,7 +547,9 @@ fn verify_snapshot(
   if cell_total == 0 {
     return Err("OD-CAP-REV2-TARGET-COUNT".to_string());
   }
-  let expected_claim = if target_status.advertised {
+  let expected_claim = if target_status.hermetic {
+    "test-conformant"
+  } else if target_status.advertised {
     "advertised"
   } else {
     "not-advertised"
@@ -512,7 +564,7 @@ fn verify_snapshot(
       target_status.unsupported
     ));
   }
-  if !target_status.advertised {
+  if !target_status.hermetic && !target_status.advertised {
     blockers.push("target-not-advertised".to_string());
   }
   let report = snapshot_object.get("conformanceReportDigest");
@@ -537,11 +589,12 @@ fn verify_snapshot(
   }
   blockers.sort_unstable();
   blockers.dedup();
-  let state = if conformant && target_status.advertised {
-    OdenRev2LoadState::Armable
-  } else {
-    OdenRev2LoadState::VerifiedUnarmed
-  };
+  let state =
+    if conformant && (target_status.hermetic || target_status.advertised) {
+      OdenRev2LoadState::Armable
+    } else {
+      OdenRev2LoadState::VerifiedUnarmed
+    };
   Ok(OdenRev2LoadedPolicyContext {
     state,
     target: target_status.target.to_string(),
@@ -1011,6 +1064,7 @@ fn validate_executable_bindings(
         .ok_or_else(|| "OD-CAP-REV2-EXECUTABLE-OBJECT".to_string())?,
       false,
     )?;
+    verify_opened_executable_content(&file, content)?;
     retained.push(OdenRev2RetainedObject {
       binding_id: binding_id.to_string(),
       source_id: source_id.to_string(),
@@ -1650,6 +1704,66 @@ fn validate_and_open_bound_object(
   Ok(file)
 }
 
+#[cfg(unix)]
+fn verify_opened_executable_content(
+  file: &File,
+  expected: &str,
+) -> Result<(), String> {
+  use std::os::unix::fs::FileExt;
+  use std::os::unix::fs::MetadataExt;
+
+  let before = file
+    .metadata()
+    .map_err(|_| "OD-CAP-REV2-EXECUTABLE-CONTENT-METADATA".to_string())?;
+  if !before.is_file() {
+    return Err("OD-CAP-REV2-EXECUTABLE-CONTENT-TYPE".to_string());
+  }
+  let mut digest = Sha256::new();
+  let mut buffer = [0_u8; 64 * 1024];
+  let mut offset = 0_u64;
+  loop {
+    let read = match file.read_at(&mut buffer, offset) {
+      Ok(read) => read,
+      Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+      Err(_) => return Err("OD-CAP-REV2-EXECUTABLE-CONTENT-READ".to_string()),
+    };
+    if read == 0 {
+      break;
+    }
+    digest.update(&buffer[..read]);
+    offset = offset
+      .checked_add(read as u64)
+      .ok_or_else(|| "OD-CAP-REV2-EXECUTABLE-CONTENT-BOUNDS".to_string())?;
+  }
+  let after = file
+    .metadata()
+    .map_err(|_| "OD-CAP-REV2-EXECUTABLE-CONTENT-METADATA".to_string())?;
+  if before.dev() != after.dev()
+    || before.ino() != after.ino()
+    || before.len() != after.len()
+    || before.mtime() != after.mtime()
+    || before.mtime_nsec() != after.mtime_nsec()
+    || before.ctime() != after.ctime()
+    || before.ctime_nsec() != after.ctime_nsec()
+    || offset != after.len()
+  {
+    return Err("OD-CAP-REV2-EXECUTABLE-CONTENT-RACED".to_string());
+  }
+  let actual = format!("sha256-{}", URL_SAFE_NO_PAD.encode(digest.finalize()));
+  if actual != expected {
+    return Err("OD-CAP-REV2-EXECUTABLE-CONTENT-DIGEST".to_string());
+  }
+  Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_opened_executable_content(
+  _file: &File,
+  _expected: &str,
+) -> Result<(), String> {
+  Err("OD-CAP-REV2-EXECUTABLE-CONTENT-PLATFORM".to_string())
+}
+
 fn parse_tagged_path(value: &Value) -> Result<PathBuf, String> {
   let tagged = exact_object(
     value,
@@ -1820,6 +1934,29 @@ mod tests {
       .expect("compiled target is present in the generated registry")
   }
 
+  fn test_build_identity() -> OdenRev2CompiledBuildIdentity {
+    let target = embedded_compiled_target();
+    OdenRev2CompiledBuildIdentity {
+      target: target.target,
+      rust_toolchain: target.rust_toolchain,
+      cargo_features: target.cargo_features,
+      rust_cfg_digest: target.rust_cfg_digest,
+      cargo_feature_graph_digest: target.cargo_feature_graph_digest,
+      build_profile: target.build_profile,
+      marker_panic_strategy: "abort",
+      marker_debug_assertions: "false",
+      actual_panic_strategy: "abort",
+      actual_debug_assertions: false,
+    }
+  }
+
+  fn verify_authenticated_envelope(
+    bytes: &[u8],
+    key: &[u8],
+  ) -> Result<OdenRev2LoadedPolicyContext, String> {
+    super::verify_authenticated_envelope(bytes, key, &test_build_identity())
+  }
+
   fn candidate_snapshot(
     target: TargetStatus<'_>,
     report: Option<&str>,
@@ -1948,6 +2085,91 @@ mod tests {
   }
 
   #[cfg(unix)]
+  fn candidate_with_executable_policy(
+    target: TargetStatus<'_>,
+    object_path: &std::path::Path,
+    interpreter_path: &std::path::Path,
+  ) -> Value {
+    let principal = PrincipalRef {
+      kind: PrincipalKind::Package,
+      key: "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+    };
+    let object_digest = file_sha256_digest(object_path);
+    let interpreter_digest = file_sha256_digest(interpreter_path);
+    let selector = Rev2Core::embedded()
+      .unwrap()
+      .normalize_selector(
+        &AuthoritySelectorInput {
+          identity: EngineIdentity::embedded(),
+          principal: Some(principal.clone()),
+          capability: "process:spawn".to_string(),
+          resource: serde_json::json!({
+            "interpreterIdentity": {
+              "kind": "verified-content",
+              "value": interpreter_digest,
+            },
+            "objectIdentity": {
+              "kind": "verified-content",
+              "value": object_digest,
+            },
+            "path": { "encoding": "unicode", "value": "$PACKAGE/bin/worker" },
+          }),
+        },
+        SelectorPolarity::Positive,
+      )
+      .unwrap();
+    let mut snapshot = candidate_snapshot(target, None);
+    snapshot["canonicalPolicy"]["principals"] = serde_json::json!([{
+      "principal": principal.clone(),
+      "binding": {
+        "resolverId": "fixture-lock-resolver/2",
+        "bindingDigest": REV2_VOCAB_DIGEST,
+      },
+      "floor": [{ "sourceId": "floor:spawn", "selector": selector }],
+      "escalationCeiling": [],
+      "denials": [],
+    }]);
+    snapshot["executableBindings"] = serde_json::json!([
+      {
+        "sourceId": "floor:spawn",
+        "role": "interpreter",
+        "canonicalContentIdentity": interpreter_digest,
+        "bindingId": "executable:interpreter",
+        "principal": principal.clone(),
+        "canonicalPath": {
+          "encoding": "unicode",
+          "value": interpreter_path.to_str().unwrap(),
+        },
+        "objectIdentity": platform_identity(interpreter_path),
+        "provenanceDigest": REV2_REGISTRY_DIGEST,
+      },
+      {
+        "sourceId": "floor:spawn",
+        "role": "object",
+        "canonicalContentIdentity": object_digest,
+        "bindingId": "executable:object",
+        "principal": principal,
+        "canonicalPath": {
+          "encoding": "unicode",
+          "value": object_path.to_str().unwrap(),
+        },
+        "objectIdentity": platform_identity(object_path),
+        "provenanceDigest": REV2_REGISTRY_DIGEST,
+      },
+    ]);
+    refresh_digests(&mut snapshot);
+    snapshot
+  }
+
+  #[cfg(unix)]
+  fn file_sha256_digest(path: &std::path::Path) -> String {
+    format!(
+      "sha256-{}",
+      URL_SAFE_NO_PAD.encode(Sha256::digest(std::fs::read(path).unwrap()))
+    )
+  }
+
+  #[cfg(unix)]
   fn platform_identity(path: &std::path::Path) -> Value {
     use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::metadata(path).unwrap();
@@ -1972,6 +2194,64 @@ mod tests {
   }
 
   #[test]
+  fn compiled_build_identity_must_match_every_generated_feature_field() {
+    let expected = embedded_compiled_target();
+    let exact = test_build_identity();
+    assert!(validate_compiled_build_identity(expected, &exact).is_ok());
+    for actual in [
+      OdenRev2CompiledBuildIdentity {
+        build_profile: "debug",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        cargo_features: "__vendored_zlib_ng,default,hmr,upgrade",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        cargo_features: "__vendored_zlib_ng,upgrade",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        rust_cfg_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        cargo_feature_graph_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        rust_toolchain: "0.0.0",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        target: "unknown-target",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        actual_panic_strategy: "unwind",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        actual_debug_assertions: true,
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        marker_panic_strategy: "unwind",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        marker_debug_assertions: "not-a-boolean",
+        ..exact
+      },
+    ] {
+      assert_eq!(
+        validate_compiled_build_identity(expected, &actual),
+        Err("OD-CAP-REV2-FEATURE-BINARY-MISMATCH".to_string())
+      );
+    }
+  }
+
+  #[test]
   fn production_candidate_is_verified_but_never_armed_or_advertised() {
     let key = [9_u8; 32];
     let embedded = embedded_compiled_target();
@@ -1985,6 +2265,7 @@ mod tests {
       absent: embedded.absent,
       unsupported: embedded.unsupported,
       advertised: false,
+      hermetic: false,
     };
     let snapshot = candidate_snapshot(target, None);
     let context =
@@ -2025,6 +2306,7 @@ mod tests {
       absent: embedded.absent,
       unsupported: embedded.unsupported,
       advertised: false,
+      hermetic: false,
     };
     let mut encoded = envelope(candidate_snapshot(target, None), &key);
     let index = encoded
@@ -2061,6 +2343,7 @@ mod tests {
       absent: embedded.absent,
       unsupported: embedded.unsupported,
       advertised: false,
+      hermetic: false,
     };
     let snapshot = candidate_with_env_policy(target);
     verify_authenticated_envelope(&envelope(snapshot.clone(), &key), &key)
@@ -2139,6 +2422,7 @@ mod tests {
       absent: embedded.absent,
       unsupported: embedded.unsupported,
       advertised: false,
+      hermetic: false,
     };
     let principal = PrincipalRef {
       kind: PrincipalKind::Package,
@@ -2223,6 +2507,63 @@ mod tests {
     std::fs::remove_dir(root).unwrap();
   }
 
+  #[cfg(unix)]
+  #[test]
+  fn executable_bindings_hash_opened_bytes_and_retain_exact_objects() {
+    use std::os::unix::fs::MetadataExt;
+
+    let key = [17_u8; 32];
+    let embedded = embedded_compiled_target();
+    let target = TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: embedded.profile_claim,
+      conformance_report_digest: None,
+      enforced: embedded.enforced,
+      closed: embedded.closed,
+      absent: embedded.absent,
+      unsupported: embedded.unsupported,
+      advertised: false,
+      hermetic: false,
+    };
+    let unique = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    let raw = std::env::temp_dir().join(format!(
+      "oden-rev2-executable-{}-{unique}",
+      std::process::id()
+    ));
+    std::fs::create_dir(&raw).unwrap();
+    let object = raw.join("worker.js");
+    let interpreter = raw.join("interpreter");
+    std::fs::write(&object, b"console.log('verified');\n").unwrap();
+    std::fs::write(&interpreter, b"verified interpreter bytes\n").unwrap();
+    let object = std::fs::canonicalize(object).unwrap();
+    let interpreter = std::fs::canonicalize(interpreter).unwrap();
+    let snapshot =
+      candidate_with_executable_policy(target, &object, &interpreter);
+    let context =
+      verify_authenticated_envelope(&envelope(snapshot.clone(), &key), &key)
+        .unwrap();
+    assert_eq!(context.retained_objects().len(), 2);
+    assert!(
+      context
+        .retained_objects()
+        .iter()
+        .any(|object| object.role() == Some("object"))
+    );
+    let inode = std::fs::metadata(&object).unwrap().ino();
+    std::fs::write(&object, b"console.log('mutated');\n").unwrap();
+    assert_eq!(std::fs::metadata(&object).unwrap().ino(), inode);
+    assert!(matches!(
+      verify_authenticated_envelope(&envelope(snapshot, &key), &key),
+      Err(reason) if reason == "OD-CAP-REV2-EXECUTABLE-CONTENT-DIGEST"
+    ));
+    drop(context);
+    std::fs::remove_dir_all(raw).unwrap();
+  }
+
   #[test]
   fn hermetic_conformant_registry_can_arm_without_a_production_override() {
     let embedded = &REV2_TARGET_STATUS[0];
@@ -2230,17 +2571,32 @@ mod tests {
     let target = TargetStatus {
       target: embedded.target,
       feature_set: embedded.feature_set,
-      profile_claim: "advertised",
+      profile_claim: "test-conformant",
       conformance_report_digest: Some(report),
       enforced: 996,
       closed: 0,
       absent: 0,
       unsupported: 0,
-      advertised: true,
+      advertised: false,
+      hermetic: true,
     };
     let snapshot = candidate_snapshot(target, Some(report));
-    let context = verify_snapshot(&snapshot, target).unwrap();
+    let key = [23_u8; 32];
+    let authenticated =
+      parse_authenticated_snapshot(&envelope(snapshot, &key), &key).unwrap();
+    let context = verify_snapshot(&authenticated, target).unwrap();
     assert_eq!(context.state(), OdenRev2LoadState::Armable);
     assert!(context.blockers().is_empty());
+    let evidence = context.evidence();
+    assert_eq!(evidence["verified"], true);
+    assert_eq!(evidence["armable"], true);
+    assert_eq!(evidence["armed"], false);
+    assert_eq!(evidence["conformant"], true);
+    assert_eq!(evidence["advertised"], false);
+    assert_eq!(evidence["conformanceReportDigest"], report);
+    assert_eq!(
+      evidence["blockers"],
+      serde_json::json!(["runtime-protocol-not-installed"])
+    );
   }
 }
