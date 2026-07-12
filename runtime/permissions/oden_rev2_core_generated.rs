@@ -33,6 +33,7 @@ const MAX_OPERATION_COMMITTED_STAGES: usize = 256;
 const MAX_OPERATION_CAPTURED_SOURCE_ENTRIES: usize = 16_384;
 const MAX_OPERATION_NEGATIVE_INVENTORY_ENTRIES: usize = 4_096;
 const MAX_PROVISIONAL_RESOURCE_ENTRIES: usize = 1_024;
+const I_JSON_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -4512,13 +4513,13 @@ fn canonical_row_digest(selector: &CanonicalAuthoritySelector) -> Result<String,
     domain_digest("oden:capsec:canonical-row:2", &row)
 }
 
+// @ref LLP 0019#canonical-policy-artifact [implements] — Digest inputs use
+// strict I-JSON and byte-exact RFC 8785 serialization.
 fn canonicalize_value(value: &Value) -> Result<Value, CoreError> {
     Ok(match value {
         Value::Null | Value::Bool(_) | Value::String(_) => value.clone(),
         Value::Number(number) => {
-            if number.as_f64().is_some_and(|value| !value.is_finite()) {
-                return Err(CoreError::new(REASON_SCHEMA_INVALID, "non-finite JSON number"));
-            }
+            validate_i_json_number(number)?;
             Value::Number(number.clone())
         }
         Value::Array(values) => Value::Array(
@@ -4530,7 +4531,7 @@ fn canonicalize_value(value: &Value) -> Result<Value, CoreError> {
         Value::Object(object) => {
             let mut sorted = Map::new();
             let mut keys: Vec<&String> = object.keys().collect();
-            keys.sort();
+            keys.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
             for key in keys {
                 sorted.insert(key.clone(), canonicalize_value(&object[key])?);
             }
@@ -4539,8 +4540,86 @@ fn canonicalize_value(value: &Value) -> Result<Value, CoreError> {
     })
 }
 
+fn validate_i_json_number(number: &serde_json::Number) -> Result<(), CoreError> {
+    if let Some(value) = number.as_i64() {
+        if value < -I_JSON_SAFE_INTEGER_MAX || value > I_JSON_SAFE_INTEGER_MAX {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "I-JSON integer exceeds the exact IEEE-754 safe range",
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(value) = number.as_u64() {
+        if value > I_JSON_SAFE_INTEGER_MAX as u64 {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "I-JSON integer exceeds the exact IEEE-754 safe range",
+            ));
+        }
+        return Ok(());
+    }
+    if number.as_f64().is_some_and(f64::is_finite) {
+        return Ok(());
+    }
+    Err(CoreError::new(
+        REASON_SCHEMA_INVALID,
+        "non-finite JSON number",
+    ))
+}
+
+fn write_canonical_json(value: &Value, output: &mut String) -> Result<(), CoreError> {
+    match value {
+        Value::Null => output.push_str("null"),
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::Number(number) => {
+            validate_i_json_number(number)?;
+            if let Some(value) = number.as_i64() {
+                output.push_str(&value.to_string());
+            } else if let Some(value) = number.as_u64() {
+                output.push_str(&value.to_string());
+            } else {
+                let value = number.as_f64().ok_or_else(|| {
+                    CoreError::new(REASON_SCHEMA_INVALID, "invalid I-JSON number")
+                })?;
+                output.push_str(ryu_js::Buffer::new().format_finite(value));
+            }
+        }
+        Value::String(value) => {
+            output.push_str(&serde_json::to_string(value).map_err(schema_error)?);
+        }
+        Value::Array(values) => {
+            output.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                write_canonical_json(value, output)?;
+            }
+            output.push(']');
+        }
+        Value::Object(object) => {
+            output.push('{');
+            let mut keys: Vec<&String> = object.keys().collect();
+            keys.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                output.push_str(&serde_json::to_string(key).map_err(schema_error)?);
+                output.push(':');
+                write_canonical_json(&object[key], output)?;
+            }
+            output.push('}');
+        }
+    }
+    Ok(())
+}
+
 pub fn canonical_json(value: &Value) -> Result<String, CoreError> {
-    serde_json::to_string(&canonicalize_value(value)?).map_err(schema_error)
+    let mut output = String::new();
+    write_canonical_json(value, &mut output)?;
+    Ok(output)
 }
 
 pub fn domain_digest(domain: &str, value: &Value) -> Result<String, CoreError> {
@@ -4579,11 +4658,27 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
         Ok(StrictJson(Value::Bool(value)))
     }
 
-    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        if value < -I_JSON_SAFE_INTEGER_MAX || value > I_JSON_SAFE_INTEGER_MAX {
+            return Err(E::custom(
+                "I-JSON integer exceeds the exact IEEE-754 safe range",
+            ));
+        }
         Ok(StrictJson(Value::Number(value.into())))
     }
 
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        if value > I_JSON_SAFE_INTEGER_MAX as u64 {
+            return Err(E::custom(
+                "I-JSON integer exceeds the exact IEEE-754 safe range",
+            ));
+        }
         Ok(StrictJson(Value::Number(value.into())))
     }
 
@@ -4650,7 +4745,92 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
     }
 }
 
+// serde_json promotes integer tokens outside u64 into f64 before a Visitor can
+// distinguish their lexical class. Preflight integer tokens so the safe-range
+// rule cannot be bypassed through that lossy promotion; fractions and
+// exponent-form numbers remain binary64 values.
+fn validate_i_json_integer_tokens(input: &str) -> Result<(), CoreError> {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if bytes[index] == b'\\' {
+                escaped = true;
+            } else if bytes[index] == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b'"' {
+            in_string = true;
+            index += 1;
+            continue;
+        }
+        if bytes[index] != b'-' && !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+
+        let token_start = index;
+        if bytes[index] == b'-' {
+            index += 1;
+        }
+        let digits_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if digits_start == index {
+            index = token_start + 1;
+            continue;
+        }
+        let digits_end = index;
+        let mut has_fraction_or_exponent = false;
+        if index < bytes.len() && bytes[index] == b'.' {
+            has_fraction_or_exponent = true;
+            index += 1;
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+        }
+        if index < bytes.len() && matches!(bytes[index], b'e' | b'E') {
+            has_fraction_or_exponent = true;
+            index += 1;
+            if index < bytes.len() && matches!(bytes[index], b'+' | b'-') {
+                index += 1;
+            }
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+        }
+        if has_fraction_or_exponent {
+            continue;
+        }
+
+        let mut significant_start = digits_start;
+        while significant_start < digits_end && bytes[significant_start] == b'0' {
+            significant_start += 1;
+        }
+        let magnitude = &bytes[significant_start..digits_end];
+        const SAFE_MAX: &[u8] = b"9007199254740991";
+        if magnitude.len() > SAFE_MAX.len()
+            || (magnitude.len() == SAFE_MAX.len() && magnitude > SAFE_MAX)
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "I-JSON integer exceeds the exact IEEE-754 safe range",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_strict_json(input: &str) -> Result<Value, CoreError> {
+    validate_i_json_integer_tokens(input)?;
     serde_json::from_str::<StrictJson>(input)
         .map(|value| value.0)
         .map_err(|error| CoreError::new(REASON_SCHEMA_INVALID, error.to_string()))
@@ -5557,6 +5737,71 @@ mod tests {
         );
         let duplicate = parse_strict_json(r#"{"a":1,"a":2}"#).unwrap_err();
         assert_eq!(duplicate.reason_code, REASON_SCHEMA_INVALID);
+    }
+
+    #[test]
+    fn canonical_json_uses_rfc8785_ecmascript_number_rendering() {
+        let value = parse_strict_json(
+            "[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001,-0]",
+        )
+        .unwrap();
+        assert_eq!(
+            canonical_json(&value).unwrap(),
+            "[333333333.3333333,1e+30,4.5,0.002,1e-27,0]"
+        );
+    }
+
+    #[test]
+    fn canonical_json_uses_rfc8785_utf16_property_ordering() {
+        let value = json!({
+            "\u{e000}": "bmp-private-use",
+            "😀": "supplementary",
+            "€": "euro",
+            "ö": "o-diaeresis",
+            "1": "one",
+            "\r": "carriage-return",
+        });
+        assert_eq!(
+            canonical_json(&value).unwrap(),
+            "{\"\\r\":\"carriage-return\",\"1\":\"one\",\"ö\":\"o-diaeresis\",\"€\":\"euro\",\"😀\":\"supplementary\",\"\u{e000}\":\"bmp-private-use\"}"
+        );
+    }
+
+    #[test]
+    fn strict_i_json_rejects_decoded_duplicates_and_unsafe_integer_tokens() {
+        for input in [r#"{"a":1,"a":2}"#, r#"{"a":1,"\u0061":2}"#] {
+            let error = parse_strict_json(input).unwrap_err();
+            assert_eq!(error.reason_code, REASON_SCHEMA_INVALID);
+            assert!(error.message.contains("duplicate object key"));
+        }
+
+        for input in [
+            "9007199254740992",
+            "-9007199254740992",
+            "18446744073709551616",
+            "-18446744073709551616",
+        ] {
+            let error = parse_strict_json(input).unwrap_err();
+            assert_eq!(error.reason_code, REASON_SCHEMA_INVALID);
+            assert!(error.message.contains("safe range"));
+        }
+
+        let boundaries = parse_strict_json("[9007199254740991,-9007199254740991,1.25]")
+            .unwrap();
+        assert_eq!(
+            canonical_json(&boundaries).unwrap(),
+            "[9007199254740991,-9007199254740991,1.25]"
+        );
+        assert_eq!(
+            parse_strict_json(r#"{"value":"18446744073709551616"}"#).unwrap(),
+            json!({ "value": "18446744073709551616" })
+        );
+
+        let constructed_unsafe = json!(9_007_199_254_740_992_u64);
+        assert_eq!(
+            canonical_json(&constructed_unsafe).unwrap_err().reason_code,
+            REASON_SCHEMA_INVALID
+        );
     }
 
     #[test]

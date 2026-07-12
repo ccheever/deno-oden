@@ -16,6 +16,7 @@ path = "src/lib.rs"
 base64 = "=0.22.1"
 idna = "=1.1.0"
 ipnet = { version = "=2.9.0", features = ["serde"] }
+ryu-js = "=1.0.1"
 serde = { version = "=1.0.228", features = ["alloc", "derive", "rc"] }
 serde_json = { version = "=1.0.140", features = ["alloc", "float_roundtrip", "preserve_order", "raw_value"] }
 sha2 = { version = "=0.10.8", features = ["oid"] }
