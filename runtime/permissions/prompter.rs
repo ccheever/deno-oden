@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::cell::Cell;
+use std::cell::RefCell;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -58,17 +59,10 @@ pub(crate) static MAYBE_CURRENT_STACKTRACE: Lazy<
   Mutex<Option<GetFormattedStackFn>>,
 > = Lazy::new(|| Mutex::new(None));
 
-pub(crate) static MAYBE_CURRENT_ODEN_STACKTRACE: Lazy<
-  Mutex<Option<GetOdenStackFn>>,
-> = Lazy::new(|| Mutex::new(None));
-
 // Oden CPED scheduling-principal locator captured at the most recent op
 // dispatch that had no live user frame (precedence row 2). Stored as the
 // already-resolved value, not a closure, since it is computed at dispatch.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md
-pub(crate) static MAYBE_CURRENT_ODEN_CPED_LOCATOR: Lazy<Mutex<Option<String>>> =
-  Lazy::new(|| Mutex::new(None));
-
 // Oden CPED scheduling-principal *stack set* carried on the continuation — the
 // seam for call-boundary attribution (precedence row 3). Where the single
 // locator above records the last package to stamp the slot, this is intended to
@@ -79,14 +73,18 @@ pub(crate) static MAYBE_CURRENT_ODEN_CPED_LOCATOR: Lazy<Mutex<Option<String>>> =
 // boundary. Reading the long-lived op-dispatch slot here remains forbidden: it
 // pollutes later synchronous ops by unrelated packages.
 // @ref llp/0001-adding-capability-security-to-deno.plan.md (Async attribution row 3)
-pub(crate) static MAYBE_CURRENT_ODEN_CPED_STACK: Lazy<
-  Mutex<Option<Vec<String>>>,
-> = Lazy::new(|| Mutex::new(None));
-
 // Opaque Rust-owned host actor carried by the current CPED continuation. It is
 // a fallback only: live and scheduled package actors remain authoritative.
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements] -- Dispatch-local host provenance cannot replace a constrained operation actor.
+//
+// Every worker isolate executes on its own OS thread. Keep all dispatch-local
+// attribution on that thread so a concurrent worker cannot overwrite the
+// principal consulted by an in-flight native op.
+// @ref llp/0001-adding-capability-security-to-deno.plan.md (Native resource ownership)
 thread_local! {
+  static CURRENT_ODEN_STACKTRACE: RefCell<Option<GetOdenStackFn>> = const { RefCell::new(None) };
+  static CURRENT_ODEN_CPED_LOCATOR: RefCell<Option<String>> = const { RefCell::new(None) };
+  static CURRENT_ODEN_CPED_STACK: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
   static CURRENT_ODEN_TRUSTED_HOST_ACTOR: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -95,19 +93,34 @@ pub fn set_current_stacktrace(get_stack: GetFormattedStackFn) {
 }
 
 pub fn set_current_oden_stacktrace(get_stack: GetOdenStackFn) {
-  *MAYBE_CURRENT_ODEN_STACKTRACE.lock() = Some(get_stack);
+  CURRENT_ODEN_STACKTRACE.with(|stack| *stack.borrow_mut() = Some(get_stack));
+}
+
+pub(crate) fn current_oden_stacktrace() -> Vec<OdenStackFrame> {
+  CURRENT_ODEN_STACKTRACE.with(|stack| {
+    stack
+      .borrow()
+      .as_ref()
+      .map(|get_stack| get_stack())
+      .unwrap_or_default()
+  })
+}
+
+#[cfg(test)]
+pub(crate) fn clear_current_oden_stacktrace() {
+  CURRENT_ODEN_STACKTRACE.with(|stack| *stack.borrow_mut() = None);
 }
 
 pub fn set_current_oden_cped_locator(locator: Option<String>) {
-  *MAYBE_CURRENT_ODEN_CPED_LOCATOR.lock() = locator;
+  CURRENT_ODEN_CPED_LOCATOR.with(|current| *current.borrow_mut() = locator);
 }
 
 pub(crate) fn current_oden_cped_locator() -> Option<String> {
-  MAYBE_CURRENT_ODEN_CPED_LOCATOR.lock().clone()
+  CURRENT_ODEN_CPED_LOCATOR.with(|current| current.borrow().clone())
 }
 
 pub fn set_current_oden_cped_stack(stack: Option<Vec<String>>) {
-  *MAYBE_CURRENT_ODEN_CPED_STACK.lock() = stack;
+  CURRENT_ODEN_CPED_STACK.with(|current| *current.borrow_mut() = stack);
 }
 
 pub fn set_current_oden_trusted_host_actor(active: bool) {
@@ -119,10 +132,8 @@ pub(crate) fn current_oden_trusted_host_actor() -> bool {
 }
 
 pub(crate) fn current_oden_cped_stack() -> Vec<String> {
-  MAYBE_CURRENT_ODEN_CPED_STACK
-    .lock()
-    .clone()
-    .unwrap_or_default()
+  CURRENT_ODEN_CPED_STACK
+    .with(|current| current.borrow().clone().unwrap_or_default())
 }
 
 pub fn permission_prompt(
@@ -707,6 +718,8 @@ impl PermissionPrompter for TtyPrompter {
 
 #[cfg(test)]
 pub mod tests {
+  use std::sync::Arc;
+  use std::sync::Barrier;
   use std::sync::atomic::AtomicBool;
   use std::sync::atomic::Ordering;
 
@@ -746,6 +759,52 @@ pub mod tests {
   impl PermissionPromptStubValueSetter {
     pub fn set(&self, value: bool) {
       STUB_PROMPT_VALUE.store(value, Ordering::SeqCst);
+    }
+  }
+
+  #[test]
+  fn oden_dispatch_attribution_is_thread_local() {
+    let barrier = Arc::new(Barrier::new(2));
+    let workers = ["worker-a", "worker-b"].map(|label| {
+      let barrier = barrier.clone();
+      std::thread::spawn(move || {
+        let locator = format!("file:///{label}.js");
+        let frame_locator = locator.clone();
+        set_current_oden_stacktrace(Box::new(move || {
+          vec![OdenStackFrame {
+            isolate_id: Some(1),
+            script_id: Some(1),
+            locator: Some(frame_locator.clone()),
+            display_name: None,
+          }]
+        }));
+        set_current_oden_cped_locator(Some(format!("data:{label}:cped")));
+        set_current_oden_cped_stack(Some(vec![format!(
+          "data:{label}:schedule"
+        )]));
+
+        // Both threads have populated their dispatch state before either one
+        // reads it. A process-global slot deterministically gives at least one
+        // worker the other's attribution here.
+        barrier.wait();
+
+        assert_eq!(
+          current_oden_stacktrace()[0].locator.as_deref(),
+          Some(locator.as_str())
+        );
+        assert_eq!(
+          current_oden_cped_locator().as_deref(),
+          Some(format!("data:{label}:cped").as_str())
+        );
+        assert_eq!(
+          current_oden_cped_stack(),
+          vec![format!("data:{label}:schedule")]
+        );
+      })
+    });
+
+    for worker in workers {
+      worker.join().unwrap();
     }
   }
 }

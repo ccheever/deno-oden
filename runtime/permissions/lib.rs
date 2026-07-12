@@ -50,7 +50,6 @@ pub mod prompter;
 mod runtime_descriptor_parser;
 pub mod which;
 
-use prompter::MAYBE_CURRENT_ODEN_STACKTRACE;
 use prompter::MAYBE_CURRENT_STACKTRACE;
 use prompter::PERMISSION_EMOJI;
 use prompter::permission_prompt;
@@ -4537,11 +4536,7 @@ fn oden_capsec_apply_unattributed_fallback(
 }
 
 fn oden_capsec_principal_with_locator() -> (OdenPrincipal, Option<String>) {
-  let frames = MAYBE_CURRENT_ODEN_STACKTRACE
-    .lock()
-    .as_ref()
-    .map(|s| s())
-    .unwrap_or_default();
+  let frames = prompter::current_oden_stacktrace();
   for frame in frames {
     // Principals come from the loader principal index — integrity-bound
     // classification (a locator whose lockfile binding fails resolves to
@@ -4624,11 +4619,7 @@ fn oden_capsec_integrity_actor_keys() -> Vec<String> {
 
   let mut constrained = std::collections::BTreeSet::new();
   let mut ambient = std::collections::BTreeSet::new();
-  let frames = MAYBE_CURRENT_ODEN_STACKTRACE
-    .lock()
-    .as_ref()
-    .map(|stack| stack())
-    .unwrap_or_default();
+  let frames = prompter::current_oden_stacktrace();
   for frame in frames {
     match frame.locator.as_deref() {
       Some(locator) => push(
@@ -4698,11 +4689,7 @@ fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
     }
   }
   // The live call chain (the "stack" of the stack-intersection).
-  let frames = MAYBE_CURRENT_ODEN_STACKTRACE
-    .lock()
-    .as_ref()
-    .map(|s| s())
-    .unwrap_or_default();
+  let frames = prompter::current_oden_stacktrace();
   for frame in frames {
     match frame.locator.as_deref() {
       Some(locator) => {
@@ -10588,7 +10575,7 @@ mod tests {
     struct ResetAttribution;
     impl Drop for ResetAttribution {
       fn drop(&mut self) {
-        *prompter::MAYBE_CURRENT_ODEN_STACKTRACE.lock() = None;
+        prompter::clear_current_oden_stacktrace();
         prompter::set_current_oden_cped_locator(None);
         prompter::set_current_oden_cped_stack(None);
         prompter::set_current_oden_trusted_host_actor(false);
