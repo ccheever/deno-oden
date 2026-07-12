@@ -1,0 +1,38 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "oden_rev2_fork_harness"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "=0.22.1"
+idna = "=1.1.0"
+ipnet = "=2.9.0"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.140"
+sha2 = "=0.10.8"
+
+# These behavior-bearing transitive packages are direct exact pins so a future
+# lock refresh cannot silently change the registry-bound UTS #46 tables. Their
+# features still come from `idna`; disabling defaults here avoids widening the
+# compiled evaluator graph.
+icu_normalizer = { version = "=2.2.0", default-features = false }
+icu_normalizer_data = { version = "=2.2.0", default-features = false }
+icu_properties = { version = "=2.2.0", default-features = false }
+icu_properties_data = { version = "=2.2.0", default-features = false }
+idna_adapter = { version = "=1.2.2", default-features = false }
+
+[dev-dependencies]
+proptest = "=1.11.0"
+
+[[example]]
+name = "oden_rev2_oracle"
+path = "examples/oden_rev2_oracle.rs"

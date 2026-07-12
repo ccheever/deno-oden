@@ -13,9 +13,6 @@ description = "Provides the deno permissions implementation."
 name = "deno_permissions"
 path = "lib.rs"
 
-[features]
-oden_rev2 = ["dep:idna"]
-
 [dependencies]
 base64.workspace = true
 capacity_builder.workspace = true
@@ -27,7 +24,6 @@ deno_unsync.workspace = true
 fqdn.workspace = true
 faster-hex.workspace = true
 hmac.workspace = true
-idna = { workspace = true, optional = true }
 ipnet.workspace = true
 libc.workspace = true
 log.workspace = true
@@ -56,8 +52,3 @@ nix = { workspace = true, features = ["fs"] }
 [dev-dependencies]
 proptest = { workspace = true }
 sys_traits = { workspace = true, features = ["libc", "real", "winapi"] }
-
-[[example]]
-name = "oden_rev2_oracle"
-path = "examples/oden_rev2_oracle.rs"
-required-features = ["oden_rev2"]

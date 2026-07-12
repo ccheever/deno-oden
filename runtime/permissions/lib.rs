@@ -16899,12 +16899,3 @@ mod tests {
     }
   }
 }
-
-// @ref LLP 0019#stage-c-shared-core-implementation-checkpoint-eng-24015 [constrained-by] — Rev2 remains opt-in checkpoint scaffolding.
-// Keep Rev2-only modules after the frozen Rev1 line-derived coverage corpus.
-#[cfg(feature = "oden_rev2")]
-#[path = "oden_rev2_core_generated.rs"]
-pub mod rev2;
-#[cfg(feature = "oden_rev2")]
-#[path = "oden_rev2_registry_generated.rs"]
-mod rev2_registry_generated;
