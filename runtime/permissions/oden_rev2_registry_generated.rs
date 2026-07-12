@@ -471,7 +471,7 @@ pub struct Rev2RuntimeDefinition { pub id: Rev2CapabilityId, pub family: String,
 pub struct Rev2SemanticEdge { pub id: String, pub kind: Rev2EdgeKind, pub surface_kind: String, pub semantics: Rev2JsonValue }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Rev2RuntimePolicyRules { pub resource_schemas: Vec<Rev2TypedSchema>, pub occurrence_schemas: Vec<Rev2TypedSchema>, pub value_schemas: Vec<Rev2TypedSchema>, pub schema_evaluation_spec: Rev2SchemaEvaluationSpec, pub schema_fixture_vectors: Vec<Rev2JsonValue>, pub projections: Vec<Rev2Projection>, pub match_evaluation_spec: Rev2MatchEvaluationSpec, pub normalizers: Vec<Rev2Normalizer>, pub predicates: Vec<Rev2Predicate>, pub protected_receipt_schema: Option<Rev2JsonValue>, pub predicate_fixture_vectors: Vec<Rev2JsonValue>, pub risk_rules: Vec<Rev2RiskRule>, pub risk_evaluation_spec: Rev2RiskEvaluationSpec, pub negative_closure_specs: Vec<Rev2JsonValue>, pub edge_semantic_spec: Rev2JsonValue, pub derivation_rules: Vec<Rev2JsonValue>, pub ceiling_rules: Vec<Rev2JsonValue>, pub aliases: Vec<Rev2JsonValue>, pub macro_policy: Rev2JsonValue, pub macros: Vec<Rev2JsonValue>, pub system_information_kinds: Vec<Rev2JsonValue>, pub dispositions: Vec<Rev2JsonValue>, pub sensitive_environment_names: Vec<String>, pub loader_control_environment_names: Vec<String>, pub ambient_network_config_neutralization: Option<Rev2JsonValue>, pub ip_address_classes: Option<Rev2JsonValue>, pub public_suffix_input: Rev2JsonValue, pub special_files: Vec<Rev2JsonValue>, pub lifetime_contracts: Vec<Rev2JsonValue>, pub reason_codes: Vec<Rev2JsonValue> }
+pub struct Rev2RuntimePolicyRules { pub resource_schemas: Vec<Rev2TypedSchema>, pub occurrence_schemas: Vec<Rev2TypedSchema>, pub value_schemas: Vec<Rev2TypedSchema>, pub schema_evaluation_spec: Rev2SchemaEvaluationSpec, pub schema_fixture_vectors: Vec<Rev2JsonValue>, pub projections: Vec<Rev2Projection>, pub match_evaluation_spec: Rev2MatchEvaluationSpec, pub normalizers: Vec<Rev2Normalizer>, pub predicates: Vec<Rev2Predicate>, pub protected_receipt_schema: Option<Rev2JsonValue>, pub predicate_fixture_vectors: Vec<Rev2JsonValue>, pub risk_rules: Vec<Rev2RiskRule>, pub risk_evaluation_spec: Rev2RiskEvaluationSpec, pub runtime_protocol_spec: Rev2JsonValue, pub negative_closure_specs: Vec<Rev2JsonValue>, pub edge_semantic_spec: Rev2JsonValue, pub derivation_rules: Vec<Rev2JsonValue>, pub ceiling_rules: Vec<Rev2JsonValue>, pub aliases: Vec<Rev2JsonValue>, pub macro_policy: Rev2JsonValue, pub macros: Vec<Rev2JsonValue>, pub system_information_kinds: Vec<Rev2JsonValue>, pub dispositions: Vec<Rev2JsonValue>, pub sensitive_environment_names: Vec<String>, pub loader_control_environment_names: Vec<String>, pub ambient_network_config_neutralization: Option<Rev2JsonValue>, pub ip_address_classes: Option<Rev2JsonValue>, pub public_suffix_input: Rev2JsonValue, pub special_files: Vec<Rev2JsonValue>, pub lifetime_contracts: Vec<Rev2JsonValue>, pub reason_codes: Vec<Rev2JsonValue> }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rev2RuntimeSemanticPayload { pub schema: String, pub profile: String, pub definitions: Vec<Rev2RuntimeDefinition>, pub coverage_edges: Vec<Rev2SemanticEdge>, pub policy_rules_and_classifiers: Rev2RuntimePolicyRules }
@@ -492,6 +492,538 @@ pub struct Rev2CanonicalPolicyRow { pub principal: String, pub capability: Rev2C
 pub struct Rev2AuditRow { pub edge_id: String, pub effect_slot_id: String, pub capability: Rev2CapabilityId, pub principal: String, pub effect_owner: String, pub resource: Rev2JsonValue, pub occurrence: Rev2JsonValue, pub decision: Rev2AuditDecision, pub reason_code: Option<String>, pub vocab_digest: String, pub registry_digest: String }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rev2ForkIntegrationRow { pub edge_id: &'static str, pub effect_slot_id: &'static str, pub capability: Rev2CapabilityId, pub resource_schema_id: &'static str, pub occurrence_schema_id: &'static str, pub positive_projection_id: &'static str, pub negative_projection_id: &'static str, pub authority_selector_normalizer_id: &'static str, pub effect_occurrence_normalizer_id: &'static str }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2RuntimeRecordField { pub name: &'static str, pub value_type: &'static str, pub required: bool, pub collection: &'static str, pub format: &'static str, pub schema_ref: Option<&'static str>, pub allowed_values: &'static [&'static str] }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2RuntimeRecordSchema { pub record_type: &'static str, pub id: &'static str, pub additional_properties: bool, pub canonicalization: &'static str, pub fields: &'static [Rev2RuntimeRecordField] }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2RuntimeOperationEdges { pub query: &'static str, pub request: &'static str, pub revoke: &'static str }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2RuntimeOptionalOperationSlots { pub query: Option<&'static str>, pub request: Option<&'static str>, pub revoke: Option<&'static str> }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2RuntimePermissionTransitions { pub query: &'static str, pub request: &'static str, pub revoke: &'static str }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2RuntimePermissionSlot { pub slot_id: &'static str, pub capability: &'static str, pub positive_projection_id: &'static str, pub negative_projection_id: &'static str, pub effect_owner_source: &'static str, pub operation_effect_slot_ids: Rev2RuntimeOptionalOperationSlots, pub transitions: Rev2RuntimePermissionTransitions }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2RuntimePermissionBranch { pub id: &'static str, pub disposition: &'static str, pub descriptor_name: &'static str, pub descriptor_required_fields: &'static [&'static str], pub descriptor_optional_fields: &'static [&'static str], pub descriptor_scope_field: Option<&'static str>, pub descriptor_scope_requirement: &'static str, pub descriptor_scope_format: Option<&'static str>, pub operation_edge_ids: Rev2RuntimeOperationEdges, pub slot_order: &'static [Rev2RuntimePermissionSlot], pub aggregate_rule: &'static str, pub refusal_reason_code: Option<&'static str> }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2RuntimeGenerationTransition { pub id: &'static str, pub mutations: &'static [&'static str], pub increments: &'static [&'static str], pub cache_disposition: &'static str, pub publication: &'static str }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2RuntimeNegativeReentryPhase { pub order: usize, pub id: &'static str, pub strata: &'static [u8], pub stale_disposition: &'static str }
+
+pub const REV2_RUNTIME_PROTOCOL_SCHEMA: &str = "oden/capsec-runtime-protocol-spec/2";
+pub const REV2_RUNTIME_IDENTITY_SCHEMA: &str = "oden/capsec-runtime-identity-binding/2";
+pub const REV2_RUNTIME_AUTHORITY_CONTEXT_SCHEMA: &str = "oden/capsec-runtime-authority-context/2";
+pub const REV2_RUNTIME_GENERATION_VECTOR_SCHEMA: &str = "oden/capsec-runtime-generation-vector/2";
+pub const REV2_RUNTIME_PERMISSION_BATCH_SCHEMA: &str = "oden/capsec-permission-batch/2";
+pub const REV2_RUNTIME_PERMISSION_RESULT_SCHEMA: &str = "oden/capsec-permission-result/2";
+pub const REV2_RUNTIME_EXTERNAL_RESPONSE_SCHEMA: &str = "oden/capsec-permission-external-response/2";
+pub const REV2_RUNTIME_DECISION_CACHE_KEY_SCHEMA: &str = "oden/capsec-decision-cache-key/2";
+pub const REV2_RUNTIME_DECISION_CACHE_VALUE_SCHEMA: &str = "oden/capsec-decision-cache-value/2";
+pub const REV2_RUNTIME_RECORD_SCHEMAS: &[Rev2RuntimeRecordSchema] = &[
+  Rev2RuntimeRecordSchema {
+    record_type: "DecisionCacheValue",
+    id: "oden/capsec-decision-cache-value/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "decision", value_type: "string", required: true, collection: "scalar", format: "decision-state/2", schema_ref: None, allowed_values: &["allow", "deny", "masked", "prompt"] },
+      Rev2RuntimeRecordField { name: "dimensions", value_type: "object-array", required: true, collection: "canonical-set", format: "cache-dimension-set/2", schema_ref: Some("oden/capsec-decision-cache-dimension/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "weightBytes", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "validUntilMonotonic", value_type: "string-or-null", required: true, collection: "scalar", format: "canonical-u64-decimal-or-null", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "negativeInventoryDigest", value_type: "string", required: true, collection: "scalar", format: "sha256-base64url", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "DecisionCacheDimension",
+    id: "oden/capsec-decision-cache-dimension/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "decision", value_type: "string", required: true, collection: "scalar", format: "decision-state/2", schema_ref: None, allowed_values: &["allow", "deny", "masked", "prompt"] },
+      Rev2RuntimeRecordField { name: "slotId", value_type: "string", required: true, collection: "scalar", format: "generated-slot-id/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "positiveSource", value_type: "typed-value", required: true, collection: "scalar", format: "positive-source-or-null/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "principal", value_type: "typed-value", required: true, collection: "scalar", format: "principal-ref/2", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "RuntimeAuthorityContext",
+    id: "oden/capsec-runtime-authority-context/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "mode", value_type: "string", required: true, collection: "scalar", format: "runtime-mode/2", schema_ref: None, allowed_values: &["audit", "enforce", "permissive"] },
+      Rev2RuntimeRecordField { name: "executionRole", value_type: "string", required: true, collection: "scalar", format: "execution-role/2", schema_ref: None, allowed_values: &["baseline", "candidate", "probe", "run"] },
+      Rev2RuntimeRecordField { name: "schema", value_type: "string", required: true, collection: "scalar", format: "schema-id", schema_ref: None, allowed_values: &["oden/capsec-runtime-authority-context/2"] },
+      Rev2RuntimeRecordField { name: "capsVocab", value_type: "string", required: true, collection: "scalar", format: "profile-id", schema_ref: None, allowed_values: &["oden/capsec/2"] },
+      Rev2RuntimeRecordField { name: "engineFeatureSet", value_type: "string", required: true, collection: "scalar", format: "engine-feature-set/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "engineTarget", value_type: "string", required: true, collection: "scalar", format: "engine-target/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "profile", value_type: "string", required: true, collection: "scalar", format: "profile-id", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "retainedObjects", value_type: "host-private", required: true, collection: "scalar", format: "retained-object-set/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "authorityState", value_type: "host-private", required: true, collection: "scalar", format: "runtime-authority-state/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "identity", value_type: "object", required: true, collection: "scalar", format: "runtime-identity-binding/2", schema_ref: Some("oden/capsec-runtime-identity-binding/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "decisionPolicy", value_type: "host-private", required: true, collection: "scalar", format: "sealed-decision-policy/2", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "DecisionCacheKey",
+    id: "oden/capsec-decision-cache-key/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "mode", value_type: "string", required: true, collection: "scalar", format: "runtime-mode/2", schema_ref: None, allowed_values: &["audit", "enforce", "permissive"] },
+      Rev2RuntimeRecordField { name: "schema", value_type: "string", required: true, collection: "scalar", format: "schema-id", schema_ref: None, allowed_values: &["oden/capsec-decision-cache-key/2"] },
+      Rev2RuntimeRecordField { name: "constrainedPrincipals", value_type: "typed-value", required: true, collection: "canonical-set", format: "principal-ref-set/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "receiptDependencies", value_type: "object-array", required: true, collection: "canonical-set", format: "receipt-dependency-set/2", schema_ref: Some("oden/capsec-receipt-dependency/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "effects", value_type: "object-array", required: true, collection: "ordered", format: "normalized-permission-effect-list/2", schema_ref: Some("oden/capsec-permission-effect/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "coverageEdgeId", value_type: "string", required: true, collection: "scalar", format: "coverage-edge-id/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "stageId", value_type: "string", required: true, collection: "scalar", format: "generated-stage-id/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "operationClass", value_type: "string", required: true, collection: "scalar", format: "operation-class/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "overlayOwner", value_type: "typed-value", required: true, collection: "scalar", format: "principal-ref/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "generations", value_type: "object", required: true, collection: "scalar", format: "runtime-generation-vector/2", schema_ref: Some("oden/capsec-runtime-generation-vector/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "identity", value_type: "object", required: true, collection: "scalar", format: "runtime-identity-binding/2", schema_ref: Some("oden/capsec-runtime-identity-binding/2"), allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "NormalizedPermissionBatch",
+    id: "oden/capsec-permission-batch/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "atomicity", value_type: "string", required: true, collection: "scalar", format: "permission-atomicity/2", schema_ref: None, allowed_values: &["conjunctive"] },
+      Rev2RuntimeRecordField { name: "schema", value_type: "string", required: true, collection: "scalar", format: "schema-id", schema_ref: None, allowed_values: &["oden/capsec-permission-batch/2"] },
+      Rev2RuntimeRecordField { name: "operation", value_type: "string", required: true, collection: "scalar", format: "permission-operation/2", schema_ref: None, allowed_values: &["query", "request", "revoke"] },
+      Rev2RuntimeRecordField { name: "constrainedPrincipals", value_type: "typed-value", required: true, collection: "canonical-set", format: "principal-ref-set/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "effects", value_type: "object-array", required: true, collection: "ordered", format: "normalized-permission-effect-list/2", schema_ref: Some("oden/capsec-permission-effect/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "batchSequence", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "coverageEdgeId", value_type: "string", required: true, collection: "scalar", format: "coverage-edge-id/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "overlayOwner", value_type: "typed-value", required: true, collection: "scalar", format: "principal-ref/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "expectedGenerations", value_type: "object", required: true, collection: "scalar", format: "runtime-generation-vector/2", schema_ref: Some("oden/capsec-runtime-generation-vector/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "identity", value_type: "object", required: true, collection: "scalar", format: "runtime-identity-binding/2", schema_ref: Some("oden/capsec-runtime-identity-binding/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "batchDigest", value_type: "string", required: true, collection: "scalar", format: "sha256-base64url", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "PermissionBatchResult",
+    id: "oden/capsec-permission-result/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "state", value_type: "string", required: true, collection: "scalar", format: "permission-state/2", schema_ref: None, allowed_values: &["denied", "granted", "prompt"] },
+      Rev2RuntimeRecordField { name: "schema", value_type: "string", required: true, collection: "scalar", format: "schema-id", schema_ref: None, allowed_values: &["oden/capsec-permission-result/2"] },
+      Rev2RuntimeRecordField { name: "operation", value_type: "string", required: true, collection: "scalar", format: "permission-operation/2", schema_ref: None, allowed_values: &["query", "request", "revoke"] },
+      Rev2RuntimeRecordField { name: "effects", value_type: "object-array", required: true, collection: "ordered", format: "permission-effect-result-list/2", schema_ref: Some("oden/capsec-permission-effect-result/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "batchSequence", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "observedGenerations", value_type: "object", required: true, collection: "scalar", format: "runtime-generation-vector/2", schema_ref: Some("oden/capsec-runtime-generation-vector/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "identity", value_type: "object", required: true, collection: "scalar", format: "runtime-identity-binding/2", schema_ref: Some("oden/capsec-runtime-identity-binding/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "batchDigest", value_type: "string", required: true, collection: "scalar", format: "sha256-base64url", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "PermissionEffectResult",
+    id: "oden/capsec-permission-effect-result/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "state", value_type: "string", required: true, collection: "scalar", format: "permission-state/2", schema_ref: None, allowed_values: &["denied", "granted", "prompt"] },
+      Rev2RuntimeRecordField { name: "dimensions", value_type: "object-array", required: true, collection: "canonical-set", format: "permission-dimension-set/2", schema_ref: Some("oden/capsec-permission-dimension-result/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "slotId", value_type: "string", required: true, collection: "scalar", format: "generated-slot-id/2", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "PermissionDimensionResult",
+    id: "oden/capsec-permission-dimension-result/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "state", value_type: "string", required: true, collection: "scalar", format: "permission-state/2", schema_ref: None, allowed_values: &["denied", "granted", "prompt"] },
+      Rev2RuntimeRecordField { name: "positiveSource", value_type: "typed-value", required: true, collection: "scalar", format: "positive-source-or-null/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "principal", value_type: "typed-value", required: true, collection: "scalar", format: "principal-ref/2", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "AuthenticatedExternalPermissionResponse",
+    id: "oden/capsec-permission-external-response/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "decision", value_type: "string", required: true, collection: "scalar", format: "external-permission-decision/2", schema_ref: None, allowed_values: &["denied", "granted"] },
+      Rev2RuntimeRecordField { name: "schema", value_type: "string", required: true, collection: "scalar", format: "schema-id", schema_ref: None, allowed_values: &["oden/capsec-permission-external-response/2"] },
+      Rev2RuntimeRecordField { name: "operation", value_type: "string", required: true, collection: "scalar", format: "permission-operation/2", schema_ref: None, allowed_values: &["query", "request", "revoke"] },
+      Rev2RuntimeRecordField { name: "batchSequence", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "authenticationTag", value_type: "string", required: true, collection: "scalar", format: "hmac-sha256-tag/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "expectedGenerations", value_type: "object", required: true, collection: "scalar", format: "runtime-generation-vector/2", schema_ref: Some("oden/capsec-runtime-generation-vector/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "identity", value_type: "object", required: true, collection: "scalar", format: "runtime-identity-binding/2", schema_ref: Some("oden/capsec-runtime-identity-binding/2"), allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "batchDigest", value_type: "string", required: true, collection: "scalar", format: "sha256-base64url", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "RuntimeIdentityBinding",
+    id: "oden/capsec-runtime-identity-binding/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "channelEpoch", value_type: "string", required: true, collection: "scalar", format: "authenticated-channel-epoch/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "runNonce", value_type: "string", required: true, collection: "scalar", format: "opaque-run-nonce/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "armedSnapshotDigest", value_type: "string", required: true, collection: "scalar", format: "sha256-base64url", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "policyDigest", value_type: "string", required: true, collection: "scalar", format: "sha256-base64url", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "projectDigest", value_type: "string", required: true, collection: "scalar", format: "sha256-base64url", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "registryDigest", value_type: "string", required: true, collection: "scalar", format: "sha256-base64url", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "vocabDigest", value_type: "string", required: true, collection: "scalar", format: "sha256-base64url", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "NormalizedPermissionEffect",
+    id: "oden/capsec-permission-effect/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "selector", value_type: "typed-value", required: true, collection: "scalar", format: "canonical-authority-selector/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "occurrence", value_type: "typed-value", required: true, collection: "scalar", format: "canonical-effect-occurrence/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "slotId", value_type: "string", required: true, collection: "scalar", format: "generated-slot-id/2", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "effectOwner", value_type: "typed-value", required: true, collection: "scalar", format: "principal-ref/2", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "ReceiptDependency",
+    id: "oden/capsec-receipt-dependency/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "issuerGeneration", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "monotonicDeadline", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "receiptNegativeGeneration", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "receiptId", value_type: "string", required: true, collection: "scalar", format: "opaque-id", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+  Rev2RuntimeRecordSchema {
+    record_type: "RuntimeGenerationVector",
+    id: "oden/capsec-runtime-generation-vector/2",
+    additional_properties: false,
+    canonicalization: "I-JSON/RFC8785",
+    fields: &[
+      Rev2RuntimeRecordField { name: "negativeOverlay", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "policySnapshot", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "revocation", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+      Rev2RuntimeRecordField { name: "sessionOverlay", value_type: "string", required: true, collection: "scalar", format: "canonical-u64-decimal", schema_ref: None, allowed_values: &[] },
+    ],
+  },
+];
+pub const REV2_RUNTIME_PERMISSION_BRANCHES: &[Rev2RuntimePermissionBranch] = &[
+  Rev2RuntimePermissionBranch {
+    id: "permission.env.scoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "env",
+    descriptor_required_fields: &["name", "variable"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: Some("variable"),
+    descriptor_scope_requirement: "required-nonempty",
+    descriptor_scope_format: Some("nonempty-environment-name/2"),
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE"),
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.env.unscoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "env",
+    descriptor_required_fields: &["name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: None,
+    descriptor_scope_requirement: "forbidden",
+    descriptor_scope_format: None,
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE"),
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.ffi.scoped/2",
+    disposition: "normalize",
+    descriptor_name: "ffi",
+    descriptor_required_fields: &["name", "path"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: Some("path"),
+    descriptor_scope_requirement: "required-nonempty",
+    descriptor_scope_format: Some("retained-library-logical-path/2"),
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+      Rev2RuntimePermissionSlot { slot_id: "permission.ffi:slot:0", capability: "ffi:load", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", effect_owner_source: "captured-effect-owner", operation_effect_slot_ids: Rev2RuntimeOptionalOperationSlots { query: Some("native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:4"), request: None, revoke: Some("native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:4") }, transitions: Rev2RuntimePermissionTransitions { query: "evaluate-static-only", request: "refuse-static-only", revoke: "compare-and-commit-session-revocation" } },
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: None,
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.ffi.unscoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "ffi",
+    descriptor_required_fields: &["name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: None,
+    descriptor_scope_requirement: "forbidden",
+    descriptor_scope_format: None,
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-UNSCOPED"),
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.import.scoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "import",
+    descriptor_required_fields: &["host", "name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: Some("host"),
+    descriptor_scope_requirement: "required-nonempty",
+    descriptor_scope_format: Some("nonempty-deno-import-descriptor/2"),
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-NO-REV2-CAPABILITY"),
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.import.unscoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "import",
+    descriptor_required_fields: &["name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: None,
+    descriptor_scope_requirement: "forbidden",
+    descriptor_scope_format: None,
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-NO-REV2-CAPABILITY"),
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.net.scoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "net",
+    descriptor_required_fields: &["host", "name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: Some("host"),
+    descriptor_scope_requirement: "required-nonempty",
+    descriptor_scope_format: Some("nonempty-deno-net-descriptor/2"),
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE"),
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.net.unscoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "net",
+    descriptor_required_fields: &["name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: None,
+    descriptor_scope_requirement: "forbidden",
+    descriptor_scope_format: None,
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE"),
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.read.scoped/2",
+    disposition: "normalize",
+    descriptor_name: "read",
+    descriptor_required_fields: &["name", "path"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: Some("path"),
+    descriptor_scope_requirement: "required-nonempty",
+    descriptor_scope_format: Some("nonempty-platform-path-input/2"),
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+      Rev2RuntimePermissionSlot { slot_id: "permission.read:slot:0", capability: "fs:read", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", effect_owner_source: "captured-effect-owner", operation_effect_slot_ids: Rev2RuntimeOptionalOperationSlots { query: Some("native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:5"), request: Some("native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:5"), revoke: Some("native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:5") }, transitions: Rev2RuntimePermissionTransitions { query: "evaluate", request: "compare-and-commit-session-positive", revoke: "compare-and-commit-session-revocation" } },
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: None,
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.read.unscoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "read",
+    descriptor_required_fields: &["name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: None,
+    descriptor_scope_requirement: "forbidden",
+    descriptor_scope_format: None,
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-UNSCOPED"),
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.run.scoped/2",
+    disposition: "normalize",
+    descriptor_name: "run",
+    descriptor_required_fields: &["command", "name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: Some("command"),
+    descriptor_scope_requirement: "required-nonempty",
+    descriptor_scope_format: Some("retained-executable-logical-path/2"),
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+      Rev2RuntimePermissionSlot { slot_id: "permission.run:slot:0", capability: "process:spawn", positive_projection_id: "projection.process:spawn.positive/2", negative_projection_id: "projection.process:spawn.negative/2", effect_owner_source: "captured-effect-owner", operation_effect_slot_ids: Rev2RuntimeOptionalOperationSlots { query: Some("native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:1"), request: None, revoke: Some("native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:1") }, transitions: Rev2RuntimePermissionTransitions { query: "evaluate-static-only", request: "refuse-static-only", revoke: "compare-and-commit-session-revocation" } },
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: None,
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.run.unscoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "run",
+    descriptor_required_fields: &["name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: None,
+    descriptor_scope_requirement: "forbidden",
+    descriptor_scope_format: None,
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-UNSCOPED"),
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.sys.scoped/2",
+    disposition: "normalize",
+    descriptor_name: "sys",
+    descriptor_required_fields: &["kind", "name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: Some("kind"),
+    descriptor_scope_requirement: "required-nonempty",
+    descriptor_scope_format: Some("generated-deno-system-information-spelling/2"),
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+      Rev2RuntimePermissionSlot { slot_id: "permission.sys:slot:0", capability: "sys:read", positive_projection_id: "projection.sys:read.positive/2", negative_projection_id: "projection.sys:read.negative/2", effect_owner_source: "captured-effect-owner", operation_effect_slot_ids: Rev2RuntimeOptionalOperationSlots { query: Some("native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:2"), request: Some("native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:2"), revoke: Some("native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:2") }, transitions: Rev2RuntimePermissionTransitions { query: "evaluate", request: "compare-and-commit-session-positive", revoke: "compare-and-commit-session-revocation" } },
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: None,
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.sys.unscoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "sys",
+    descriptor_required_fields: &["name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: None,
+    descriptor_scope_requirement: "forbidden",
+    descriptor_scope_format: None,
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-UNSCOPED"),
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.write.scoped/2",
+    disposition: "normalize",
+    descriptor_name: "write",
+    descriptor_required_fields: &["name", "path"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: Some("path"),
+    descriptor_scope_requirement: "required-nonempty",
+    descriptor_scope_format: Some("nonempty-platform-path-input/2"),
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+      Rev2RuntimePermissionSlot { slot_id: "permission.write:slot:0", capability: "fs:write", positive_projection_id: "projection.fs:write.positive/2", negative_projection_id: "projection.fs:write.negative/2", effect_owner_source: "captured-effect-owner", operation_effect_slot_ids: Rev2RuntimeOptionalOperationSlots { query: Some("native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:6"), request: Some("native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:6"), revoke: Some("native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:6") }, transitions: Rev2RuntimePermissionTransitions { query: "evaluate", request: "compare-and-commit-session-positive", revoke: "compare-and-commit-session-revocation" } },
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: None,
+  },
+  Rev2RuntimePermissionBranch {
+    id: "permission.write.unscoped-refusal/2",
+    disposition: "refuse",
+    descriptor_name: "write",
+    descriptor_required_fields: &["name"],
+    descriptor_optional_fields: &[],
+    descriptor_scope_field: None,
+    descriptor_scope_requirement: "forbidden",
+    descriptor_scope_format: None,
+    operation_edge_ids: Rev2RuntimeOperationEdges { query: "native-op:runtime/ops/permissions.rs#op_query_permission", request: "native-op:runtime/ops/permissions.rs#op_request_permission", revoke: "native-op:runtime/ops/permissions.rs#op_revoke_permission" },
+    slot_order: &[
+
+    ],
+    aggregate_rule: "all-slots-same-disposition-or-refuse",
+    refusal_reason_code: Some("OD-CAP-PERMISSION-UNSCOPED"),
+  },
+];
+pub const REV2_RUNTIME_GENERATION_TRANSITIONS: &[Rev2RuntimeGenerationTransition] = &[
+  Rev2RuntimeGenerationTransition { id: "generation.other-negative-change/2", mutations: &["add-negative-blocker-without-revocation-inventory-change", "remove-negative-blocker-without-revocation-inventory-change", "replace-negative-blocker-without-revocation-inventory-change"], increments: &["negativeOverlay"], cache_disposition: "clear-before-publication", publication: "atomic-rows-vector-and-cache" },
+  Rev2RuntimeGenerationTransition { id: "generation.revocation-inventory-change/2", mutations: &["add-negative-blocker-with-revocation-inventory-change", "remove-negative-blocker-with-revocation-inventory-change", "replace-negative-blocker-with-revocation-inventory-change"], increments: &["negativeOverlay", "revocation"], cache_disposition: "clear-before-publication", publication: "atomic-rows-vector-and-cache" },
+  Rev2RuntimeGenerationTransition { id: "generation.session-positive-change/2", mutations: &["add-session-positive", "remove-session-positive", "replace-session-positive"], increments: &["sessionOverlay"], cache_disposition: "clear-before-publication", publication: "atomic-rows-vector-and-cache" },
+  Rev2RuntimeGenerationTransition { id: "generation.session-revocation-change/2", mutations: &["add-session-revocation", "remove-session-revocation", "replace-session-revocation"], increments: &["negativeOverlay", "revocation", "sessionOverlay"], cache_disposition: "clear-before-publication", publication: "atomic-rows-vector-and-cache" },
+  Rev2RuntimeGenerationTransition { id: "generation.no-publication/2", mutations: &["cache-miss", "refusal", "unanswered-external-decision"], increments: &[], cache_disposition: "unchanged", publication: "none" },
+];
+pub const REV2_RUNTIME_NEGATIVE_REENTRY_PHASES: &[Rev2RuntimeNegativeReentryPhase] = &[
+  Rev2RuntimeNegativeReentryPhase { order: 1, id: "initial-query-or-request", strata: &[1, 2, 3, 4, 5, 6, 7], stale_disposition: "discard-batch-and-restart-with-new-sequence" },
+  Rev2RuntimeNegativeReentryPhase { order: 2, id: "already-granted-check", strata: &[1, 2, 3, 4, 5, 6, 7], stale_disposition: "discard-batch-and-restart-with-new-sequence" },
+  Rev2RuntimeNegativeReentryPhase { order: 3, id: "before-external-decider", strata: &[1, 2, 3, 4, 5, 6, 7], stale_disposition: "discard-batch-and-restart-with-new-sequence" },
+  Rev2RuntimeNegativeReentryPhase { order: 4, id: "after-external-response", strata: &[1, 2, 3, 4, 5, 6, 7], stale_disposition: "discard-batch-and-restart-with-new-sequence" },
+  Rev2RuntimeNegativeReentryPhase { order: 5, id: "before-overlay-publication", strata: &[1, 2, 3, 4, 5, 6, 7], stale_disposition: "discard-batch-and-restart-with-new-sequence" },
+  Rev2RuntimeNegativeReentryPhase { order: 6, id: "result-production", strata: &[1, 2, 3, 4, 5, 6, 7], stale_disposition: "discard-batch-and-restart-with-new-sequence" },
+  Rev2RuntimeNegativeReentryPhase { order: 7, id: "cache-hit", strata: &[1, 2, 3, 4, 5, 6, 7], stale_disposition: "discard-batch-and-restart-with-new-sequence" },
+];
+pub const REV2_RUNTIME_ACTOR_KEYS: &[&str] = &["decision-stage", "effect-owner", "operation-actor", "principal-set"];
+pub const REV2_RUNTIME_SESSION_ROW_SCHEMA: &str = "oden/capsec-session-row-identity/2";
+pub const REV2_RUNTIME_SESSION_ROW_ID_PREIMAGE_SCHEMA: &str = "oden/capsec-session-row-id-preimage/2";
+pub const REV2_RUNTIME_SESSION_POSITIVE_ROW_ID_DOMAIN: &str = "oden:capsec:session-positive-row:2";
+pub const REV2_RUNTIME_SESSION_REVOCATION_ROW_ID_DOMAIN: &str = "oden:capsec:session-revocation-row:2";
+pub const REV2_RUNTIME_SESSION_ROW_IDENTITY_FIELDS: &[&str] = &["identity.armedSnapshotDigest", "overlayOwner", "principal", "slot.capability", "identitySelector"];
+pub const REV2_RUNTIME_SESSION_IDENTITY_SELECTOR_FIELDS: &[&str] = &["principal", "capability", "resource"];
+pub const REV2_RUNTIME_SESSION_MISSING_ROW_PROJECTION: &[&str] = &["slot-order", "then-constrained-principal-order", "refuse-complete-mutation-if-any-pre-result-dimension-is-denied", "missing-dimensions-are-exactly-pre-result-prompt-dimensions", "identity-selector-is-principal-capability-resource-with-dimension-principal", "positive-row-selector-uses-slot-positive-projection", "revocation-row-selector-uses-slot-negative-projection", "one-exact-row-per-principal-and-selector", "row-id-from-kind-domain-and-identity-fields"];
+pub const REV2_RUNTIME_SESSION_POSITIVE_SELECTOR_PROJECTION: &str = "slot.positiveProjectionId";
+pub const REV2_RUNTIME_SESSION_REVOCATION_SELECTOR_PROJECTION: &str = "slot.negativeProjectionId";
+pub const REV2_RUNTIME_SESSION_REQUEST_GRANT_RECONCILIATION: &str = "remove-exact-paired-session-revocation-then-upsert-positive-in-one-transaction";
+pub const REV2_RUNTIME_SESSION_BATCH_SEQUENCE_DISPOSITION: &str = "excluded-from-row-identity";
+pub const REV2_RUNTIME_SESSION_DUPLICATE_DISPOSITION: &str = "identical-row-is-idempotent-replacement;conflicting-row-refuses";
+pub const REV2_RUNTIME_PERMISSION_BATCH_DIGEST_DOMAIN: &str = "oden:capsec:permission-batch:2";
+pub const REV2_RUNTIME_EXTERNAL_RESPONSE_MAC_DOMAIN: &str = "oden:capsec:permission-response:2";
+pub const REV2_RUNTIME_CANONICAL_ROW_DIGEST_DOMAIN: &str = "oden:capsec:canonical-row:2";
+pub const REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN: &str = "oden:capsec:protected-row:2";
+pub const REV2_RUNTIME_DECISION_CACHE_KEY_DOMAIN: &str = "oden:capsec:decision-cache-key:2";
+pub const REV2_RUNTIME_NEGATIVE_INVENTORY_DOMAIN: &str = "oden:capsec:negative-inventory:2";
+pub const REV2_RUNTIME_MAX_BATCH_EFFECTS: usize = 256;
+pub const REV2_RUNTIME_MAX_CONSTRAINED_PRINCIPALS: usize = 4096;
+pub const REV2_RUNTIME_MAX_PRINCIPAL_EFFECT_DIMENSIONS: usize = 16384;
+pub const REV2_RUNTIME_MAX_CANONICAL_COMPONENT_BYTES: usize = 4096;
+pub const REV2_RUNTIME_MAX_CANONICAL_EFFECT_BYTES: usize = 1048576;
+pub const REV2_RUNTIME_MAX_CANONICAL_BATCH_BYTES: usize = 4194304;
+pub const REV2_RUNTIME_MAX_CANONICAL_RESULT_BYTES: usize = 4194304;
+pub const REV2_RUNTIME_AUTHORITY_MAX_ROWS: usize = 4096;
+pub const REV2_RUNTIME_AUTHORITY_MAX_ROW_BYTES: usize = 65536;
+pub const REV2_RUNTIME_AUTHORITY_MAX_TOTAL_BYTES: usize = 16777216;
+pub const REV2_RUNTIME_MAX_TRANSACTION_MUTATIONS: usize = 4096;
+pub const REV2_RUNTIME_CACHE_MAX_ENTRIES: usize = 4096;
+pub const REV2_RUNTIME_CACHE_MAX_ENTRY_BYTES: usize = 65536;
+pub const REV2_RUNTIME_CACHE_MAX_TOTAL_BYTES: usize = 16777216;
+pub const REV2_RUNTIME_CACHE_MAX_EFFECTS: usize = 256;
+pub const REV2_RUNTIME_CACHE_MAX_PRINCIPALS: usize = 4096;
+pub const REV2_RUNTIME_CACHE_MAX_DIMENSIONS: usize = 16384;
+pub const REV2_RUNTIME_CACHE_MAX_RECEIPT_DEPENDENCIES: usize = 4096;
+pub const REV2_RUNTIME_EXECUTABLE_MAX_IMAGES: usize = 256;
+pub const REV2_RUNTIME_EXECUTABLE_MAX_IMAGE_BYTES: usize = 536870912;
+pub const REV2_RUNTIME_EXECUTABLE_MAX_AGGREGATE_BYTES: usize = 1073741824;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rev2Definition {
@@ -518,15 +1050,15 @@ pub struct Rev2TargetStatus {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-nJUMGJMnQHvU7ZKI3dz3aGCDSQ-2V5-Y2Qz_HhOTU7s";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-9mfmw7vol5d4V43JWrpATUJ0M6YDICFLOpCpeXAKIW4";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-RQDIPntAtC-HcEFnGEwY-S7BUDjKUKUX3rQTGC9ucEw";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-yAnpYXwQmiE4NXTyzrYx46wVSTsL240xU6MHLKfGmmA";
 pub const REV2_ADVERTISED_TARGETS: &[&str] = &[];
 
 pub const REV2_TARGET_STATUS: &[Rev2TargetStatus] = &[
-  Rev2TargetStatus { target: "x86_64-apple-darwin", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:fdfd9dc24cb0c588308450d2fc622110258ab9b4cd22a2994287469428c5906d", cargo_feature_graph_digest: "sha256:35e00b8875f7b1526e5435872719ae71859244ce80b09e6384260b830548714d", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:fdfd9dc24cb0c588308450d2fc622110258ab9b4cd22a2994287469428c5906d;graph:sha256:35e00b8875f7b1526e5435872719ae71859244ce80b09e6384260b830548714d;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
-  Rev2TargetStatus { target: "aarch64-apple-darwin", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a", cargo_feature_graph_digest: "sha256:4eacad2e8b418d883a00bc6f4eacaba89ac868ce26fe15438c930c1122630123", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:4eacad2e8b418d883a00bc6f4eacaba89ac868ce26fe15438c930c1122630123;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
-  Rev2TargetStatus { target: "x86_64-unknown-linux-gnu", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c", cargo_feature_graph_digest: "sha256:b43eacccb33b0db32acf36734016f7bdafd4bdf503e768f1530ace381823f844", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:b43eacccb33b0db32acf36734016f7bdafd4bdf503e768f1530ace381823f844;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
-  Rev2TargetStatus { target: "aarch64-unknown-linux-gnu", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:2215dcca89932ecf67370ba53dfcbf8cb3f720e09441dff76871815e93bd274c", cargo_feature_graph_digest: "sha256:dee87db4815ad37f0ca2936b62fd4412b8452697148196a99bf3b5adf6744f93", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:2215dcca89932ecf67370ba53dfcbf8cb3f720e09441dff76871815e93bd274c;graph:sha256:dee87db4815ad37f0ca2936b62fd4412b8452697148196a99bf3b5adf6744f93;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
+  Rev2TargetStatus { target: "x86_64-apple-darwin", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:fdfd9dc24cb0c588308450d2fc622110258ab9b4cd22a2994287469428c5906d", cargo_feature_graph_digest: "sha256:21a13efa7c0d9254dadd4bba64183dffff2f9155282bbb094465ea14c77503a4", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:fdfd9dc24cb0c588308450d2fc622110258ab9b4cd22a2994287469428c5906d;graph:sha256:21a13efa7c0d9254dadd4bba64183dffff2f9155282bbb094465ea14c77503a4;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
+  Rev2TargetStatus { target: "aarch64-apple-darwin", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a", cargo_feature_graph_digest: "sha256:a14ecd657dfdecd69e05b3c162a829be3ed9667d65d3de5f7ad308501925faf8", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:a14ecd657dfdecd69e05b3c162a829be3ed9667d65d3de5f7ad308501925faf8;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
+  Rev2TargetStatus { target: "aarch64-unknown-linux-gnu", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:2215dcca89932ecf67370ba53dfcbf8cb3f720e09441dff76871815e93bd274c", cargo_feature_graph_digest: "sha256:b06952e2f477edce5df994333bae511c90f018165bbb733f87a79c54d214d6e0", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:2215dcca89932ecf67370ba53dfcbf8cb3f720e09441dff76871815e93bd274c;graph:sha256:b06952e2f477edce5df994333bae511c90f018165bbb733f87a79c54d214d6e0;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
+  Rev2TargetStatus { target: "x86_64-unknown-linux-gnu", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c", cargo_feature_graph_digest: "sha256:ddfbde4cbb94a53c7b88afaa155e4ffbdccd5c41e3f373e82c0a8c2976fb9367", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:ddfbde4cbb94a53c7b88afaa155e4ffbdccd5c41e3f373e82c0a8c2976fb9367;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 9, unsupported: 987 },
 ];
 
 pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
@@ -66794,103 +67326,53 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         "effects": [
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-1-env:read",
-            "capability": "env:read",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is env and action is read",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:0",
-            "sourceResourceDescription": "requested environment name"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-10-run:run",
             "capability": "process:spawn",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is run",
+            "condition": "when the closed descriptor is exactly {name:run,command:<retained logical executable>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:1",
-            "sourceResourceDescription": "requested command"
+            "sourceResourceDescription": "exact retained logical executable"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-11-sys:read",
             "capability": "sys:read",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is sys",
+            "condition": "when the closed descriptor is exactly {name:sys,kind:<generated exact Deno spelling>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:2",
-            "sourceResourceDescription": "requested system-information kind"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-2-env:write",
-            "capability": "env:write",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is env and action is write",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:3",
-            "sourceResourceDescription": "requested environment name"
+            "sourceResourceDescription": "exact generated system-information kind"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-3-ffi:load",
             "capability": "ffi:load",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is ffi",
+            "condition": "when the closed descriptor is exactly {name:ffi,path:<retained logical library>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:4",
-            "sourceResourceDescription": "requested native library"
+            "sourceResourceDescription": "exact retained logical native library"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-4-fs:read",
             "capability": "fs:read",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is read",
+            "condition": "when the closed descriptor is exactly {name:read,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:5",
-            "sourceResourceDescription": "requested path"
+            "sourceResourceDescription": "exact requested scoped read path"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-5-fs:write",
             "capability": "fs:write",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is write",
+            "condition": "when the closed descriptor is exactly {name:write,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:6",
-            "sourceResourceDescription": "requested path"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-7-network:connect",
-            "capability": "network:connect",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is net and action is outbound transport",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:7",
-            "sourceResourceDescription": "requested host"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-8-network:fetch",
-            "capability": "network:fetch",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is net and action is request/DNS",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:8",
-            "sourceResourceDescription": "requested host"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-9-network:listen",
-            "capability": "network:listen",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is net and action is bind/listen",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:9",
-            "sourceResourceDescription": "requested host"
+            "sourceResourceDescription": "exact requested scoped write path"
           }
         ],
         "gate": {
@@ -69284,103 +69766,33 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         "effects": [
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-1-env:read",
-            "capability": "env:read",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is env and action is read",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:0",
-            "sourceResourceDescription": "requested environment name"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-10-run:run",
-            "capability": "process:spawn",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is run",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:1",
-            "sourceResourceDescription": "requested command"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-11-sys:read",
             "capability": "sys:read",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is sys",
+            "condition": "when the closed descriptor is exactly {name:sys,kind:<generated exact Deno spelling>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:2",
-            "sourceResourceDescription": "requested system-information kind"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-2-env:write",
-            "capability": "env:write",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is env and action is write",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:3",
-            "sourceResourceDescription": "requested environment name"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-3-ffi:load",
-            "capability": "ffi:load",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is ffi",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:4",
-            "sourceResourceDescription": "requested native library"
+            "sourceResourceDescription": "exact generated system-information kind"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-4-fs:read",
             "capability": "fs:read",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is read",
+            "condition": "when the closed descriptor is exactly {name:read,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:5",
-            "sourceResourceDescription": "requested path"
+            "sourceResourceDescription": "exact requested scoped read path"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-5-fs:write",
             "capability": "fs:write",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is write",
+            "condition": "when the closed descriptor is exactly {name:write,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:6",
-            "sourceResourceDescription": "requested path"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-7-network:connect",
-            "capability": "network:connect",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is net and action is outbound transport",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:7",
-            "sourceResourceDescription": "requested host"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-8-network:fetch",
-            "capability": "network:fetch",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is net and action is request/DNS",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:8",
-            "sourceResourceDescription": "requested host"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-9-network:listen",
-            "capability": "network:listen",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is net and action is bind/listen",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:9",
-            "sourceResourceDescription": "requested host"
+            "sourceResourceDescription": "exact requested scoped write path"
           }
         ],
         "gate": {
@@ -69401,7 +69813,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         "maskedCommit": null,
         "positiveChannels": [
           "ambient-root",
-          "floor"
+          "floor",
+          "handle",
+          "mode-fallback",
+          "session"
         ],
         "principalSources": [
           "captured-constrained-set"
@@ -71027,103 +71442,53 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         "effects": [
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-1-env:read",
-            "capability": "env:read",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is env and action is read",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:0",
-            "sourceResourceDescription": "requested environment name"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-10-run:run",
             "capability": "process:spawn",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is run",
+            "condition": "when the closed descriptor is exactly {name:run,command:<retained logical executable>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:1",
-            "sourceResourceDescription": "requested command"
+            "sourceResourceDescription": "exact retained logical executable"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-11-sys:read",
             "capability": "sys:read",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is sys",
+            "condition": "when the closed descriptor is exactly {name:sys,kind:<generated exact Deno spelling>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:2",
-            "sourceResourceDescription": "requested system-information kind"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-2-env:write",
-            "capability": "env:write",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is env and action is write",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:3",
-            "sourceResourceDescription": "requested environment name"
+            "sourceResourceDescription": "exact generated system-information kind"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-3-ffi:load",
             "capability": "ffi:load",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is ffi",
+            "condition": "when the closed descriptor is exactly {name:ffi,path:<retained logical library>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:4",
-            "sourceResourceDescription": "requested native library"
+            "sourceResourceDescription": "exact retained logical native library"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-4-fs:read",
             "capability": "fs:read",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is read",
+            "condition": "when the closed descriptor is exactly {name:read,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:5",
-            "sourceResourceDescription": "requested path"
+            "sourceResourceDescription": "exact requested scoped read path"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": "effect-5-fs:write",
             "capability": "fs:write",
             "cardinality": "exactly-one",
-            "condition": "when descriptor name is write",
+            "condition": "when the closed descriptor is exactly {name:write,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:6",
-            "sourceResourceDescription": "requested path"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-7-network:connect",
-            "capability": "network:connect",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is net and action is outbound transport",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:7",
-            "sourceResourceDescription": "requested host"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-8-network:fetch",
-            "capability": "network:fetch",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is net and action is request/DNS",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:8",
-            "sourceResourceDescription": "requested host"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": "effect-9-network:listen",
-            "capability": "network:listen",
-            "cardinality": "exactly-one",
-            "condition": "when descriptor name is net and action is bind/listen",
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:9",
-            "sourceResourceDescription": "requested host"
+            "sourceResourceDescription": "exact requested scoped write path"
           }
         ],
         "gate": {
@@ -85117,6 +85482,1606 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         }
       }
     ],
+    "runtimeProtocolSpec": {
+      "actorKeys": [
+        "decision-stage",
+        "effect-owner",
+        "operation-actor",
+        "principal-set"
+      ],
+      "bounds": {
+        "authorityMaxRowBytes": 65536,
+        "authorityMaxRows": 4096,
+        "authorityMaxTotalBytes": 16777216,
+        "cacheMaxDimensions": 16384,
+        "cacheMaxEffects": 256,
+        "cacheMaxEntries": 4096,
+        "cacheMaxEntryBytes": 65536,
+        "cacheMaxPrincipals": 4096,
+        "cacheMaxReceiptDependencies": 4096,
+        "cacheMaxTotalBytes": 16777216,
+        "executableMaxAggregateBytes": 1073741824,
+        "executableMaxImageBytes": 536870912,
+        "executableMaxImages": 256,
+        "maxBatchEffects": 256,
+        "maxCanonicalBatchBytes": 4194304,
+        "maxCanonicalComponentBytes": 4096,
+        "maxCanonicalEffectBytes": 1048576,
+        "maxCanonicalResultBytes": 4194304,
+        "maxConstrainedPrincipals": 4096,
+        "maxPrincipalEffectDimensions": 16384,
+        "maxTransactionMutations": 4096
+      },
+      "digestDomains": {
+        "canonicalRow": "oden:capsec:canonical-row:2",
+        "decisionCacheKey": "oden:capsec:decision-cache-key:2",
+        "externalResponseMac": "oden:capsec:permission-response:2",
+        "negativeInventory": "oden:capsec:negative-inventory:2",
+        "permissionBatch": "oden:capsec:permission-batch:2",
+        "protectedRow": "oden:capsec:protected-row:2",
+        "sessionPositiveRow": "oden:capsec:session-positive-row:2",
+        "sessionRevocationRow": "oden:capsec:session-revocation-row:2"
+      },
+      "generationTransitions": [
+        {
+          "cacheDisposition": "clear-before-publication",
+          "id": "generation.other-negative-change/2",
+          "increments": [
+            "negativeOverlay"
+          ],
+          "mutations": [
+            "add-negative-blocker-without-revocation-inventory-change",
+            "remove-negative-blocker-without-revocation-inventory-change",
+            "replace-negative-blocker-without-revocation-inventory-change"
+          ],
+          "publication": "atomic-rows-vector-and-cache"
+        },
+        {
+          "cacheDisposition": "clear-before-publication",
+          "id": "generation.revocation-inventory-change/2",
+          "increments": [
+            "negativeOverlay",
+            "revocation"
+          ],
+          "mutations": [
+            "add-negative-blocker-with-revocation-inventory-change",
+            "remove-negative-blocker-with-revocation-inventory-change",
+            "replace-negative-blocker-with-revocation-inventory-change"
+          ],
+          "publication": "atomic-rows-vector-and-cache"
+        },
+        {
+          "cacheDisposition": "clear-before-publication",
+          "id": "generation.session-positive-change/2",
+          "increments": [
+            "sessionOverlay"
+          ],
+          "mutations": [
+            "add-session-positive",
+            "remove-session-positive",
+            "replace-session-positive"
+          ],
+          "publication": "atomic-rows-vector-and-cache"
+        },
+        {
+          "cacheDisposition": "clear-before-publication",
+          "id": "generation.session-revocation-change/2",
+          "increments": [
+            "negativeOverlay",
+            "revocation",
+            "sessionOverlay"
+          ],
+          "mutations": [
+            "add-session-revocation",
+            "remove-session-revocation",
+            "replace-session-revocation"
+          ],
+          "publication": "atomic-rows-vector-and-cache"
+        },
+        {
+          "cacheDisposition": "unchanged",
+          "id": "generation.no-publication/2",
+          "increments": [],
+          "mutations": [
+            "cache-miss",
+            "refusal",
+            "unanswered-external-decision"
+          ],
+          "publication": "none"
+        }
+      ],
+      "negativeReentryPhases": [
+        {
+          "id": "initial-query-or-request",
+          "order": 1,
+          "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+          "strata": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        },
+        {
+          "id": "already-granted-check",
+          "order": 2,
+          "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+          "strata": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        },
+        {
+          "id": "before-external-decider",
+          "order": 3,
+          "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+          "strata": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        },
+        {
+          "id": "after-external-response",
+          "order": 4,
+          "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+          "strata": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        },
+        {
+          "id": "before-overlay-publication",
+          "order": 5,
+          "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+          "strata": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        },
+        {
+          "id": "result-production",
+          "order": 6,
+          "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+          "strata": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        },
+        {
+          "id": "cache-hit",
+          "order": 7,
+          "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+          "strata": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        }
+      ],
+      "permissionDescriptorBranches": [
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "env",
+            "optionalFields": [],
+            "requiredFields": [
+              "name",
+              "variable"
+            ],
+            "scope": {
+              "field": "variable",
+              "format": "nonempty-environment-name/2",
+              "requirement": "required-nonempty"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.env.scoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE",
+          "slotOrder": []
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "env",
+            "optionalFields": [],
+            "requiredFields": [
+              "name"
+            ],
+            "scope": {
+              "field": null,
+              "format": null,
+              "requirement": "forbidden"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.env.unscoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE",
+          "slotOrder": []
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "ffi",
+            "optionalFields": [],
+            "requiredFields": [
+              "name",
+              "path"
+            ],
+            "scope": {
+              "field": "path",
+              "format": "retained-library-logical-path/2",
+              "requirement": "required-nonempty"
+            }
+          },
+          "disposition": "normalize",
+          "id": "permission.ffi.scoped/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": null,
+          "slotOrder": [
+            {
+              "capability": "ffi:load",
+              "effectOwnerSource": "captured-effect-owner",
+              "negativeProjectionId": "projection.ffi:load.negative/2",
+              "operationEffectSlotIds": {
+                "query": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:4",
+                "request": null,
+                "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:4"
+              },
+              "positiveProjectionId": "projection.ffi:load.positive/2",
+              "slotId": "permission.ffi:slot:0",
+              "transitions": {
+                "query": "evaluate-static-only",
+                "request": "refuse-static-only",
+                "revoke": "compare-and-commit-session-revocation"
+              }
+            }
+          ]
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "ffi",
+            "optionalFields": [],
+            "requiredFields": [
+              "name"
+            ],
+            "scope": {
+              "field": null,
+              "format": null,
+              "requirement": "forbidden"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.ffi.unscoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-UNSCOPED",
+          "slotOrder": []
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "import",
+            "optionalFields": [],
+            "requiredFields": [
+              "host",
+              "name"
+            ],
+            "scope": {
+              "field": "host",
+              "format": "nonempty-deno-import-descriptor/2",
+              "requirement": "required-nonempty"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.import.scoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-NO-REV2-CAPABILITY",
+          "slotOrder": []
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "import",
+            "optionalFields": [],
+            "requiredFields": [
+              "name"
+            ],
+            "scope": {
+              "field": null,
+              "format": null,
+              "requirement": "forbidden"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.import.unscoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-NO-REV2-CAPABILITY",
+          "slotOrder": []
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "net",
+            "optionalFields": [],
+            "requiredFields": [
+              "host",
+              "name"
+            ],
+            "scope": {
+              "field": "host",
+              "format": "nonempty-deno-net-descriptor/2",
+              "requirement": "required-nonempty"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.net.scoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE",
+          "slotOrder": []
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "net",
+            "optionalFields": [],
+            "requiredFields": [
+              "name"
+            ],
+            "scope": {
+              "field": null,
+              "format": null,
+              "requirement": "forbidden"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.net.unscoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE",
+          "slotOrder": []
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "read",
+            "optionalFields": [],
+            "requiredFields": [
+              "name",
+              "path"
+            ],
+            "scope": {
+              "field": "path",
+              "format": "nonempty-platform-path-input/2",
+              "requirement": "required-nonempty"
+            }
+          },
+          "disposition": "normalize",
+          "id": "permission.read.scoped/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": null,
+          "slotOrder": [
+            {
+              "capability": "fs:read",
+              "effectOwnerSource": "captured-effect-owner",
+              "negativeProjectionId": "projection.fs:read.negative/2",
+              "operationEffectSlotIds": {
+                "query": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:5",
+                "request": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:5",
+                "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:5"
+              },
+              "positiveProjectionId": "projection.fs:read.positive/2",
+              "slotId": "permission.read:slot:0",
+              "transitions": {
+                "query": "evaluate",
+                "request": "compare-and-commit-session-positive",
+                "revoke": "compare-and-commit-session-revocation"
+              }
+            }
+          ]
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "read",
+            "optionalFields": [],
+            "requiredFields": [
+              "name"
+            ],
+            "scope": {
+              "field": null,
+              "format": null,
+              "requirement": "forbidden"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.read.unscoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-UNSCOPED",
+          "slotOrder": []
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "run",
+            "optionalFields": [],
+            "requiredFields": [
+              "command",
+              "name"
+            ],
+            "scope": {
+              "field": "command",
+              "format": "retained-executable-logical-path/2",
+              "requirement": "required-nonempty"
+            }
+          },
+          "disposition": "normalize",
+          "id": "permission.run.scoped/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": null,
+          "slotOrder": [
+            {
+              "capability": "process:spawn",
+              "effectOwnerSource": "captured-effect-owner",
+              "negativeProjectionId": "projection.process:spawn.negative/2",
+              "operationEffectSlotIds": {
+                "query": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:1",
+                "request": null,
+                "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:1"
+              },
+              "positiveProjectionId": "projection.process:spawn.positive/2",
+              "slotId": "permission.run:slot:0",
+              "transitions": {
+                "query": "evaluate-static-only",
+                "request": "refuse-static-only",
+                "revoke": "compare-and-commit-session-revocation"
+              }
+            }
+          ]
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "run",
+            "optionalFields": [],
+            "requiredFields": [
+              "name"
+            ],
+            "scope": {
+              "field": null,
+              "format": null,
+              "requirement": "forbidden"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.run.unscoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-UNSCOPED",
+          "slotOrder": []
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "sys",
+            "optionalFields": [],
+            "requiredFields": [
+              "kind",
+              "name"
+            ],
+            "scope": {
+              "field": "kind",
+              "format": "generated-deno-system-information-spelling/2",
+              "requirement": "required-nonempty"
+            }
+          },
+          "disposition": "normalize",
+          "id": "permission.sys.scoped/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": null,
+          "slotOrder": [
+            {
+              "capability": "sys:read",
+              "effectOwnerSource": "captured-effect-owner",
+              "negativeProjectionId": "projection.sys:read.negative/2",
+              "operationEffectSlotIds": {
+                "query": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:2",
+                "request": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:2",
+                "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:2"
+              },
+              "positiveProjectionId": "projection.sys:read.positive/2",
+              "slotId": "permission.sys:slot:0",
+              "transitions": {
+                "query": "evaluate",
+                "request": "compare-and-commit-session-positive",
+                "revoke": "compare-and-commit-session-revocation"
+              }
+            }
+          ]
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "sys",
+            "optionalFields": [],
+            "requiredFields": [
+              "name"
+            ],
+            "scope": {
+              "field": null,
+              "format": null,
+              "requirement": "forbidden"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.sys.unscoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-UNSCOPED",
+          "slotOrder": []
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "write",
+            "optionalFields": [],
+            "requiredFields": [
+              "name",
+              "path"
+            ],
+            "scope": {
+              "field": "path",
+              "format": "nonempty-platform-path-input/2",
+              "requirement": "required-nonempty"
+            }
+          },
+          "disposition": "normalize",
+          "id": "permission.write.scoped/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": null,
+          "slotOrder": [
+            {
+              "capability": "fs:write",
+              "effectOwnerSource": "captured-effect-owner",
+              "negativeProjectionId": "projection.fs:write.negative/2",
+              "operationEffectSlotIds": {
+                "query": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:6",
+                "request": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:6",
+                "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:6"
+              },
+              "positiveProjectionId": "projection.fs:write.positive/2",
+              "slotId": "permission.write:slot:0",
+              "transitions": {
+                "query": "evaluate",
+                "request": "compare-and-commit-session-positive",
+                "revoke": "compare-and-commit-session-revocation"
+              }
+            }
+          ]
+        },
+        {
+          "aggregateRule": "all-slots-same-disposition-or-refuse",
+          "descriptor": {
+            "additionalProperties": false,
+            "name": "write",
+            "optionalFields": [],
+            "requiredFields": [
+              "name"
+            ],
+            "scope": {
+              "field": null,
+              "format": null,
+              "requirement": "forbidden"
+            }
+          },
+          "disposition": "refuse",
+          "id": "permission.write.unscoped-refusal/2",
+          "operationEdgeIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+          },
+          "refusalReasonCode": "OD-CAP-PERMISSION-UNSCOPED",
+          "slotOrder": []
+        }
+      ],
+      "profile": "oden/capsec/2",
+      "recordSchemas": [
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "allowedValues": [
+                "allow",
+                "deny",
+                "masked",
+                "prompt"
+              ],
+              "collection": "scalar",
+              "format": "decision-state/2",
+              "name": "decision",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "canonical-set",
+              "format": "cache-dimension-set/2",
+              "name": "dimensions",
+              "required": true,
+              "schemaRef": "oden/capsec-decision-cache-dimension/2",
+              "valueType": "object-array"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "weightBytes",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal-or-null",
+              "name": "validUntilMonotonic",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string-or-null"
+            },
+            {
+              "collection": "scalar",
+              "format": "sha256-base64url",
+              "name": "negativeInventoryDigest",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            }
+          ],
+          "id": "oden/capsec-decision-cache-value/2",
+          "recordType": "DecisionCacheValue"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "allowedValues": [
+                "allow",
+                "deny",
+                "masked",
+                "prompt"
+              ],
+              "collection": "scalar",
+              "format": "decision-state/2",
+              "name": "decision",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "generated-slot-id/2",
+              "name": "slotId",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "positive-source-or-null/2",
+              "name": "positiveSource",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            },
+            {
+              "collection": "scalar",
+              "format": "principal-ref/2",
+              "name": "principal",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            }
+          ],
+          "id": "oden/capsec-decision-cache-dimension/2",
+          "recordType": "DecisionCacheDimension"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "allowedValues": [
+                "audit",
+                "enforce",
+                "permissive"
+              ],
+              "collection": "scalar",
+              "format": "runtime-mode/2",
+              "name": "mode",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "allowedValues": [
+                "baseline",
+                "candidate",
+                "probe",
+                "run"
+              ],
+              "collection": "scalar",
+              "format": "execution-role/2",
+              "name": "executionRole",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "allowedValues": [
+                "oden/capsec-runtime-authority-context/2"
+              ],
+              "collection": "scalar",
+              "format": "schema-id",
+              "name": "schema",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "allowedValues": [
+                "oden/capsec/2"
+              ],
+              "collection": "scalar",
+              "format": "profile-id",
+              "name": "capsVocab",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "engine-feature-set/2",
+              "name": "engineFeatureSet",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "engine-target/2",
+              "name": "engineTarget",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "profile-id",
+              "name": "profile",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "retained-object-set/2",
+              "name": "retainedObjects",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "host-private"
+            },
+            {
+              "collection": "scalar",
+              "format": "runtime-authority-state/2",
+              "name": "authorityState",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "host-private"
+            },
+            {
+              "collection": "scalar",
+              "format": "runtime-identity-binding/2",
+              "name": "identity",
+              "required": true,
+              "schemaRef": "oden/capsec-runtime-identity-binding/2",
+              "valueType": "object"
+            },
+            {
+              "collection": "scalar",
+              "format": "sealed-decision-policy/2",
+              "name": "decisionPolicy",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "host-private"
+            }
+          ],
+          "id": "oden/capsec-runtime-authority-context/2",
+          "recordType": "RuntimeAuthorityContext"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "allowedValues": [
+                "audit",
+                "enforce",
+                "permissive"
+              ],
+              "collection": "scalar",
+              "format": "runtime-mode/2",
+              "name": "mode",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "allowedValues": [
+                "oden/capsec-decision-cache-key/2"
+              ],
+              "collection": "scalar",
+              "format": "schema-id",
+              "name": "schema",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "canonical-set",
+              "format": "principal-ref-set/2",
+              "name": "constrainedPrincipals",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            },
+            {
+              "collection": "canonical-set",
+              "format": "receipt-dependency-set/2",
+              "name": "receiptDependencies",
+              "required": true,
+              "schemaRef": "oden/capsec-receipt-dependency/2",
+              "valueType": "object-array"
+            },
+            {
+              "collection": "ordered",
+              "format": "normalized-permission-effect-list/2",
+              "name": "effects",
+              "required": true,
+              "schemaRef": "oden/capsec-permission-effect/2",
+              "valueType": "object-array"
+            },
+            {
+              "collection": "scalar",
+              "format": "coverage-edge-id/2",
+              "name": "coverageEdgeId",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "generated-stage-id/2",
+              "name": "stageId",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "operation-class/2",
+              "name": "operationClass",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "principal-ref/2",
+              "name": "overlayOwner",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            },
+            {
+              "collection": "scalar",
+              "format": "runtime-generation-vector/2",
+              "name": "generations",
+              "required": true,
+              "schemaRef": "oden/capsec-runtime-generation-vector/2",
+              "valueType": "object"
+            },
+            {
+              "collection": "scalar",
+              "format": "runtime-identity-binding/2",
+              "name": "identity",
+              "required": true,
+              "schemaRef": "oden/capsec-runtime-identity-binding/2",
+              "valueType": "object"
+            }
+          ],
+          "id": "oden/capsec-decision-cache-key/2",
+          "recordType": "DecisionCacheKey"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "allowedValues": [
+                "conjunctive"
+              ],
+              "collection": "scalar",
+              "format": "permission-atomicity/2",
+              "name": "atomicity",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "allowedValues": [
+                "oden/capsec-permission-batch/2"
+              ],
+              "collection": "scalar",
+              "format": "schema-id",
+              "name": "schema",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "allowedValues": [
+                "query",
+                "request",
+                "revoke"
+              ],
+              "collection": "scalar",
+              "format": "permission-operation/2",
+              "name": "operation",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "canonical-set",
+              "format": "principal-ref-set/2",
+              "name": "constrainedPrincipals",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            },
+            {
+              "collection": "ordered",
+              "format": "normalized-permission-effect-list/2",
+              "name": "effects",
+              "required": true,
+              "schemaRef": "oden/capsec-permission-effect/2",
+              "valueType": "object-array"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "batchSequence",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "coverage-edge-id/2",
+              "name": "coverageEdgeId",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "principal-ref/2",
+              "name": "overlayOwner",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            },
+            {
+              "collection": "scalar",
+              "format": "runtime-generation-vector/2",
+              "name": "expectedGenerations",
+              "required": true,
+              "schemaRef": "oden/capsec-runtime-generation-vector/2",
+              "valueType": "object"
+            },
+            {
+              "collection": "scalar",
+              "format": "runtime-identity-binding/2",
+              "name": "identity",
+              "required": true,
+              "schemaRef": "oden/capsec-runtime-identity-binding/2",
+              "valueType": "object"
+            },
+            {
+              "collection": "scalar",
+              "format": "sha256-base64url",
+              "name": "batchDigest",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            }
+          ],
+          "id": "oden/capsec-permission-batch/2",
+          "recordType": "NormalizedPermissionBatch"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "allowedValues": [
+                "denied",
+                "granted",
+                "prompt"
+              ],
+              "collection": "scalar",
+              "format": "permission-state/2",
+              "name": "state",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "allowedValues": [
+                "oden/capsec-permission-result/2"
+              ],
+              "collection": "scalar",
+              "format": "schema-id",
+              "name": "schema",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "allowedValues": [
+                "query",
+                "request",
+                "revoke"
+              ],
+              "collection": "scalar",
+              "format": "permission-operation/2",
+              "name": "operation",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "ordered",
+              "format": "permission-effect-result-list/2",
+              "name": "effects",
+              "required": true,
+              "schemaRef": "oden/capsec-permission-effect-result/2",
+              "valueType": "object-array"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "batchSequence",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "runtime-generation-vector/2",
+              "name": "observedGenerations",
+              "required": true,
+              "schemaRef": "oden/capsec-runtime-generation-vector/2",
+              "valueType": "object"
+            },
+            {
+              "collection": "scalar",
+              "format": "runtime-identity-binding/2",
+              "name": "identity",
+              "required": true,
+              "schemaRef": "oden/capsec-runtime-identity-binding/2",
+              "valueType": "object"
+            },
+            {
+              "collection": "scalar",
+              "format": "sha256-base64url",
+              "name": "batchDigest",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            }
+          ],
+          "id": "oden/capsec-permission-result/2",
+          "recordType": "PermissionBatchResult"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "allowedValues": [
+                "denied",
+                "granted",
+                "prompt"
+              ],
+              "collection": "scalar",
+              "format": "permission-state/2",
+              "name": "state",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "canonical-set",
+              "format": "permission-dimension-set/2",
+              "name": "dimensions",
+              "required": true,
+              "schemaRef": "oden/capsec-permission-dimension-result/2",
+              "valueType": "object-array"
+            },
+            {
+              "collection": "scalar",
+              "format": "generated-slot-id/2",
+              "name": "slotId",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            }
+          ],
+          "id": "oden/capsec-permission-effect-result/2",
+          "recordType": "PermissionEffectResult"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "allowedValues": [
+                "denied",
+                "granted",
+                "prompt"
+              ],
+              "collection": "scalar",
+              "format": "permission-state/2",
+              "name": "state",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "positive-source-or-null/2",
+              "name": "positiveSource",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            },
+            {
+              "collection": "scalar",
+              "format": "principal-ref/2",
+              "name": "principal",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            }
+          ],
+          "id": "oden/capsec-permission-dimension-result/2",
+          "recordType": "PermissionDimensionResult"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "allowedValues": [
+                "denied",
+                "granted"
+              ],
+              "collection": "scalar",
+              "format": "external-permission-decision/2",
+              "name": "decision",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "allowedValues": [
+                "oden/capsec-permission-external-response/2"
+              ],
+              "collection": "scalar",
+              "format": "schema-id",
+              "name": "schema",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "allowedValues": [
+                "query",
+                "request",
+                "revoke"
+              ],
+              "collection": "scalar",
+              "format": "permission-operation/2",
+              "name": "operation",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "batchSequence",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "hmac-sha256-tag/2",
+              "name": "authenticationTag",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "runtime-generation-vector/2",
+              "name": "expectedGenerations",
+              "required": true,
+              "schemaRef": "oden/capsec-runtime-generation-vector/2",
+              "valueType": "object"
+            },
+            {
+              "collection": "scalar",
+              "format": "runtime-identity-binding/2",
+              "name": "identity",
+              "required": true,
+              "schemaRef": "oden/capsec-runtime-identity-binding/2",
+              "valueType": "object"
+            },
+            {
+              "collection": "scalar",
+              "format": "sha256-base64url",
+              "name": "batchDigest",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            }
+          ],
+          "id": "oden/capsec-permission-external-response/2",
+          "recordType": "AuthenticatedExternalPermissionResponse"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "collection": "scalar",
+              "format": "authenticated-channel-epoch/2",
+              "name": "channelEpoch",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "opaque-run-nonce/2",
+              "name": "runNonce",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "sha256-base64url",
+              "name": "armedSnapshotDigest",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "sha256-base64url",
+              "name": "policyDigest",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "sha256-base64url",
+              "name": "projectDigest",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "sha256-base64url",
+              "name": "registryDigest",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "sha256-base64url",
+              "name": "vocabDigest",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            }
+          ],
+          "id": "oden/capsec-runtime-identity-binding/2",
+          "recordType": "RuntimeIdentityBinding"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "collection": "scalar",
+              "format": "canonical-authority-selector/2",
+              "name": "selector",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-effect-occurrence/2",
+              "name": "occurrence",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            },
+            {
+              "collection": "scalar",
+              "format": "generated-slot-id/2",
+              "name": "slotId",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "principal-ref/2",
+              "name": "effectOwner",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "typed-value"
+            }
+          ],
+          "id": "oden/capsec-permission-effect/2",
+          "recordType": "NormalizedPermissionEffect"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "issuerGeneration",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "monotonicDeadline",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "receiptNegativeGeneration",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "opaque-id",
+              "name": "receiptId",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            }
+          ],
+          "id": "oden/capsec-receipt-dependency/2",
+          "recordType": "ReceiptDependency"
+        },
+        {
+          "additionalProperties": false,
+          "canonicalization": "I-JSON/RFC8785",
+          "fields": [
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "negativeOverlay",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "policySnapshot",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "revocation",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            },
+            {
+              "collection": "scalar",
+              "format": "canonical-u64-decimal",
+              "name": "sessionOverlay",
+              "required": true,
+              "schemaRef": null,
+              "valueType": "string"
+            }
+          ],
+          "id": "oden/capsec-runtime-generation-vector/2",
+          "recordType": "RuntimeGenerationVector"
+        }
+      ],
+      "schema": "oden/capsec-runtime-protocol-spec/2",
+      "sessionRows": {
+        "batchSequenceDisposition": "excluded-from-row-identity",
+        "duplicateDisposition": "identical-row-is-idempotent-replacement;conflicting-row-refuses",
+        "identityFields": [
+          "identity.armedSnapshotDigest",
+          "overlayOwner",
+          "principal",
+          "slot.capability",
+          "identitySelector"
+        ],
+        "identitySelectorFields": [
+          "principal",
+          "capability",
+          "resource"
+        ],
+        "missingRowProjection": [
+          "slot-order",
+          "then-constrained-principal-order",
+          "refuse-complete-mutation-if-any-pre-result-dimension-is-denied",
+          "missing-dimensions-are-exactly-pre-result-prompt-dimensions",
+          "identity-selector-is-principal-capability-resource-with-dimension-principal",
+          "positive-row-selector-uses-slot-positive-projection",
+          "revocation-row-selector-uses-slot-negative-projection",
+          "one-exact-row-per-principal-and-selector",
+          "row-id-from-kind-domain-and-identity-fields"
+        ],
+        "positiveRowIdDomain": "oden:capsec:session-positive-row:2",
+        "requestGrantReconciliation": "remove-exact-paired-session-revocation-then-upsert-positive-in-one-transaction",
+        "revocationRowIdDomain": "oden:capsec:session-revocation-row:2",
+        "rowIdPreimageSchema": "oden/capsec-session-row-id-preimage/2",
+        "schema": "oden/capsec-session-row-identity/2",
+        "storedRowSelectorProjections": {
+          "sessionPositive": "slot.positiveProjectionId",
+          "sessionRevocation": "slot.negativeProjectionId"
+        }
+      }
+    },
     "schemaEvaluationSpec": {
       "canonicalizations": [
         {
@@ -89417,6 +91382,1607 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
   "schema": "oden/capsec-runtime-vocabulary/2"
 }"###;
 
+pub const REV2_RUNTIME_PROTOCOL_SPEC_JSON: &str = r###"{
+  "actorKeys": [
+    "decision-stage",
+    "effect-owner",
+    "operation-actor",
+    "principal-set"
+  ],
+  "bounds": {
+    "authorityMaxRowBytes": 65536,
+    "authorityMaxRows": 4096,
+    "authorityMaxTotalBytes": 16777216,
+    "cacheMaxDimensions": 16384,
+    "cacheMaxEffects": 256,
+    "cacheMaxEntries": 4096,
+    "cacheMaxEntryBytes": 65536,
+    "cacheMaxPrincipals": 4096,
+    "cacheMaxReceiptDependencies": 4096,
+    "cacheMaxTotalBytes": 16777216,
+    "executableMaxAggregateBytes": 1073741824,
+    "executableMaxImageBytes": 536870912,
+    "executableMaxImages": 256,
+    "maxBatchEffects": 256,
+    "maxCanonicalBatchBytes": 4194304,
+    "maxCanonicalComponentBytes": 4096,
+    "maxCanonicalEffectBytes": 1048576,
+    "maxCanonicalResultBytes": 4194304,
+    "maxConstrainedPrincipals": 4096,
+    "maxPrincipalEffectDimensions": 16384,
+    "maxTransactionMutations": 4096
+  },
+  "digestDomains": {
+    "canonicalRow": "oden:capsec:canonical-row:2",
+    "decisionCacheKey": "oden:capsec:decision-cache-key:2",
+    "externalResponseMac": "oden:capsec:permission-response:2",
+    "negativeInventory": "oden:capsec:negative-inventory:2",
+    "permissionBatch": "oden:capsec:permission-batch:2",
+    "protectedRow": "oden:capsec:protected-row:2",
+    "sessionPositiveRow": "oden:capsec:session-positive-row:2",
+    "sessionRevocationRow": "oden:capsec:session-revocation-row:2"
+  },
+  "generationTransitions": [
+    {
+      "cacheDisposition": "clear-before-publication",
+      "id": "generation.other-negative-change/2",
+      "increments": [
+        "negativeOverlay"
+      ],
+      "mutations": [
+        "add-negative-blocker-without-revocation-inventory-change",
+        "remove-negative-blocker-without-revocation-inventory-change",
+        "replace-negative-blocker-without-revocation-inventory-change"
+      ],
+      "publication": "atomic-rows-vector-and-cache"
+    },
+    {
+      "cacheDisposition": "clear-before-publication",
+      "id": "generation.revocation-inventory-change/2",
+      "increments": [
+        "negativeOverlay",
+        "revocation"
+      ],
+      "mutations": [
+        "add-negative-blocker-with-revocation-inventory-change",
+        "remove-negative-blocker-with-revocation-inventory-change",
+        "replace-negative-blocker-with-revocation-inventory-change"
+      ],
+      "publication": "atomic-rows-vector-and-cache"
+    },
+    {
+      "cacheDisposition": "clear-before-publication",
+      "id": "generation.session-positive-change/2",
+      "increments": [
+        "sessionOverlay"
+      ],
+      "mutations": [
+        "add-session-positive",
+        "remove-session-positive",
+        "replace-session-positive"
+      ],
+      "publication": "atomic-rows-vector-and-cache"
+    },
+    {
+      "cacheDisposition": "clear-before-publication",
+      "id": "generation.session-revocation-change/2",
+      "increments": [
+        "negativeOverlay",
+        "revocation",
+        "sessionOverlay"
+      ],
+      "mutations": [
+        "add-session-revocation",
+        "remove-session-revocation",
+        "replace-session-revocation"
+      ],
+      "publication": "atomic-rows-vector-and-cache"
+    },
+    {
+      "cacheDisposition": "unchanged",
+      "id": "generation.no-publication/2",
+      "increments": [],
+      "mutations": [
+        "cache-miss",
+        "refusal",
+        "unanswered-external-decision"
+      ],
+      "publication": "none"
+    }
+  ],
+  "negativeReentryPhases": [
+    {
+      "id": "initial-query-or-request",
+      "order": 1,
+      "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+      "strata": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    {
+      "id": "already-granted-check",
+      "order": 2,
+      "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+      "strata": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    {
+      "id": "before-external-decider",
+      "order": 3,
+      "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+      "strata": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    {
+      "id": "after-external-response",
+      "order": 4,
+      "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+      "strata": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    {
+      "id": "before-overlay-publication",
+      "order": 5,
+      "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+      "strata": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    {
+      "id": "result-production",
+      "order": 6,
+      "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+      "strata": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    {
+      "id": "cache-hit",
+      "order": 7,
+      "staleDisposition": "discard-batch-and-restart-with-new-sequence",
+      "strata": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    }
+  ],
+  "permissionDescriptorBranches": [
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "env",
+        "optionalFields": [],
+        "requiredFields": [
+          "name",
+          "variable"
+        ],
+        "scope": {
+          "field": "variable",
+          "format": "nonempty-environment-name/2",
+          "requirement": "required-nonempty"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.env.scoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE",
+      "slotOrder": []
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "env",
+        "optionalFields": [],
+        "requiredFields": [
+          "name"
+        ],
+        "scope": {
+          "field": null,
+          "format": null,
+          "requirement": "forbidden"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.env.unscoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE",
+      "slotOrder": []
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "ffi",
+        "optionalFields": [],
+        "requiredFields": [
+          "name",
+          "path"
+        ],
+        "scope": {
+          "field": "path",
+          "format": "retained-library-logical-path/2",
+          "requirement": "required-nonempty"
+        }
+      },
+      "disposition": "normalize",
+      "id": "permission.ffi.scoped/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": null,
+      "slotOrder": [
+        {
+          "capability": "ffi:load",
+          "effectOwnerSource": "captured-effect-owner",
+          "negativeProjectionId": "projection.ffi:load.negative/2",
+          "operationEffectSlotIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:4",
+            "request": null,
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:4"
+          },
+          "positiveProjectionId": "projection.ffi:load.positive/2",
+          "slotId": "permission.ffi:slot:0",
+          "transitions": {
+            "query": "evaluate-static-only",
+            "request": "refuse-static-only",
+            "revoke": "compare-and-commit-session-revocation"
+          }
+        }
+      ]
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "ffi",
+        "optionalFields": [],
+        "requiredFields": [
+          "name"
+        ],
+        "scope": {
+          "field": null,
+          "format": null,
+          "requirement": "forbidden"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.ffi.unscoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-UNSCOPED",
+      "slotOrder": []
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "import",
+        "optionalFields": [],
+        "requiredFields": [
+          "host",
+          "name"
+        ],
+        "scope": {
+          "field": "host",
+          "format": "nonempty-deno-import-descriptor/2",
+          "requirement": "required-nonempty"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.import.scoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-NO-REV2-CAPABILITY",
+      "slotOrder": []
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "import",
+        "optionalFields": [],
+        "requiredFields": [
+          "name"
+        ],
+        "scope": {
+          "field": null,
+          "format": null,
+          "requirement": "forbidden"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.import.unscoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-NO-REV2-CAPABILITY",
+      "slotOrder": []
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "net",
+        "optionalFields": [],
+        "requiredFields": [
+          "host",
+          "name"
+        ],
+        "scope": {
+          "field": "host",
+          "format": "nonempty-deno-net-descriptor/2",
+          "requirement": "required-nonempty"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.net.scoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE",
+      "slotOrder": []
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "net",
+        "optionalFields": [],
+        "requiredFields": [
+          "name"
+        ],
+        "scope": {
+          "field": null,
+          "format": null,
+          "requirement": "forbidden"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.net.unscoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-AMBIGUOUS-AGGREGATE",
+      "slotOrder": []
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "read",
+        "optionalFields": [],
+        "requiredFields": [
+          "name",
+          "path"
+        ],
+        "scope": {
+          "field": "path",
+          "format": "nonempty-platform-path-input/2",
+          "requirement": "required-nonempty"
+        }
+      },
+      "disposition": "normalize",
+      "id": "permission.read.scoped/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": null,
+      "slotOrder": [
+        {
+          "capability": "fs:read",
+          "effectOwnerSource": "captured-effect-owner",
+          "negativeProjectionId": "projection.fs:read.negative/2",
+          "operationEffectSlotIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:5",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:5",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:5"
+          },
+          "positiveProjectionId": "projection.fs:read.positive/2",
+          "slotId": "permission.read:slot:0",
+          "transitions": {
+            "query": "evaluate",
+            "request": "compare-and-commit-session-positive",
+            "revoke": "compare-and-commit-session-revocation"
+          }
+        }
+      ]
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "read",
+        "optionalFields": [],
+        "requiredFields": [
+          "name"
+        ],
+        "scope": {
+          "field": null,
+          "format": null,
+          "requirement": "forbidden"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.read.unscoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-UNSCOPED",
+      "slotOrder": []
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "run",
+        "optionalFields": [],
+        "requiredFields": [
+          "command",
+          "name"
+        ],
+        "scope": {
+          "field": "command",
+          "format": "retained-executable-logical-path/2",
+          "requirement": "required-nonempty"
+        }
+      },
+      "disposition": "normalize",
+      "id": "permission.run.scoped/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": null,
+      "slotOrder": [
+        {
+          "capability": "process:spawn",
+          "effectOwnerSource": "captured-effect-owner",
+          "negativeProjectionId": "projection.process:spawn.negative/2",
+          "operationEffectSlotIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:1",
+            "request": null,
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:1"
+          },
+          "positiveProjectionId": "projection.process:spawn.positive/2",
+          "slotId": "permission.run:slot:0",
+          "transitions": {
+            "query": "evaluate-static-only",
+            "request": "refuse-static-only",
+            "revoke": "compare-and-commit-session-revocation"
+          }
+        }
+      ]
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "run",
+        "optionalFields": [],
+        "requiredFields": [
+          "name"
+        ],
+        "scope": {
+          "field": null,
+          "format": null,
+          "requirement": "forbidden"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.run.unscoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-UNSCOPED",
+      "slotOrder": []
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "sys",
+        "optionalFields": [],
+        "requiredFields": [
+          "kind",
+          "name"
+        ],
+        "scope": {
+          "field": "kind",
+          "format": "generated-deno-system-information-spelling/2",
+          "requirement": "required-nonempty"
+        }
+      },
+      "disposition": "normalize",
+      "id": "permission.sys.scoped/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": null,
+      "slotOrder": [
+        {
+          "capability": "sys:read",
+          "effectOwnerSource": "captured-effect-owner",
+          "negativeProjectionId": "projection.sys:read.negative/2",
+          "operationEffectSlotIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:2",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:2",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:2"
+          },
+          "positiveProjectionId": "projection.sys:read.positive/2",
+          "slotId": "permission.sys:slot:0",
+          "transitions": {
+            "query": "evaluate",
+            "request": "compare-and-commit-session-positive",
+            "revoke": "compare-and-commit-session-revocation"
+          }
+        }
+      ]
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "sys",
+        "optionalFields": [],
+        "requiredFields": [
+          "name"
+        ],
+        "scope": {
+          "field": null,
+          "format": null,
+          "requirement": "forbidden"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.sys.unscoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-UNSCOPED",
+      "slotOrder": []
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "write",
+        "optionalFields": [],
+        "requiredFields": [
+          "name",
+          "path"
+        ],
+        "scope": {
+          "field": "path",
+          "format": "nonempty-platform-path-input/2",
+          "requirement": "required-nonempty"
+        }
+      },
+      "disposition": "normalize",
+      "id": "permission.write.scoped/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": null,
+      "slotOrder": [
+        {
+          "capability": "fs:write",
+          "effectOwnerSource": "captured-effect-owner",
+          "negativeProjectionId": "projection.fs:write.negative/2",
+          "operationEffectSlotIds": {
+            "query": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:6",
+            "request": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:6",
+            "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:6"
+          },
+          "positiveProjectionId": "projection.fs:write.positive/2",
+          "slotId": "permission.write:slot:0",
+          "transitions": {
+            "query": "evaluate",
+            "request": "compare-and-commit-session-positive",
+            "revoke": "compare-and-commit-session-revocation"
+          }
+        }
+      ]
+    },
+    {
+      "aggregateRule": "all-slots-same-disposition-or-refuse",
+      "descriptor": {
+        "additionalProperties": false,
+        "name": "write",
+        "optionalFields": [],
+        "requiredFields": [
+          "name"
+        ],
+        "scope": {
+          "field": null,
+          "format": null,
+          "requirement": "forbidden"
+        }
+      },
+      "disposition": "refuse",
+      "id": "permission.write.unscoped-refusal/2",
+      "operationEdgeIds": {
+        "query": "native-op:runtime/ops/permissions.rs#op_query_permission",
+        "request": "native-op:runtime/ops/permissions.rs#op_request_permission",
+        "revoke": "native-op:runtime/ops/permissions.rs#op_revoke_permission"
+      },
+      "refusalReasonCode": "OD-CAP-PERMISSION-UNSCOPED",
+      "slotOrder": []
+    }
+  ],
+  "profile": "oden/capsec/2",
+  "recordSchemas": [
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "allowedValues": [
+            "allow",
+            "deny",
+            "masked",
+            "prompt"
+          ],
+          "collection": "scalar",
+          "format": "decision-state/2",
+          "name": "decision",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "canonical-set",
+          "format": "cache-dimension-set/2",
+          "name": "dimensions",
+          "required": true,
+          "schemaRef": "oden/capsec-decision-cache-dimension/2",
+          "valueType": "object-array"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "weightBytes",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal-or-null",
+          "name": "validUntilMonotonic",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string-or-null"
+        },
+        {
+          "collection": "scalar",
+          "format": "sha256-base64url",
+          "name": "negativeInventoryDigest",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        }
+      ],
+      "id": "oden/capsec-decision-cache-value/2",
+      "recordType": "DecisionCacheValue"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "allowedValues": [
+            "allow",
+            "deny",
+            "masked",
+            "prompt"
+          ],
+          "collection": "scalar",
+          "format": "decision-state/2",
+          "name": "decision",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "generated-slot-id/2",
+          "name": "slotId",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "positive-source-or-null/2",
+          "name": "positiveSource",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        },
+        {
+          "collection": "scalar",
+          "format": "principal-ref/2",
+          "name": "principal",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        }
+      ],
+      "id": "oden/capsec-decision-cache-dimension/2",
+      "recordType": "DecisionCacheDimension"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "allowedValues": [
+            "audit",
+            "enforce",
+            "permissive"
+          ],
+          "collection": "scalar",
+          "format": "runtime-mode/2",
+          "name": "mode",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "allowedValues": [
+            "baseline",
+            "candidate",
+            "probe",
+            "run"
+          ],
+          "collection": "scalar",
+          "format": "execution-role/2",
+          "name": "executionRole",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "allowedValues": [
+            "oden/capsec-runtime-authority-context/2"
+          ],
+          "collection": "scalar",
+          "format": "schema-id",
+          "name": "schema",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "allowedValues": [
+            "oden/capsec/2"
+          ],
+          "collection": "scalar",
+          "format": "profile-id",
+          "name": "capsVocab",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "engine-feature-set/2",
+          "name": "engineFeatureSet",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "engine-target/2",
+          "name": "engineTarget",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "profile-id",
+          "name": "profile",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "retained-object-set/2",
+          "name": "retainedObjects",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "host-private"
+        },
+        {
+          "collection": "scalar",
+          "format": "runtime-authority-state/2",
+          "name": "authorityState",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "host-private"
+        },
+        {
+          "collection": "scalar",
+          "format": "runtime-identity-binding/2",
+          "name": "identity",
+          "required": true,
+          "schemaRef": "oden/capsec-runtime-identity-binding/2",
+          "valueType": "object"
+        },
+        {
+          "collection": "scalar",
+          "format": "sealed-decision-policy/2",
+          "name": "decisionPolicy",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "host-private"
+        }
+      ],
+      "id": "oden/capsec-runtime-authority-context/2",
+      "recordType": "RuntimeAuthorityContext"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "allowedValues": [
+            "audit",
+            "enforce",
+            "permissive"
+          ],
+          "collection": "scalar",
+          "format": "runtime-mode/2",
+          "name": "mode",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "allowedValues": [
+            "oden/capsec-decision-cache-key/2"
+          ],
+          "collection": "scalar",
+          "format": "schema-id",
+          "name": "schema",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "canonical-set",
+          "format": "principal-ref-set/2",
+          "name": "constrainedPrincipals",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        },
+        {
+          "collection": "canonical-set",
+          "format": "receipt-dependency-set/2",
+          "name": "receiptDependencies",
+          "required": true,
+          "schemaRef": "oden/capsec-receipt-dependency/2",
+          "valueType": "object-array"
+        },
+        {
+          "collection": "ordered",
+          "format": "normalized-permission-effect-list/2",
+          "name": "effects",
+          "required": true,
+          "schemaRef": "oden/capsec-permission-effect/2",
+          "valueType": "object-array"
+        },
+        {
+          "collection": "scalar",
+          "format": "coverage-edge-id/2",
+          "name": "coverageEdgeId",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "generated-stage-id/2",
+          "name": "stageId",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "operation-class/2",
+          "name": "operationClass",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "principal-ref/2",
+          "name": "overlayOwner",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        },
+        {
+          "collection": "scalar",
+          "format": "runtime-generation-vector/2",
+          "name": "generations",
+          "required": true,
+          "schemaRef": "oden/capsec-runtime-generation-vector/2",
+          "valueType": "object"
+        },
+        {
+          "collection": "scalar",
+          "format": "runtime-identity-binding/2",
+          "name": "identity",
+          "required": true,
+          "schemaRef": "oden/capsec-runtime-identity-binding/2",
+          "valueType": "object"
+        }
+      ],
+      "id": "oden/capsec-decision-cache-key/2",
+      "recordType": "DecisionCacheKey"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "allowedValues": [
+            "conjunctive"
+          ],
+          "collection": "scalar",
+          "format": "permission-atomicity/2",
+          "name": "atomicity",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "allowedValues": [
+            "oden/capsec-permission-batch/2"
+          ],
+          "collection": "scalar",
+          "format": "schema-id",
+          "name": "schema",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "allowedValues": [
+            "query",
+            "request",
+            "revoke"
+          ],
+          "collection": "scalar",
+          "format": "permission-operation/2",
+          "name": "operation",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "canonical-set",
+          "format": "principal-ref-set/2",
+          "name": "constrainedPrincipals",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        },
+        {
+          "collection": "ordered",
+          "format": "normalized-permission-effect-list/2",
+          "name": "effects",
+          "required": true,
+          "schemaRef": "oden/capsec-permission-effect/2",
+          "valueType": "object-array"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "batchSequence",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "coverage-edge-id/2",
+          "name": "coverageEdgeId",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "principal-ref/2",
+          "name": "overlayOwner",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        },
+        {
+          "collection": "scalar",
+          "format": "runtime-generation-vector/2",
+          "name": "expectedGenerations",
+          "required": true,
+          "schemaRef": "oden/capsec-runtime-generation-vector/2",
+          "valueType": "object"
+        },
+        {
+          "collection": "scalar",
+          "format": "runtime-identity-binding/2",
+          "name": "identity",
+          "required": true,
+          "schemaRef": "oden/capsec-runtime-identity-binding/2",
+          "valueType": "object"
+        },
+        {
+          "collection": "scalar",
+          "format": "sha256-base64url",
+          "name": "batchDigest",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        }
+      ],
+      "id": "oden/capsec-permission-batch/2",
+      "recordType": "NormalizedPermissionBatch"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "allowedValues": [
+            "denied",
+            "granted",
+            "prompt"
+          ],
+          "collection": "scalar",
+          "format": "permission-state/2",
+          "name": "state",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "allowedValues": [
+            "oden/capsec-permission-result/2"
+          ],
+          "collection": "scalar",
+          "format": "schema-id",
+          "name": "schema",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "allowedValues": [
+            "query",
+            "request",
+            "revoke"
+          ],
+          "collection": "scalar",
+          "format": "permission-operation/2",
+          "name": "operation",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "ordered",
+          "format": "permission-effect-result-list/2",
+          "name": "effects",
+          "required": true,
+          "schemaRef": "oden/capsec-permission-effect-result/2",
+          "valueType": "object-array"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "batchSequence",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "runtime-generation-vector/2",
+          "name": "observedGenerations",
+          "required": true,
+          "schemaRef": "oden/capsec-runtime-generation-vector/2",
+          "valueType": "object"
+        },
+        {
+          "collection": "scalar",
+          "format": "runtime-identity-binding/2",
+          "name": "identity",
+          "required": true,
+          "schemaRef": "oden/capsec-runtime-identity-binding/2",
+          "valueType": "object"
+        },
+        {
+          "collection": "scalar",
+          "format": "sha256-base64url",
+          "name": "batchDigest",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        }
+      ],
+      "id": "oden/capsec-permission-result/2",
+      "recordType": "PermissionBatchResult"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "allowedValues": [
+            "denied",
+            "granted",
+            "prompt"
+          ],
+          "collection": "scalar",
+          "format": "permission-state/2",
+          "name": "state",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "canonical-set",
+          "format": "permission-dimension-set/2",
+          "name": "dimensions",
+          "required": true,
+          "schemaRef": "oden/capsec-permission-dimension-result/2",
+          "valueType": "object-array"
+        },
+        {
+          "collection": "scalar",
+          "format": "generated-slot-id/2",
+          "name": "slotId",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        }
+      ],
+      "id": "oden/capsec-permission-effect-result/2",
+      "recordType": "PermissionEffectResult"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "allowedValues": [
+            "denied",
+            "granted",
+            "prompt"
+          ],
+          "collection": "scalar",
+          "format": "permission-state/2",
+          "name": "state",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "positive-source-or-null/2",
+          "name": "positiveSource",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        },
+        {
+          "collection": "scalar",
+          "format": "principal-ref/2",
+          "name": "principal",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        }
+      ],
+      "id": "oden/capsec-permission-dimension-result/2",
+      "recordType": "PermissionDimensionResult"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "allowedValues": [
+            "denied",
+            "granted"
+          ],
+          "collection": "scalar",
+          "format": "external-permission-decision/2",
+          "name": "decision",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "allowedValues": [
+            "oden/capsec-permission-external-response/2"
+          ],
+          "collection": "scalar",
+          "format": "schema-id",
+          "name": "schema",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "allowedValues": [
+            "query",
+            "request",
+            "revoke"
+          ],
+          "collection": "scalar",
+          "format": "permission-operation/2",
+          "name": "operation",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "batchSequence",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "hmac-sha256-tag/2",
+          "name": "authenticationTag",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "runtime-generation-vector/2",
+          "name": "expectedGenerations",
+          "required": true,
+          "schemaRef": "oden/capsec-runtime-generation-vector/2",
+          "valueType": "object"
+        },
+        {
+          "collection": "scalar",
+          "format": "runtime-identity-binding/2",
+          "name": "identity",
+          "required": true,
+          "schemaRef": "oden/capsec-runtime-identity-binding/2",
+          "valueType": "object"
+        },
+        {
+          "collection": "scalar",
+          "format": "sha256-base64url",
+          "name": "batchDigest",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        }
+      ],
+      "id": "oden/capsec-permission-external-response/2",
+      "recordType": "AuthenticatedExternalPermissionResponse"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "collection": "scalar",
+          "format": "authenticated-channel-epoch/2",
+          "name": "channelEpoch",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "opaque-run-nonce/2",
+          "name": "runNonce",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "sha256-base64url",
+          "name": "armedSnapshotDigest",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "sha256-base64url",
+          "name": "policyDigest",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "sha256-base64url",
+          "name": "projectDigest",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "sha256-base64url",
+          "name": "registryDigest",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "sha256-base64url",
+          "name": "vocabDigest",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        }
+      ],
+      "id": "oden/capsec-runtime-identity-binding/2",
+      "recordType": "RuntimeIdentityBinding"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "collection": "scalar",
+          "format": "canonical-authority-selector/2",
+          "name": "selector",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-effect-occurrence/2",
+          "name": "occurrence",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        },
+        {
+          "collection": "scalar",
+          "format": "generated-slot-id/2",
+          "name": "slotId",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "principal-ref/2",
+          "name": "effectOwner",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "typed-value"
+        }
+      ],
+      "id": "oden/capsec-permission-effect/2",
+      "recordType": "NormalizedPermissionEffect"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "issuerGeneration",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "monotonicDeadline",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "receiptNegativeGeneration",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "opaque-id",
+          "name": "receiptId",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        }
+      ],
+      "id": "oden/capsec-receipt-dependency/2",
+      "recordType": "ReceiptDependency"
+    },
+    {
+      "additionalProperties": false,
+      "canonicalization": "I-JSON/RFC8785",
+      "fields": [
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "negativeOverlay",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "policySnapshot",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "revocation",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        },
+        {
+          "collection": "scalar",
+          "format": "canonical-u64-decimal",
+          "name": "sessionOverlay",
+          "required": true,
+          "schemaRef": null,
+          "valueType": "string"
+        }
+      ],
+      "id": "oden/capsec-runtime-generation-vector/2",
+      "recordType": "RuntimeGenerationVector"
+    }
+  ],
+  "schema": "oden/capsec-runtime-protocol-spec/2",
+  "sessionRows": {
+    "batchSequenceDisposition": "excluded-from-row-identity",
+    "duplicateDisposition": "identical-row-is-idempotent-replacement;conflicting-row-refuses",
+    "identityFields": [
+      "identity.armedSnapshotDigest",
+      "overlayOwner",
+      "principal",
+      "slot.capability",
+      "identitySelector"
+    ],
+    "identitySelectorFields": [
+      "principal",
+      "capability",
+      "resource"
+    ],
+    "missingRowProjection": [
+      "slot-order",
+      "then-constrained-principal-order",
+      "refuse-complete-mutation-if-any-pre-result-dimension-is-denied",
+      "missing-dimensions-are-exactly-pre-result-prompt-dimensions",
+      "identity-selector-is-principal-capability-resource-with-dimension-principal",
+      "positive-row-selector-uses-slot-positive-projection",
+      "revocation-row-selector-uses-slot-negative-projection",
+      "one-exact-row-per-principal-and-selector",
+      "row-id-from-kind-domain-and-identity-fields"
+    ],
+    "positiveRowIdDomain": "oden:capsec:session-positive-row:2",
+    "requestGrantReconciliation": "remove-exact-paired-session-revocation-then-upsert-positive-in-one-transaction",
+    "revocationRowIdDomain": "oden:capsec:session-revocation-row:2",
+    "rowIdPreimageSchema": "oden/capsec-session-row-id-preimage/2",
+    "schema": "oden/capsec-session-row-identity/2",
+    "storedRowSelectorProjections": {
+      "sessionPositive": "slot.positiveProjectionId",
+      "sessionRevocation": "slot.negativeProjectionId"
+    }
+  }
+}"###;
+
 pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/cron/lib.rs#op_cron_create", effect_slot_id: "native-op:ext/cron/lib.rs#op_cron_create:effect-slot:0", capability: Rev2CapabilityId::CronSchedule, resource_schema_id: "resource.cron-schedule/2", occurrence_schema_id: "occurrence.cron-schedule/2", positive_projection_id: "projection.cron:schedule.positive/2", negative_projection_id: "projection.cron:schedule.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/cron/lib.rs#op_cron_next", effect_slot_id: "native-op:ext/cron/lib.rs#op_cron_next:effect-slot:0", capability: Rev2CapabilityId::CronSchedule, resource_schema_id: "resource.cron-schedule/2", occurrence_schema_id: "occurrence.cron-schedule/2", positive_projection_id: "projection.cron:schedule.positive/2", negative_projection_id: "projection.cron:schedule.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -89429,9 +92995,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_node_spawn_child", effect_slot_id: "native-op:ext/process/lib.rs#op_node_spawn_child:effect-slot:1", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_run", effect_slot_id: "native-op:ext/process/lib.rs#op_run:effect-slot:1", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_spawn_child", effect_slot_id: "native-op:ext/process/lib.rs#op_spawn_child:effect-slot:1", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_query_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:0", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_request_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:0", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:0", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:process", effect_slot_id: "node-builtin:node:process:effect-slot:0", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "startup-hook:cli/util/v8.rs#get_v8_flags_from_env", effect_slot_id: "startup-hook:cli/util/v8.rs#get_v8_flags_from_env:effect-slot:0", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "startup-hook:ext/tls/keylog.rs#get_ssl_key_log", effect_slot_id: "startup-hook:ext/tls/keylog.rs#get_ssl_key_log:effect-slot:0", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -89439,9 +93002,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_node_spawn_child", effect_slot_id: "native-op:ext/process/lib.rs#op_node_spawn_child:effect-slot:2", capability: Rev2CapabilityId::EnvWrite, resource_schema_id: "resource.env-write-target/2", occurrence_schema_id: "occurrence.env-write/2", positive_projection_id: "projection.env:write.positive/2", negative_projection_id: "projection.env:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_run", effect_slot_id: "native-op:ext/process/lib.rs#op_run:effect-slot:2", capability: Rev2CapabilityId::EnvWrite, resource_schema_id: "resource.env-write-target/2", occurrence_schema_id: "occurrence.env-write/2", positive_projection_id: "projection.env:write.positive/2", negative_projection_id: "projection.env:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_spawn_child", effect_slot_id: "native-op:ext/process/lib.rs#op_spawn_child:effect-slot:2", capability: Rev2CapabilityId::EnvWrite, resource_schema_id: "resource.env-write-target/2", occurrence_schema_id: "occurrence.env-write/2", positive_projection_id: "projection.env:write.positive/2", negative_projection_id: "projection.env:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_query_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:3", capability: Rev2CapabilityId::EnvWrite, resource_schema_id: "resource.env-write-target/2", occurrence_schema_id: "occurrence.env-write/2", positive_projection_id: "projection.env:write.positive/2", negative_projection_id: "projection.env:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_request_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:3", capability: Rev2CapabilityId::EnvWrite, resource_schema_id: "resource.env-write-target/2", occurrence_schema_id: "occurrence.env-write/2", positive_projection_id: "projection.env:write.positive/2", negative_projection_id: "projection.env:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:3", capability: Rev2CapabilityId::EnvWrite, resource_schema_id: "resource.env-write-target/2", occurrence_schema_id: "occurrence.env-write/2", positive_projection_id: "projection.env:write.positive/2", negative_projection_id: "projection.env:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:process", effect_slot_id: "node-builtin:node:process:effect-slot:1", capability: Rev2CapabilityId::EnvWrite, resource_schema_id: "resource.env-write-target/2", occurrence_schema_id: "occurrence.env-write/2", positive_projection_id: "projection.env:write.positive/2", negative_projection_id: "projection.env:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/ffi/call.rs#op_ffi_call_nonblocking", effect_slot_id: "native-op:ext/ffi/call.rs#op_ffi_call_nonblocking:effect-slot:0", capability: Rev2CapabilityId::FfiLoad, resource_schema_id: "resource.library-identity/2", occurrence_schema_id: "occurrence.library-load/2", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/ffi/call.rs#op_ffi_call_ptr", effect_slot_id: "native-op:ext/ffi/call.rs#op_ffi_call_ptr:effect-slot:0", capability: Rev2CapabilityId::FfiLoad, resource_schema_id: "resource.library-identity/2", occurrence_schema_id: "occurrence.library-load/2", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -89478,7 +93038,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/node_sqlite/database.rs#DatabaseSync::new[constructor]", effect_slot_id: "native-op:ext/node_sqlite/database.rs#DatabaseSync::new[constructor]:effect-slot:0", capability: Rev2CapabilityId::FfiLoad, resource_schema_id: "resource.library-identity/2", occurrence_schema_id: "occurrence.library-load/2", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/node_sqlite/database.rs#DatabaseSync::open", effect_slot_id: "native-op:ext/node_sqlite/database.rs#DatabaseSync::open:effect-slot:0", capability: Rev2CapabilityId::FfiLoad, resource_schema_id: "resource.library-identity/2", occurrence_schema_id: "occurrence.library-load/2", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_query_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:4", capability: Rev2CapabilityId::FfiLoad, resource_schema_id: "resource.library-identity/2", occurrence_schema_id: "occurrence.library-load/2", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_request_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:4", capability: Rev2CapabilityId::FfiLoad, resource_schema_id: "resource.library-identity/2", occurrence_schema_id: "occurrence.library-load/2", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:4", capability: Rev2CapabilityId::FfiLoad, resource_schema_id: "resource.library-identity/2", occurrence_schema_id: "occurrence.library-load/2", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "loader-branch:cli/module_loader.rs#local-computed-dynamic-javascript", effect_slot_id: "loader-branch:cli/module_loader.rs#local-computed-dynamic-javascript:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "loader-branch:cli/module_loader.rs#local-computed-dynamic-other", effect_slot_id: "loader-branch:cli/module_loader.rs#local-computed-dynamic-other:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -90057,9 +93616,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/websocket/lib.rs#op_ws_send_ping", effect_slot_id: "native-op:ext/websocket/lib.rs#op_ws_send_ping:effect-slot:1", capability: Rev2CapabilityId::NetworkConnect, resource_schema_id: "resource.network-connect/2", occurrence_schema_id: "occurrence.network-connect/2", positive_projection_id: "projection.network:connect.positive/2", negative_projection_id: "projection.network:connect.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/websocket/lib.rs#op_ws_send_text", effect_slot_id: "native-op:ext/websocket/lib.rs#op_ws_send_text:effect-slot:1", capability: Rev2CapabilityId::NetworkConnect, resource_schema_id: "resource.network-connect/2", occurrence_schema_id: "occurrence.network-connect/2", positive_projection_id: "projection.network:connect.positive/2", negative_projection_id: "projection.network:connect.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/websocket/lib.rs#op_ws_send_text_async", effect_slot_id: "native-op:ext/websocket/lib.rs#op_ws_send_text_async:effect-slot:1", capability: Rev2CapabilityId::NetworkConnect, resource_schema_id: "resource.network-connect/2", occurrence_schema_id: "occurrence.network-connect/2", positive_projection_id: "projection.network:connect.positive/2", negative_projection_id: "projection.network:connect.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_query_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:7", capability: Rev2CapabilityId::NetworkConnect, resource_schema_id: "resource.network-connect/2", occurrence_schema_id: "occurrence.network-connect/2", positive_projection_id: "projection.network:connect.positive/2", negative_projection_id: "projection.network:connect.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_request_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:7", capability: Rev2CapabilityId::NetworkConnect, resource_schema_id: "resource.network-connect/2", occurrence_schema_id: "occurrence.network-connect/2", positive_projection_id: "projection.network:connect.positive/2", negative_projection_id: "projection.network:connect.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:7", capability: Rev2CapabilityId::NetworkConnect, resource_schema_id: "resource.network-connect/2", occurrence_schema_id: "occurrence.network-connect/2", positive_projection_id: "projection.network:connect.positive/2", negative_projection_id: "projection.network:connect.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:_http_agent", effect_slot_id: "node-builtin:node:_http_agent:effect-slot:0", capability: Rev2CapabilityId::NetworkConnect, resource_schema_id: "resource.network-connect/2", occurrence_schema_id: "occurrence.network-connect/2", positive_projection_id: "projection.network:connect.positive/2", negative_projection_id: "projection.network:connect.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:_http_client", effect_slot_id: "node-builtin:node:_http_client:effect-slot:0", capability: Rev2CapabilityId::NetworkConnect, resource_schema_id: "resource.network-connect/2", occurrence_schema_id: "occurrence.network-connect/2", positive_projection_id: "projection.network:connect.positive/2", negative_projection_id: "projection.network:connect.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:_http_common", effect_slot_id: "node-builtin:node:_http_common:effect-slot:0", capability: Rev2CapabilityId::NetworkConnect, resource_schema_id: "resource.network-connect/2", occurrence_schema_id: "occurrence.network-connect/2", positive_projection_id: "projection.network:connect.positive/2", negative_projection_id: "projection.network:connect.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -90135,9 +93691,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/telemetry/lib.rs#op_otel_span_attribute2", effect_slot_id: "native-op:ext/telemetry/lib.rs#op_otel_span_attribute2:effect-slot:0", capability: Rev2CapabilityId::NetworkFetch, resource_schema_id: "resource.network-fetch/2", occurrence_schema_id: "occurrence.network-fetch/2", positive_projection_id: "projection.network:fetch.positive/2", negative_projection_id: "projection.network:fetch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/telemetry/lib.rs#op_otel_span_attribute3", effect_slot_id: "native-op:ext/telemetry/lib.rs#op_otel_span_attribute3:effect-slot:0", capability: Rev2CapabilityId::NetworkFetch, resource_schema_id: "resource.network-fetch/2", occurrence_schema_id: "occurrence.network-fetch/2", positive_projection_id: "projection.network:fetch.positive/2", negative_projection_id: "projection.network:fetch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/telemetry/lib.rs#op_otel_span_update_name", effect_slot_id: "native-op:ext/telemetry/lib.rs#op_otel_span_update_name:effect-slot:0", capability: Rev2CapabilityId::NetworkFetch, resource_schema_id: "resource.network-fetch/2", occurrence_schema_id: "occurrence.network-fetch/2", positive_projection_id: "projection.network:fetch.positive/2", negative_projection_id: "projection.network:fetch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_query_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:8", capability: Rev2CapabilityId::NetworkFetch, resource_schema_id: "resource.network-fetch/2", occurrence_schema_id: "occurrence.network-fetch/2", positive_projection_id: "projection.network:fetch.positive/2", negative_projection_id: "projection.network:fetch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_request_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:8", capability: Rev2CapabilityId::NetworkFetch, resource_schema_id: "resource.network-fetch/2", occurrence_schema_id: "occurrence.network-fetch/2", positive_projection_id: "projection.network:fetch.positive/2", negative_projection_id: "projection.network:fetch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:8", capability: Rev2CapabilityId::NetworkFetch, resource_schema_id: "resource.network-fetch/2", occurrence_schema_id: "occurrence.network-fetch/2", positive_projection_id: "projection.network:fetch.positive/2", negative_projection_id: "projection.network:fetch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:dns", effect_slot_id: "node-builtin:node:dns:effect-slot:0", capability: Rev2CapabilityId::NetworkFetch, resource_schema_id: "resource.network-fetch/2", occurrence_schema_id: "occurrence.network-fetch/2", positive_projection_id: "projection.network:fetch.positive/2", negative_projection_id: "projection.network:fetch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:dns/promises", effect_slot_id: "node-builtin:node:dns/promises:effect-slot:0", capability: Rev2CapabilityId::NetworkFetch, resource_schema_id: "resource.network-fetch/2", occurrence_schema_id: "occurrence.network-fetch/2", positive_projection_id: "projection.network:fetch.positive/2", negative_projection_id: "projection.network:fetch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "socket-path:ext/fetch/lib.rs#op_fetch", effect_slot_id: "socket-path:ext/fetch/lib.rs#op_fetch:effect-slot:0", capability: Rev2CapabilityId::NetworkFetch, resource_schema_id: "resource.network-fetch/2", occurrence_schema_id: "occurrence.network-fetch/2", positive_projection_id: "projection.network:fetch.positive/2", negative_projection_id: "projection.network:fetch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -90374,9 +93927,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/node/ops/udp.rs#op_node_udp_set_multicast_ttl", effect_slot_id: "native-op:ext/node/ops/udp.rs#op_node_udp_set_multicast_ttl:effect-slot:1", capability: Rev2CapabilityId::NetworkListen, resource_schema_id: "resource.network-listen/2", occurrence_schema_id: "occurrence.network-listen/2", positive_projection_id: "projection.network:listen.positive/2", negative_projection_id: "projection.network:listen.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/node/ops/udp.rs#op_node_udp_set_ttl", effect_slot_id: "native-op:ext/node/ops/udp.rs#op_node_udp_set_ttl:effect-slot:1", capability: Rev2CapabilityId::NetworkListen, resource_schema_id: "resource.network-listen/2", occurrence_schema_id: "occurrence.network-listen/2", positive_projection_id: "projection.network:listen.positive/2", negative_projection_id: "projection.network:listen.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/http.rs#op_http_start", effect_slot_id: "native-op:runtime/ops/http.rs#op_http_start:effect-slot:0", capability: Rev2CapabilityId::NetworkListen, resource_schema_id: "resource.network-listen/2", occurrence_schema_id: "occurrence.network-listen/2", positive_projection_id: "projection.network:listen.positive/2", negative_projection_id: "projection.network:listen.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_query_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:9", capability: Rev2CapabilityId::NetworkListen, resource_schema_id: "resource.network-listen/2", occurrence_schema_id: "occurrence.network-listen/2", positive_projection_id: "projection.network:listen.positive/2", negative_projection_id: "projection.network:listen.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_request_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:9", capability: Rev2CapabilityId::NetworkListen, resource_schema_id: "resource.network-listen/2", occurrence_schema_id: "occurrence.network-listen/2", positive_projection_id: "projection.network:listen.positive/2", negative_projection_id: "projection.network:listen.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:9", capability: Rev2CapabilityId::NetworkListen, resource_schema_id: "resource.network-listen/2", occurrence_schema_id: "occurrence.network-listen/2", positive_projection_id: "projection.network:listen.positive/2", negative_projection_id: "projection.network:listen.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:_http_agent", effect_slot_id: "node-builtin:node:_http_agent:effect-slot:2", capability: Rev2CapabilityId::NetworkListen, resource_schema_id: "resource.network-listen/2", occurrence_schema_id: "occurrence.network-listen/2", positive_projection_id: "projection.network:listen.positive/2", negative_projection_id: "projection.network:listen.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:_http_client", effect_slot_id: "node-builtin:node:_http_client:effect-slot:2", capability: Rev2CapabilityId::NetworkListen, resource_schema_id: "resource.network-listen/2", occurrence_schema_id: "occurrence.network-listen/2", positive_projection_id: "projection.network:listen.positive/2", negative_projection_id: "projection.network:listen.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:_http_common", effect_slot_id: "node-builtin:node:_http_common:effect-slot:2", capability: Rev2CapabilityId::NetworkListen, resource_schema_id: "resource.network-listen/2", occurrence_schema_id: "occurrence.network-listen/2", positive_projection_id: "projection.network:listen.positive/2", negative_projection_id: "projection.network:listen.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -90457,7 +94007,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_spawn_child", effect_slot_id: "native-op:ext/process/lib.rs#op_spawn_child:effect-slot:0", capability: Rev2CapabilityId::ProcessSpawn, resource_schema_id: "resource.executable-identity/2", occurrence_schema_id: "occurrence.process-spawn/2", positive_projection_id: "projection.process:spawn.positive/2", negative_projection_id: "projection.process:spawn.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_spawn_wait", effect_slot_id: "native-op:ext/process/lib.rs#op_spawn_wait:effect-slot:0", capability: Rev2CapabilityId::ProcessSpawn, resource_schema_id: "resource.executable-identity/2", occurrence_schema_id: "occurrence.process-spawn/2", positive_projection_id: "projection.process:spawn.positive/2", negative_projection_id: "projection.process:spawn.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_query_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:1", capability: Rev2CapabilityId::ProcessSpawn, resource_schema_id: "resource.executable-identity/2", occurrence_schema_id: "occurrence.process-spawn/2", positive_projection_id: "projection.process:spawn.positive/2", negative_projection_id: "projection.process:spawn.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_request_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:1", capability: Rev2CapabilityId::ProcessSpawn, resource_schema_id: "resource.executable-identity/2", occurrence_schema_id: "occurrence.process-spawn/2", positive_projection_id: "projection.process:spawn.positive/2", negative_projection_id: "projection.process:spawn.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:1", capability: Rev2CapabilityId::ProcessSpawn, resource_schema_id: "resource.executable-identity/2", occurrence_schema_id: "occurrence.process-spawn/2", positive_projection_id: "projection.process:spawn.positive/2", negative_projection_id: "projection.process:spawn.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:child_process", effect_slot_id: "node-builtin:node:child_process:effect-slot:0", capability: Rev2CapabilityId::ProcessSpawn, resource_schema_id: "resource.executable-identity/2", occurrence_schema_id: "occurrence.process-spawn/2", positive_projection_id: "projection.process:spawn.positive/2", negative_projection_id: "projection.process:spawn.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:cluster", effect_slot_id: "node-builtin:node:cluster:effect-slot:0", capability: Rev2CapabilityId::ProcessSpawn, resource_schema_id: "resource.executable-identity/2", occurrence_schema_id: "occurrence.process-spawn/2", positive_projection_id: "projection.process:spawn.positive/2", negative_projection_id: "projection.process:spawn.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
