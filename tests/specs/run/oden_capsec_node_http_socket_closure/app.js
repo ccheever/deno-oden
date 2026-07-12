@@ -1,5 +1,6 @@
 import http from "node:http";
 import https from "node:https";
+import net from "node:net";
 import diagnosticsChannel from "node:diagnostics_channel";
 import {
   runNodeHttpSocketRoutes,
@@ -1037,23 +1038,34 @@ async function runHandoffPeerClosure() {
     }
 
     // coverage-route: borrowed-accepted-socket-closed
+    // Use a fresh raw server for this route. Reusing the HTTP server above
+    // lets a delayed connection event from an already-denied client satisfy
+    // `acceptedReady` with a socket whose handle has since closed.
+    const acceptedServer = net.createServer({ pauseOnConnect: true });
+    const acceptedSockets = track(acceptedServer, (bytes) => peerBytes += bytes);
+    await listen(acceptedServer, { hostname: "127.0.0.1", port: 0 });
+    const acceptedPort = acceptedServer.address().port;
+    const acceptedDeclared =
+      `http://allowed.example:${acceptedPort}/accepted`;
     let accepted;
-    const acceptedReady = new Promise((resolve) => {
-      server.once("connection", (socket) => {
-        accepted = socket;
-        resolve();
-      });
-    });
-    const client = await openSocket("localhost", port);
+    let client;
     let acceptedBytes = 0;
-    client.on("data", (chunk) => acceptedBytes += chunk.length);
-    await acceptedReady;
     try {
+      const acceptedReady = new Promise((resolve) => {
+        acceptedServer.once("connection", (socket) => {
+          accepted = socket;
+          resolve();
+        });
+      });
+      client = await openSocket("localhost", acceptedPort);
+      client.on("data", (chunk) => acceptedBytes += chunk.length);
+      await acceptedReady;
+
       // coverage-route: native-accepted-peer-closed
-      const nativeOutcome = checkNativeTcpSocket(accepted, declared);
+      const nativeOutcome = checkNativeTcpSocket(accepted, acceptedDeclared);
       const outcome = await requestWithCreateConnectionSocket(
         accepted,
-        declared,
+        acceptedDeclared,
       );
       if (outcome !== "denied") {
         throw new Error(
@@ -1072,8 +1084,9 @@ async function runHandoffPeerClosure() {
         "NODE_HTTP_SOCKET_ROUTE native-accepted-peer-closed DENIED",
       );
     } finally {
-      client.destroy();
+      client?.destroy();
       accepted?.destroy();
+      await close(acceptedServer, acceptedSockets);
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
     if (requests !== 0 || peerBytes !== 0 || acceptedBytes !== 0) {
