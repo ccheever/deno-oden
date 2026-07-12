@@ -1,1 +1,1 @@
-{"sameActor":"ALLOWED","actorAB":"DENIED","actorBA":"DENIED","untrustedSchedule":"LIVE","missingSchedule":"ADMISSION","concurrentNodeIterator":"CLOSED","concurrentWebDefaultPull":"CLOSED","concurrentWebBYOBPull":"CLOSED"}
+{"sameActor":"ALLOWED","actorAB":"DENIED","actorBA":"DENIED","untrustedSchedule":"LIVE","missingSchedule":"ADMISSION","concurrentNodeIterator":"CLOSED","acceptedConcurrentNodeIterator":"BOUND","concurrentWebDefaultPull":"CLOSED","concurrentWebBYOBPull":"CLOSED","acceptedConcurrentWebDefaultPull":"BOUND","acceptedConcurrentWebBYOBPull":"BOUND"}

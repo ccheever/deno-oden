@@ -144,6 +144,7 @@ const readableControllerSizeAlgorithms = new SafeWeakMap();
 const readableSizeAlgorithmCallbackRecords = new SafeWeakMap();
 const readableUnderlyingSourceCallbackRecords = new SafeWeakMap();
 const readableControllerPullOperationContexts = new SafeWeakMap();
+const readableRequestOperationContexts = new SafeWeakMap();
 const readableBYOBRequestUseStreams = new SafeWeakMap();
 // Canonical graph identities must be recorded at construction, before a
 // stream is known to need protection; otherwise a reflected slot can be
@@ -235,8 +236,9 @@ function runWithReadableOperationContext(stream, callback) {
   ) {
     return callback();
   }
-  const operationContext = activeReadableOperationContext() ??
-    op_oden_schedule_context();
+  const operationContext = hasActiveReadableOperationContext()
+    ? activeReadableOperationContext()
+    : op_oden_schedule_context();
   return runWithActiveReadableOperationContext(operationContext, callback);
 }
 
@@ -257,14 +259,47 @@ function activeReadableOperationContext() {
     ];
 }
 
+function hasActiveReadableOperationContext() {
+  return activeReadableOperationContexts.length !== 0;
+}
+
 function queueReadableOperationMicrotask(callback) {
+  const hasActiveOperationContext = hasActiveReadableOperationContext();
   const operationContext = activeReadableOperationContext();
-  if (operationContext === undefined) {
+  if (!hasActiveOperationContext) {
     queueMicrotask(callback);
     return;
   }
   queueMicrotask(() =>
     runWithActiveReadableOperationContext(operationContext, callback)
+  );
+}
+
+function recordReadableRequestOperationContext(stream, request) {
+  if (
+    !hasProtectedReadableStreams ||
+    WeakMapPrototypeGet(readableStreamUseGuards, stream) === undefined
+  ) {
+    return;
+  }
+  WeakMapPrototypeSet(readableRequestOperationContexts, request, {
+    __proto__: null,
+    context: activeReadableOperationContext(),
+  });
+}
+
+function readableControllerPendingRequestOperationContext(controller) {
+  const reader = controller[_stream][_reader];
+  if (reader === undefined) return undefined;
+  const requests = isReadableStreamDefaultReader(reader)
+    ? reader[_readRequests]
+    : isReadableStreamBYOBReader(reader)
+    ? reader[_readIntoRequests]
+    : undefined;
+  if (requests === undefined || queueSize(requests) === 0) return undefined;
+  return WeakMapPrototypeGet(
+    readableRequestOperationContexts,
+    queuePeek(requests),
   );
 }
 
@@ -1308,6 +1343,17 @@ function registerReadableLiteralRequest(request) {
 }
 
 function runReadableRequestStep(request, step, value) {
+  const operationContext = WeakMapPrototypeGet(
+    readableRequestOperationContexts,
+    request,
+  );
+  if (operationContext !== undefined) {
+    WeakMapPrototypeDelete(readableRequestOperationContexts, request);
+    return runWithActiveReadableOperationContext(
+      operationContext.context,
+      () => runReadableRequestStep(request, step, value),
+    );
+  }
   const dispatch = WeakMapPrototypeGet(readableRequestDispatches, request);
   assert(dispatch !== undefined);
   const args = step === "close" && value === readableRequestNoCloseValue
@@ -2784,31 +2830,49 @@ function readableByteStreamControllerCallPullIfNeeded(controller) {
   const stream = controller[_stream];
   const protectedStream = hasProtectedReadableStreams &&
     WeakMapPrototypeGet(readableStreamUseGuards, stream) !== undefined;
+  const hasActiveOperationContext = protectedStream &&
+    hasActiveReadableOperationContext();
   const activeOperationContext = protectedStream
     ? activeReadableOperationContext()
     : undefined;
-  if (protectedStream && activeOperationContext === undefined) {
-    const pendingOperationContext = WeakMapPrototypeGet(
+  const currentPullOperationContext = protectedStream
+    ? WeakMapPrototypeGet(
       readableControllerPullOperationContexts,
       controller,
+    )
+    : undefined;
+  if (
+    protectedStream && !hasActiveOperationContext &&
+    currentPullOperationContext !== undefined
+  ) {
+    return runWithActiveReadableOperationContext(
+      currentPullOperationContext.context,
+      () => readableByteStreamControllerCallPullIfNeeded(controller),
     );
-    if (pendingOperationContext !== undefined) {
-      return runWithActiveReadableOperationContext(
-        pendingOperationContext,
-        () => readableByteStreamControllerCallPullIfNeeded(controller),
-      );
-    }
+  }
+  const requestOperationContext = protectedStream
+    ? readableControllerPendingRequestOperationContext(controller)
+    : undefined;
+  if (
+    requestOperationContext !== undefined &&
+    (!hasActiveOperationContext ||
+      requestOperationContext.context !== activeOperationContext)
+  ) {
+    return runWithActiveReadableOperationContext(
+      requestOperationContext.context,
+      () => readableByteStreamControllerCallPullIfNeeded(controller),
+    );
   }
   const shouldPull = readableByteStreamControllerShouldCallPull(controller);
   if (!shouldPull) {
     if (
-      controller[_started] === false && activeOperationContext !== undefined &&
+      controller[_started] === false && hasActiveOperationContext &&
       !WeakMapPrototypeHas(readableControllerPullOperationContexts, controller)
     ) {
       WeakMapPrototypeSet(
         readableControllerPullOperationContexts,
         controller,
-        activeOperationContext,
+        { __proto__: null, context: activeOperationContext },
       );
     } else if (controller[_started] && !controller[_pulling]) {
       WeakMapPrototypeDelete(
@@ -2818,16 +2882,6 @@ function readableByteStreamControllerCallPullIfNeeded(controller) {
     }
     return;
   }
-  if (
-    activeOperationContext !== undefined &&
-    !WeakMapPrototypeHas(readableControllerPullOperationContexts, controller)
-  ) {
-    WeakMapPrototypeSet(
-      readableControllerPullOperationContexts,
-      controller,
-      activeOperationContext,
-    );
-  }
   if (controller[_pulling]) {
     controller[_pullAgain] = true;
     return;
@@ -2835,28 +2889,25 @@ function readableByteStreamControllerCallPullIfNeeded(controller) {
   assert(controller[_pullAgain] === false);
   controller[_pulling] = true;
   if (protectedStream) {
-    // A public read authenticates before it reaches this loader-owned pull
-    // algorithm. Capture that exact operation actor while the caller is still
-    // live, then let every pull reaction inherit only that context. Capturing
-    // at controller construction would turn later stream passage into
-    // authority; invoking the shared internal callback under the ambient
-    // loader continuation can instead resurrect an unrelated prior actor.
+    // Each public read records its own operation actor on its closure-private
+    // request. Prefer the head request for this pull; a controller-wide actor
+    // would otherwise let request A substitute for queued request B. Retain
+    // only the selected current pull context for its Promise reactions.
     // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
-    const operationContext = WeakMapPrototypeGet(
+    const operationContext = requestOperationContext ??
+      currentPullOperationContext ?? {
+      __proto__: null,
+      context: hasActiveOperationContext
+        ? activeOperationContext
+        : op_oden_schedule_context(),
+    };
+    WeakMapPrototypeSet(
       readableControllerPullOperationContexts,
       controller,
-    ) ?? op_oden_schedule_context();
-    if (
-      !WeakMapPrototypeHas(readableControllerPullOperationContexts, controller)
-    ) {
-      WeakMapPrototypeSet(
-        readableControllerPullOperationContexts,
-        controller,
-        operationContext,
-      );
-    }
-    return runWithActiveReadableOperationContext(
       operationContext,
+    );
+    return runWithActiveReadableOperationContext(
+      operationContext.context,
       () => readableByteStreamControllerStartPull(controller),
     );
   }
@@ -2891,7 +2942,10 @@ function readableByteStreamControllerStartPull(controller) {
       };
       return operationContext === undefined
         ? fulfill()
-        : runWithActiveReadableOperationContext(operationContext, fulfill);
+        : runWithActiveReadableOperationContext(
+          operationContext.context,
+          fulfill,
+        );
     };
     controller[_onPullRejected] = (e) => {
       const operationContext = WeakMapPrototypeGet(
@@ -2903,11 +2957,19 @@ function readableByteStreamControllerStartPull(controller) {
           readableByteStreamControllerError(controller, e);
         } catch (err) {
           rethrowAssertionErrorRejection(err);
+        } finally {
+          WeakMapPrototypeDelete(
+            readableControllerPullOperationContexts,
+            controller,
+          );
         }
       };
       return operationContext === undefined
         ? reject()
-        : runWithActiveReadableOperationContext(operationContext, reject);
+        : runWithActiveReadableOperationContext(
+          operationContext.context,
+          reject,
+        );
     };
   }
   PromisePrototypeThen(
@@ -2920,14 +2982,10 @@ function readableByteStreamControllerStartPull(controller) {
 /** @param {ReadableByteStreamController} controller */
 function readableByteStreamControllerFinishPull(controller) {
   controller[_pulling] = false;
+  WeakMapPrototypeDelete(readableControllerPullOperationContexts, controller);
   if (controller[_pullAgain]) {
     controller[_pullAgain] = false;
     readableByteStreamControllerCallPullIfNeeded(controller);
-  } else {
-    WeakMapPrototypeDelete(
-      readableControllerPullOperationContexts,
-      controller,
-    );
   }
 }
 
@@ -2936,7 +2994,9 @@ function readableByteStreamControllerFinishPull(controller) {
  * @returns {void}
  */
 function readableByteStreamControllerClearAlgorithms(controller) {
-  WeakMapPrototypeDelete(readableControllerPullOperationContexts, controller);
+  if (!controller[_pulling]) {
+    WeakMapPrototypeDelete(readableControllerPullOperationContexts, controller);
+  }
   WeakMapPrototypeDelete(readableUnderlyingSourceCallbackRecords, controller);
   controller[_pullAlgorithm] = undefined;
   controller[_cancelAlgorithm] = undefined;
@@ -3392,33 +3452,51 @@ function readableStreamDefaultControllerCallPullIfNeeded(controller) {
   const stream = controller[_stream];
   const protectedStream = hasProtectedReadableStreams &&
     WeakMapPrototypeGet(readableStreamUseGuards, stream) !== undefined;
+  const hasActiveOperationContext = protectedStream &&
+    hasActiveReadableOperationContext();
   const activeOperationContext = protectedStream
     ? activeReadableOperationContext()
     : undefined;
-  if (protectedStream && activeOperationContext === undefined) {
-    const pendingOperationContext = WeakMapPrototypeGet(
+  const currentPullOperationContext = protectedStream
+    ? WeakMapPrototypeGet(
       readableControllerPullOperationContexts,
       controller,
+    )
+    : undefined;
+  if (
+    protectedStream && !hasActiveOperationContext &&
+    currentPullOperationContext !== undefined
+  ) {
+    return runWithActiveReadableOperationContext(
+      currentPullOperationContext.context,
+      () => readableStreamDefaultControllerCallPullIfNeeded(controller),
     );
-    if (pendingOperationContext !== undefined) {
-      return runWithActiveReadableOperationContext(
-        pendingOperationContext,
-        () => readableStreamDefaultControllerCallPullIfNeeded(controller),
-      );
-    }
+  }
+  const requestOperationContext = protectedStream
+    ? readableControllerPendingRequestOperationContext(controller)
+    : undefined;
+  if (
+    requestOperationContext !== undefined &&
+    (!hasActiveOperationContext ||
+      requestOperationContext.context !== activeOperationContext)
+  ) {
+    return runWithActiveReadableOperationContext(
+      requestOperationContext.context,
+      () => readableStreamDefaultControllerCallPullIfNeeded(controller),
+    );
   }
   const shouldPull = readableStreamDefaultcontrollerShouldCallPull(
     controller,
   );
   if (shouldPull === false) {
     if (
-      controller[_started] === false && activeOperationContext !== undefined &&
+      controller[_started] === false && hasActiveOperationContext &&
       !WeakMapPrototypeHas(readableControllerPullOperationContexts, controller)
     ) {
       WeakMapPrototypeSet(
         readableControllerPullOperationContexts,
         controller,
-        activeOperationContext,
+        { __proto__: null, context: activeOperationContext },
       );
     } else if (controller[_started] && !controller[_pulling]) {
       WeakMapPrototypeDelete(
@@ -3428,16 +3506,6 @@ function readableStreamDefaultControllerCallPullIfNeeded(controller) {
     }
     return;
   }
-  if (
-    activeOperationContext !== undefined &&
-    !WeakMapPrototypeHas(readableControllerPullOperationContexts, controller)
-  ) {
-    WeakMapPrototypeSet(
-      readableControllerPullOperationContexts,
-      controller,
-      activeOperationContext,
-    );
-  }
   if (controller[_pulling] === true) {
     controller[_pullAgain] = true;
     return;
@@ -3445,26 +3513,24 @@ function readableStreamDefaultControllerCallPullIfNeeded(controller) {
   assert(controller[_pullAgain] === false);
   controller[_pulling] = true;
   if (protectedStream) {
-    // Keep shared underlying-source callbacks and their Promise reactions in
-    // the context authenticated by this exact public read. The context is
-    // captured per pull, so retaining or passing the stream never retains a
-    // prior consumer's authority.
+    // Bind this pull to the head pending read request. In particular, a
+    // fulfilled A pull must select queued B rather than retaining A merely
+    // because _pullAgain was set while A was active.
     // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
-    const operationContext = WeakMapPrototypeGet(
+    const operationContext = requestOperationContext ??
+      currentPullOperationContext ?? {
+      __proto__: null,
+      context: hasActiveOperationContext
+        ? activeOperationContext
+        : op_oden_schedule_context(),
+    };
+    WeakMapPrototypeSet(
       readableControllerPullOperationContexts,
       controller,
-    ) ?? op_oden_schedule_context();
-    if (
-      !WeakMapPrototypeHas(readableControllerPullOperationContexts, controller)
-    ) {
-      WeakMapPrototypeSet(
-        readableControllerPullOperationContexts,
-        controller,
-        operationContext,
-      );
-    }
-    return runWithActiveReadableOperationContext(
       operationContext,
+    );
+    return runWithActiveReadableOperationContext(
+      operationContext.context,
       () => readableStreamDefaultControllerStartPull(controller),
     );
   }
@@ -3504,7 +3570,10 @@ function readableStreamDefaultControllerStartPull(controller) {
       };
       return operationContext === undefined
         ? fulfill()
-        : runWithActiveReadableOperationContext(operationContext, fulfill);
+        : runWithActiveReadableOperationContext(
+          operationContext.context,
+          fulfill,
+        );
     };
     controller[_onPullRejected] = (e) => {
       const operationContext = WeakMapPrototypeGet(
@@ -3516,11 +3585,19 @@ function readableStreamDefaultControllerStartPull(controller) {
           readableStreamDefaultControllerError(controller, e);
         } catch (err) {
           rethrowAssertionErrorRejection(err);
+        } finally {
+          WeakMapPrototypeDelete(
+            readableControllerPullOperationContexts,
+            controller,
+          );
         }
       };
       return operationContext === undefined
         ? reject()
-        : runWithActiveReadableOperationContext(operationContext, reject);
+        : runWithActiveReadableOperationContext(
+          operationContext.context,
+          reject,
+        );
     };
   }
   PromisePrototypeThen(
@@ -3533,14 +3610,10 @@ function readableStreamDefaultControllerStartPull(controller) {
 /** @param {ReadableStreamDefaultController<any>} controller */
 function readableStreamDefaultControllerFinishPull(controller) {
   controller[_pulling] = false;
+  WeakMapPrototypeDelete(readableControllerPullOperationContexts, controller);
   if (controller[_pullAgain] === true) {
     controller[_pullAgain] = false;
     readableStreamDefaultControllerCallPullIfNeeded(controller);
-  } else {
-    WeakMapPrototypeDelete(
-      readableControllerPullOperationContexts,
-      controller,
-    );
   }
 }
 
@@ -3555,7 +3628,9 @@ function readableStreamDefaultControllerCanCloseOrEnqueue(controller) {
 
 /** @param {ReadableStreamDefaultController<any>} controller */
 function readableStreamDefaultControllerClearAlgorithms(controller) {
-  WeakMapPrototypeDelete(readableControllerPullOperationContexts, controller);
+  if (!controller[_pulling]) {
+    WeakMapPrototypeDelete(readableControllerPullOperationContexts, controller);
+  }
   WeakMapPrototypeDelete(readableUnderlyingSourceCallbackRecords, controller);
   controller[_pullAlgorithm] = undefined;
   controller[_cancelAlgorithm] = undefined;
@@ -3717,6 +3792,7 @@ function readableStreamBYOBReaderRead(reader, view, min, readIntoRequest) {
     return;
   }
   return runWithReadableOperationContext(stream, () => {
+    recordReadableRequestOperationContext(stream, readIntoRequest);
     stream[_disturbed] = true;
     if (stream[_state] === "errored") {
       readableRequestErrorSteps(readIntoRequest, stream[_storedError]);
@@ -4371,6 +4447,7 @@ function readableStreamDefaultReaderRead(reader, readRequest) {
     return;
   }
   return runWithReadableOperationContext(stream, () => {
+    recordReadableRequestOperationContext(stream, readRequest);
     stream[_disturbed] = true;
     const state = stream[_state];
     if (state === "closed") {

@@ -89,6 +89,16 @@ const nodeDuplexConversions = section(
   "function newStreamDuplexFromReadableWritablePair(",
   "function newReadableStreamFromStreamReadable(",
 );
+const nodeReadableToWebAdapter = section(
+  nodeWebAdapters,
+  "function newReadableStreamFromStreamReadable(",
+  "function newWritableStreamFromStreamWritable(",
+);
+const nodeWritableToWebAdapter = section(
+  nodeWebAdapters,
+  "function newWritableStreamFromStreamWritable(",
+  "function newReadableWritablePairFromDuplex(",
+);
 const nodeDuplexToWebFacade = section(
   nodeDuplex,
   "Duplex.toWeb = function (duplex, options)",
@@ -186,11 +196,13 @@ const evidence = {
     "const generator = createAsyncIterator(stream, options, admittedOperation);",
   ) && nodeIterator.includes(
     "? createPublicReadableAsyncIterator(stream, generator)",
-  ) && nodeIterator.includes(
-    "const admission = createStreamUseAdmission(stream);",
-  ) && nodeIterator.includes(
-    "() => AsyncGeneratorPrototypeNext(generator, value)",
-  ),
+  ) && nodeIterator.includes("createStreamUseAdmission(stream),") &&
+    nodeIterator.includes("const requests = [];") &&
+    nodeIterator.includes("request.admission,") && nodeIterator.includes(
+      "ReflectApply(request.method, generator, [request.value])",
+    ) && nodeIterator.includes(
+      "return new Proxy(generator, {",
+    ),
   nodePipeReadableDestinationPropagation: ordered(
     nodePipe,
     "runReadableUseGuard(this);",
@@ -224,6 +236,23 @@ const evidence = {
     "newWritableStreamFromStreamWritable(duplex)",
   ) && nodeDuplexToWebConversion.includes(
     "newReadableStreamFromStreamReadable(duplex, readableOptions)",
+  ),
+  nodeDuplexToWebSideAttachHooks: nodeReadableToWebAdapter.includes(
+    "registerStreamGuardAttachHook(streamReadable, (guard) => {\n" +
+      "    setReadableStreamUseGuard(readable, guard);\n" +
+      "  });",
+  ) && nodeReadableToWebAdapter.includes(
+    "registerReadableStreamGuardAttachHook(readable, (guard) => {\n" +
+      "    setStreamUseGuard(streamReadable, guard);\n" +
+      "  });",
+  ) && nodeWritableToWebAdapter.includes(
+    "registerStreamGuardAttachHook(streamWritable, (guard) => {\n" +
+      "    setWritableStreamUseGuard(writable, guard);\n" +
+      "  });",
+  ) && nodeWritableToWebAdapter.includes(
+    "registerWritableStreamGuardAttachHook(writable, (guard) => {\n" +
+      "    setStreamUseGuard(streamWritable, guard);\n" +
+      "  });",
   ),
   nodeDuplexifyPropagation: nodeDuplexifyFunction.includes(
     "linkStreamUseGuard(carrier, guardedValue);",
@@ -300,31 +329,37 @@ const evidence = {
     webReaderFastPath,
     "const stream = this[_stream]",
   ),
-  webPullCallTimeActor: webBytePull.includes(
-    "const pendingOperationContext = WeakMapPrototypeGet(",
+  webPullCallTimeActor: streams.includes(
+    "const readableRequestOperationContexts = new SafeWeakMap();",
+  ) && streams.includes(
+    "recordReadableRequestOperationContext(stream, readIntoRequest);",
+  ) && streams.includes(
+    "recordReadableRequestOperationContext(stream, readRequest);",
   ) && webBytePull.includes(
-    "const operationContext = WeakMapPrototypeGet(",
+    "readableControllerPendingRequestOperationContext(controller)",
   ) && webBytePull.includes(
     "() => readableByteStreamControllerStartPull(controller)",
   ) && webDefaultPull.includes(
-    "const pendingOperationContext = WeakMapPrototypeGet(",
-  ) && webDefaultPull.includes(
-    "const operationContext = WeakMapPrototypeGet(",
+    "readableControllerPendingRequestOperationContext(controller)",
   ) && webDefaultPull.includes(
     "() => readableStreamDefaultControllerStartPull(controller)",
   ),
-  webPullActorSlotFirstWriter: webBytePull.includes(
-    "!WeakMapPrototypeHas(readableControllerPullOperationContexts, controller)",
+  webPullRequestActorFIFO: requestBarrier.includes(
+    "WeakMapPrototypeDelete(readableRequestOperationContexts, request);",
+  ) && requestBarrier.includes(
+    "operationContext.context,",
+  ) && webBytePull.includes(
+    "const operationContext = requestOperationContext ??",
   ) && webDefaultPull.includes(
-    "!WeakMapPrototypeHas(readableControllerPullOperationContexts, controller)",
+    "const operationContext = requestOperationContext ??",
   ) && ordered(
     webBytePull,
-    "const pendingOperationContext = WeakMapPrototypeGet(",
-    "const shouldPull = readableByteStreamControllerShouldCallPull(controller);",
+    "WeakMapPrototypeDelete(readableControllerPullOperationContexts, controller);",
+    "readableByteStreamControllerCallPullIfNeeded(controller);",
   ) && ordered(
     webDefaultPull,
-    "const pendingOperationContext = WeakMapPrototypeGet(",
-    "const shouldPull = readableStreamDefaultcontrollerShouldCallPull(",
+    "WeakMapPrototypeDelete(readableControllerPullOperationContexts, controller);",
+    "readableStreamDefaultControllerCallPullIfNeeded(controller);",
   ),
   webPullCallbackActorSeparation: streams.includes(
     "const readableUnderlyingSourceCallbackRecords = new SafeWeakMap();",

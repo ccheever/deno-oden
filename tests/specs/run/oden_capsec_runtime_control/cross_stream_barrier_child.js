@@ -207,6 +207,9 @@ try {
   result.preconstructedWebToNodePipeCalls = lateNodeProbe.writeCalls();
   await lateNodeIngress;
 
+  // Resolve the protected source first so no await can let the preconstructed
+  // adapter's unguarded resume drain before the guard attaches below.
+  const lateNodeSource = await protectedNode();
   const lateNodeBridge = new PassThrough();
   nodeStreams.add(lateNodeBridge);
   // Exercise the public Duplex facade as well as the per-side adapters whose
@@ -221,7 +224,7 @@ try {
     lateNodeWebProbe.writable,
   );
   const lateNodeWebIngress = nodePipeOutcome(
-    await protectedNode(),
+    lateNodeSource,
     lateNodeBridge,
     "preconstructed Node-to-Web ingress",
   );
@@ -231,6 +234,26 @@ try {
   );
   result.preconstructedNodeToWebPipeCalls = lateNodeWebProbe.writeCalls();
   await lateNodeWebIngress;
+
+  // Keep writable-side denial independent from the readable-side egress: a
+  // refused writer is allowed to error its own Duplex, but must not turn the
+  // readable propagation assertion above into a closure-only observation.
+  const lateNodeWritableBridge = new PassThrough();
+  nodeStreams.add(lateNodeWritableBridge);
+  const lateNodeWritablePair = Duplex.toWeb(lateNodeWritableBridge);
+  webStreams.add(lateNodeWritablePair.readable);
+  webStreams.add(lateNodeWritablePair.writable);
+  const lateNodeWritableIngress = nodePipeOutcome(
+    await protectedNode(),
+    lateNodeWritableBridge,
+    "preconstructed Duplex.toWeb writable ingress",
+  );
+  result.preconstructedNodeToWebWritableWrite = await deniedProbe
+    .websocketStreamWrite(
+      lateNodeWritablePair.writable,
+      new Uint8Array([1]),
+    );
+  await lateNodeWritableIngress;
 
   const lateTeeTransform = new TransformStream();
   webStreams.add(lateTeeTransform.readable);

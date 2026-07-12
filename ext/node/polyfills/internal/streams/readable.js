@@ -142,6 +142,7 @@ const {
   ArrayBufferIsView,
   ArrayPrototypeIndexOf,
   ArrayPrototypePush,
+  ArrayPrototypeShift,
   ArrayPrototypeSlice,
   ArrayPrototypeSplice,
   ArrayPrototypeUnshift,
@@ -157,11 +158,15 @@ const {
   NumberParseInt,
   ObjectDefineProperties,
   ObjectKeys,
+  ObjectPrototypeHasOwnProperty,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   Promise,
+  PromisePrototypeThen,
   PromiseReject,
+  Proxy,
   ReflectApply,
+  ReflectGet,
   SafeSet,
   SafeWeakMap,
   StringPrototypeSlice,
@@ -309,6 +314,12 @@ function isNotCapableError(error) {
   );
 }
 
+function isProtectedNodeStreamUseError(error) {
+  return error !== null && typeof error === "object" &&
+    error.code === "EACCES" && error.errno === -13 &&
+    error.syscall === "node:net.Socket protected stream use";
+}
+
 // Protected native sockets can otherwise prefetch into this module's JS
 // buffer under the creator's context and later expose those bytes through a
 // passed Readable. Keep closure-private per-consumer guards and run them before
@@ -324,6 +335,10 @@ const originalReadableStates = new SafeWeakMap();
 // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
 const readableEnabledValues = new SafeWeakMap();
 const readableHighWaterMarkValues = new SafeWeakMap();
+// Scheduled denial cannot inspect public listener-state bits, so retain only
+// the current data/readable consumer presence needed to settle active flow.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+const readableConsumerValues = new SafeWeakMap();
 // Native EOF cleanup is allowed after revocation, but it must still use the
 // construction-time state and captured implementation. The override is
 // closure-private and exists only for that exact terminal transition.
@@ -332,6 +347,87 @@ const protectedReadableOperationStates = new SafeWeakMap();
 // admission. Keeping the two override classes distinct prevents cleanup from
 // inheriting an application read admission (or vice versa).
 const admittedReadableOperationStates = new SafeWeakMap();
+// A denied scheduled callback cannot safely clear flags on the user-reachable
+// ReadableState: a package may have replaced those scalar slots with getters.
+// Remember the retired work privately and reconcile the compatibility flags
+// only after a later public caller has passed the live stream guard.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+const deniedReadableScheduledWork = new SafeWeakMap();
+const kDeniedReadingMore = 1;
+const kDeniedResume = 2;
+
+function rememberDeniedReadableScheduledWork(stream, kind) {
+  WeakMapPrototypeSet(
+    deniedReadableScheduledWork,
+    stream,
+    (WeakMapPrototypeGet(deniedReadableScheduledWork, stream) ?? 0) | kind,
+  );
+}
+
+function recoverDeniedReadableScheduledWork(stream, state) {
+  const denied = WeakMapPrototypeGet(deniedReadableScheduledWork, stream);
+  if (denied === undefined) return;
+  if ((denied & kDeniedReadingMore) !== 0) {
+    state[kState] &= ~kReadingMore;
+  }
+  if ((denied & kDeniedResume) !== 0) {
+    state[kState] &= ~(kResumeScheduled | kFlowing);
+    state[kState] |= kHasPaused | kPaused;
+  }
+  WeakMapPrototypeDelete(deniedReadableScheduledWork, stream);
+}
+
+// Catch only the closure-owned guard. Deno resources report NotCapable while
+// protected Node sockets report the exact native EACCES shape above. Once the
+// guard succeeds, every state read and exact Readable implementation call
+// happens in the caller, outside this catch, so package callback errors retain
+// ordinary Node exception semantics.
+function preflightProtectedScheduledReadable(stream, state) {
+  try {
+    runReadableUseGuard(stream);
+  } catch (error) {
+    if (
+      !isNotCapableError(error) && !isProtectedNodeStreamUseError(error)
+    ) {
+      throw error;
+    }
+    return error;
+  }
+  const registeredState = WeakMapPrototypeGet(originalReadableStates, stream);
+  if (registeredState === undefined || registeredState !== state) {
+    throw new Error("scheduled Readable state identity changed");
+  }
+  recoverDeniedReadableScheduledWork(stream, state);
+  return undefined;
+}
+
+function containProtectedScheduledReadableDenial(
+  stream,
+  kind,
+  error,
+) {
+  rememberDeniedReadableScheduledWork(stream, kind);
+  const state = WeakMapPrototypeGet(originalReadableStates, stream);
+  if (
+    kind === kDeniedResume &&
+    state !== undefined &&
+    (WeakMapPrototypeGet(readableConsumerValues, state) ?? 0) !== 0
+  ) {
+    // Lifecycle delivery restores each listener's own CPED. In particular,
+    // pipeline's error listener can reject its promise without borrowing the
+    // denied scheduler's actor.
+    emitGuardedReadableEvent(stream, "error", error);
+  }
+}
+
+function recordReadableConsumer(state, bit, active) {
+  const current = WeakMapPrototypeGet(readableConsumerValues, state) ?? 0;
+  WeakMapPrototypeSet(
+    readableConsumerValues,
+    state,
+    active ? current | bit : current & ~bit,
+  );
+}
 
 function registerReadableState(stream, state) {
   const registered = WeakMapPrototypeGet(originalReadableStates, stream);
@@ -914,6 +1010,7 @@ function ReadableState(options, stream, isDuplex) {
   this[kState] = kEmitClose | kAutoDestroy | kConstructed | kSync;
   WeakMapPrototypeSet(originalReadableStates, stream, this);
   WeakMapPrototypeSet(readableEnabledValues, this, true);
+  WeakMapPrototypeSet(readableConsumerValues, this, 0);
   markStreamTrustedDeliveryCallback(
     stream,
     Readable.prototype[EE.captureRejectionSymbol],
@@ -1451,10 +1548,12 @@ Readable.prototype.read = function (n) {
   if (admittedState !== undefined) {
     WeakMapPrototypeDelete(admittedReadableOperationStates, this);
   }
+  const publicOperation = protectedState === undefined &&
+    admittedState === undefined;
   // Closure-owned native EOF cleanup is always allowed. Positive delivery was
   // already authorized before its operation state is installed. Operator
   // reads are covered by their still-active, constituent-bound admission.
-  if (protectedState === undefined && admittedState === undefined) {
+  if (publicOperation) {
     runReadableUseGuard(this);
   }
   debug("read", n);
@@ -1467,6 +1566,9 @@ Readable.prototype.read = function (n) {
   }
   const state = protectedState ?? admittedState ??
     readableStateForStream(this);
+  if (publicOperation) {
+    recoverDeniedReadableScheduledWork(this, state);
+  }
   const nOrig = n;
 
   // If we're asking for more than the current hwm, then raise the hwm.
@@ -1803,12 +1905,55 @@ function emitReadable(
 }
 
 function emitReadable_(stream, state = getReadableOperationState(stream)) {
+  if (getStreamUseGuard(stream) === undefined) {
+    debug("emitReadable_");
+    if (
+      (state[kState] & (kDestroyed | kErrored)) === 0 &&
+      (state.length || (state[kState] & kEnded) !== 0)
+    ) {
+      emitGuardedReadableEvent(stream, "readable");
+      state[kState] &= ~kEmittedReadable;
+    }
+    state[kState] |= (state[kState] & (kFlowing | kEnded)) === 0 &&
+        state.length <= readableStateHighWaterMark(state)
+      ? kNeedReadable
+      : 0;
+    flow(stream);
+    return;
+  }
+
+  let denial = preflightProtectedScheduledReadable(stream, state);
+  if (denial !== undefined) {
+    containProtectedScheduledReadableDenial(
+      stream,
+      kDeniedReadingMore,
+      denial,
+    );
+    return;
+  }
   debug("emitReadable_");
-  if (
-    (state[kState] & (kDestroyed | kErrored)) === 0 &&
-    (state.length || (state[kState] & kEnded) !== 0)
-  ) {
+  const shouldEmit = (state[kState] & (kDestroyed | kErrored)) === 0 &&
+    (state.length || (state[kState] & kEnded) !== 0);
+  denial = preflightProtectedScheduledReadable(stream, state);
+  if (denial !== undefined) {
+    containProtectedScheduledReadableDenial(
+      stream,
+      kDeniedReadingMore,
+      denial,
+    );
+    return;
+  }
+  if (shouldEmit) {
     emitGuardedReadableEvent(stream, "readable");
+    denial = preflightProtectedScheduledReadable(stream, state);
+    if (denial !== undefined) {
+      containProtectedScheduledReadableDenial(
+        stream,
+        kDeniedReadingMore,
+        denial,
+      );
+      return;
+    }
     state[kState] &= ~kEmittedReadable;
   }
 
@@ -1818,11 +1963,25 @@ function emitReadable_(stream, state = getReadableOperationState(stream)) {
   // 2. It is not ended.
   // 3. It is below the highWaterMark, so we can schedule
   //    another readable later.
-  state[kState] |= (state[kState] & (kFlowing | kEnded)) === 0 &&
+  const needReadable = (state[kState] & (kFlowing | kEnded)) === 0 &&
       state.length <= readableStateHighWaterMark(state)
     ? kNeedReadable
     : 0;
-  flow(stream);
+  denial = preflightProtectedScheduledReadable(stream, state);
+  if (denial !== undefined) {
+    containProtectedScheduledReadableDenial(
+      stream,
+      kDeniedReadingMore,
+      denial,
+    );
+    return;
+  }
+  state[kState] |= needReadable;
+  flowProtectedScheduled(
+    stream,
+    state,
+    kDeniedReadingMore,
+  );
 }
 
 function emitProtectedReadable(stream, state) {
@@ -1871,15 +2030,49 @@ function maybeReadMore(stream, state, deliveryContext) {
   }
 }
 
-function maybeReadMore_(stream, state, scheduledGuard) {
+function maybeReadMore_(
+  stream,
+  state,
+  scheduledGuard,
+) {
+  const currentGuard = getStreamUseGuard(stream);
+  if (currentGuard === undefined && scheduledGuard === undefined) {
+    // Preserve the upstream path byte-for-byte in behavior: ordinary streams
+    // neither classify nor contain errors thrown by state access or callbacks.
+    while (
+      (state[kState] & (kReading | kEnded)) === 0 &&
+      (state.length < readableStateHighWaterMark(state) ||
+        ((state[kState] & kFlowing) !== 0 && state.length === 0))
+    ) {
+      const len = state.length;
+      debug("maybeReadMore read 0");
+      readGuardedReadable(stream, state, 0);
+      if (len === state.length) {
+        break;
+      }
+    }
+    state[kState] &= ~kReadingMore;
+    return;
+  }
+  if (currentGuard === undefined) {
+    rememberDeniedReadableScheduledWork(stream, kDeniedReadingMore);
+    return;
+  }
+
+  let denial = preflightProtectedScheduledReadable(stream, state);
+  if (denial !== undefined) {
+    containProtectedScheduledReadableDenial(
+      stream,
+      kDeniedReadingMore,
+      denial,
+    );
+    return;
+  }
+
   // A constructor-side prefetch may have been queued before a native stream
   // became protected. It carries no consumer actor, so retire it when the
   // stable guard identity changed; an authorized read/listener schedules new
   // work under its own operation context.
-  if (getStreamUseGuard(stream) !== scheduledGuard) {
-    state[kState] &= ~kReadingMore;
-    return;
-  }
   // Attempt to read more data if we should.
   //
   // The conditions for reading more data are (one of):
@@ -1903,37 +2096,77 @@ function maybeReadMore_(stream, state, scheduledGuard) {
   //   called push() with new data. In this case we skip performing more
   //   read()s. The execution ends in this method again after the _read() ends
   //   up calling push() with more data.
-  try {
-    while (
-      (state[kState] & (kReading | kEnded)) === 0 &&
-      (state.length < readableStateHighWaterMark(state) ||
-        ((state[kState] & kFlowing) !== 0 && state.length === 0))
-    ) {
-      const len = state.length;
-      debug("maybeReadMore read 0");
-      readGuardedReadable(stream, state, 0);
-      if (len === state.length) {
-        // Didn't get any data, stop spinning.
-        break;
-      }
-    }
-  } catch (error) {
-    // A next-tick prefetch has no synchronous consumer to receive an
-    // authorization denial. Retire only that scheduled work; the guard runs
-    // before `_read` or buffered-byte delivery, and a later public operation
-    // must authorize independently.
-    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
-    if (!isNotCapableError(error)) throw error;
-    if (
-      (state[kState] & (kDataListening | kReadableListening)) !== 0
-    ) {
-      // An installed consumer needs the ordinary Node error signal so its
-      // pipeline or adapter can settle as refused instead of hanging.
-      errorOrDestroy(stream, error);
-    }
-  } finally {
-    state[kState] &= ~kReadingMore;
+  if (getStreamUseGuard(stream) !== scheduledGuard) {
+    rememberDeniedReadableScheduledWork(stream, kDeniedReadingMore);
+    return;
   }
+  while (true) {
+    const shouldRead = (state[kState] & (kReading | kEnded)) === 0 &&
+      (state.length < readableStateHighWaterMark(state) ||
+        ((state[kState] & kFlowing) !== 0 && state.length === 0));
+    // A state getter may itself be package code. Recheck after inspecting
+    // the condition and before either reading or retiring the loop.
+    denial = preflightProtectedScheduledReadable(stream, state);
+    if (denial !== undefined) {
+      containProtectedScheduledReadableDenial(
+        stream,
+        kDeniedReadingMore,
+        denial,
+      );
+      return;
+    }
+    if (!shouldRead) break;
+
+    const len = state.length;
+    denial = preflightProtectedScheduledReadable(stream, state);
+    if (denial !== undefined) {
+      containProtectedScheduledReadableDenial(
+        stream,
+        kDeniedReadingMore,
+        denial,
+      );
+      return;
+    }
+    debug("maybeReadMore read 0");
+    readProtectedReadableWithState(stream, state, 0);
+
+    // The exact read may run `_read`, event listeners, or state accessors.
+    // Its NotCapable errors are not caught here; a subsequent genuine guard
+    // denial is the only outcome translated into scheduled containment.
+    denial = preflightProtectedScheduledReadable(stream, state);
+    if (denial !== undefined) {
+      containProtectedScheduledReadableDenial(
+        stream,
+        kDeniedReadingMore,
+        denial,
+      );
+      return;
+    }
+    const unchanged = len === state.length;
+    denial = preflightProtectedScheduledReadable(stream, state);
+    if (denial !== undefined) {
+      containProtectedScheduledReadableDenial(
+        stream,
+        kDeniedReadingMore,
+        denial,
+      );
+      return;
+    }
+    if (unchanged) {
+      // Didn't get any data, stop spinning.
+      break;
+    }
+  }
+  denial = preflightProtectedScheduledReadable(stream, state);
+  if (denial !== undefined) {
+    containProtectedScheduledReadableDenial(
+      stream,
+      kDeniedReadingMore,
+      denial,
+    );
+    return;
+  }
+  state[kState] &= ~kReadingMore;
 }
 
 // Abstract method.  to be overridden in specific implementation classes.
@@ -2273,16 +2506,21 @@ Readable.prototype.on = function (ev, fn) {
 
   if (ev === "data") {
     state[kState] |= kDataListening;
+    recordReadableConsumer(state, kDataListening, true);
 
     // Update readableListening so that resume() may be a no-op
     // a few lines down. This is needed to support once('readable').
-    state[kState] |= FunctionPrototypeCall(
-        protectedEventEmitterListenerCount,
-        this,
-        "readable",
-      ) > 0
-      ? kReadableListening
-      : 0;
+    const hasReadableListener = FunctionPrototypeCall(
+      protectedEventEmitterListenerCount,
+      this,
+      "readable",
+    ) > 0;
+    state[kState] |= hasReadableListener ? kReadableListening : 0;
+    recordReadableConsumer(
+      state,
+      kReadableListening,
+      hasReadableListener,
+    );
 
     // Try start flowing on next tick if stream isn't explicitly paused.
     if ((state[kState] & (kHasFlowing | kFlowing)) !== kHasFlowing) {
@@ -2292,6 +2530,7 @@ Readable.prototype.on = function (ev, fn) {
   } else if (ev === "readable") {
     if ((state[kState] & (kEndEmitted | kReadableListening)) === 0) {
       state[kState] |= kReadableListening | kNeedReadable | kHasFlowing;
+      recordReadableConsumer(state, kReadableListening, true);
       state[kState] &= ~(kFlowing | kEmittedReadable);
       debug("on readable");
       if (state.length) {
@@ -2313,6 +2552,15 @@ Readable.prototype.removeListener = function (ev, fn) {
   const res = removeEventEmitterListener(this, ev, fn);
 
   if (ev === "readable") {
+    recordReadableConsumer(
+      state,
+      kReadableListening,
+      FunctionPrototypeCall(
+        protectedEventEmitterListenerCount,
+        this,
+        "readable",
+      ) > 0,
+    );
     // We need to check if there is someone still listening to
     // readable and reset the state. However this needs to happen
     // after readable has been emitted but before I/O (nextTick) to
@@ -2330,6 +2578,7 @@ Readable.prototype.removeListener = function (ev, fn) {
       0
   ) {
     state[kState] &= ~kDataListening;
+    recordReadableConsumer(state, kDataListening, false);
   }
 
   return res;
@@ -2344,6 +2593,16 @@ Readable.prototype.removeAllListeners = function (ev) {
     : removeAllEventEmitterListeners(this, ev, arguments.length !== 0);
 
   if (ev === "readable" || ev === undefined) {
+    const state = readableStateForStream(this);
+    recordReadableConsumer(
+      state,
+      kReadableListening,
+      FunctionPrototypeCall(
+        protectedEventEmitterListenerCount,
+        this,
+        "readable",
+      ) > 0,
+    );
     // We need to check if there is someone still listening to
     // readable and reset the state. However this needs to happen
     // after readable has been emitted but before I/O (nextTick) to
@@ -2351,6 +2610,18 @@ Readable.prototype.removeAllListeners = function (ev) {
     // resume within the same tick will have no
     // effect.
     nextTickWithCurrent(updateReadableListening, this);
+  }
+  if (ev === "data" || ev === undefined) {
+    const state = readableStateForStream(this);
+    recordReadableConsumer(
+      state,
+      kDataListening,
+      FunctionPrototypeCall(
+        protectedEventEmitterListenerCount,
+        this,
+        "data",
+      ) > 0,
+    );
   }
 
   return res;
@@ -2367,8 +2638,10 @@ function updateReadableListening(self) {
     ) > 0
   ) {
     state[kState] |= kReadableListening;
+    recordReadableConsumer(state, kReadableListening, true);
   } else {
     state[kState] &= ~kReadableListening;
+    recordReadableConsumer(state, kReadableListening, false);
   }
 
   if (
@@ -2397,6 +2670,7 @@ function nReadingNextTick(self) {
 Readable.prototype.resume = function () {
   runReadableUseGuard(this);
   const state = getReadableOperationState(this);
+  recoverDeniedReadableScheduledWork(this, state);
   if ((state[kState] & kDestroyed) !== 0) {
     return this;
   }
@@ -2422,12 +2696,65 @@ ReadablePrototypeResume = Readable.prototype.resume;
 function resume(stream, state) {
   if ((state[kState] & kResumeScheduled) === 0) {
     state[kState] |= kResumeScheduled;
-    nextTickWithCurrent(resume_, stream, state);
+    nextTickWithCurrent(
+      resume_,
+      stream,
+      state,
+      getStreamUseGuard(stream),
+    );
   }
 }
 
-function resume_(stream, state) {
-  try {
+function flowProtectedScheduled(
+  stream,
+  state,
+  denialKind = kDeniedResume,
+) {
+  while (true) {
+    let denial = preflightProtectedScheduledReadable(stream, state);
+    if (denial !== undefined) {
+      containProtectedScheduledReadableDenial(
+        stream,
+        denialKind,
+        denial,
+      );
+      return false;
+    }
+    const flowing = (state[kState] & kFlowing) !== 0;
+    denial = preflightProtectedScheduledReadable(stream, state);
+    if (denial !== undefined) {
+      containProtectedScheduledReadableDenial(
+        stream,
+        denialKind,
+        denial,
+      );
+      return false;
+    }
+    if (!flowing) return true;
+
+    const chunk = readProtectedReadableWithState(stream, state, undefined);
+    denial = preflightProtectedScheduledReadable(stream, state);
+    if (denial !== undefined) {
+      containProtectedScheduledReadableDenial(
+        stream,
+        denialKind,
+        denial,
+      );
+      return false;
+    }
+    if (chunk === null) return true;
+  }
+}
+
+function resume_(
+  stream,
+  state,
+  scheduledGuard,
+) {
+  const currentGuard = getStreamUseGuard(stream);
+  if (currentGuard === undefined && scheduledGuard === undefined) {
+    // Keep ordinary Node behavior unchanged, including propagation from
+    // `resume` listeners and other callbacks.
     debug("resume", (state[kState] & kReading) !== 0);
     if ((state[kState] & kReading) === 0) {
       readGuardedReadable(stream, state, 0);
@@ -2439,17 +2766,88 @@ function resume_(stream, state) {
     if ((state[kState] & (kFlowing | kReading)) === kFlowing) {
       readGuardedReadable(stream, state, 0);
     }
-  } catch (error) {
-    if (!isNotCapableError(error)) throw error;
-    // `resume_` is loader-owned next-tick maintenance. A denied actor stops
-    // this flow without delivering buffered bytes; root or another authorized
-    // caller can explicitly resume later under a fresh operation actor.
-    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
-    const hadConsumer = (state[kState] &
-      (kDataListening | kReadableListening)) !== 0;
-    state[kState] &= ~(kResumeScheduled | kFlowing);
-    state[kState] |= kHasPaused | kPaused;
-    if (hadConsumer) errorOrDestroy(stream, error);
+    return;
+  }
+  if (currentGuard === undefined) {
+    rememberDeniedReadableScheduledWork(stream, kDeniedResume);
+    return;
+  }
+
+  let denial = preflightProtectedScheduledReadable(stream, state);
+  if (denial !== undefined) {
+    containProtectedScheduledReadableDenial(
+      stream,
+      kDeniedResume,
+      denial,
+    );
+    return;
+  }
+  if (getStreamUseGuard(stream) !== scheduledGuard) {
+    rememberDeniedReadableScheduledWork(stream, kDeniedResume);
+    return;
+  }
+
+  debug("resume", (state[kState] & kReading) !== 0);
+  const reading = (state[kState] & kReading) !== 0;
+  denial = preflightProtectedScheduledReadable(stream, state);
+  if (denial !== undefined) {
+    containProtectedScheduledReadableDenial(
+      stream,
+      kDeniedResume,
+      denial,
+    );
+    return;
+  }
+  if (!reading) {
+    readProtectedReadableWithState(stream, state, 0);
+    denial = preflightProtectedScheduledReadable(stream, state);
+    if (denial !== undefined) {
+      containProtectedScheduledReadableDenial(
+        stream,
+        kDeniedResume,
+        denial,
+      );
+      return;
+    }
+  }
+
+  state[kState] &= ~kResumeScheduled;
+  denial = preflightProtectedScheduledReadable(stream, state);
+  if (denial !== undefined) {
+    containProtectedScheduledReadableDenial(
+      stream,
+      kDeniedResume,
+      denial,
+    );
+    return;
+  }
+
+  // Listener exceptions, including NotCapable, intentionally escape. Only a
+  // later guard-only preflight may classify a denial as scheduled work.
+  emitGuardedReadableEvent(stream, "resume");
+  denial = preflightProtectedScheduledReadable(stream, state);
+  if (denial !== undefined) {
+    containProtectedScheduledReadableDenial(
+      stream,
+      kDeniedResume,
+      denial,
+    );
+    return;
+  }
+  if (!flowProtectedScheduled(stream, state)) return;
+
+  const needsRead = (state[kState] & (kFlowing | kReading)) === kFlowing;
+  denial = preflightProtectedScheduledReadable(stream, state);
+  if (denial !== undefined) {
+    containProtectedScheduledReadableDenial(
+      stream,
+      kDeniedResume,
+      denial,
+    );
+    return;
+  }
+  if (needsRead) {
+    readProtectedReadableWithState(stream, state, 0);
   }
 }
 
@@ -2601,34 +2999,115 @@ function createPublicReadableAsyncIterator(stream, generator) {
   // Async-generator bodies resume from loader-only frames, so a public
   // iterator cannot safely use the context retained by generator creation.
   // Keep the branded generator closure-private and authenticate each `next`
-  // caller before that exact request enters it. A passed iterator therefore
-  // grants nothing: its new holder must independently pass the stream guard,
-  // while the admitted call's continuation inherits only its initiating
-  // operation actor.
+  // caller before that exact request enters it. The wrapper owns the FIFO:
+  // V8 otherwise queues concurrent requests inside the raw generator and
+  // resumes later requests under the first pending request's actor. A passed
+  // iterator therefore grants nothing, while each admitted continuation
+  // inherits only its own initiating operation actor.
   // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
-  return ObjectSetPrototypeOf({
-    next(value) {
-      try {
-        const admission = createStreamUseAdmission(stream);
-        return runWithStreamUseAdmission(
+  const requests = [];
+  let active = false;
+
+  function drain() {
+    if (active || requests.length === 0) return;
+    active = true;
+    const request = requests[0];
+    let result;
+    try {
+      const invoke = request.method === AsyncGeneratorPrototypeNext
+        ? () => AsyncGeneratorPrototypeNext(generator, request.value)
+        : () => ReflectApply(request.method, generator, [request.value]);
+      if (request.admission !== undefined) {
+        result = runWithStreamUseAdmission(
           stream,
-          admission,
-          () => AsyncGeneratorPrototypeNext(generator, value),
+          request.admission,
+          invoke,
         );
-      } catch (error) {
-        return PromiseReject(error);
+      } else {
+        const previous = core.getAsyncContext();
+        core.setAsyncContext(request.context);
+        try {
+          result = invoke();
+        } finally {
+          core.setAsyncContext(previous);
+        }
       }
+    } catch (error) {
+      settle(request, error, true);
+      return;
+    }
+    PromisePrototypeThen(
+      result,
+      (value) => settle(request, value, false),
+      (error) => settle(request, error, true),
+    );
+  }
+
+  function settle(request, value, rejected) {
+    ArrayPrototypeShift(requests);
+    active = false;
+    if (rejected) request.reject(value);
+    else request.resolve(value);
+    drain();
+  }
+
+  function enqueue(method, value, admission, context) {
+    return new Promise((resolve, reject) => {
+      ArrayPrototypePush(requests, {
+        __proto__: null,
+        method,
+        value,
+        admission,
+        context,
+        resolve,
+        reject,
+      });
+      drain();
+    });
+  }
+
+  const next = (value) => {
+    try {
+      return enqueue(
+        AsyncGeneratorPrototypeNext,
+        value,
+        createStreamUseAdmission(stream),
+        undefined,
+      );
+    } catch (error) {
+      return PromiseReject(error);
+    }
+  };
+  const returnIterator = (value) =>
+    enqueue(
+      AsyncGeneratorPrototypeReturn,
+      value,
+      undefined,
+      core.getAsyncContext(),
+    );
+  const throwIterator = (error) =>
+    enqueue(
+      AsyncGeneratorPrototypeThrow,
+      error,
+      undefined,
+      core.getAsyncContext(),
+    );
+
+  // A target-hiding proxy preserves the ordinary async-generator prototype,
+  // own-key layout, and Symbol.asyncIterator behavior. Only the three request
+  // methods are intercepted; user-defined own overrides retain normal lookup.
+  return new Proxy(generator, {
+    get(target, property, receiver) {
+      if (
+        !ObjectPrototypeHasOwnProperty(target, property)
+      ) {
+        if (property === "next") return next;
+        if (property === "return") return returnIterator;
+        if (property === "throw") return throwIterator;
+      }
+      return ReflectGet(target, property, receiver);
     },
-    return(value) {
-      return ReflectApply(AsyncGeneratorPrototypeReturn, generator, [value]);
-    },
-    throw(error) {
-      return ReflectApply(AsyncGeneratorPrototypeThrow, generator, [error]);
-    },
-    [SymbolAsyncIterator]() {
-      return this;
-    },
-  }, AsyncGeneratorPrototype);
+  });
 }
 
 async function* createAsyncIterator(stream, options, admittedOperation) {

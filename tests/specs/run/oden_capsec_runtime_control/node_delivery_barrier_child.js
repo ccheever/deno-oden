@@ -1,5 +1,6 @@
 import inspector from "node:inspector";
 import { createRequire } from "node:module";
+import process from "node:process";
 import { EventEmitter, on as eventsOn, once as eventsOnce } from "node:events";
 import { PassThrough, Readable, Transform, Writable } from "node:stream";
 
@@ -31,6 +32,32 @@ function attempt(operation) {
   } catch {
     return "DENIED";
   }
+}
+
+function captureUncaught(operation, milliseconds = 250) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (outcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      process.setUncaughtExceptionCaptureCallback(null);
+      resolve(outcome);
+    };
+    process.setUncaughtExceptionCaptureCallback((error) => {
+      finish(
+        error instanceof Deno.errors.NotCapable ? "PROPAGATED" : "BROKEN",
+      );
+    });
+    const timeoutId = setTimeout(() => finish("ABSORBED"), milliseconds);
+    try {
+      operation();
+    } catch (error) {
+      finish(
+        error instanceof Deno.errors.NotCapable ? "PROPAGATED" : "BROKEN",
+      );
+    }
+  });
 }
 
 async function probeOutcome(probe, label, milliseconds = 100) {
@@ -90,6 +117,15 @@ async function protectedNodeBuffer(label) {
   return node;
 }
 
+async function protectedNodeIdle() {
+  const response = await fetch(httpUrl);
+  webStreams.add(response.body);
+  const node = Readable.fromWeb(response.body);
+  streams.add(node);
+  node.pause();
+  return node;
+}
+
 function rootReadOutcome(readable) {
   try {
     return readable.read() == null ? "EMPTY" : "ROOT_ALLOWED";
@@ -103,6 +139,37 @@ let completed = false;
 const phase = (name) => console.error(`phase:${name}`);
 
 try {
+  phase("scheduled-not-capable");
+  const ordinaryRead = new Readable({
+    read() {
+      throw new Deno.errors.NotCapable("ordinary _read denial");
+    },
+  });
+  streams.add(ordinaryRead);
+  const ordinaryReadError = new Promise((resolve) => {
+    ordinaryRead.once("error", (error) => {
+      resolve(
+        error instanceof Deno.errors.NotCapable ? "PROPAGATED" : "BROKEN",
+      );
+    });
+  });
+  ordinaryRead.resume();
+  result.unprotectedReadNotCapable = await bounded(
+    ordinaryReadError,
+    "unprotected _read NotCapable",
+  );
+
+  const ordinaryResume = new Readable({ read() {} });
+  streams.add(ordinaryResume);
+  const ordinaryResumeListener = () => {
+    throw new Deno.errors.NotCapable("ordinary resume listener denial");
+  };
+  ordinaryResume.on("resume", ordinaryResumeListener);
+  result.unprotectedResumeListenerNotCapable = await captureUncaught(() =>
+    ordinaryResume.resume()
+  );
+  ordinaryResume.removeListener("resume", ordinaryResumeListener);
+
   phase("direct");
   const direct = await protectedNodeBuffer("direct state");
   const directLength = direct.readableLength;
@@ -271,6 +338,48 @@ try {
   result.scheduledListenerOutcome = await probeOutcome(
     scheduledProbe,
     "scheduled listener",
+  );
+
+  phase("protected-resume-not-capable");
+  const protectedResume = await protectedNodeBuffer(
+    "protected resume listener",
+  );
+  protectedResume.pause();
+  const removeThrowingResume = deniedProbe.registerThrowingResumeListener(
+    protectedResume,
+  );
+  result.protectedResumeListenerNotCapable = await captureUncaught(() =>
+    protectedResume.resume()
+  );
+  removeThrowingResume();
+
+  phase("scheduled-state-poison");
+  const scheduledPoisonSource = await protectedNodeIdle();
+  const scheduledPoisonStream = new PassThrough();
+  streams.add(scheduledPoisonStream);
+  const scheduledPoison = deniedProbe.makeScheduledReadableStatePoisonProbe(
+    scheduledPoisonStream,
+  );
+  try {
+    scheduledPoisonSource.pipe(scheduledPoison.stream);
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotCapable)) throw error;
+  }
+  scheduledPoisonSource.pause();
+  scheduledPoison.poison();
+  try {
+    result.scheduledStatePoisonDenial = await bounded(
+      scheduledPoison.error,
+      "scheduled state poison denial",
+    );
+    result.scheduledStatePoisonAccesses = scheduledPoison.stateAccesses();
+    result.scheduledStatePoisonDataCalls = scheduledPoison.dataCalls();
+  } finally {
+    scheduledPoison.restore();
+  }
+  scheduledPoison.stream.removeAllListeners("data");
+  result.scheduledStatePoisonRecovery = attempt(() =>
+    scheduledPoison.stream.resume()
   );
 
   phase("events-derived-results");

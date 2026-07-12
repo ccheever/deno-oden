@@ -28,11 +28,16 @@ function runInContext(context, callback) {
 }
 
 function actorGuard(actor) {
+  return actorsGuard(actor);
+}
+
+function actorsGuard(...actors) {
   return () => {
-    if (core.getAsyncContext() !== actor) {
-      throw new Deno.errors.NotCapable("synthetic stream actor denied");
+    const actor = core.getAsyncContext();
+    for (let i = 0; i < actors.length; i++) {
+      if (actor === actors[i]) return actor;
     }
-    return actor;
+    throw new Deno.errors.NotCapable("synthetic stream actor denied");
   };
 }
 
@@ -69,6 +74,61 @@ async function concurrentNodeIteratorOutcome() {
     const root = await first;
     return passed === "DENIED" && !root.done && root.value?.[0] === 0x2a
       ? "CLOSED"
+      : "BROKEN";
+  } finally {
+    await iterator.return();
+    stream.destroy();
+  }
+}
+
+async function acceptedConcurrentNodeIteratorOutcome() {
+  const actorA = {};
+  const actorB = {};
+  const guardActors = [];
+  const stream = new Readable({ read() {} });
+  setStreamUseGuard(stream, () => {
+    const actor = actorsGuard(actorA, actorB)();
+    guardActors.push(actor);
+    return actor;
+  });
+  const iterator = runInContext(
+    actorA,
+    () => stream.iterator({ destroyOnReturn: false }),
+  );
+  try {
+    const first = runInContext(actorA, () => iterator.next());
+    const second = runInContext(actorB, () => iterator.next());
+    const actorBCallsAtAdmission = guardActors.filter((actor) =>
+      actor === actorB
+    ).length;
+    runInContext(actorA, () => stream.push(new Uint8Array([0x2a])));
+    const firstResult = await first;
+    runInContext(actorA, () => stream.push(new Uint8Array([0x2b])));
+    const secondResult = await second;
+    const actorBCallsAfterSettlement = guardActors.filter((actor) =>
+      actor === actorB
+    ).length;
+    const prototypeProbe = (async function* () {})();
+    const asyncGeneratorPrototype = Object.getPrototypeOf(
+      Object.getPrototypeOf(prototypeProbe),
+    );
+    const iteratorPrototype = Object.getPrototypeOf(iterator);
+    const prototypeCompatible = iteratorPrototype !== asyncGeneratorPrototype &&
+      Object.getPrototypeOf(iteratorPrototype) === asyncGeneratorPrototype;
+    const asyncIteratorIdentity = iterator[Symbol.asyncIterator]() === iterator;
+    const wrappedNext = iterator.next;
+    const ownNext = () => "OVERRIDE";
+    iterator.next = ownNext;
+    const ownOverride = iterator.next === ownNext;
+    delete iterator.next;
+    const overrideRestored = iterator.next === wrappedNext;
+    await prototypeProbe.return();
+    return !firstResult.done && firstResult.value?.[0] === 0x2a &&
+        !secondResult.done && secondResult.value?.[0] === 0x2b &&
+        actorBCallsAfterSettlement > actorBCallsAtAdmission &&
+        prototypeCompatible && asyncIteratorIdentity && ownOverride &&
+        overrideRestored && Object.keys(iterator).join() === "stream"
+      ? "BOUND"
       : "BROKEN";
   } finally {
     await iterator.return();
@@ -144,14 +204,81 @@ async function concurrentWebPullOutcome(type) {
   }
 }
 
+async function acceptedConcurrentWebPullOutcome(type) {
+  const actorA = {};
+  const actorB = {};
+  const releaseActor = {};
+  const releases = [];
+  const pullActors = [];
+  const resumeActors = [];
+  let pullCount = 0;
+  async function pull(controller) {
+    const value = ++pullCount;
+    pullActors.push(core.getAsyncContext());
+    await new Promise((resolve) => releases.push(resolve));
+    resumeActors.push(core.getAsyncContext());
+    if (type === "bytes") {
+      controller.byobRequest.view[0] = value;
+      controller.byobRequest.respond(1);
+    } else {
+      controller.enqueue(value);
+    }
+    if (value === 2) controller.close();
+  }
+  markReadableStreamTrustedCallback(pull);
+  const source = type === "bytes" ? { type, pull } : { pull };
+  const stream = new ReadableStream(source, { highWaterMark: 0 });
+  setReadableStreamUseGuard(stream, actorsGuard(actorA, actorB));
+  const reader = runInContext(
+    actorA,
+    () =>
+      type === "bytes"
+        ? stream.getReader({ mode: "byob" })
+        : stream.getReader(),
+  );
+  reader.closed.catch(() => {});
+  const read = () =>
+    type === "bytes" ? reader.read(new Uint8Array(8)) : reader.read();
+  try {
+    const first = runInContext(actorA, read);
+    const second = runInContext(actorB, read);
+    await waitFor(() => releases.length === 1);
+    runInContext(releaseActor, releases[0]);
+    await waitFor(() => releases.length === 2);
+    runInContext(releaseActor, releases[1]);
+    const firstResult = await first;
+    const secondResult = await second;
+    const firstValue = type === "bytes"
+      ? firstResult.value?.[0]
+      : firstResult.value;
+    const secondValue = type === "bytes"
+      ? secondResult.value?.[0]
+      : secondResult.value;
+    return firstValue === 1 && secondValue === 2 &&
+        pullActors.length === 2 && pullActors[0] === actorA &&
+        pullActors[1] === actorB && resumeActors.length === 2 &&
+        resumeActors[0] === actorA && resumeActors[1] === actorB
+      ? "BOUND"
+      : "BROKEN";
+  } finally {
+    await runInContext(actorA, () => reader.cancel()).catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 async function concurrentOperationOutcomes() {
   const previous = core.getAsyncContext();
   core.ops.op_oden_schedule_context = () => core.getAsyncContext();
   try {
     return {
       nodeIterator: await concurrentNodeIteratorOutcome(),
+      acceptedNodeIterator: await acceptedConcurrentNodeIteratorOutcome(),
       webDefaultPull: await concurrentWebPullOutcome("default"),
       webBYOBPull: await concurrentWebPullOutcome("bytes"),
+      acceptedWebDefaultPull: await acceptedConcurrentWebPullOutcome(
+        "default",
+      ),
+      acceptedWebBYOBPull: await acceptedConcurrentWebPullOutcome("bytes"),
     };
   } finally {
     core.ops.op_oden_schedule_context = originalScheduleContext;
@@ -233,6 +360,9 @@ console.log(JSON.stringify({
   untrustedSchedule: capturePriorityOutcome(true),
   missingSchedule: capturePriorityOutcome(false),
   concurrentNodeIterator: concurrent.nodeIterator,
+  acceptedConcurrentNodeIterator: concurrent.acceptedNodeIterator,
   concurrentWebDefaultPull: concurrent.webDefaultPull,
   concurrentWebBYOBPull: concurrent.webBYOBPull,
+  acceptedConcurrentWebDefaultPull: concurrent.acceptedWebDefaultPull,
+  acceptedConcurrentWebBYOBPull: concurrent.acceptedWebBYOBPull,
 }));
