@@ -829,6 +829,16 @@ pub fn main() {
   let oden_capsec_armed =
     deno_runtime::deno_permissions::oden_capsec_init_control_plane();
   deno_core::error::oden_capsec_set_armed(oden_capsec_armed);
+  if let Some(exit_code) =
+    deno_runtime::deno_permissions::oden_capsec_rev2_bootstrap_exit_code()
+  {
+    // A Rev2 candidate is authenticated and verified (or refused) entirely
+    // before flags, V8, or package code. The current generated target set is
+    // intentionally nonconformant/unadvertised, so C03 records the engine's
+    // own loaded-context evidence and exits without pretending it armed.
+    deno_runtime::deno_permissions::oden_capsec_finish_audit_channel();
+    deno_runtime::exit(exit_code);
+  }
   let future = async move {
     let roots = LibWorkerFactoryRoots::default();
 

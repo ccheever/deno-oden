@@ -1,0 +1,2246 @@
+//! Authenticated, immutable Rev2 policy-snapshot verification.
+//!
+//! This module verifies the parent-produced armed-snapshot candidate before V8.
+//! It does not translate runtime permission descriptors or install operation
+//! actors; those protocol bindings belong to LLP 0019/C04.
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use hmac::Hmac;
+use hmac::Mac;
+use serde_json::Map;
+use serde_json::Value;
+use sha2::Digest;
+use sha2::Sha256;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fs::File;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::rev2::AuthoritySelectorInput;
+use crate::rev2::CanonicalAuthoritySelector;
+use crate::rev2::EngineIdentity;
+use crate::rev2::PrincipalKind;
+use crate::rev2::PrincipalRef;
+use crate::rev2::Rev2Core;
+use crate::rev2::SelectorPolarity;
+use crate::rev2::canonical_json;
+use crate::rev2::domain_digest;
+use crate::rev2::parse_strict_json;
+use crate::rev2_registry_generated::REV2_ADVERTISED_TARGETS;
+use crate::rev2_registry_generated::REV2_PROFILE;
+use crate::rev2_registry_generated::REV2_REGISTRY_DIGEST;
+use crate::rev2_registry_generated::REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON;
+use crate::rev2_registry_generated::REV2_TARGET_STATUS;
+use crate::rev2_registry_generated::REV2_VOCAB_DIGEST;
+
+const ENVELOPE_SCHEMA: &str = "oden/capsec-armed-envelope/2";
+const SNAPSHOT_SCHEMA: &str = "oden/capsec-armed-snapshot/2";
+const POLICY_SCHEMA: &str = "oden/capsec-policy/2";
+const ENVELOPE_AUTH_DOMAIN: &str = "oden:capsec:armed-envelope:2";
+const RECEIPT_SET_DOMAIN: &str = "oden:capsec:protected-receipt-set:2";
+const PROTECTED_RESOURCE_DOMAIN: &str = "oden:capsec:protected-resource:2";
+const ROUTE_RESOURCE_DOMAIN: &str = "oden:capsec:route-resource:2";
+const ROUTE_SELECTOR_DOMAIN: &str = "oden:capsec:route-selector:2";
+const CLASSIFIER_INPUT_DOMAIN: &str = "oden:capsec:classifier-input:2";
+const MAX_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_BINDING_ROWS: usize = 16_384;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OdenRev2LoadState {
+  Armable,
+  VerifiedUnarmed,
+}
+
+#[derive(Clone, Debug)]
+pub struct OdenRev2RetainedObject {
+  binding_id: String,
+  source_id: String,
+  role: Option<String>,
+  file: Arc<File>,
+}
+
+impl OdenRev2RetainedObject {
+  pub fn binding_id(&self) -> &str {
+    &self.binding_id
+  }
+
+  pub fn source_id(&self) -> &str {
+    &self.source_id
+  }
+
+  pub fn role(&self) -> Option<&str> {
+    self.role.as_deref()
+  }
+
+  pub fn file(&self) -> &File {
+    &self.file
+  }
+}
+
+#[derive(Clone, Debug)]
+pub struct OdenRev2LoadedPolicyContext {
+  state: OdenRev2LoadState,
+  target: String,
+  feature_set: String,
+  policy_digest: String,
+  project_digest: String,
+  armed_snapshot_digest: String,
+  conformance_report_digest: Option<String>,
+  execution_role: String,
+  run_nonce: String,
+  channel_epoch: String,
+  conformant: bool,
+  advertised: bool,
+  blockers: Arc<[String]>,
+  retained_objects: Arc<[OdenRev2RetainedObject]>,
+  snapshot: Arc<Value>,
+}
+
+impl OdenRev2LoadedPolicyContext {
+  pub fn state(&self) -> OdenRev2LoadState {
+    self.state.clone()
+  }
+
+  pub fn target(&self) -> &str {
+    &self.target
+  }
+
+  pub fn feature_set(&self) -> &str {
+    &self.feature_set
+  }
+
+  pub fn policy_digest(&self) -> &str {
+    &self.policy_digest
+  }
+
+  pub fn project_digest(&self) -> &str {
+    &self.project_digest
+  }
+
+  pub fn armed_snapshot_digest(&self) -> &str {
+    &self.armed_snapshot_digest
+  }
+
+  pub fn run_nonce(&self) -> &str {
+    &self.run_nonce
+  }
+
+  pub fn execution_role(&self) -> &str {
+    &self.execution_role
+  }
+
+  pub fn channel_epoch(&self) -> &str {
+    &self.channel_epoch
+  }
+
+  pub fn blockers(&self) -> &[String] {
+    &self.blockers
+  }
+
+  pub fn retained_objects(&self) -> &[OdenRev2RetainedObject] {
+    &self.retained_objects
+  }
+
+  pub fn snapshot(&self) -> &Value {
+    &self.snapshot
+  }
+
+  pub fn evidence(&self) -> Value {
+    let mut evidence_blockers = self.blockers.to_vec();
+    if self.state == OdenRev2LoadState::Armable {
+      evidence_blockers.push("runtime-protocol-not-installed".to_string());
+    }
+    evidence_blockers.sort_unstable();
+    evidence_blockers.dedup();
+    serde_json::json!({
+      "v": 1,
+      "event": "rev2_loaded_context",
+      "profile": REV2_PROFILE,
+      "vocabDigest": REV2_VOCAB_DIGEST,
+      "registryDigest": REV2_REGISTRY_DIGEST,
+      "policyDigest": self.policy_digest,
+      "projectDigest": self.project_digest,
+      "armedSnapshotDigest": self.armed_snapshot_digest,
+      "loadedArmedSnapshotDigest": self.armed_snapshot_digest,
+      "conformanceReportDigest": self.conformance_report_digest,
+      "executionRole": self.execution_role,
+      "engineTarget": self.target,
+      "engineFeatureSet": self.feature_set,
+      "runNonce": self.run_nonce,
+      "channelEpoch": self.channel_epoch,
+      "configured": true,
+      "decisionStage": "bootstrap",
+      "verified": true,
+      "armable": self.state == OdenRev2LoadState::Armable,
+      // C04 installs the typed runtime protocol. Artifact verification alone
+      // must never be presented as an actually armed execution context.
+      "armed": false,
+      "conformant": self.conformant,
+      "advertised": self.advertised,
+      "blockers": evidence_blockers,
+    })
+  }
+}
+
+#[derive(Clone, Copy)]
+struct TargetStatus<'a> {
+  target: &'a str,
+  feature_set: &'a str,
+  profile_claim: &'a str,
+  conformance_report_digest: Option<&'a str>,
+  enforced: usize,
+  closed: usize,
+  absent: usize,
+  unsupported: usize,
+  advertised: bool,
+}
+
+#[derive(Clone)]
+struct CanonicalRowFact {
+  source_id: String,
+  principal: Option<PrincipalRef>,
+  projection_id: String,
+  resource: Value,
+  protected: Option<ProtectedRowFact>,
+}
+
+#[derive(Clone)]
+struct ProtectedRowFact {
+  predicate_id: String,
+  predicate_version: String,
+  canonical_row_digest: String,
+}
+
+struct PolicyFacts {
+  rows: Vec<CanonicalRowFact>,
+  protected_by_digest: HashMap<String, CanonicalRowFact>,
+  source_ids: HashSet<String>,
+}
+
+pub fn verify_authenticated_envelope(
+  bytes: &[u8],
+  one_shot_key: &[u8],
+) -> Result<OdenRev2LoadedPolicyContext, String> {
+  if bytes.is_empty() || bytes.len() > MAX_ENVELOPE_BYTES {
+    return Err("OD-CAP-REV2-ENVELOPE-BOUNDS".to_string());
+  }
+  if one_shot_key.len() != 32 {
+    return Err("OD-CAP-REV2-AUTH-KEY".to_string());
+  }
+  let text = std::str::from_utf8(bytes)
+    .map_err(|_| "OD-CAP-REV2-ENVELOPE-UTF8".to_string())?;
+  let envelope = parse_strict_json(text)
+    .map_err(|_| "OD-CAP-REV2-ENVELOPE-JSON".to_string())?;
+  let envelope = exact_object(
+    &envelope,
+    &["mac", "schema", "snapshot"],
+    "OD-CAP-REV2-ENVELOPE-SHAPE",
+  )?;
+  require_string(envelope, "schema", ENVELOPE_SCHEMA)?;
+  let snapshot = envelope
+    .get("snapshot")
+    .ok_or_else(|| "OD-CAP-REV2-SNAPSHOT-MISSING".to_string())?;
+  let mac = exact_object(
+    envelope
+      .get("mac")
+      .ok_or_else(|| "OD-CAP-REV2-AUTH-MISSING".to_string())?,
+    &["algorithm", "keyId", "tag"],
+    "OD-CAP-REV2-AUTH-SHAPE",
+  )?;
+  require_string(mac, "algorithm", "hmac-sha256")?;
+  verify_mac(snapshot, mac, one_shot_key)?;
+
+  let target = snapshot
+    .get("engineTarget")
+    .and_then(Value::as_str)
+    .ok_or_else(|| "OD-CAP-REV2-TARGET-MISSING".to_string())?;
+  if Some(target) != compiled_target() {
+    return Err("OD-CAP-REV2-TARGET-BINARY-MISMATCH".to_string());
+  }
+  let embedded = REV2_TARGET_STATUS
+    .iter()
+    .find(|status| status.target == target)
+    .ok_or_else(|| "OD-CAP-REV2-TARGET-UNKNOWN".to_string())?;
+  verify_snapshot(
+    snapshot,
+    TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: embedded.profile_claim,
+      // A production report is a separately generated, release-bound input;
+      // none is embedded while every candidate target remains unsupported.
+      conformance_report_digest: None,
+      enforced: embedded.enforced,
+      closed: embedded.closed,
+      absent: embedded.absent,
+      unsupported: embedded.unsupported,
+      advertised: REV2_ADVERTISED_TARGETS.contains(&embedded.target),
+    },
+  )
+}
+
+fn compiled_target() -> Option<&'static str> {
+  #[cfg(all(
+    target_arch = "x86_64",
+    target_os = "linux",
+    target_env = "gnu"
+  ))]
+  return Some("x86_64-unknown-linux-gnu");
+  #[cfg(all(
+    target_arch = "aarch64",
+    target_os = "linux",
+    target_env = "gnu"
+  ))]
+  return Some("aarch64-unknown-linux-gnu");
+  #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+  return Some("x86_64-apple-darwin");
+  #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+  return Some("aarch64-apple-darwin");
+  #[allow(unreachable_code)]
+  None
+}
+
+fn verify_mac(
+  snapshot: &Value,
+  mac: &Map<String, Value>,
+  key: &[u8],
+) -> Result<(), String> {
+  let key_id = mac
+    .get("keyId")
+    .and_then(Value::as_str)
+    .ok_or_else(|| "OD-CAP-REV2-AUTH-KEY-ID".to_string())?;
+  let expected_key_id =
+    format!("sha256-{}", URL_SAFE_NO_PAD.encode(Sha256::digest(key)));
+  if key_id != expected_key_id {
+    return Err("OD-CAP-REV2-AUTH-KEY-ID".to_string());
+  }
+  let tag = mac
+    .get("tag")
+    .and_then(Value::as_str)
+    .and_then(|tag| URL_SAFE_NO_PAD.decode(tag).ok())
+    .filter(|tag| tag.len() == 32)
+    .ok_or_else(|| "OD-CAP-REV2-AUTH-TAG".to_string())?;
+  let canonical = canonical_json(snapshot)
+    .map_err(|_| "OD-CAP-REV2-AUTH-CANONICAL".to_string())?;
+  let mut verifier = <Hmac<Sha256> as Mac>::new_from_slice(key)
+    .map_err(|_| "OD-CAP-REV2-AUTH-KEY".to_string())?;
+  verifier.update(ENVELOPE_AUTH_DOMAIN.as_bytes());
+  verifier.update(key_id.as_bytes());
+  verifier.update(canonical.as_bytes());
+  verifier
+    .verify_slice(&tag)
+    .map_err(|_| "OD-CAP-REV2-AUTH-FAILED".to_string())
+}
+
+fn verify_snapshot(
+  snapshot: &Value,
+  target_status: TargetStatus<'_>,
+) -> Result<OdenRev2LoadedPolicyContext, String> {
+  let snapshot_object = exact_object(
+    snapshot,
+    &[
+      "armedSnapshotDigest",
+      "canonicalPolicy",
+      "capsVocab",
+      "channelEpoch",
+      "classifierBindings",
+      "conformanceReportDigest",
+      "denyCeiling",
+      "effectiveMode",
+      "engineFeatureSet",
+      "engineTarget",
+      "executionRole",
+      "executableBindings",
+      "policyDigest",
+      "projectDigest",
+      "protectedPredicateVersions",
+      "protectedReceiptBindings",
+      "protectedReceiptSetDigest",
+      "registryDigest",
+      "rootBindings",
+      "routeBindings",
+      "runNonce",
+      "snapshotSchema",
+      "vocabDigest",
+    ],
+    "OD-CAP-REV2-SNAPSHOT-SHAPE",
+  )?;
+  require_string(snapshot_object, "snapshotSchema", SNAPSHOT_SCHEMA)?;
+  require_string(snapshot_object, "capsVocab", REV2_PROFILE)?;
+  require_string(snapshot_object, "vocabDigest", REV2_VOCAB_DIGEST)?;
+  require_string(snapshot_object, "registryDigest", REV2_REGISTRY_DIGEST)?;
+  require_string(snapshot_object, "engineTarget", target_status.target)?;
+  require_string(
+    snapshot_object,
+    "engineFeatureSet",
+    target_status.feature_set,
+  )?;
+  let mode = required_mode(snapshot_object, "effectiveMode")?;
+  let execution_role = snapshot_object
+    .get("executionRole")
+    .and_then(Value::as_str)
+    .filter(|role| matches!(*role, "run" | "probe" | "candidate" | "baseline"))
+    .ok_or_else(|| "OD-CAP-REV2-EXECUTION-ROLE".to_string())?;
+  let run_nonce = bounded_nonempty(snapshot_object, "runNonce", 1024)?;
+  let channel_epoch = bounded_nonempty(snapshot_object, "channelEpoch", 1024)?;
+  let project_digest = required_digest(snapshot_object, "projectDigest")?;
+  for field in [
+    "rootBindings",
+    "denyCeiling",
+    "executableBindings",
+    "routeBindings",
+    "classifierBindings",
+    "protectedPredicateVersions",
+    "protectedReceiptBindings",
+  ] {
+    let rows = snapshot_object
+      .get(field)
+      .and_then(Value::as_array)
+      .ok_or_else(|| format!("OD-CAP-REV2-{field}-SHAPE"))?;
+    if rows.len() > MAX_BINDING_ROWS {
+      return Err(format!("OD-CAP-REV2-{field}-BOUNDS"));
+    }
+    require_canonical_set(rows, field)?;
+  }
+
+  let canonical_policy = snapshot_object
+    .get("canonicalPolicy")
+    .ok_or_else(|| "OD-CAP-REV2-POLICY-MISSING".to_string())?;
+  let policy = exact_object(
+    canonical_policy,
+    &[
+      "capsVocab",
+      "mode",
+      "policyDigest",
+      "policySchema",
+      "principals",
+      "processDenials",
+      "vocabDigest",
+    ],
+    "OD-CAP-REV2-POLICY-SHAPE",
+  )?;
+  require_string(policy, "policySchema", POLICY_SCHEMA)?;
+  require_string(policy, "capsVocab", REV2_PROFILE)?;
+  require_string(policy, "vocabDigest", REV2_VOCAB_DIGEST)?;
+  if required_mode(policy, "mode")? != mode {
+    return Err("OD-CAP-REV2-MODE-MISMATCH".to_string());
+  }
+  let core =
+    Rev2Core::embedded().map_err(|_| "OD-CAP-REV2-CORE-INIT".to_string())?;
+  let mut policy_facts = validate_canonical_policy_contents(policy, &core)?;
+  let deny_ceiling = snapshot_object
+    .get("denyCeiling")
+    .and_then(Value::as_array)
+    .ok_or_else(|| "OD-CAP-REV2-denyCeiling-SHAPE".to_string())?;
+  validate_authority_rows(
+    deny_ceiling,
+    None,
+    SelectorPolarity::Negative,
+    false,
+    &core,
+    &mut policy_facts,
+    "denyCeiling",
+  )?;
+  let policy_digest = required_digest(snapshot_object, "policyDigest")?;
+  if required_digest(policy, "policyDigest")? != policy_digest {
+    return Err("OD-CAP-REV2-POLICY-DIGEST-MISMATCH".to_string());
+  }
+  let mut policy_basis = canonical_policy.clone();
+  policy_basis
+    .as_object_mut()
+    .expect("validated policy object")
+    .remove("policyDigest");
+  let computed_policy_digest =
+    domain_digest("oden:capsec:policy:2", &policy_basis)
+      .map_err(|_| "OD-CAP-REV2-POLICY-CANONICAL".to_string())?;
+  if computed_policy_digest != policy_digest {
+    return Err("OD-CAP-REV2-POLICY-DIGEST-MISMATCH".to_string());
+  }
+
+  let receipt_bindings = snapshot_object
+    .get("protectedReceiptBindings")
+    .expect("validated receipt array");
+  let receipt_set_digest =
+    required_digest(snapshot_object, "protectedReceiptSetDigest")?;
+  let computed_receipt_set =
+    domain_digest(RECEIPT_SET_DOMAIN, receipt_bindings)
+      .map_err(|_| "OD-CAP-REV2-RECEIPT-CANONICAL".to_string())?;
+  if receipt_set_digest != computed_receipt_set {
+    return Err("OD-CAP-REV2-RECEIPT-DIGEST-MISMATCH".to_string());
+  }
+  let retained_objects =
+    validate_snapshot_bindings(snapshot_object, &policy_facts, project_digest)?;
+
+  reject_display_or_source_fields(snapshot)?;
+  let armed_snapshot_digest =
+    required_digest(snapshot_object, "armedSnapshotDigest")?;
+  let mut armed_basis = snapshot.clone();
+  armed_basis
+    .as_object_mut()
+    .expect("validated snapshot object")
+    .remove("armedSnapshotDigest");
+  let computed_armed_digest =
+    domain_digest("oden:capsec:armed:2", &armed_basis)
+      .map_err(|_| "OD-CAP-REV2-ARMED-CANONICAL".to_string())?;
+  if computed_armed_digest != armed_snapshot_digest {
+    return Err("OD-CAP-REV2-ARMED-DIGEST-MISMATCH".to_string());
+  }
+
+  let cell_total = target_status
+    .enforced
+    .checked_add(target_status.closed)
+    .and_then(|value| value.checked_add(target_status.absent))
+    .and_then(|value| value.checked_add(target_status.unsupported))
+    .ok_or_else(|| "OD-CAP-REV2-TARGET-COUNT".to_string())?;
+  if cell_total == 0 {
+    return Err("OD-CAP-REV2-TARGET-COUNT".to_string());
+  }
+  let expected_claim = if target_status.advertised {
+    "advertised"
+  } else {
+    "not-advertised"
+  };
+  if target_status.profile_claim != expected_claim {
+    return Err("OD-CAP-REV2-TARGET-CLAIM".to_string());
+  }
+  let mut blockers = Vec::new();
+  if target_status.unsupported != 0 {
+    blockers.push(format!(
+      "target-unsupported-cells:{}",
+      target_status.unsupported
+    ));
+  }
+  if !target_status.advertised {
+    blockers.push("target-not-advertised".to_string());
+  }
+  let report = snapshot_object.get("conformanceReportDigest");
+  let conformance_report_digest = match target_status.conformance_report_digest
+  {
+    Some(expected) => {
+      let actual = required_digest(snapshot_object, "conformanceReportDigest")?;
+      if actual != expected {
+        return Err("OD-CAP-REV2-CONFORMANCE-REPORT-MISMATCH".to_string());
+      }
+      Some(actual.to_string())
+    }
+    None if matches!(report, Some(Value::Null)) => None,
+    None => {
+      return Err("OD-CAP-REV2-CONFORMANCE-REPORT-UNTRUSTED".to_string());
+    }
+  };
+  let conformant =
+    target_status.unsupported == 0 && conformance_report_digest.is_some();
+  if target_status.unsupported == 0 && !conformant {
+    blockers.push("conformance-report-not-embedded".to_string());
+  }
+  blockers.sort_unstable();
+  blockers.dedup();
+  let state = if conformant && target_status.advertised {
+    OdenRev2LoadState::Armable
+  } else {
+    OdenRev2LoadState::VerifiedUnarmed
+  };
+  Ok(OdenRev2LoadedPolicyContext {
+    state,
+    target: target_status.target.to_string(),
+    feature_set: target_status.feature_set.to_string(),
+    policy_digest: policy_digest.to_string(),
+    project_digest: project_digest.to_string(),
+    armed_snapshot_digest: armed_snapshot_digest.to_string(),
+    conformance_report_digest,
+    execution_role: execution_role.to_string(),
+    run_nonce: run_nonce.to_string(),
+    channel_epoch: channel_epoch.to_string(),
+    conformant,
+    advertised: target_status.advertised,
+    blockers: blockers.into(),
+    retained_objects: retained_objects.into(),
+    snapshot: Arc::new(snapshot.clone()),
+  })
+}
+
+fn validate_canonical_policy_contents(
+  policy: &Map<String, Value>,
+  core: &Rev2Core,
+) -> Result<PolicyFacts, String> {
+  let principals = policy
+    .get("principals")
+    .and_then(Value::as_array)
+    .ok_or_else(|| "OD-CAP-REV2-PRINCIPALS-SHAPE".to_string())?;
+  if principals.len() > MAX_BINDING_ROWS {
+    return Err("OD-CAP-REV2-PRINCIPALS-BOUNDS".to_string());
+  }
+  require_canonical_set(principals, "principals")?;
+  let mut facts = PolicyFacts {
+    rows: Vec::new(),
+    protected_by_digest: HashMap::new(),
+    source_ids: HashSet::new(),
+  };
+  let mut principal_keys = HashSet::new();
+  for principal_policy in principals {
+    let entry = exact_object(
+      principal_policy,
+      &[
+        "binding",
+        "denials",
+        "escalationCeiling",
+        "floor",
+        "principal",
+      ],
+      "OD-CAP-REV2-PRINCIPAL-POLICY-SHAPE",
+    )?;
+    let principal_value = entry
+      .get("principal")
+      .ok_or_else(|| "OD-CAP-REV2-PRINCIPAL-MISSING".to_string())?;
+    let principal = validate_policy_principal(principal_value)?;
+    if !principal_keys.insert(principal.key.clone()) {
+      return Err("OD-CAP-REV2-PRINCIPAL-DUPLICATE".to_string());
+    }
+    validate_integrity_binding(
+      entry
+        .get("binding")
+        .ok_or_else(|| "OD-CAP-REV2-BINDING-MISSING".to_string())?,
+    )?;
+    for (field, polarity, protected_allowed) in [
+      ("floor", SelectorPolarity::Positive, true),
+      ("escalationCeiling", SelectorPolarity::Positive, false),
+      ("denials", SelectorPolarity::Negative, false),
+    ] {
+      let rows = entry
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("OD-CAP-REV2-{field}-SHAPE"))?;
+      validate_authority_rows(
+        rows,
+        Some(&principal),
+        polarity,
+        protected_allowed,
+        core,
+        &mut facts,
+        field,
+      )?;
+    }
+  }
+  let process_denials = policy
+    .get("processDenials")
+    .and_then(Value::as_array)
+    .ok_or_else(|| "OD-CAP-REV2-PROCESS-DENIALS-SHAPE".to_string())?;
+  validate_authority_rows(
+    process_denials,
+    None,
+    SelectorPolarity::Negative,
+    false,
+    core,
+    &mut facts,
+    "processDenials",
+  )?;
+  Ok(facts)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_authority_rows(
+  rows: &[Value],
+  expected_principal: Option<&PrincipalRef>,
+  polarity: SelectorPolarity,
+  protected_allowed: bool,
+  core: &Rev2Core,
+  facts: &mut PolicyFacts,
+  field: &str,
+) -> Result<(), String> {
+  if rows.len() > MAX_BINDING_ROWS {
+    return Err(format!("OD-CAP-REV2-{field}-BOUNDS"));
+  }
+  require_canonical_set(rows, field)?;
+  for row in rows {
+    let has_protected = row
+      .as_object()
+      .is_some_and(|object| object.contains_key("protected"));
+    let expected_fields: &[&str] = if has_protected {
+      &["protected", "selector", "sourceId"]
+    } else {
+      &["selector", "sourceId"]
+    };
+    let row_object =
+      exact_object(row, expected_fields, "OD-CAP-REV2-AUTHORITY-ROW-SHAPE")?;
+    let source_id = bounded_nonempty(row_object, "sourceId", 1024)?;
+    if !facts.source_ids.insert(source_id.to_string()) {
+      return Err("OD-CAP-REV2-SOURCE-ID-DUPLICATE".to_string());
+    }
+    let selector_value = row_object
+      .get("selector")
+      .ok_or_else(|| "OD-CAP-REV2-SELECTOR-MISSING".to_string())?;
+    let selector = validate_canonical_selector(selector_value, polarity, core)?;
+    if selector.principal.as_ref() != expected_principal {
+      return Err("OD-CAP-REV2-SELECTOR-PRINCIPAL".to_string());
+    }
+    let protected = if let Some(protected_value) = row_object.get("protected") {
+      if !protected_allowed || expected_principal.is_none() {
+        return Err("OD-CAP-REV2-PROTECTED-POSITION".to_string());
+      }
+      let protected_object = exact_object(
+        protected_value,
+        &["canonicalRowDigest", "predicateId", "reasonDigest"],
+        "OD-CAP-REV2-PROTECTED-SHAPE",
+      )?;
+      let predicate_id =
+        bounded_nonempty(protected_object, "predicateId", 256)?;
+      let predicate_version = generated_protected_predicate_version(
+        &selector.capability,
+        predicate_id,
+      )?;
+      let reason_digest = required_digest(protected_object, "reasonDigest")?;
+      let row_digest = required_digest(protected_object, "canonicalRowDigest")?;
+      let basis = serde_json::json!({
+        "sourceId": source_id,
+        "selector": selector_value,
+        "predicateId": predicate_id,
+        "reasonDigest": reason_digest,
+      });
+      let expected = domain_digest("oden:capsec:protected-row:2", &basis)
+        .map_err(|_| "OD-CAP-REV2-PROTECTED-CANONICAL".to_string())?;
+      if row_digest != expected {
+        return Err("OD-CAP-REV2-PROTECTED-DIGEST".to_string());
+      }
+      Some(ProtectedRowFact {
+        predicate_id: predicate_id.to_string(),
+        predicate_version,
+        canonical_row_digest: row_digest.to_string(),
+      })
+    } else {
+      None
+    };
+    let fact = CanonicalRowFact {
+      source_id: source_id.to_string(),
+      principal: selector.principal.clone(),
+      projection_id: selector.projection_id.clone(),
+      resource: selector.resource.clone(),
+      protected: protected.clone(),
+    };
+    if let Some(protected) = protected {
+      if facts
+        .protected_by_digest
+        .insert(protected.canonical_row_digest, fact.clone())
+        .is_some()
+      {
+        return Err("OD-CAP-REV2-PROTECTED-DUPLICATE".to_string());
+      }
+    }
+    facts.rows.push(fact);
+  }
+  Ok(())
+}
+
+fn validate_canonical_selector(
+  value: &Value,
+  polarity: SelectorPolarity,
+  core: &Rev2Core,
+) -> Result<CanonicalAuthoritySelector, String> {
+  let selector = exact_object(
+    value,
+    &["capability", "principal", "projectionId", "resource"],
+    "OD-CAP-REV2-SELECTOR-SHAPE",
+  )?;
+  let principal = match selector.get("principal") {
+    Some(Value::Null) => None,
+    Some(value) => Some(validate_policy_principal(value)?),
+    None => return Err("OD-CAP-REV2-SELECTOR-PRINCIPAL".to_string()),
+  };
+  let capability = bounded_nonempty(selector, "capability", 256)?;
+  let projection_id = bounded_nonempty(selector, "projectionId", 1024)?;
+  let resource = selector
+    .get("resource")
+    .ok_or_else(|| "OD-CAP-REV2-SELECTOR-RESOURCE".to_string())?
+    .clone();
+  let canonical = CanonicalAuthoritySelector {
+    principal: principal.clone(),
+    capability: capability.to_string(),
+    projection_id: projection_id.to_string(),
+    resource: resource.clone(),
+  };
+  let normalized = core
+    .normalize_selector(
+      &AuthoritySelectorInput {
+        identity: EngineIdentity::embedded(),
+        principal,
+        capability: capability.to_string(),
+        resource,
+      },
+      polarity,
+    )
+    .map_err(|_| "OD-CAP-REV2-SELECTOR-CORE".to_string())?;
+  if normalized != canonical {
+    return Err("OD-CAP-REV2-SELECTOR-NONCANONICAL".to_string());
+  }
+  Ok(canonical)
+}
+
+fn validate_policy_principal(value: &Value) -> Result<PrincipalRef, String> {
+  let principal =
+    exact_object(value, &["key", "kind"], "OD-CAP-REV2-PRINCIPAL-SHAPE")?;
+  let kind = principal
+    .get("kind")
+    .and_then(Value::as_str)
+    .ok_or_else(|| "OD-CAP-REV2-PRINCIPAL-KIND".to_string())?;
+  let (kind, prefix) = match kind {
+    "root" => (PrincipalKind::Root, "root:"),
+    "package" => (PrincipalKind::Package, "pkg:"),
+    "jsr" => (PrincipalKind::Jsr, "jsr:"),
+    "url" => (PrincipalKind::Url, "url:"),
+    "quarantine" => (PrincipalKind::Quarantine, "quarantine:"),
+    "runtime" | "no-user" => {
+      return Err("OD-CAP-REV2-PRINCIPAL-RECIPIENT".to_string());
+    }
+    _ => return Err("OD-CAP-REV2-PRINCIPAL-KIND".to_string()),
+  };
+  let key = bounded_nonempty(principal, "key", 1024)?;
+  let Some(digest) = key.strip_prefix(prefix) else {
+    return Err("OD-CAP-REV2-PRINCIPAL-KEY".to_string());
+  };
+  if !valid_digest(digest) {
+    return Err("OD-CAP-REV2-PRINCIPAL-KEY".to_string());
+  }
+  Ok(PrincipalRef {
+    kind,
+    key: key.to_string(),
+  })
+}
+
+fn validate_integrity_binding(value: &Value) -> Result<(), String> {
+  let binding = exact_object(
+    value,
+    &["bindingDigest", "resolverId"],
+    "OD-CAP-REV2-PRINCIPAL-BINDING-SHAPE",
+  )?;
+  bounded_nonempty(binding, "resolverId", 1024)?;
+  required_digest(binding, "bindingDigest")?;
+  Ok(())
+}
+
+fn validate_snapshot_bindings(
+  snapshot: &Map<String, Value>,
+  facts: &PolicyFacts,
+  project_digest: &str,
+) -> Result<Vec<OdenRev2RetainedObject>, String> {
+  let mut retained = validate_root_bindings(
+    snapshot
+      .get("rootBindings")
+      .and_then(Value::as_array)
+      .ok_or_else(|| "OD-CAP-REV2-rootBindings-SHAPE".to_string())?,
+    facts,
+  )?;
+  retained.extend(validate_executable_bindings(
+    snapshot
+      .get("executableBindings")
+      .and_then(Value::as_array)
+      .ok_or_else(|| "OD-CAP-REV2-executableBindings-SHAPE".to_string())?,
+    facts,
+  )?);
+  validate_route_bindings(
+    snapshot
+      .get("routeBindings")
+      .and_then(Value::as_array)
+      .ok_or_else(|| "OD-CAP-REV2-routeBindings-SHAPE".to_string())?,
+    facts,
+  )?;
+  validate_classifier_bindings(
+    snapshot
+      .get("classifierBindings")
+      .and_then(Value::as_array)
+      .ok_or_else(|| "OD-CAP-REV2-classifierBindings-SHAPE".to_string())?,
+    facts,
+  )?;
+  validate_protected_bindings(
+    snapshot
+      .get("protectedPredicateVersions")
+      .and_then(Value::as_array)
+      .ok_or_else(|| {
+        "OD-CAP-REV2-protectedPredicateVersions-SHAPE".to_string()
+      })?,
+    snapshot
+      .get("protectedReceiptBindings")
+      .and_then(Value::as_array)
+      .ok_or_else(|| {
+        "OD-CAP-REV2-protectedReceiptBindings-SHAPE".to_string()
+      })?,
+    facts,
+    project_digest,
+  )?;
+  Ok(retained)
+}
+
+fn validate_root_bindings(
+  bindings: &[Value],
+  facts: &PolicyFacts,
+) -> Result<Vec<OdenRev2RetainedObject>, String> {
+  let mut required = HashSet::new();
+  for fact in &facts.rows {
+    let mut roots = HashSet::new();
+    collect_logical_roots(&fact.resource, &mut roots)?;
+    for root in roots {
+      required.insert(root_requirement_key(
+        &fact.source_id,
+        &root,
+        fact.principal.as_ref(),
+      )?);
+    }
+  }
+  let mut supplied = HashSet::new();
+  let mut binding_ids = HashSet::new();
+  let mut retained = Vec::new();
+  for binding in bindings {
+    let object = exact_object(
+      binding,
+      &[
+        "bindingProvenanceDigest",
+        "canonicalPath",
+        "logicalRoot",
+        "objectIdentity",
+        "principal",
+        "rootBindingId",
+        "sourceId",
+      ],
+      "OD-CAP-REV2-ROOT-BINDING-SHAPE",
+    )?;
+    let source_id = bounded_nonempty(object, "sourceId", 1024)?;
+    let logical_root = bounded_nonempty(object, "logicalRoot", 16)?;
+    if !matches!(
+      logical_root,
+      "$PROJECT" | "$PACKAGE" | "$HOME" | "$TMP" | "$ABS"
+    ) {
+      return Err("OD-CAP-REV2-ROOT-BINDING-LOGICAL".to_string());
+    }
+    let principal = validate_optional_policy_principal(
+      object
+        .get("principal")
+        .ok_or_else(|| "OD-CAP-REV2-ROOT-BINDING-PRINCIPAL".to_string())?,
+    )?;
+    let binding_id = bounded_nonempty(object, "rootBindingId", 1024)?;
+    if !binding_ids.insert(binding_id.to_string()) {
+      return Err("OD-CAP-REV2-ROOT-BINDING-ID".to_string());
+    }
+    required_digest(object, "bindingProvenanceDigest")?;
+    let key =
+      root_requirement_key(source_id, logical_root, principal.as_ref())?;
+    if !supplied.insert(key) {
+      return Err("OD-CAP-REV2-ROOT-BINDING-DUPLICATE".to_string());
+    }
+    let file = validate_and_open_bound_object(
+      object
+        .get("canonicalPath")
+        .ok_or_else(|| "OD-CAP-REV2-ROOT-BINDING-PATH".to_string())?,
+      object
+        .get("objectIdentity")
+        .ok_or_else(|| "OD-CAP-REV2-ROOT-BINDING-OBJECT".to_string())?,
+      true,
+    )?;
+    retained.push(OdenRev2RetainedObject {
+      binding_id: binding_id.to_string(),
+      source_id: source_id.to_string(),
+      role: None,
+      file: Arc::new(file),
+    });
+  }
+  if required != supplied {
+    return Err("OD-CAP-REV2-ROOT-BINDING-COVERAGE".to_string());
+  }
+  Ok(retained)
+}
+
+fn validate_executable_bindings(
+  bindings: &[Value],
+  facts: &PolicyFacts,
+) -> Result<Vec<OdenRev2RetainedObject>, String> {
+  let mut required = HashMap::new();
+  for fact in &facts.rows {
+    let mut identities = Vec::new();
+    collect_content_identities(&fact.resource, &mut identities)?;
+    for (role, digest) in identities {
+      let key = executable_requirement_key(&fact.source_id, role, &digest)?;
+      required.insert(key, fact.principal.clone());
+    }
+  }
+  let mut supplied = HashSet::new();
+  let mut binding_ids = HashSet::new();
+  let mut retained = Vec::new();
+  for binding in bindings {
+    let object = exact_object(
+      binding,
+      &[
+        "bindingId",
+        "canonicalContentIdentity",
+        "canonicalPath",
+        "objectIdentity",
+        "principal",
+        "provenanceDigest",
+        "role",
+        "sourceId",
+      ],
+      "OD-CAP-REV2-EXECUTABLE-BINDING-SHAPE",
+    )?;
+    let source_id = bounded_nonempty(object, "sourceId", 1024)?;
+    let role = bounded_nonempty(object, "role", 16)?;
+    if !matches!(role, "object" | "interpreter") {
+      return Err("OD-CAP-REV2-EXECUTABLE-ROLE".to_string());
+    }
+    let content = required_digest(object, "canonicalContentIdentity")?;
+    let principal = validate_optional_policy_principal(
+      object
+        .get("principal")
+        .ok_or_else(|| "OD-CAP-REV2-EXECUTABLE-PRINCIPAL".to_string())?,
+    )?;
+    let key = executable_requirement_key(source_id, role, content)?;
+    if !supplied.insert(key.clone()) {
+      return Err("OD-CAP-REV2-EXECUTABLE-DUPLICATE".to_string());
+    }
+    if required.get(&key) != Some(&principal) {
+      return Err("OD-CAP-REV2-EXECUTABLE-COVERAGE".to_string());
+    }
+    let binding_id = bounded_nonempty(object, "bindingId", 1024)?;
+    if !binding_ids.insert(binding_id.to_string()) {
+      return Err("OD-CAP-REV2-EXECUTABLE-ID".to_string());
+    }
+    required_digest(object, "provenanceDigest")?;
+    let file = validate_and_open_bound_object(
+      object
+        .get("canonicalPath")
+        .ok_or_else(|| "OD-CAP-REV2-EXECUTABLE-PATH".to_string())?,
+      object
+        .get("objectIdentity")
+        .ok_or_else(|| "OD-CAP-REV2-EXECUTABLE-OBJECT".to_string())?,
+      false,
+    )?;
+    retained.push(OdenRev2RetainedObject {
+      binding_id: binding_id.to_string(),
+      source_id: source_id.to_string(),
+      role: Some(role.to_string()),
+      file: Arc::new(file),
+    });
+  }
+  if required.keys().cloned().collect::<HashSet<_>>() != supplied {
+    return Err("OD-CAP-REV2-EXECUTABLE-COVERAGE".to_string());
+  }
+  Ok(retained)
+}
+
+fn validate_route_bindings(
+  bindings: &[Value],
+  facts: &PolicyFacts,
+) -> Result<(), String> {
+  let mut required = HashMap::new();
+  for fact in &facts.rows {
+    let mut routes = Vec::new();
+    collect_named_objects(&fact.resource, "route", &mut routes)?;
+    if routes.is_empty() {
+      continue;
+    }
+    let resource_digest = domain_digest(ROUTE_RESOURCE_DOMAIN, &fact.resource)
+      .map_err(|_| "OD-CAP-REV2-ROUTE-RESOURCE".to_string())?;
+    for route in routes {
+      let route_object = route
+        .as_object()
+        .ok_or_else(|| "OD-CAP-REV2-ROUTE-SELECTOR".to_string())?;
+      let kind = route_object
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.trim().is_empty())
+        .ok_or_else(|| "OD-CAP-REV2-ROUTE-KIND".to_string())?;
+      let route_digest = domain_digest(ROUTE_SELECTOR_DOMAIN, route)
+        .map_err(|_| "OD-CAP-REV2-ROUTE-SELECTOR".to_string())?;
+      required.insert(
+        route_requirement_key(
+          &fact.source_id,
+          &resource_digest,
+          &route_digest,
+        )?,
+        kind.to_string(),
+      );
+    }
+  }
+  let mut supplied = HashSet::new();
+  let mut route_ids = HashSet::new();
+  for binding in bindings {
+    let object = exact_object(
+      binding,
+      &[
+        "resourceDigest",
+        "routeDigest",
+        "routeId",
+        "routeKind",
+        "sourceId",
+      ],
+      "OD-CAP-REV2-ROUTE-BINDING-SHAPE",
+    )?;
+    let source_id = bounded_nonempty(object, "sourceId", 1024)?;
+    let resource_digest = required_digest(object, "resourceDigest")?;
+    let route_digest = required_digest(object, "routeDigest")?;
+    let route_kind = bounded_nonempty(object, "routeKind", 256)?;
+    let route_id = bounded_nonempty(object, "routeId", 1024)?;
+    if !route_ids.insert(route_id.to_string()) {
+      return Err("OD-CAP-REV2-ROUTE-ID".to_string());
+    }
+    let key = route_requirement_key(source_id, resource_digest, route_digest)?;
+    if !supplied.insert(key.clone())
+      || required.get(&key) != Some(&route_kind.to_string())
+    {
+      return Err("OD-CAP-REV2-ROUTE-COVERAGE".to_string());
+    }
+  }
+  if required.keys().cloned().collect::<HashSet<_>>() != supplied {
+    return Err("OD-CAP-REV2-ROUTE-COVERAGE".to_string());
+  }
+  Ok(())
+}
+
+fn validate_classifier_bindings(
+  bindings: &[Value],
+  facts: &PolicyFacts,
+) -> Result<(), String> {
+  let payload = parse_strict_json(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON)
+    .map_err(|_| "OD-CAP-REV2-CLASSIFIER-PAYLOAD".to_string())?;
+  let rules = payload
+    .get("policyRulesAndClassifiers")
+    .and_then(Value::as_object)
+    .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-PAYLOAD".to_string())?;
+  let projections = rules
+    .get("projections")
+    .and_then(Value::as_array)
+    .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-PROJECTIONS".to_string())?;
+  let match_spec = rules
+    .get("matchEvaluationSpec")
+    .and_then(Value::as_object)
+    .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-MATCH-SPEC".to_string())?;
+  let operations = match_spec
+    .get("operations")
+    .and_then(Value::as_array)
+    .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-OPERATIONS".to_string())?;
+  let data_tables = match_spec
+    .get("dataTables")
+    .and_then(Value::as_array)
+    .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-TABLES".to_string())?;
+  let mut required = HashMap::new();
+  let mut table_digests: HashMap<String, String> = HashMap::new();
+  for fact in &facts.rows {
+    let projection = find_generated_row(projections, &fact.projection_id)
+      .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-PROJECTION".to_string())?;
+    let Some(spec) = projection.get("matchSpec") else {
+      return Err("OD-CAP-REV2-CLASSIFIER-PROJECTION".to_string());
+    };
+    let clauses: &[Value] = if spec.is_null() {
+      &[]
+    } else {
+      spec
+        .get("clauses")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-CLAUSES".to_string())?
+    };
+    for clause in clauses {
+      let operation_id = clause
+        .get("operation")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-OPERATION".to_string())?;
+      let operation = find_generated_row(operations, operation_id)
+        .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-OPERATION".to_string())?;
+      let refs = operation
+        .get("tableRefs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-TABLE-REFS".to_string())?;
+      for table_id in refs {
+        let table_id = table_id
+          .as_str()
+          .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-TABLE-ID".to_string())?;
+        let table = find_generated_row(data_tables, table_id)
+          .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-TABLE".to_string())?;
+        let version = table
+          .get("version")
+          .and_then(Value::as_str)
+          .ok_or_else(|| "OD-CAP-REV2-CLASSIFIER-VERSION".to_string())?;
+        let digest = if let Some(digest) = table_digests.get(table_id) {
+          digest.clone()
+        } else {
+          let digest = domain_digest(CLASSIFIER_INPUT_DOMAIN, table)
+            .map_err(|_| "OD-CAP-REV2-CLASSIFIER-DIGEST".to_string())?;
+          table_digests.insert(table_id.to_string(), digest.clone());
+          digest
+        };
+        required.insert(
+          classifier_requirement_key(&fact.source_id, table_id)?,
+          (version.to_string(), digest),
+        );
+      }
+    }
+  }
+  let mut supplied = HashSet::new();
+  for binding in bindings {
+    let object = exact_object(
+      binding,
+      &[
+        "classifierId",
+        "classifierVersion",
+        "inputDigest",
+        "sourceId",
+      ],
+      "OD-CAP-REV2-CLASSIFIER-BINDING-SHAPE",
+    )?;
+    let source_id = bounded_nonempty(object, "sourceId", 1024)?;
+    let classifier_id = bounded_nonempty(object, "classifierId", 1024)?;
+    let version = bounded_nonempty(object, "classifierVersion", 256)?;
+    let input_digest = required_digest(object, "inputDigest")?;
+    let key = classifier_requirement_key(source_id, classifier_id)?;
+    if !supplied.insert(key.clone())
+      || required.get(&key)
+        != Some(&(version.to_string(), input_digest.to_string()))
+    {
+      return Err("OD-CAP-REV2-CLASSIFIER-COVERAGE".to_string());
+    }
+  }
+  if required.keys().cloned().collect::<HashSet<_>>() != supplied {
+    return Err("OD-CAP-REV2-CLASSIFIER-COVERAGE".to_string());
+  }
+  Ok(())
+}
+
+fn generated_protected_predicate_version(
+  capability: &str,
+  predicate_id: &str,
+) -> Result<String, String> {
+  let payload = parse_strict_json(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON)
+    .map_err(|_| "OD-CAP-REV2-PROTECTED-PAYLOAD".to_string())?;
+  let definition = payload
+    .get("definitions")
+    .and_then(Value::as_array)
+    .and_then(|definitions| find_generated_row(definitions, capability))
+    .ok_or_else(|| "OD-CAP-REV2-PROTECTED-UNREGISTERED".to_string())?;
+  if definition
+    .get("protectedReceiptPredicateId")
+    .and_then(Value::as_str)
+    != Some(predicate_id)
+  {
+    return Err("OD-CAP-REV2-PROTECTED-UNREGISTERED".to_string());
+  }
+
+  let rules = payload
+    .get("policyRulesAndClassifiers")
+    .and_then(Value::as_object)
+    .ok_or_else(|| "OD-CAP-REV2-PROTECTED-PAYLOAD".to_string())?;
+  let predicate = rules
+    .get("predicates")
+    .and_then(Value::as_array)
+    .and_then(|predicates| find_generated_row(predicates, predicate_id))
+    .ok_or_else(|| "OD-CAP-REV2-PROTECTED-UNREGISTERED".to_string())?;
+  if predicate.get("kind").and_then(Value::as_str)
+    != Some("definition-positive")
+    || predicate
+      .get("evaluator")
+      .and_then(Value::as_object)
+      .and_then(|evaluator| evaluator.get("algorithm"))
+      .and_then(Value::as_str)
+      != Some("authenticated-protected-receipt")
+  {
+    return Err("OD-CAP-REV2-PROTECTED-UNREGISTERED".to_string());
+  }
+  let receipt_schema_id = rules
+    .get("protectedReceiptSchema")
+    .and_then(Value::as_object)
+    .and_then(|schema| schema.get("id"))
+    .and_then(Value::as_str)
+    .ok_or_else(|| "OD-CAP-REV2-PROTECTED-UNREGISTERED".to_string())?;
+  let predicate_version = generated_id_version(predicate_id)?;
+  if generated_id_version(receipt_schema_id)? != predicate_version {
+    return Err("OD-CAP-REV2-PROTECTED-VERSION".to_string());
+  }
+  Ok(predicate_version.to_string())
+}
+
+fn generated_id_version(id: &str) -> Result<&str, String> {
+  let (_, version) = id
+    .rsplit_once('/')
+    .ok_or_else(|| "OD-CAP-REV2-PROTECTED-VERSION".to_string())?;
+  if version.is_empty()
+    || version.starts_with('0')
+    || !version.bytes().all(|byte| byte.is_ascii_digit())
+  {
+    return Err("OD-CAP-REV2-PROTECTED-VERSION".to_string());
+  }
+  Ok(version)
+}
+
+fn validate_protected_bindings(
+  predicate_versions: &[Value],
+  receipts: &[Value],
+  facts: &PolicyFacts,
+  project_digest: &str,
+) -> Result<(), String> {
+  let required_predicates = facts
+    .protected_by_digest
+    .values()
+    .filter_map(|fact| fact.protected.as_ref())
+    .map(|protected| {
+      (
+        protected.predicate_id.clone(),
+        protected.predicate_version.clone(),
+      )
+    })
+    .collect::<HashMap<_, _>>();
+  let mut supplied_predicates = HashSet::new();
+  for version in predicate_versions {
+    let object = exact_object(
+      version,
+      &["predicateId", "version"],
+      "OD-CAP-REV2-PREDICATE-VERSION-SHAPE",
+    )?;
+    let predicate_id = bounded_nonempty(object, "predicateId", 256)?;
+    let version = bounded_nonempty(object, "version", 256)?;
+    if !supplied_predicates.insert(predicate_id.to_string()) {
+      return Err("OD-CAP-REV2-PREDICATE-DUPLICATE".to_string());
+    }
+    if required_predicates.get(predicate_id).map(String::as_str)
+      != Some(version)
+    {
+      return Err("OD-CAP-REV2-PREDICATE-VERSION".to_string());
+    }
+  }
+  if required_predicates.keys().cloned().collect::<HashSet<_>>()
+    != supplied_predicates
+  {
+    return Err("OD-CAP-REV2-PREDICATE-COVERAGE".to_string());
+  }
+
+  let required_receipts = facts
+    .protected_by_digest
+    .keys()
+    .cloned()
+    .collect::<HashSet<_>>();
+  let mut supplied_receipts = HashSet::new();
+  let mut receipt_ids = HashSet::new();
+  let mut binding_digests = HashSet::new();
+  for receipt in receipts {
+    let object = exact_object(
+      receipt,
+      &[
+        "bindingDigest",
+        "canonicalRowDigest",
+        "expiresAt",
+        "issuerGeneration",
+        "issuerId",
+        "monotonicDeadline",
+        "predicateId",
+        "principal",
+        "projectDigest",
+        "receiptId",
+        "receiptNegativeGeneration",
+        "resourceDigest",
+        "revocationFeedId",
+      ],
+      "OD-CAP-REV2-RECEIPT-SHAPE",
+    )?;
+    let receipt_id = bounded_nonempty(object, "receiptId", 1024)?;
+    if !receipt_ids.insert(receipt_id.to_string()) {
+      return Err("OD-CAP-REV2-RECEIPT-ID".to_string());
+    }
+    let binding_digest = required_digest(object, "bindingDigest")?;
+    if !binding_digests.insert(binding_digest.to_string()) {
+      return Err("OD-CAP-REV2-RECEIPT-BINDING".to_string());
+    }
+    let row_digest = required_digest(object, "canonicalRowDigest")?;
+    if !supplied_receipts.insert(row_digest.to_string()) {
+      return Err("OD-CAP-REV2-RECEIPT-DUPLICATE".to_string());
+    }
+    let fact = facts
+      .protected_by_digest
+      .get(row_digest)
+      .ok_or_else(|| "OD-CAP-REV2-RECEIPT-ROW".to_string())?;
+    let protected = fact
+      .protected
+      .as_ref()
+      .ok_or_else(|| "OD-CAP-REV2-RECEIPT-ROW".to_string())?;
+    if bounded_nonempty(object, "predicateId", 256)? != protected.predicate_id {
+      return Err("OD-CAP-REV2-RECEIPT-PREDICATE".to_string());
+    }
+    let principal = validate_policy_principal(
+      object
+        .get("principal")
+        .ok_or_else(|| "OD-CAP-REV2-RECEIPT-PRINCIPAL".to_string())?,
+    )?;
+    if fact.principal.as_ref() != Some(&principal) {
+      return Err("OD-CAP-REV2-RECEIPT-PRINCIPAL".to_string());
+    }
+    let expected_resource =
+      domain_digest(PROTECTED_RESOURCE_DOMAIN, &fact.resource)
+        .map_err(|_| "OD-CAP-REV2-RECEIPT-RESOURCE".to_string())?;
+    if required_digest(object, "resourceDigest")? != expected_resource {
+      return Err("OD-CAP-REV2-RECEIPT-RESOURCE".to_string());
+    }
+    if required_digest(object, "projectDigest")? != project_digest {
+      return Err("OD-CAP-REV2-RECEIPT-PROJECT".to_string());
+    }
+    for field in ["issuerId", "revocationFeedId"] {
+      bounded_nonempty(object, field, 1024)?;
+    }
+    for field in [
+      "issuerGeneration",
+      "receiptNegativeGeneration",
+      "monotonicDeadline",
+    ] {
+      let value = object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("OD-CAP-REV2-RECEIPT-{field}"))?;
+      if !canonical_unsigned(value) {
+        return Err(format!("OD-CAP-REV2-RECEIPT-{field}"));
+      }
+    }
+    let expires = object
+      .get("expiresAt")
+      .and_then(Value::as_str)
+      .ok_or_else(|| "OD-CAP-REV2-RECEIPT-EXPIRY".to_string())?;
+    let expires = chrono::DateTime::parse_from_rfc3339(expires)
+      .map_err(|_| "OD-CAP-REV2-RECEIPT-EXPIRY".to_string())?;
+    let canonical = expires
+      .with_timezone(&chrono::Utc)
+      .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    if object.get("expiresAt").and_then(Value::as_str) != Some(&canonical)
+      || expires <= chrono::Utc::now()
+    {
+      return Err("OD-CAP-REV2-RECEIPT-EXPIRY".to_string());
+    }
+  }
+  if required_receipts != supplied_receipts {
+    return Err("OD-CAP-REV2-RECEIPT-COVERAGE".to_string());
+  }
+  Ok(())
+}
+
+fn validate_optional_policy_principal(
+  value: &Value,
+) -> Result<Option<PrincipalRef>, String> {
+  if value.is_null() {
+    Ok(None)
+  } else {
+    validate_policy_principal(value).map(Some)
+  }
+}
+
+fn collect_logical_roots(
+  value: &Value,
+  roots: &mut HashSet<String>,
+) -> Result<(), String> {
+  match value {
+    Value::Array(values) => {
+      for value in values {
+        collect_logical_roots(value, roots)?;
+      }
+    }
+    Value::Object(object) => {
+      for (key, value) in object {
+        if key == "root" {
+          let root = value
+            .as_str()
+            .ok_or_else(|| "OD-CAP-REV2-ROOT-BINDING-LOGICAL".to_string())?;
+          if !matches!(
+            root,
+            "$PROJECT" | "$PACKAGE" | "$HOME" | "$TMP" | "$ABS"
+          ) {
+            return Err("OD-CAP-REV2-ROOT-BINDING-LOGICAL".to_string());
+          }
+          roots.insert(root.to_string());
+        }
+        collect_logical_roots(value, roots)?;
+      }
+    }
+    Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+  }
+  Ok(())
+}
+
+fn collect_content_identities<'a>(
+  value: &'a Value,
+  identities: &mut Vec<(&'static str, String)>,
+) -> Result<(), String> {
+  match value {
+    Value::Array(values) => {
+      for value in values {
+        collect_content_identities(value, identities)?;
+      }
+    }
+    Value::Object(object) => {
+      for (key, value) in object {
+        if matches!(key.as_str(), "objectIdentity" | "interpreterIdentity") {
+          let identity = exact_object(
+            value,
+            &["kind", "value"],
+            "OD-CAP-REV2-CONTENT-IDENTITY-SHAPE",
+          )?;
+          require_string(identity, "kind", "verified-content")?;
+          let digest = required_digest(identity, "value")?;
+          identities.push((
+            if key == "objectIdentity" {
+              "object"
+            } else {
+              "interpreter"
+            },
+            digest.to_string(),
+          ));
+        } else {
+          collect_content_identities(value, identities)?;
+        }
+      }
+    }
+    Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+  }
+  Ok(())
+}
+
+fn collect_named_objects<'a>(
+  value: &'a Value,
+  field: &str,
+  matches: &mut Vec<&'a Value>,
+) -> Result<(), String> {
+  match value {
+    Value::Array(values) => {
+      for value in values {
+        collect_named_objects(value, field, matches)?;
+      }
+    }
+    Value::Object(object) => {
+      for (key, value) in object {
+        if key == field {
+          if !value.is_object() {
+            return Err("OD-CAP-REV2-NAMED-OBJECT".to_string());
+          }
+          matches.push(value);
+        } else {
+          collect_named_objects(value, field, matches)?;
+        }
+      }
+    }
+    Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+  }
+  Ok(())
+}
+
+fn root_requirement_key(
+  source_id: &str,
+  logical_root: &str,
+  principal: Option<&PrincipalRef>,
+) -> Result<String, String> {
+  canonical_json(&serde_json::json!({
+    "sourceId": source_id,
+    "logicalRoot": logical_root,
+    "principal": principal,
+  }))
+  .map_err(|_| "OD-CAP-REV2-ROOT-BINDING-CANONICAL".to_string())
+}
+
+fn executable_requirement_key(
+  source_id: &str,
+  role: &str,
+  content: &str,
+) -> Result<String, String> {
+  canonical_json(&serde_json::json!({
+    "sourceId": source_id,
+    "role": role,
+    "canonicalContentIdentity": content,
+  }))
+  .map_err(|_| "OD-CAP-REV2-EXECUTABLE-CANONICAL".to_string())
+}
+
+fn route_requirement_key(
+  source_id: &str,
+  resource_digest: &str,
+  route_digest: &str,
+) -> Result<String, String> {
+  canonical_json(&serde_json::json!({
+    "sourceId": source_id,
+    "resourceDigest": resource_digest,
+    "routeDigest": route_digest,
+  }))
+  .map_err(|_| "OD-CAP-REV2-ROUTE-CANONICAL".to_string())
+}
+
+fn classifier_requirement_key(
+  source_id: &str,
+  classifier_id: &str,
+) -> Result<String, String> {
+  canonical_json(&serde_json::json!({
+    "sourceId": source_id,
+    "classifierId": classifier_id,
+  }))
+  .map_err(|_| "OD-CAP-REV2-CLASSIFIER-CANONICAL".to_string())
+}
+
+fn find_generated_row<'a>(rows: &'a [Value], id: &str) -> Option<&'a Value> {
+  rows
+    .iter()
+    .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+}
+
+fn canonical_unsigned(value: &str) -> bool {
+  value == "0"
+    || (!value.starts_with('0')
+      && value.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn validate_and_open_bound_object(
+  path_value: &Value,
+  identity_value: &Value,
+  expect_directory: bool,
+) -> Result<File, String> {
+  let path = parse_tagged_path(path_value)?;
+  if !path.is_absolute() {
+    return Err("OD-CAP-REV2-BOUND-PATH-ABSOLUTE".to_string());
+  }
+  let canonical = std::fs::canonicalize(&path)
+    .map_err(|_| "OD-CAP-REV2-BOUND-PATH-CANONICAL".to_string())?;
+  if canonical != path {
+    return Err("OD-CAP-REV2-BOUND-PATH-CANONICAL".to_string());
+  }
+  let before = std::fs::symlink_metadata(&path)
+    .map_err(|_| "OD-CAP-REV2-BOUND-PATH-METADATA".to_string())?;
+  if before.file_type().is_symlink() {
+    return Err("OD-CAP-REV2-BOUND-PATH-SYMLINK".to_string());
+  }
+  if (expect_directory && !before.is_dir())
+    || (!expect_directory && !before.is_file())
+  {
+    return Err("OD-CAP-REV2-BOUND-PATH-TYPE".to_string());
+  }
+  let mut options = std::fs::OpenOptions::new();
+  options.read(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+  }
+  #[cfg(not(unix))]
+  return Err("OD-CAP-REV2-BOUND-PATH-PLATFORM".to_string());
+  let file = options
+    .open(&path)
+    .map_err(|_| "OD-CAP-REV2-BOUND-PATH-OPEN".to_string())?;
+  let metadata = file
+    .metadata()
+    .map_err(|_| "OD-CAP-REV2-BOUND-PATH-METADATA".to_string())?;
+  if (expect_directory && !metadata.is_dir())
+    || (!expect_directory && !metadata.is_file())
+  {
+    return Err("OD-CAP-REV2-BOUND-PATH-TYPE".to_string());
+  }
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::MetadataExt;
+    if before.dev() != metadata.dev() || before.ino() != metadata.ino() {
+      return Err("OD-CAP-REV2-BOUND-PATH-IDENTITY".to_string());
+    }
+    let identity = exact_object(
+      identity_value,
+      &["kind", "value"],
+      "OD-CAP-REV2-BOUND-OBJECT-SHAPE",
+    )?;
+    require_string(identity, "kind", "platform-object")?;
+    let expected = format!(
+      "unix-dev-ino:{:016x}{:016x}",
+      metadata.dev(),
+      metadata.ino()
+    );
+    if identity.get("value").and_then(Value::as_str) != Some(&expected) {
+      return Err("OD-CAP-REV2-BOUND-OBJECT-IDENTITY".to_string());
+    }
+  }
+  Ok(file)
+}
+
+fn parse_tagged_path(value: &Value) -> Result<PathBuf, String> {
+  let tagged = exact_object(
+    value,
+    &["encoding", "value"],
+    "OD-CAP-REV2-BOUND-PATH-SHAPE",
+  )?;
+  let encoding = tagged
+    .get("encoding")
+    .and_then(Value::as_str)
+    .ok_or_else(|| "OD-CAP-REV2-BOUND-PATH-ENCODING".to_string())?;
+  let value = bounded_nonempty(tagged, "value", 32_768)?;
+  match encoding {
+    "unicode" => Ok(PathBuf::from(value)),
+    "bytes" => {
+      let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .filter(|bytes| {
+          !bytes.is_empty() && URL_SAFE_NO_PAD.encode(bytes) == value
+        })
+        .ok_or_else(|| "OD-CAP-REV2-BOUND-PATH-BYTES".to_string())?;
+      #[cfg(unix)]
+      {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        Ok(PathBuf::from(OsString::from_vec(bytes)))
+      }
+      #[cfg(not(unix))]
+      {
+        let _ = bytes;
+        Err("OD-CAP-REV2-BOUND-PATH-PLATFORM".to_string())
+      }
+    }
+    _ => Err("OD-CAP-REV2-BOUND-PATH-ENCODING".to_string()),
+  }
+}
+
+fn exact_object<'a>(
+  value: &'a Value,
+  expected: &[&str],
+  reason: &str,
+) -> Result<&'a Map<String, Value>, String> {
+  let object = value.as_object().ok_or_else(|| reason.to_string())?;
+  let mut actual: Vec<&str> = object.keys().map(String::as_str).collect();
+  actual.sort_unstable();
+  let mut expected = expected.to_vec();
+  expected.sort_unstable();
+  if actual != expected {
+    return Err(reason.to_string());
+  }
+  Ok(object)
+}
+
+fn require_string(
+  object: &Map<String, Value>,
+  field: &str,
+  expected: &str,
+) -> Result<(), String> {
+  if object.get(field).and_then(Value::as_str) != Some(expected) {
+    return Err(format!("OD-CAP-REV2-{field}-MISMATCH"));
+  }
+  Ok(())
+}
+
+fn required_mode<'a>(
+  object: &'a Map<String, Value>,
+  field: &str,
+) -> Result<&'a str, String> {
+  object
+    .get(field)
+    .and_then(Value::as_str)
+    .filter(|mode| matches!(*mode, "permissive" | "audit" | "enforce"))
+    .ok_or_else(|| format!("OD-CAP-REV2-{field}-INVALID"))
+}
+
+fn bounded_nonempty<'a>(
+  object: &'a Map<String, Value>,
+  field: &str,
+  maximum: usize,
+) -> Result<&'a str, String> {
+  object
+    .get(field)
+    .and_then(Value::as_str)
+    .filter(|value| !value.trim().is_empty() && value.len() <= maximum)
+    .ok_or_else(|| format!("OD-CAP-REV2-{field}-INVALID"))
+}
+
+fn required_digest<'a>(
+  object: &'a Map<String, Value>,
+  field: &str,
+) -> Result<&'a str, String> {
+  object
+    .get(field)
+    .and_then(Value::as_str)
+    .filter(|digest| valid_digest(digest))
+    .ok_or_else(|| format!("OD-CAP-REV2-{field}-INVALID"))
+}
+
+fn valid_digest(digest: &str) -> bool {
+  digest
+    .strip_prefix("sha256-")
+    .filter(|encoded| encoded.len() == 43)
+    .and_then(|encoded| {
+      URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()
+        .map(|bytes| (encoded, bytes))
+    })
+    .is_some_and(|(encoded, bytes)| {
+      bytes.len() == 32 && URL_SAFE_NO_PAD.encode(bytes) == encoded
+    })
+}
+
+fn require_canonical_set(rows: &[Value], field: &str) -> Result<(), String> {
+  let mut prior: Option<String> = None;
+  for row in rows {
+    let canonical = canonical_json(row)
+      .map_err(|_| format!("OD-CAP-REV2-{field}-CANONICAL"))?;
+    if prior.as_ref().is_some_and(|prior| prior >= &canonical) {
+      return Err(format!("OD-CAP-REV2-{field}-SET"));
+    }
+    prior = Some(canonical);
+  }
+  Ok(())
+}
+
+fn reject_display_or_source_fields(value: &Value) -> Result<(), String> {
+  match value {
+    Value::Array(values) => {
+      for value in values {
+        reject_display_or_source_fields(value)?;
+      }
+    }
+    Value::Object(object) => {
+      for (key, value) in object {
+        if matches!(
+          key.as_str(),
+          "alias"
+            | "aliases"
+            | "comment"
+            | "comments"
+            | "display"
+            | "macro"
+            | "macros"
+            | "reason"
+        ) {
+          return Err("OD-CAP-REV2-DISPLAY-OR-SOURCE-DATA".to_string());
+        }
+        reject_display_or_source_fields(value)?;
+      }
+    }
+    Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+  }
+  Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn embedded_compiled_target()
+  -> &'static crate::rev2_registry_generated::Rev2TargetStatus {
+    let target =
+      compiled_target().expect("test host has a generated Rev2 target");
+    REV2_TARGET_STATUS
+      .iter()
+      .find(|status| status.target == target)
+      .expect("compiled target is present in the generated registry")
+  }
+
+  fn candidate_snapshot(
+    target: TargetStatus<'_>,
+    report: Option<&str>,
+  ) -> Value {
+    let mut policy = serde_json::json!({
+      "policySchema": POLICY_SCHEMA,
+      "capsVocab": REV2_PROFILE,
+      "vocabDigest": REV2_VOCAB_DIGEST,
+      "policyDigest": "",
+      "mode": "enforce",
+      "principals": [],
+      "processDenials": [],
+    });
+    let mut policy_basis = policy.clone();
+    policy_basis.as_object_mut().unwrap().remove("policyDigest");
+    let policy_digest =
+      domain_digest("oden:capsec:policy:2", &policy_basis).unwrap();
+    policy["policyDigest"] = Value::String(policy_digest.clone());
+    let receipts = Value::Array(Vec::new());
+    let receipt_digest = domain_digest(RECEIPT_SET_DOMAIN, &receipts).unwrap();
+    let mut snapshot = serde_json::json!({
+      "snapshotSchema": SNAPSHOT_SCHEMA,
+      "capsVocab": REV2_PROFILE,
+      "vocabDigest": REV2_VOCAB_DIGEST,
+      "registryDigest": REV2_REGISTRY_DIGEST,
+      "policyDigest": policy_digest,
+      "projectDigest": REV2_REGISTRY_DIGEST,
+      "armedSnapshotDigest": "",
+      "engineTarget": target.target,
+      "engineFeatureSet": target.feature_set,
+      "executionRole": "probe",
+      "conformanceReportDigest": report,
+      "effectiveMode": "enforce",
+      "runNonce": "run:test",
+      "channelEpoch": "channel:test",
+      "canonicalPolicy": policy,
+      "rootBindings": [],
+      "denyCeiling": [],
+      "executableBindings": [],
+      "routeBindings": [],
+      "classifierBindings": [],
+      "protectedPredicateVersions": [],
+      "protectedReceiptBindings": receipts,
+      "protectedReceiptSetDigest": receipt_digest,
+    });
+    let mut armed_basis = snapshot.clone();
+    armed_basis
+      .as_object_mut()
+      .unwrap()
+      .remove("armedSnapshotDigest");
+    snapshot["armedSnapshotDigest"] = Value::String(
+      domain_digest("oden:capsec:armed:2", &armed_basis).unwrap(),
+    );
+    snapshot
+  }
+
+  fn envelope(snapshot: Value, key: &[u8; 32]) -> Vec<u8> {
+    let key_id =
+      format!("sha256-{}", URL_SAFE_NO_PAD.encode(Sha256::digest(key)));
+    let mut signer = <Hmac<Sha256> as Mac>::new_from_slice(key).unwrap();
+    signer.update(ENVELOPE_AUTH_DOMAIN.as_bytes());
+    signer.update(key_id.as_bytes());
+    signer.update(canonical_json(&snapshot).unwrap().as_bytes());
+    let tag = URL_SAFE_NO_PAD.encode(signer.finalize().into_bytes());
+    serde_json::to_vec(&serde_json::json!({
+      "schema": ENVELOPE_SCHEMA,
+      "snapshot": snapshot,
+      "mac": {
+        "algorithm": "hmac-sha256",
+        "keyId": key_id,
+        "tag": tag,
+      },
+    }))
+    .unwrap()
+  }
+
+  fn refresh_digests(snapshot: &mut Value) {
+    let policy = snapshot["canonicalPolicy"].as_object_mut().unwrap();
+    policy.remove("policyDigest");
+    let policy_digest =
+      domain_digest("oden:capsec:policy:2", &Value::Object(policy.clone()))
+        .unwrap();
+    policy.insert(
+      "policyDigest".to_string(),
+      Value::String(policy_digest.clone()),
+    );
+    snapshot["policyDigest"] = Value::String(policy_digest);
+    snapshot
+      .as_object_mut()
+      .unwrap()
+      .remove("armedSnapshotDigest");
+    let digest = domain_digest("oden:capsec:armed:2", snapshot).unwrap();
+    snapshot["armedSnapshotDigest"] = Value::String(digest);
+  }
+
+  fn candidate_with_env_policy(target: TargetStatus<'_>) -> Value {
+    let mut snapshot = candidate_snapshot(target, None);
+    let principal = PrincipalRef {
+      kind: PrincipalKind::Package,
+      key: "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+    };
+    let selector = Rev2Core::embedded()
+      .unwrap()
+      .normalize_selector(
+        &AuthoritySelectorInput {
+          identity: EngineIdentity::embedded(),
+          principal: Some(principal.clone()),
+          capability: "env:read".to_string(),
+          resource: serde_json::json!({ "name": "TOKEN" }),
+        },
+        SelectorPolarity::Positive,
+      )
+      .unwrap();
+    snapshot["canonicalPolicy"]["principals"] = serde_json::json!([{
+      "principal": principal,
+      "binding": {
+        "resolverId": "fixture-lock-resolver/2",
+        "bindingDigest": REV2_VOCAB_DIGEST,
+      },
+      "floor": [{ "sourceId": "floor:env", "selector": selector }],
+      "escalationCeiling": [],
+      "denials": [],
+    }]);
+    refresh_digests(&mut snapshot);
+    snapshot
+  }
+
+  #[cfg(unix)]
+  fn platform_identity(path: &std::path::Path) -> Value {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).unwrap();
+    serde_json::json!({
+      "kind": "platform-object",
+      "value": format!(
+        "unix-dev-ino:{:016x}{:016x}",
+        metadata.dev(),
+        metadata.ino(),
+      ),
+    })
+  }
+
+  #[test]
+  fn unknown_envelope_fields_and_bad_auth_fail_closed() {
+    let key = [7_u8; 32];
+    let bad = br#"{"schema":"oden/capsec-armed-envelope/2","snapshot":{},"mac":{"algorithm":"hmac-sha256","keyId":"bad","tag":"bad"},"extra":true}"#;
+    assert!(matches!(
+      verify_authenticated_envelope(bad, &key),
+      Err(reason) if reason == "OD-CAP-REV2-ENVELOPE-SHAPE"
+    ));
+  }
+
+  #[test]
+  fn production_candidate_is_verified_but_never_armed_or_advertised() {
+    let key = [9_u8; 32];
+    let embedded = embedded_compiled_target();
+    let target = TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: embedded.profile_claim,
+      conformance_report_digest: None,
+      enforced: embedded.enforced,
+      closed: embedded.closed,
+      absent: embedded.absent,
+      unsupported: embedded.unsupported,
+      advertised: false,
+    };
+    let snapshot = candidate_snapshot(target, None);
+    let context =
+      verify_authenticated_envelope(&envelope(snapshot, &key), &key).unwrap();
+    assert_eq!(context.state(), OdenRev2LoadState::VerifiedUnarmed);
+    assert!(
+      context
+        .blockers()
+        .iter()
+        .any(|blocker| blocker.starts_with("target-unsupported-cells:"))
+    );
+    assert!(
+      context
+        .blockers()
+        .contains(&"target-not-advertised".to_string())
+    );
+    let evidence = context.evidence();
+    assert_eq!(evidence["armed"], false);
+    assert_eq!(evidence["executionRole"], "probe");
+    assert_eq!(
+      evidence["loadedArmedSnapshotDigest"],
+      evidence["armedSnapshotDigest"]
+    );
+    assert_eq!(evidence["projectDigest"], REV2_REGISTRY_DIGEST);
+  }
+
+  #[test]
+  fn authenticated_tamper_and_digest_mutation_refuse() {
+    let key = [11_u8; 32];
+    let embedded = embedded_compiled_target();
+    let target = TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: embedded.profile_claim,
+      conformance_report_digest: None,
+      enforced: embedded.enforced,
+      closed: embedded.closed,
+      absent: embedded.absent,
+      unsupported: embedded.unsupported,
+      advertised: false,
+    };
+    let mut encoded = envelope(candidate_snapshot(target, None), &key);
+    let index = encoded
+      .windows(b"run:test".len())
+      .position(|window| window == b"run:test")
+      .unwrap();
+    encoded[index] = b'R';
+    assert!(matches!(
+      verify_authenticated_envelope(&encoded, &key),
+      Err(reason) if reason == "OD-CAP-REV2-AUTH-FAILED"
+    ));
+
+    let mut snapshot = candidate_snapshot(target, None);
+    snapshot["policyDigest"] = Value::String(
+      "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+    );
+    assert!(matches!(
+      verify_authenticated_envelope(&envelope(snapshot, &key), &key),
+      Err(reason) if reason == "OD-CAP-REV2-POLICY-DIGEST-MISMATCH"
+    ));
+  }
+
+  #[test]
+  fn nested_policy_shapes_principals_and_core_normalization_fail_closed() {
+    let key = [13_u8; 32];
+    let embedded = embedded_compiled_target();
+    let target = TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: embedded.profile_claim,
+      conformance_report_digest: None,
+      enforced: embedded.enforced,
+      closed: embedded.closed,
+      absent: embedded.absent,
+      unsupported: embedded.unsupported,
+      advertised: false,
+    };
+    let snapshot = candidate_with_env_policy(target);
+    verify_authenticated_envelope(&envelope(snapshot.clone(), &key), &key)
+      .unwrap();
+
+    let mut projection = snapshot.clone();
+    projection["canonicalPolicy"]["principals"][0]["floor"][0]["selector"]["projectionId"] =
+      Value::String("projection:forged".to_string());
+    refresh_digests(&mut projection);
+    assert!(matches!(
+      verify_authenticated_envelope(&envelope(projection, &key), &key),
+      Err(reason) if reason == "OD-CAP-REV2-SELECTOR-NONCANONICAL"
+    ));
+
+    let mut unknown = snapshot.clone();
+    unknown["canonicalPolicy"]["principals"][0]["binding"]["extra"] =
+      Value::Bool(true);
+    refresh_digests(&mut unknown);
+    assert!(matches!(
+      verify_authenticated_envelope(&envelope(unknown, &key), &key),
+      Err(reason) if reason == "OD-CAP-REV2-PRINCIPAL-BINDING-SHAPE"
+    ));
+
+    let mut protected = snapshot.clone();
+    let source_id =
+      protected["canonicalPolicy"]["principals"][0]["floor"][0]["sourceId"]
+        .clone();
+    let selector =
+      protected["canonicalPolicy"]["principals"][0]["floor"][0]["selector"]
+        .clone();
+    let predicate_id = "predicate.protected-receipt/2";
+    let reason_digest = REV2_REGISTRY_DIGEST;
+    let protected_digest = domain_digest(
+      "oden:capsec:protected-row:2",
+      &serde_json::json!({
+        "sourceId": source_id,
+        "selector": selector,
+        "predicateId": predicate_id,
+        "reasonDigest": reason_digest,
+      }),
+    )
+    .unwrap();
+    protected["canonicalPolicy"]["principals"][0]["floor"][0]["protected"] = serde_json::json!({
+      "predicateId": predicate_id,
+      "reasonDigest": reason_digest,
+      "canonicalRowDigest": protected_digest,
+    });
+    refresh_digests(&mut protected);
+    assert!(matches!(
+      verify_authenticated_envelope(&envelope(protected, &key), &key),
+      Err(reason) if reason == "OD-CAP-REV2-PROTECTED-UNREGISTERED"
+    ));
+
+    let mut runtime = snapshot;
+    runtime["canonicalPolicy"]["principals"][0]["principal"] =
+      serde_json::json!({ "kind": "runtime", "key": "runtime:internal" });
+    refresh_digests(&mut runtime);
+    assert!(matches!(
+      verify_authenticated_envelope(&envelope(runtime, &key), &key),
+      Err(reason) if reason == "OD-CAP-REV2-PRINCIPAL-RECIPIENT"
+    ));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn root_bindings_are_exact_revalidated_and_retained() {
+    let key = [15_u8; 32];
+    let embedded = embedded_compiled_target();
+    let target = TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: embedded.profile_claim,
+      conformance_report_digest: None,
+      enforced: embedded.enforced,
+      closed: embedded.closed,
+      absent: embedded.absent,
+      unsupported: embedded.unsupported,
+      advertised: false,
+    };
+    let principal = PrincipalRef {
+      kind: PrincipalKind::Package,
+      key: "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+    };
+    let selector = Rev2Core::embedded()
+      .unwrap()
+      .normalize_selector(
+        &AuthoritySelectorInput {
+          identity: EngineIdentity::embedded(),
+          principal: Some(principal.clone()),
+          capability: "fs:read".to_string(),
+          resource: serde_json::json!({
+            "kind": "path-tree",
+            "path": { "encoding": "unicode", "value": "data" },
+            "root": "$PROJECT",
+          }),
+        },
+        SelectorPolarity::Positive,
+      )
+      .unwrap();
+    let unique = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    let raw = std::env::temp_dir()
+      .join(format!("oden-rev2-root-{}-{unique}", std::process::id()));
+    std::fs::create_dir(&raw).unwrap();
+    let root = std::fs::canonicalize(&raw).unwrap();
+    let mut snapshot = candidate_snapshot(target, None);
+    snapshot["canonicalPolicy"]["principals"] = serde_json::json!([{
+      "principal": principal.clone(),
+      "binding": {
+        "resolverId": "fixture-lock-resolver/2",
+        "bindingDigest": REV2_VOCAB_DIGEST,
+      },
+      "floor": [{ "sourceId": "floor:path", "selector": selector }],
+      "escalationCeiling": [],
+      "denials": [],
+    }]);
+    snapshot["rootBindings"] = serde_json::json!([{
+      "sourceId": "floor:path",
+      "logicalRoot": "$PROJECT",
+      "principal": principal,
+      "rootBindingId": "root-binding:project",
+      "canonicalPath": {
+        "encoding": "unicode",
+        "value": root.to_str().unwrap(),
+      },
+      "objectIdentity": platform_identity(&root),
+      "bindingProvenanceDigest": REV2_REGISTRY_DIGEST,
+    }]);
+    refresh_digests(&mut snapshot);
+    let context =
+      verify_authenticated_envelope(&envelope(snapshot.clone(), &key), &key)
+        .unwrap();
+    assert_eq!(context.retained_objects().len(), 1);
+    assert_eq!(
+      context.retained_objects()[0].binding_id(),
+      "root-binding:project"
+    );
+
+    let mut missing = snapshot.clone();
+    missing["rootBindings"] = Value::Array(Vec::new());
+    refresh_digests(&mut missing);
+    assert!(matches!(
+      verify_authenticated_envelope(&envelope(missing, &key), &key),
+      Err(reason) if reason == "OD-CAP-REV2-ROOT-BINDING-COVERAGE"
+    ));
+
+    let mut wrong_identity = snapshot;
+    wrong_identity["rootBindings"][0]["objectIdentity"]["value"] =
+      Value::String(
+        "unix-dev-ino:00000000000000000000000000000000".to_string(),
+      );
+    refresh_digests(&mut wrong_identity);
+    assert!(matches!(
+      verify_authenticated_envelope(&envelope(wrong_identity, &key), &key),
+      Err(reason) if reason == "OD-CAP-REV2-BOUND-OBJECT-IDENTITY"
+    ));
+    drop(context);
+    std::fs::remove_dir(root).unwrap();
+  }
+
+  #[test]
+  fn hermetic_conformant_registry_can_arm_without_a_production_override() {
+    let embedded = &REV2_TARGET_STATUS[0];
+    let report = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let target = TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: "advertised",
+      conformance_report_digest: Some(report),
+      enforced: 996,
+      closed: 0,
+      absent: 0,
+      unsupported: 0,
+      advertised: true,
+    };
+    let snapshot = candidate_snapshot(target, Some(report));
+    let context = verify_snapshot(&snapshot, target).unwrap();
+    assert_eq!(context.state(), OdenRev2LoadState::Armable);
+    assert!(context.blockers().is_empty());
+  }
+}

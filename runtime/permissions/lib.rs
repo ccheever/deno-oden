@@ -7,6 +7,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::io::Read;
 use std::io::Write;
 use std::net::IpAddr;
 use std::net::Ipv6Addr;
@@ -46,6 +47,7 @@ mod oden_handle;
 mod oden_policy;
 mod oden_principal_index;
 mod oden_protected;
+mod oden_rev2_policy;
 mod oden_rev2_runtime;
 pub mod prompter;
 mod runtime_descriptor_parser;
@@ -57,6 +59,8 @@ pub mod rev2;
 #[path = "oden_rev2_registry_generated.rs"]
 mod rev2_registry_generated;
 
+pub use oden_rev2_policy::OdenRev2LoadState;
+pub use oden_rev2_policy::OdenRev2LoadedPolicyContext;
 pub use oden_rev2_runtime::OdenRev2ArmedContext;
 pub use oden_rev2_runtime::OdenRev2CommittedLaunchEntry;
 pub use oden_rev2_runtime::OdenRev2CommittedLaunchPayload;
@@ -1672,6 +1676,29 @@ fn oden_capsec_gate_url_scheme_inner(
 /// JS environment reads and ordinary child inheritance are scrubbed; OS views
 /// of the initial exec environment may retain stale path strings, but the key
 /// was never there and the one-shot key/policy files are absent before user code.
+pub const ODEN_CAPSEC_REV2_UNARMED_EXIT_CODE: i32 = 75;
+
+static ODEN_CAPSEC_REV2_BOOTSTRAP: OnceLock<
+  Result<OdenRev2LoadedPolicyContext, String>,
+> = OnceLock::new();
+
+pub fn oden_capsec_rev2_loaded_policy_context()
+-> Option<&'static OdenRev2LoadedPolicyContext> {
+  ODEN_CAPSEC_REV2_BOOTSTRAP
+    .get()
+    .and_then(|result| result.as_ref().ok())
+}
+
+pub fn oden_capsec_rev2_bootstrap_exit_code() -> Option<i32> {
+  // C03 authenticates and verifies the immutable plane, but C04 still owns
+  // installing its typed permission/handle protocol into every operation
+  // seam. No Rev2 launch may reach V8 merely because a hermetic conformance
+  // status says that its artifact could arm.
+  ODEN_CAPSEC_REV2_BOOTSTRAP
+    .get()
+    .map(|_| ODEN_CAPSEC_REV2_UNARMED_EXIT_CODE)
+}
+
 #[allow(
   clippy::disallowed_methods,
   reason = "single-threaded bootstrap snapshots and removes the private inherited handoff before V8 or worker threads start"
@@ -1679,14 +1706,73 @@ fn oden_capsec_gate_url_scheme_inner(
 pub fn oden_capsec_init_control_plane() -> bool {
   let explicit_policy =
     std::env::var_os("ODEN_CAPSEC_POLICY").filter(|path| !path.is_empty());
-  let armed = oden_capsec_armed();
+  let explicit_rev2 = std::env::var_os("ODEN_CAPSEC_REV2_SNAPSHOT")
+    .filter(|path| !path.is_empty());
+  // Rev1 and Rev2 are explicit, disjoint bootstrap protocols. In particular,
+  // never parse a Rev1 policy as a side effect of a Rev2 attempt.
+  let armed = if explicit_rev2.is_some() {
+    false
+  } else {
+    oden_capsec_armed()
+  };
   let _ = oden_capsec_project_root();
-  let _ = oden_capsec_policy_file();
-  let _ = oden_capsec_policy_source();
+  if let Some(snapshot) = explicit_rev2.as_deref() {
+    let result = if explicit_policy.is_some() {
+      // Consume/unlink any securely opened one-shot candidate even though the
+      // mixed protocol is unconditionally refused. This prevents a rejected
+      // handoff retaining receipt or host-binding material on disk.
+      let _ = oden_capsec_consume_rev2_snapshot(snapshot);
+      if let Some(policy) = explicit_policy.as_deref()
+        && let Some(control_root) =
+          oden_capsec_audit_channel().lock().control_root()
+      {
+        let _ = oden_capsec_consume_parent_policy(policy, &control_root);
+      }
+      Err("OD-CAP-REV2-MIXED-HANDOFF".to_string())
+    } else {
+      oden_capsec_consume_rev2_snapshot(snapshot)
+    };
+    let evidence = match &result {
+      Ok(context) => context.evidence(),
+      Err(reason) => serde_json::json!({
+        "v": 1,
+        "event": "rev2_loaded_context",
+        "profile": rev2_registry_generated::REV2_PROFILE,
+        "vocabDigest": rev2_registry_generated::REV2_VOCAB_DIGEST,
+        "registryDigest": rev2_registry_generated::REV2_REGISTRY_DIGEST,
+        "policyDigest": null,
+        "projectDigest": null,
+        "armedSnapshotDigest": null,
+        "loadedArmedSnapshotDigest": null,
+        "conformanceReportDigest": null,
+        "engineTarget": null,
+        "engineFeatureSet": null,
+        "executionRole": null,
+        "runNonce": null,
+        "channelEpoch": null,
+        "configured": true,
+        "decisionStage": "bootstrap",
+        "verified": false,
+        "armable": false,
+        "armed": false,
+        "conformant": false,
+        "advertised": false,
+        "blockers": [reason],
+      }),
+    };
+    let _ = ODEN_CAPSEC_REV2_BOOTSTRAP.set(result);
+    oden_capsec_write_audit_record(&evidence);
+  } else {
+    // Keep the frozen Rev1 initialization order unchanged when no Rev2
+    // candidate handoff exists.
+    let _ = oden_capsec_policy_file();
+    let _ = oden_capsec_policy_source();
+  }
   if oden_capsec_audit_channel().lock().authenticated_failure() {
     oden_capsec_fatal_audit_failure();
   }
-  if let Some(policy) = explicit_policy
+  if explicit_rev2.is_none()
+    && let Some(policy) = explicit_policy
     && let Some(control_root) =
       oden_capsec_audit_channel().lock().control_root()
     && let Err(_reason) =
@@ -1703,6 +1789,7 @@ pub fn oden_capsec_init_control_plane() -> bool {
       "ODEN_CAPSEC_POLICY",
       "ODEN_CAPSEC_AUDIT",
       "ODEN_CAPSEC_AUDIT_KEY",
+      "ODEN_CAPSEC_REV2_SNAPSHOT",
     ] {
       std::env::remove_var(name);
     }
@@ -1738,6 +1825,93 @@ fn oden_capsec_consume_parent_policy(
   }
   std::fs::remove_file(policy)
     .map_err(|error| format!("{}: {error}", policy.display()))
+}
+
+const ODEN_CAPSEC_REV2_ENVELOPE_READ_CAP: u64 = 8 * 1024 * 1024;
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "single-threaded bootstrap opens, bounds, snapshots, and unlinks the authenticated parent's one-shot Rev2 envelope before V8"
+)]
+fn oden_capsec_consume_rev2_snapshot(
+  snapshot: &std::ffi::OsStr,
+) -> Result<OdenRev2LoadedPolicyContext, String> {
+  let (control_root, key) = {
+    let channel = oden_capsec_audit_channel().lock();
+    let control_root = channel
+      .control_root()
+      .ok_or_else(|| "OD-CAP-REV2-AUTH-CHANNEL".to_string())?;
+    let key = channel
+      .rev2_authentication_key()
+      .ok_or_else(|| "OD-CAP-REV2-AUTH-KEY".to_string())?;
+    (control_root, key)
+  };
+  let snapshot = Path::new(snapshot);
+  let parent = snapshot
+    .parent()
+    .ok_or_else(|| "OD-CAP-REV2-SNAPSHOT-PARENT".to_string())?;
+  let parent = std::fs::canonicalize(parent)
+    .map_err(|_| "OD-CAP-REV2-SNAPSHOT-PARENT".to_string())?;
+  if parent != control_root {
+    return Err("OD-CAP-REV2-SNAPSHOT-CONTROL-ROOT".to_string());
+  }
+  let symlink_metadata = std::fs::symlink_metadata(snapshot)
+    .map_err(|_| "OD-CAP-REV2-SNAPSHOT-MISSING".to_string())?;
+  if !symlink_metadata.file_type().is_file()
+    || symlink_metadata.file_type().is_symlink()
+  {
+    return Err("OD-CAP-REV2-SNAPSHOT-FILE-TYPE".to_string());
+  }
+
+  let mut options = std::fs::OpenOptions::new();
+  options.read(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+  }
+  let file = options
+    .open(snapshot)
+    .map_err(|_| "OD-CAP-REV2-SNAPSHOT-OPEN".to_string())?;
+  let metadata = file
+    .metadata()
+    .map_err(|_| "OD-CAP-REV2-SNAPSHOT-METADATA".to_string())?;
+  if !metadata.is_file() {
+    return Err("OD-CAP-REV2-SNAPSHOT-BOUNDS".to_string());
+  }
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::MetadataExt;
+    if symlink_metadata.dev() != metadata.dev()
+      || symlink_metadata.ino() != metadata.ino()
+    {
+      return Err("OD-CAP-REV2-SNAPSHOT-IDENTITY".to_string());
+    }
+  }
+  #[cfg(not(unix))]
+  {
+    return Err("OD-CAP-REV2-SNAPSHOT-PLATFORM".to_string());
+  }
+  // The authenticated control directory is parent-owned and private. Unlink
+  // immediately after the no-follow open and identity comparison, so every
+  // subsequent bounds/read/parse/authentication failure still consumes the
+  // one-shot pathname while this retained descriptor supplies the exact bytes.
+  std::fs::remove_file(snapshot)
+    .map_err(|_| "OD-CAP-REV2-SNAPSHOT-UNLINK".to_string())?;
+  if metadata.len() > ODEN_CAPSEC_REV2_ENVELOPE_READ_CAP {
+    return Err("OD-CAP-REV2-SNAPSHOT-BOUNDS".to_string());
+  }
+  let capacity = usize::try_from(metadata.len())
+    .map_err(|_| "OD-CAP-REV2-SNAPSHOT-BOUNDS".to_string())?;
+  let mut bytes = Vec::with_capacity(capacity);
+  file
+    .take(ODEN_CAPSEC_REV2_ENVELOPE_READ_CAP + 1)
+    .read_to_end(&mut bytes)
+    .map_err(|_| "OD-CAP-REV2-SNAPSHOT-READ".to_string())?;
+  if bytes.len() > ODEN_CAPSEC_REV2_ENVELOPE_READ_CAP as usize {
+    return Err("OD-CAP-REV2-SNAPSHOT-BOUNDS".to_string());
+  }
+  oden_rev2_policy::verify_authenticated_envelope(&bytes, &key)
 }
 
 #[allow(
@@ -2936,6 +3110,18 @@ impl OdenAuditChannel {
     match self {
       Self::Authenticated(channel) => Some(channel.control_root.clone()),
       Self::Disabled | Self::Legacy(_) | Self::Broken { .. } => None,
+    }
+  }
+
+  fn rev2_authentication_key(&self) -> Option<Vec<u8>> {
+    match self {
+      Self::Authenticated(channel) if !channel.failed && !channel.terminal => {
+        Some(channel.key.clone())
+      }
+      Self::Disabled
+      | Self::Legacy(_)
+      | Self::Authenticated(_)
+      | Self::Broken { .. } => None,
     }
   }
 }
