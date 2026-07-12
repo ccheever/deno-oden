@@ -24,6 +24,7 @@ deno_unsync.workspace = true
 fqdn.workspace = true
 faster-hex.workspace = true
 hmac.workspace = true
+idna.workspace = true
 ipnet.workspace = true
 libc.workspace = true
 log.workspace = true

@@ -46,6 +46,10 @@ mod oden_handle;
 mod oden_policy;
 mod oden_principal_index;
 mod oden_protected;
+#[path = "oden_rev2_registry_generated.rs"]
+mod rev2_registry_generated;
+#[path = "oden_rev2_core_generated.rs"]
+pub mod rev2;
 pub mod prompter;
 mod runtime_descriptor_parser;
 pub mod which;
