@@ -4,6 +4,7 @@ import { core, primordials } from "ext:core/mod.js";
 import { op_oden_schedule_context } from "ext:core/ops";
 
 const {
+  Error,
   SafeWeakMap,
   WeakMapPrototypeGet,
   WeakMapPrototypeSet,
@@ -18,9 +19,32 @@ export function captureOdenHttpRequestActor(request) {
   WeakMapPrototypeSet(requestActors, request, op_oden_schedule_context());
 }
 
+export function hasOdenHttpRequestActor(request) {
+  return WeakMapPrototypeGet(requestActors, request) !== undefined;
+}
+
 export function runWithOdenHttpRequestActor(request, callback) {
   const actor = WeakMapPrototypeGet(requestActors, request);
   if (actor === undefined) return callback();
+
+  const prior = core.getAsyncContext();
+  core.setAsyncContext(actor);
+  try {
+    return callback();
+  } finally {
+    core.setAsyncContext(prior);
+  }
+}
+
+export function runWithRequiredOdenHttpRequestActor(request, callback) {
+  const actor = WeakMapPrototypeGet(requestActors, request);
+  if (actor === undefined) {
+    const error = new Error(
+      "oden capsec: missing Node HTTP request actor",
+    );
+    error.code = "ERR_ACCESS_DENIED";
+    throw error;
+  }
 
   const prior = core.getAsyncContext();
   core.setAsyncContext(actor);

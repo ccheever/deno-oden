@@ -1,6 +1,8 @@
 {
   "mode": "enforce",
   "grants": {
-    "node-http-closure-probe": "network:fetch:*,fs:read:/,fs:write:/"
+    "node-http-closure-probe": "network:fetch:*,fs:read:/,fs:write:/",
+    "socket-owner": "network:connect:*,fs:read:/,fs:write:/",
+    "socket-borrower": "network:fetch:*,fs:read:/,fs:write:/"
   }
 }

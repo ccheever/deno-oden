@@ -2164,6 +2164,7 @@ function protectedEventEmitterListenerCount(type, listener) {
   );
 }
 const protectedEventEmitterOff = EventEmitter.prototype.off;
+const protectedEventEmitterOn = EventEmitter.prototype.on;
 const protectedEventEmitterOnce = EventEmitter.prototype.once;
 
 return {
@@ -2191,6 +2192,7 @@ return {
   protectedEventEmitterEmit,
   protectedEventEmitterListenerCount,
   protectedEventEmitterOff,
+  protectedEventEmitterOn,
   protectedEventEmitterOnce,
   setMaxListeners,
   emitPreparedEvent,

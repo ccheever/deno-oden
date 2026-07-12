@@ -4,7 +4,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const {
   ArrayPrototypeIndexOf,
   ArrayPrototypePush,
@@ -30,7 +30,11 @@ const {
   StringPrototypeSplit,
   SymbolAsyncDispose,
 } = primordials;
-const { op_get_env_no_permission_check, op_node_http_net_token } = core.ops;
+const {
+  op_get_env_no_permission_check,
+  op_node_http_capsec_no_reuse,
+  op_node_http_net_token,
+} = core.ops;
 const lazyTls = core.createLazyLoader("node:tls");
 const lazyNet = core.createLazyLoader("node:net");
 const { urlToHttpOptions } = core.loadExtScript(
@@ -58,7 +62,9 @@ const { kEmptyObject } = core.loadExtScript(
 );
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 
-const tls = lazyTls().default;
+const tlsModule = lazyTls();
+const tls = tlsModule.default;
+const odenCapsecBuiltinTlsConnect = tlsModule.connect;
 const net = lazyNet();
 const http = lazyHttp();
 const {
@@ -81,7 +87,7 @@ function withOdenHttpNetToken(options: any): any {
   const port = NumberIsFinite(rawPort) && rawPort >= 0 && rawPort <= 65535
     ? rawPort
     : 0;
-  return {
+  const protectedOptions: any = {
     __proto__: null,
     ...options,
     __odenHttpNetToken: op_node_http_net_token(
@@ -91,6 +97,14 @@ function withOdenHttpNetToken(options: any): any {
       "node:https.request()",
     ),
   };
+  if (op_node_http_capsec_no_reuse()) {
+    delete protectedOptions.fd;
+    delete protectedOptions.handle;
+    delete protectedOptions.onread;
+    delete protectedOptions.signal;
+    delete protectedOptions.socket;
+  }
+  return protectedOptions;
 }
 
 // https.Server extends tls.Server (which extends net.Server).
@@ -240,6 +254,9 @@ function Agent(this: any, options: any) {
   options.defaultPort ??= 443;
   options.protocol ??= "https:";
   FunctionPrototypeCall(HttpAgent, this, options);
+  if (op_node_http_capsec_no_reuse()) {
+    internals.__odenBrandTrustedNodeHttpsAgent(this);
+  }
 
   this.maxCachedSessions = this.options.maxCachedSessions;
   if (this.maxCachedSessions === undefined) {
@@ -402,6 +419,25 @@ Agent.prototype.createConnection = function createConnection(
     }
   }
 
+  if (op_node_http_capsec_no_reuse()) {
+    if (options.socket !== undefined) {
+      const error: any = new Error(
+        "oden capsec: HTTPS adoption of a caller-supplied socket is closed",
+      );
+      error.code = "ERR_ACCESS_DENIED";
+      throw error;
+    }
+    // /1.1 has no Agent pool or TLS-session cache. Invoke the captured TLS
+    // factory and return its socket synchronously; do not publish the socket
+    // through session/listener hooks before the private ClientRequest bridge
+    // reauthorizes its declared target and native peer binding.
+    return FunctionPrototypeCall(
+      odenCapsecBuiltinTlsConnect,
+      tls,
+      withOdenHttpNetToken(options),
+    );
+  }
+
   // Look up cached TLS session for reuse
   if (options._agentKey) {
     const session = this._getSession(options._agentKey);
@@ -434,6 +470,9 @@ Agent.prototype.createConnection = function createConnection(
 
   return socket;
 };
+internals.__odenRegisterTrustedNodeHttpAgentCreateConnection(
+  Agent.prototype.createConnection,
+);
 
 // Opens a CONNECT tunnel through `proxy` and TLS-upgrades the resulting
 // socket. Returns undefined; resolves through `cb(err, tlsSocket)`.

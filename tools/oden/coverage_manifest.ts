@@ -430,6 +430,18 @@ type NodeHttpSocketRoute = {
   route: string;
 };
 
+type NodeHttpHandoffRoute = {
+  action: "connect" | "closed";
+  boundary: string;
+  file: string;
+  fixture: string;
+  fn: string;
+  outcomes: Partial<
+    Record<"connect" | "fetch" | "peer", "CONNECTED" | "DENIED">
+  >;
+  route: string;
+};
+
 const NODE_HTTP_SOCKET_FIXTURE =
   "tests/specs/run/oden_capsec_node_http_socket_closure/node_modules/node-http-closure-probe/index.js";
 const NODE_HTTP_SOCKET_SPEC =
@@ -442,6 +454,14 @@ const NODE_HTTP_SOCKET_FETCH_GOLDEN =
   "tests/specs/run/oden_capsec_node_http_socket_closure/routes_fetch.out";
 const NODE_HTTP_SOCKET_CONNECT_GOLDEN =
   "tests/specs/run/oden_capsec_node_http_socket_closure/routes_connect.out";
+const NODE_HTTP_SOCKET_HANDOFF_PEER_POLICY =
+  "tests/specs/run/oden_capsec_node_http_socket_closure/handoff_peer.json";
+const NODE_HTTP_SOCKET_HANDOFF_PEER_GOLDEN =
+  "tests/specs/run/oden_capsec_node_http_socket_closure/handoff_peer.out";
+const NODE_HTTP_SOCKET_HANDOFF_FIXTURES = [
+  "tests/specs/run/oden_capsec_node_http_socket_closure/app.js",
+  "tests/specs/run/oden_capsec_node_http_socket_closure/node_modules/node-http-closure-probe/index.js",
+] as const;
 
 // Every route in Node's request/response API that can reveal, delegate, or
 // reuse the transport must lead to a connect-class native boundary or a
@@ -482,19 +502,19 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
     fixture: "upgrade-raw-write",
   },
   {
-    action: "connect",
+    action: "closed",
     route: "custom Agent.createConnection",
-    boundary: "raw Node TCP creation",
-    file: "ext/node/ops/tcp_wrap.rs",
-    fn: "connect",
+    boundary: "caller-supplied Agent factories categorically closed",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
     fixture: "custom-agent",
   },
   {
-    action: "connect",
+    action: "closed",
     route: "request createConnection hook",
-    boundary: "raw Node TCP creation",
-    file: "ext/node/ops/tcp_wrap.rs",
-    fn: "connect",
+    boundary: "caller-supplied request factories categorically closed",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
     fixture: "create-connection-hook",
   },
   {
@@ -522,12 +542,437 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
     fixture: "forward-proxy-closed",
   },
   {
+    action: "closed",
+    route: "HTTPS forward-proxy target and peer",
+    boundary: "categorically refused before proxy or TLS target connection",
+    file: "ext/node/ops/http.rs",
+    fn: "op_node_http_check_proxy_net",
+    fixture: "https-forward-proxy-closed",
+  },
+  {
     action: "connect",
     route: "Unix-domain HTTP socket",
     boundary: "built-in agent pipe creation",
     file: "ext/node/ops/pipe_wrap.rs",
     fn: "connect",
     fixture: "unix-socket",
+  },
+];
+
+const NODE_HTTP_SOCKET_HANDOFF_ROUTES: NodeHttpHandoffRoute[] = [
+  {
+    action: "connect",
+    route: "concurrent fresh built-in HTTP sockets",
+    boundary: "literal no-pool Agent ignores maxSockets and creates fresh",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "addRequest",
+    fixture: "queued-built-in-replacement",
+    outcomes: { connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "concurrent fresh built-in HTTPS sockets",
+    boundary: "private HTTPS kind/factory and uncached fresh TLS transport",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "addRequest",
+    fixture: "queued-built-in-https-replacement",
+    outcomes: { connect: "CONNECTED" },
+  },
+  {
+    action: "closed",
+    route: "borrowed TCP createConnection return",
+    boundary: "caller-supplied request factory categorically closed",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-create-connection",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "unbranded Agent-like socket injection",
+    boundary: "categorically refused before addRequest",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-agent-like",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "borrowed Unix createConnection return",
+    boundary: "caller-supplied Unix request factory categorically closed",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-unix-create-connection",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "unbranded Unix Agent-like socket injection",
+    boundary: "categorically refused before addRequest",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-unix-agent-like",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "repeated caller-supplied createConnection socket",
+    boundary: "caller-supplied request factory closed on first request",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-agent-like-reuse-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "A-owned delayed Agent-like assignment",
+    boundary: "unbranded Agent closed before delayed assignment",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-delayed-agent-like",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "A-owned synchronous createConnection hook",
+    boundary: "A-owned request factory categorically closed",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-owner-create-connection",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "A-owned callback-supplied createConnection socket",
+    boundary: "callback-supplied custom sockets categorically closed",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-owner-callback-connection-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "A-owned synchronous Agent-like assignment",
+    boundary: "unbranded Agent-like object closed",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-owner-sync-agent-like",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "A-owned branded Agent addRequest override",
+    boundary: "non-built-in addRequest identity closed",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-owner-branded-agent-like",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "borrowed hidden-peer request factory",
+    boundary: "caller-supplied request factory closed before native adoption",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-peer-create-connection",
+    outcomes: { peer: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "Agent-like hidden-peer injection",
+    boundary: "untrusted Agent-like object closed",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-peer-agent-like",
+    outcomes: { peer: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "borrowed accepted socket request factory",
+    boundary: "caller-supplied request factory closed before native adoption",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "borrowed-accepted-socket-closed",
+    outcomes: { peer: "DENIED" },
+  },
+  {
+    action: "connect",
+    route: "native connected TCP binding canary",
+    boundary: "declared endpoint, retained authority host, and live peer",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "check_oden_http_socket_use",
+    fixture: "native-bound-tcp-check",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "native connected Unix binding canary",
+    boundary: "declared and retained lexical connect path",
+    file: "ext/node/ops/pipe_wrap.rs",
+    fn: "check_oden_http_socket_use",
+    fixture: "native-bound-unix-check",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "closed",
+    route: "native accepted TCP handle",
+    boundary: "missing private client-connect binding",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "check_oden_http_socket_use",
+    fixture: "native-accepted-tcp-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "native accepted Unix handle",
+    boundary: "missing retained lexical client-connect path",
+    file: "ext/node/ops/pipe_wrap.rs",
+    fn: "check_oden_http_socket_use",
+    fixture: "native-accepted-unix-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "branded Agent createConnection return override",
+    boundary: "private agent-kind factory identity",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "__nodeHttpSnapshotOdenCapsecAgent",
+    fixture: "borrowed-owner-agent-return-connection-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "branded Agent createConnection callback override",
+    boundary: "private agent-kind factory identity",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "__nodeHttpSnapshotOdenCapsecAgent",
+    fixture: "borrowed-owner-agent-callback-connection-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "branded Agent createSocket override",
+    boundary: "captured built-in createSocket identity",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "__nodeHttpSnapshotOdenCapsecAgent",
+    fixture: "borrowed-owner-agent-create-socket-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "HTTP Agent presented to HTTPS request",
+    boundary: "private request protocol must match private Agent kind",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "__nodeHttpSnapshotOdenCapsecAgent",
+    fixture: "cross-kind-http-agent-for-https-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "HTTPS Agent with HTTP factory identity",
+    boundary: "private Agent kind requires its exact registered factory",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "__nodeHttpSnapshotOdenCapsecAgent",
+    fixture: "cross-kind-https-agent-http-factory-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "invalid falsy Agent value",
+    boundary: "remaining falsy/unbranded Agent rejected before no-agent path",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "falsy-agent-zero-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "connect",
+    route: "ClientRequest agent prototype accessor",
+    boundary: "closure-local Agent plus own compatibility property",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "client-request-agent-accessor",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "alternating addRequest getter",
+    boundary: "single capture and direct built-in invocation",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "__nodeHttpSnapshotOdenCapsecAgent",
+    fixture: "alternating-add-request-getter",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "alternating createSocket getter",
+    boundary: "single capture and direct built-in invocation",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "__nodeHttpSnapshotOdenCapsecAgent",
+    fixture: "alternating-create-socket-getter",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "alternating createConnection getter",
+    boundary: "same captured factory identity is classified and invoked",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "__nodeHttpSnapshotOdenCapsecAgent",
+    fixture: "alternating-create-connection-getter",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "public Agent free injection",
+    boundary: "no-pool free handler destroys offered socket",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "Agent",
+    fixture: "public-agent-free-injection",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "public Socket free injection",
+    boundary: "no-pool free handler destroys offered socket",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "Agent",
+    fixture: "public-socket-free-injection",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "public freeSockets injection",
+    boundary: "no-pool addRequest never reads public freeSockets",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "addRequest",
+    fixture: "public-free-sockets-injection",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "public Agent pool and queue state poisoning",
+    boundary: "no-pool add/create/destroy/keylog never read public maps",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "addRequest",
+    fixture: "public-agent-pool-state-poison",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "forged Agent endpoint and proxy options",
+    boundary: "normalized request endpoint restored after private option merge",
+    file: "ext/node/polyfills/_http_agent.js",
+    fn: "createSocket",
+    fixture: "forged-agent-endpoint-options",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "tampered ClientRequest.onSocket",
+    boundary: "closure-captured request+expected-socket bridge",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "onSocket",
+    fixture: "tampered-client-on-socket",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "closed",
+    route: "HTTPS options.socket adoption",
+    boundary: "closed before tls.connect",
+    file: "ext/node/polyfills/https.ts",
+    fn: "createConnection",
+    fixture: "borrowed-https-options-socket-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "connect",
+    route: "alternating port getter",
+    boundary: "single immutable endpoint snapshot",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "alternating-port-getter",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "closed",
+    route: "alternating port coercion object",
+    boundary: "non-primitive port rejected before coercion or transport",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "alternating-port-coercion-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "malformed primitive port string",
+    boundary: "strict validatePort rejection before endpoint precheck",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "invalid-port-string-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "connect",
+    route: "alternating hostname getter",
+    boundary: "single immutable endpoint snapshot",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "alternating-hostname-getter",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "alternating socketPath getter",
+    boundary: "single normalized lexical endpoint snapshot",
+    file: "ext/node/polyfills/_http_client.js",
+    fn: "ClientRequest",
+    fixture: "alternating-socket-path-getter",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "connect",
+    route: "net.client.socket diagnostics subscriber",
+    boundary: "protected token suppresses synchronous socket publication",
+    file: "ext/node/polyfills/net.ts",
+    fn: "connect",
+    fixture: "net-client-socket-diagnostics-closed",
+    outcomes: { fetch: "DENIED", connect: "CONNECTED" },
+  },
+  {
+    action: "closed",
+    route: "tampered net.Socket prototype",
+    boundary: "prototype integrity refusal before socket construction",
+    file: "ext/node/polyfills/net.ts",
+    fn: "assertProtectedOdenHttpSocketPrototypeIntegrity",
+    fixture: "tampered-net-socket-prototype-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "tampered tls.TLSSocket prototype",
+    boundary: "prototype integrity refusal before TLS construction",
+    file: "ext/node/polyfills/_tls_wrap.js",
+    fn: "assertProtectedOdenHttpTlsIntegrity",
+    fixture: "tampered-tls-socket-prototype-closed",
+    outcomes: { fetch: "DENIED", connect: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "native declared host differs from retained TCP binding",
+    boundary: "actual authority host and live peer rechecked",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "check_oden_http_socket_use",
+    fixture: "native-hidden-peer-check",
+    outcomes: { peer: "DENIED" },
+  },
+  {
+    action: "closed",
+    route: "native accepted peer handle",
+    boundary: "missing private client-connect binding",
+    file: "ext/node/ops/tcp_wrap.rs",
+    fn: "check_oden_http_socket_use",
+    fixture: "native-accepted-peer-closed",
+    outcomes: { peer: "DENIED" },
   },
 ];
 
@@ -715,6 +1160,14 @@ const NETWORK_SURFACES: NetworkSurface[] = [
     fn: "op_webtransport_connect",
     enforcement: "inherited",
     note: "authorized QUIC connection",
+  },
+  {
+    surface: "Node HTTP(S) immutable request endpoint",
+    action: "connect",
+    file: "ext/node/ops/http.rs",
+    fn: "op_node_http_check_target_net",
+    enforcement: "direct",
+    note: "before Agent, Socket, TLS, or diagnostics construction",
   },
   {
     surface: "Node HTTP(S) direct connection",
@@ -972,6 +1425,15 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
   const connectGolden = Deno.readTextFileSync(
     ROOT + NODE_HTTP_SOCKET_CONNECT_GOLDEN,
   );
+  const handoffPeerPolicy = JSON.parse(
+    Deno.readTextFileSync(ROOT + NODE_HTTP_SOCKET_HANDOFF_PEER_POLICY),
+  );
+  const handoffPeerGolden = Deno.readTextFileSync(
+    ROOT + NODE_HTTP_SOCKET_HANDOFF_PEER_GOLDEN,
+  );
+  const handoffFixture = NODE_HTTP_SOCKET_HANDOFF_FIXTURES.map((path) =>
+    Deno.readTextFileSync(ROOT + path)
+  ).join("\n");
 
   const fetchSpec = spec.tests?.fetch_grant_cannot_reach_node_http_sockets;
   if (
@@ -990,6 +1452,15 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
   ) {
     errors.push("Node HTTP connect route spec registration drifted");
   }
+  const peerSpec = spec.tests
+    ?.borrowed_socket_peer_and_unbound_handles_cannot_launder_endpoint;
+  if (
+    peerSpec?.args !== "run --allow-all app.js handoff-peer" ||
+    peerSpec?.envs?.ODEN_CAPSEC_POLICY !== "handoff_peer.json" ||
+    peerSpec?.output !== "handoff_peer.out" || peerSpec?.exitCode !== 0
+  ) {
+    errors.push("Node HTTP borrowed-peer closure spec registration drifted");
+  }
 
   const fetchCaps = new Set(
     String(fetchPolicy.grants?.["node-http-closure-probe"] ?? "").split(","),
@@ -1000,6 +1471,43 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
   ) {
     errors.push(
       "Node HTTP fetch route policy must isolate network:fetch while clearing Unix filesystem prechecks",
+    );
+  }
+  const fetchOwnerCaps = new Set(
+    String(fetchPolicy.grants?.["socket-owner"] ?? "").split(","),
+  );
+  const fetchBorrowerCaps = new Set(
+    String(fetchPolicy.grants?.["socket-borrower"] ?? "").split(","),
+  );
+  const connectOwnerCaps = new Set(
+    String(connectPolicy.grants?.["socket-owner"] ?? "").split(","),
+  );
+  const connectBorrowerCaps = new Set(
+    String(connectPolicy.grants?.["socket-borrower"] ?? "").split(","),
+  );
+  const hasUnixFs = (caps: Set<string>) =>
+    caps.has("fs:read:/") && caps.has("fs:write:/");
+  if (
+    !fetchOwnerCaps.has("network:connect:*") ||
+    !fetchBorrowerCaps.has("network:fetch:*") ||
+    fetchBorrowerCaps.has("network:connect:*") ||
+    !hasUnixFs(fetchOwnerCaps) || !hasUnixFs(fetchBorrowerCaps) ||
+    !connectOwnerCaps.has("network:connect:*") ||
+    !connectBorrowerCaps.has("network:connect:*") ||
+    !hasUnixFs(connectOwnerCaps) || !hasUnixFs(connectBorrowerCaps)
+  ) {
+    errors.push(
+      "Node HTTP handoff policies must differ only on borrower fetch/connect while both retain Unix filesystem authority",
+    );
+  }
+  if (
+    handoffPeerPolicy.grants?.["socket-owner"] !==
+      "network:connect:localhost" ||
+    handoffPeerPolicy.grants?.["socket-borrower"] !==
+      "network:connect:allowed.example"
+  ) {
+    errors.push(
+      "Node HTTP hidden-peer policy must isolate declared allowed.example from the localhost socket binding",
     );
   }
   const connectCaps = new Set(
@@ -1031,6 +1539,183 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
     if (!connectGolden.split("\n").includes(connectLine)) {
       errors.push(`${row.route}: connect golden row missing`);
     }
+  }
+  const handoffGoldens = {
+    connect: connectGolden,
+    fetch: fetchGolden,
+    peer: handoffPeerGolden,
+  };
+  for (const row of NODE_HTTP_SOCKET_HANDOFF_ROUTES) {
+    const marker = `coverage-route: ${row.fixture}\n`;
+    const occurrenceCount = handoffFixture.split(marker).length - 1;
+    if (occurrenceCount !== 1) {
+      errors.push(
+        `${row.route}: coverage marker ${row.fixture} must occur exactly once`,
+      );
+    }
+    for (const [suite, outcome] of Object.entries(row.outcomes)) {
+      const line = `NODE_HTTP_SOCKET_ROUTE ${row.fixture} ${outcome}`;
+      if (
+        !handoffGoldens[suite as keyof typeof handoffGoldens]
+          .split("\n").includes(line)
+      ) {
+        errors.push(`${row.route}: ${suite} golden row missing`);
+      }
+    }
+  }
+  const assertExactInventory = (
+    label: string,
+    expected: string[],
+    discovered: string[],
+  ) => {
+    const expectedSet = new Set(expected);
+    const discoveredSet = new Set(discovered);
+    const expectedDuplicates = expected.filter((value, index) =>
+      expected.indexOf(value) !== index
+    );
+    const discoveredDuplicates = discovered.filter((value, index) =>
+      discovered.indexOf(value) !== index
+    );
+    const missing = [...expectedSet].filter((value) =>
+      !discoveredSet.has(value)
+    );
+    const extra = [...discoveredSet].filter((value) => !expectedSet.has(value));
+    if (
+      expectedDuplicates.length > 0 || discoveredDuplicates.length > 0 ||
+      missing.length > 0 || extra.length > 0
+    ) {
+      errors.push(
+        `${label} inventory drifted (missing=${
+          missing.join(",") || "none"
+        }; extra=${extra.join(",") || "none"}; expected-duplicates=${
+          expectedDuplicates.join(",") || "none"
+        }; discovered-duplicates=${discoveredDuplicates.join(",") || "none"})`,
+      );
+    }
+  };
+  const discoveredMarkers = [...handoffFixture.matchAll(
+    /coverage-route:\s+([a-z0-9-]+)/g,
+  )].map((match) => match[1]);
+  assertExactInventory(
+    "Node HTTP handoff fixture markers",
+    NODE_HTTP_SOCKET_HANDOFF_ROUTES.map((row) => row.fixture),
+    discoveredMarkers,
+  );
+  const discoveredGoldenRoutes = (golden: string) =>
+    [...golden.matchAll(/^NODE_HTTP_SOCKET_ROUTE\s+([a-z0-9-]+)\s+/gm)]
+      .map((match) => match[1]);
+  for (const suite of ["connect", "fetch", "peer"] as const) {
+    const expectedBase = suite === "peer"
+      ? []
+      : NODE_HTTP_SOCKET_ROUTES.map((row) => row.fixture);
+    const expectedHandoff = NODE_HTTP_SOCKET_HANDOFF_ROUTES
+      .filter((row) => row.outcomes[suite] !== undefined)
+      .map((row) => row.fixture);
+    assertExactInventory(
+      `Node HTTP ${suite} golden routes`,
+      [...expectedBase, ...expectedHandoff],
+      discoveredGoldenRoutes(handoffGoldens[suite]),
+    );
+  }
+  if (
+    !handoffPeerGolden.includes(
+      "NODE_HTTP_SOCKET_HANDOFF_PEER_CLOSURE PASS",
+    )
+  ) {
+    errors.push("Node HTTP hidden-peer aggregate golden missing");
+  }
+
+  const httpClientSource = Deno.readTextFileSync(
+    ROOT + "ext/node/polyfills/_http_client.js",
+  );
+  const onSocketStart = httpClientSource.indexOf(
+    "ClientRequest.prototype.onSocket = function onSocket",
+  );
+  const assignmentCheck = httpClientSource.indexOf(
+    "checkOdenHttpSocketUse(",
+    onSocketStart,
+  );
+  const messageBinding = httpClientSource.indexOf(
+    "socket._httpMessage = this;",
+    onSocketStart,
+  );
+  const parserDispatch = httpClientSource.indexOf(
+    "nextTick(onSocketNT, this, socket, err);",
+    onSocketStart,
+  );
+  if (
+    onSocketStart === -1 || assignmentCheck === -1 ||
+    messageBinding === -1 || parserDispatch === -1 ||
+    !(assignmentCheck < messageBinding && assignmentCheck < parserDispatch)
+  ) {
+    errors.push(
+      "Node HTTP socket assignment check must precede request binding and parser dispatch",
+    );
+  }
+  const requiredHandoffEvidence = [
+    ["ext/node/polyfills/_http_client.js", "odenHttpSocketEndpoints"],
+    ["ext/node/polyfills/_http_client.js", "odenHttpSocketAssignments"],
+    ["ext/node/polyfills/_http_agent.js", "odenCapsecAgentKinds"],
+    ["ext/node/polyfills/_http_agent.js", "odenCapsecAgentRequests"],
+    ["ext/node/polyfills/_http_agent.js", "addRequestStage"],
+    ["ext/node/polyfills/_http_agent.js", "createSocketStage"],
+    ["ext/node/polyfills/net.ts", "odenHttpSocketPrototypeIntegrity"],
+    ["ext/node/polyfills/net.ts", "assignedOdenHttpSockets"],
+    ["ext/node/polyfills/net.ts", "finishOdenHttpSocketUses"],
+    ["ext/node/polyfills/_tls_wrap.js", "odenHttpTlsPrototypeIntegrity"],
+    ["ext/node/ops/http.rs", "op_node_http_check_target_net"],
+    ["ext/node/ops/tcp_wrap.rs", "oden_connected_endpoint"],
+    ["ext/node/ops/tcp_wrap.rs", "check_oden_http_socket_use"],
+    ["ext/node/ops/pipe_wrap.rs", "oden_connected_path"],
+    ["ext/node/ops/pipe_wrap.rs", "check_oden_http_socket_use"],
+  ] as const;
+  for (const [path, marker] of requiredHandoffEvidence) {
+    if (!Deno.readTextFileSync(ROOT + path).includes(marker)) {
+      errors.push(
+        `Node HTTP handoff source evidence missing ${path}:${marker}`,
+      );
+    }
+  }
+  const appSource = Deno.readTextFileSync(
+    ROOT + "tests/specs/run/oden_capsec_node_http_socket_closure/app.js",
+  );
+  if (
+    !appSource.includes("borrowedRequests !== 0") ||
+    !appSource.includes("borrowedBytes !== 0") ||
+    !appSource.includes("injectedBytes !== 0") ||
+    !appSource.includes("proxyConnections !== 0 || proxyBytes !== 0") ||
+    !appSource.includes(
+      "requests !== 0 || peerBytes !== 0 || acceptedBytes !== 0",
+    )
+  ) {
+    errors.push(
+      "Node HTTP denied handoff fixtures must assert zero server-observed application bytes",
+    );
+  }
+  const endpointPrecheck = httpClientSource.indexOf(
+    "op_node_http_check_target_net(",
+  );
+  const agentSnapshot = httpClientSource.indexOf(
+    "__nodeHttpSnapshotOdenCapsecAgent(",
+  );
+  const agentDispatch = httpClientSource.indexOf(
+    "__nodeHttpAddOdenCapsecRequest(",
+  );
+  if (
+    endpointPrecheck === -1 || agentSnapshot === -1 || agentDispatch === -1 ||
+    !(endpointPrecheck < agentSnapshot && agentSnapshot < agentDispatch)
+  ) {
+    errors.push(
+      "Node HTTP immutable endpoint Connect precheck must precede Agent snapshot and dispatch",
+    );
+  }
+  const proxyRefusal = httpClientSource.indexOf(
+    "op_node_http_check_proxy_net(",
+  );
+  if (proxyRefusal === -1 || !(proxyRefusal < agentDispatch)) {
+    errors.push(
+      "Node HTTP forward-proxy refusal must precede protected Agent dispatch",
+    );
   }
   if (!fetchGolden.includes("NODE_HTTP_SOCKET_ROUTES fetch PASS")) {
     errors.push("Node HTTP fetch route aggregate golden missing");
@@ -1259,6 +1944,11 @@ function renderNetworkSurfaces(): string[] {
       `| Node HTTP route: ${row.route} | ${row.action} | behavioral | ${row.file}:${row.fn}() | ${row.boundary}; registered raw-engine fixture ${row.fixture} |`,
     );
   }
+  for (const row of NODE_HTTP_SOCKET_HANDOFF_ROUTES) {
+    out.push(
+      `| Node HTTP handoff: ${row.route} | ${row.action} | behavioral | ${row.file}:${row.fn}() | ${row.boundary}; registered raw-engine fixture ${row.fixture} |`,
+    );
+  }
   out.push("");
   return out;
 }
@@ -1306,7 +1996,7 @@ function render(): string {
   out.push("");
   for (const s of skips) out.push(`- ${s}`);
   out.push("");
-  return out.join("\n");
+  return out.join("\n").trimEnd();
 }
 
 const rendered = render();

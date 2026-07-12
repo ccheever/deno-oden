@@ -28,6 +28,7 @@ import { core, internals, primordials } from "ext:core/mod.js";
 import {
   op_node_http_capsec_no_reuse,
   op_node_http_check_proxy_net,
+  op_node_http_check_target_net,
   op_node_http_check_url_scheme,
 } from "ext:core/ops";
 const {
@@ -40,6 +41,7 @@ const {
   Error,
   ErrorPrototype,
   FunctionPrototypeCall,
+  Number,
   NumberIsFinite,
   NumberParseInt,
   ObjectAssign,
@@ -50,6 +52,7 @@ const {
   ReflectApply,
   SafeArrayIterator,
   SafeRegExp,
+  SafeWeakMap,
   String,
   StringPrototypeCharCodeAt,
   StringPrototypeIncludes,
@@ -61,9 +64,13 @@ const {
   StringPrototypeToUpperCase,
   StringPrototypeTrim,
   Symbol,
+  WeakMapPrototypeDelete,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet,
 } = primordials;
 
 import net from "node:net";
+const checkOdenHttpSocketUse = internals.__nodeNetCheckOdenHttpSocketUse;
 const { getReadableUseGuard } = core.loadExtScript(
   "ext:deno_node/internal/streams/readable.js",
 );
@@ -90,6 +97,7 @@ import httpAgent from "node:_http_agent";
 import httpProxy from "node:_http_proxy";
 import {
   captureOdenHttpRequestActor,
+  runWithRequiredOdenHttpRequestActor,
 } from "ext:deno_node/internal/http/oden_actor.js";
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const { urlToHttpOptions } = core.loadExtScript(
@@ -108,6 +116,7 @@ const {
 const {
   validateBoolean,
   validateInteger,
+  validatePort,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const { getTimerDuration } = core.loadExtScript(
   "ext:deno_node/internal/timers.mjs",
@@ -154,6 +163,35 @@ const kInspectorRequestId = Symbol("kInspectorRequestId");
 const kInspectorNetwork = Symbol("kInspectorNetwork");
 const kInspectorUrl = Symbol("kInspectorUrl");
 const kInspectorCompleted = Symbol("kInspectorCompleted");
+// The target that a request actor authorized is never read back from the
+// reflectable request or options object when a custom Agent supplies a socket.
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+const odenHttpSocketEndpoints = new SafeWeakMap();
+// Exact-profile assignments are admitted only through a closure-captured
+// ClientRequest.onSocket call and are bound to the one expected socket. A
+// public/tampered onSocket method cannot consume another socket's admission.
+const odenHttpSocketAssignments = new SafeWeakMap();
+
+function isOdenCapsecHttpRequest(request) {
+  return WeakMapPrototypeGet(odenHttpSocketEndpoints, request) !== undefined;
+}
+
+function asynchronousOdenHttpSocketError() {
+  const error = new Error(
+    "oden capsec: asynchronous custom Node HTTP socket assignment is closed",
+  );
+  error.code = "ERR_ACCESS_DENIED";
+  return error;
+}
+
+function untrustedOdenHttpAgentError() {
+  const error = new Error(
+    "oden capsec: untrusted Node HTTP Agent-like socket assignment is closed",
+  );
+  error.code = "ERR_ACCESS_DENIED";
+  return error;
+}
+
 // Bound replay buffering for stale keep-alive retry. Larger streaming uploads
 // keep constant-memory behavior and surface the socket error instead.
 const MAX_RETRY_DATA_SIZE = 1024 * 1024;
@@ -491,26 +529,58 @@ function ClientRequest(input, options, cb) {
     options = ObjectAssign(input || {}, options);
   }
 
+  const odenCapsecExactProfile = op_node_http_capsec_no_reuse();
+  const suppliedCreateConnection = odenCapsecExactProfile
+    ? options.createConnection
+    : undefined;
   let agent = options.agent;
   const defaultAgent = options._defaultAgent || httpAgent.globalAgent;
   if (agent === false) {
-    agent = new defaultAgent.constructor();
+    agent = odenCapsecExactProfile
+      ? defaultAgent
+      : new defaultAgent.constructor();
   } else if (agent === null || agent === undefined) {
-    if (typeof options.createConnection !== "function") {
+    if (
+      typeof (odenCapsecExactProfile
+        ? suppliedCreateConnection
+        : options.createConnection) !== "function"
+    ) {
       agent = defaultAgent;
     }
-  } else if (typeof agent.addRequest !== "function") {
+  } else if (
+    !odenCapsecExactProfile && typeof agent.addRequest !== "function"
+  ) {
     throw new ERR_INVALID_ARG_TYPE(
       "options.agent",
       ["Agent-like Object", "undefined", "false"],
       agent,
     );
   }
-  this.agent = agent;
+  if (odenCapsecExactProfile) {
+    ObjectDefineProperty(this, "agent", {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      value: agent,
+      writable: true,
+    });
+  } else {
+    this.agent = agent;
+  }
+  if (odenCapsecExactProfile && !agent) {
+    throw untrustedOdenHttpAgentError();
+  }
 
-  const protocol = options.protocol || defaultAgent.protocol;
-  let expectedProtocol = defaultAgent.protocol;
-  if (this.agent?.protocol) {
+  const protectedAgentProtocol = odenCapsecExactProfile && agent
+    ? internals.__nodeHttpOdenCapsecAgentProtocol(agent)
+    : undefined;
+  const protocol = odenCapsecExactProfile
+    ? (options.protocol || protectedAgentProtocol || "")
+    : (options.protocol || defaultAgent.protocol);
+  let expectedProtocol = odenCapsecExactProfile
+    ? (protectedAgentProtocol || protocol)
+    : defaultAgent.protocol;
+  if (!odenCapsecExactProfile && this.agent?.protocol) {
     expectedProtocol = this.agent.protocol;
   }
 
@@ -520,7 +590,7 @@ function ClientRequest(input, options, cb) {
   // profile, pass only a primitive protocol to the native classifier; an
   // object-valued protocol becomes the closed unknown class instead of gaining
   // a time-varying ToString path into network authority.
-  if (op_node_http_capsec_no_reuse()) {
+  if (odenCapsecExactProfile) {
     op_node_http_check_url_scheme(
       typeof protocol === "string" ? protocol : "",
       protocol === "https:" ? "node:https.request()" : "node:http.request()",
@@ -534,14 +604,15 @@ function ClientRequest(input, options, cb) {
     }
   }
 
-  if (protocol !== expectedProtocol) {
+  if (!odenCapsecExactProfile && protocol !== expectedProtocol) {
     throw new ERR_INVALID_PROTOCOL(protocol, expectedProtocol);
   }
 
-  const defaultPort = options.defaultPort ||
-    (this.agent?.defaultPort);
-
   const optsWithoutSignal = { __proto__: null, ...options };
+  const defaultPort = optsWithoutSignal.defaultPort ||
+    (odenCapsecExactProfile
+      ? (protocol === "https:" ? 443 : 80)
+      : this.agent?.defaultPort);
 
   // The `_proxy*` fields are internal transport details set only by the proxy
   // selection below. A caller must not be able to supply them directly: doing
@@ -554,10 +625,52 @@ function ClientRequest(input, options, cb) {
   delete optsWithoutSignal._proxyProtocol;
   delete optsWithoutSignal._proxyUseProxyConnection;
 
-  const port = optsWithoutSignal.port = options.port || defaultPort || 80;
+  let port = optsWithoutSignal.port || defaultPort || 80;
+  optsWithoutSignal.port = port;
   const host = optsWithoutSignal.host =
-    validateHost(options.hostname, "hostname") ||
-    validateHost(options.host, "host") || "localhost";
+    validateHost(optsWithoutSignal.hostname, "hostname") ||
+    validateHost(optsWithoutSignal.host, "host") || "localhost";
+  let socketPath;
+  if (odenCapsecExactProfile) {
+    validatePort(port, "options.port");
+    port = Number(port);
+    optsWithoutSignal.port = port;
+    optsWithoutSignal.hostname = host;
+    socketPath = optsWithoutSignal.socketPath
+      ? String(optsWithoutSignal.socketPath)
+      : undefined;
+    optsWithoutSignal.socketPath = socketPath;
+    const endpoint = {
+      __proto__: null,
+      apiName: protocol === "https:"
+        ? "node:https.request()"
+        : "node:http.request()",
+      hostname: host,
+      path: socketPath,
+      port,
+    };
+    WeakMapPrototypeSet(odenHttpSocketEndpoints, this, endpoint);
+    runWithRequiredOdenHttpRequestActor(
+      this,
+      () =>
+        op_node_http_check_target_net(
+          endpoint.hostname,
+          endpoint.port,
+          endpoint.path,
+          endpoint.apiName,
+        ),
+    );
+    if (
+      agent &&
+      !internals.__nodeHttpSnapshotOdenCapsecAgent(
+        agent,
+        this,
+        protocol,
+      )
+    ) {
+      throw untrustedOdenHttpAgentError();
+    }
+  }
 
   // Proxy detection: if an env-derived proxy applies to this request,
   // either rewrite to absolute URL (http target) or set up a CONNECT tunnel
@@ -565,7 +678,8 @@ function ClientRequest(input, options, cb) {
   // is keyed by target host:port so users can look it up the same way as
   // a direct connection - the proxy is a transport detail tracked under
   // _proxy on the options.
-  const proxyConfig = httpProxy.resolveAgentProxyConfig(this.agent);
+  const selectedAgent = odenCapsecExactProfile ? agent : this.agent;
+  const proxyConfig = httpProxy.resolveAgentProxyConfig(selectedAgent);
   const proxyEntry = httpProxy.selectProxy(
     proxyConfig,
     protocol,
@@ -604,8 +718,8 @@ function ClientRequest(input, options, cb) {
     optsWithoutSignal._proxyTargetPort = port;
     optsWithoutSignal._proxyProtocol = protocol;
     optsWithoutSignal._proxyUseProxyConnection =
-      !(this.agent && this.agent.__proxyConfig !== undefined) ||
-      this.agent?.keepAlive === true;
+      !(selectedAgent && selectedAgent.__proxyConfig !== undefined) ||
+      selectedAgent?.keepAlive === true;
   }
 
   const setHost = options.setHost !== undefined
@@ -616,7 +730,9 @@ function ClientRequest(input, options, cb) {
   this._removedContLen = options.setDefaultHeaders === false;
   this._removedTE = options.setDefaultHeaders === false;
 
-  this.socketPath = options.socketPath;
+  this.socketPath = odenCapsecExactProfile
+    ? optsWithoutSignal.socketPath
+    : options.socketPath;
 
   if (options.timeout !== undefined) {
     this.timeout = getTimerDuration(options.timeout, "timeout");
@@ -707,7 +823,10 @@ function ClientRequest(input, options, cb) {
   this.protocol = protocol;
   this[kPerfStartTime] = performance.now();
 
-  if (this.agent) {
+  if (odenCapsecExactProfile && agent) {
+    this._last = true;
+    this.shouldKeepAlive = false;
+  } else if (this.agent) {
     if (!this.agent.keepAlive && !NumberIsFinite(this.agent.maxSockets)) {
       this._last = true;
       this.shouldKeepAlive = false;
@@ -791,7 +910,13 @@ function ClientRequest(input, options, cb) {
   this[kRetryOptions] = optsWithoutSignal;
 
   // initiate connection
-  if (this.agent) {
+  if (odenCapsecExactProfile) {
+    internals.__nodeHttpAddOdenCapsecRequest(
+      agent,
+      this,
+      optsWithoutSignal,
+    );
+  } else if (this.agent) {
     this.agent.addRequest(this, optsWithoutSignal);
   } else {
     this._last = true;
@@ -805,12 +930,19 @@ function ClientRequest(input, options, cb) {
         opts.path &&= undefined;
       }
     }
+    const assignSocket = (socket) => {
+      if (odenCapsecExactProfile) {
+        internals.__nodeHttpAssignSocket(this, socket, undefined, true);
+      } else {
+        this.onSocket(socket);
+      }
+    };
     if (typeof opts.createConnection === "function") {
       const oncreate = once((err, socket) => {
         if (err) {
           nextTick(() => emitErrorEvent(this, err));
         } else {
-          this.onSocket(socket);
+          assignSocket(socket);
         }
       });
 
@@ -823,7 +955,7 @@ function ClientRequest(input, options, cb) {
         oncreate(err);
       }
     } else {
-      this.onSocket(net.createConnection(opts));
+      assignSocket(net.createConnection(opts));
     }
   }
   if (onClientRequestCreatedChannel.hasSubscribers) {
@@ -991,6 +1123,7 @@ function cloneOutputDataForRetry(req) {
 // Transparently retry a request on a new connection when the reused
 // keepalive socket turns out to be stale (server closed it while idle).
 function maybeRetryRequest(req, socket) {
+  if (op_node_http_capsec_no_reuse()) return false;
   if (!canRetryRequest(req)) return false;
 
   req._retrying = true;
@@ -1054,7 +1187,8 @@ function maybeRetryRequest(req, socket) {
     req._headerSent = true;
   }
 
-  // Re-queue through agent to get a fresh socket
+  // Re-queue through the ordinary Agent pool. /1.1 returned above because its
+  // literal no-pool sockets can never be valid retry candidates.
   agent.addRequest(req, retryOpts);
   return true;
 }
@@ -1461,7 +1595,7 @@ function tickOnSocket(req, socket) {
 
   if (
     req.timeout !== undefined ||
-    (req.agent?.options?.timeout)
+    (!isOdenCapsecHttpRequest(req) && req.agent?.options?.timeout)
   ) {
     listenSocketTimeout(req);
   }
@@ -1494,6 +1628,38 @@ ClientRequest.prototype.onSocket = function onSocket(socket, err) {
     err = socket.errored;
   }
   if (socket && !err) {
+    const endpoint = WeakMapPrototypeGet(odenHttpSocketEndpoints, this);
+    if (op_node_http_capsec_no_reuse()) {
+      try {
+        const expectedSocket = WeakMapPrototypeGet(
+          odenHttpSocketAssignments,
+          this,
+        );
+        WeakMapPrototypeDelete(odenHttpSocketAssignments, this);
+        if (endpoint === undefined || expectedSocket !== socket) {
+          throw asynchronousOdenHttpSocketError();
+        }
+        // Custom Agent callbacks may run under the socket owner (or ambient
+        // root), so restore the immutable request actor before checking both
+        // the declared endpoint and the native connect binding. This runs
+        // before `_httpMessage`, listeners, parser allocation, or queued-byte
+        // flush.
+        // @ref LLP 0019#fetch-versus-connect [implements]
+        // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+        runWithRequiredOdenHttpRequestActor(this, () =>
+          checkOdenHttpSocketUse(
+            socket,
+            endpoint.hostname,
+            endpoint.port,
+            endpoint.path,
+            endpoint.apiName,
+          ));
+      } catch (error) {
+        err = error;
+      }
+    }
+  }
+  if (socket && !err) {
     if (getReadableUseGuard(socket) !== undefined) {
       nextTick(
         onSocketNT,
@@ -1507,6 +1673,31 @@ ClientRequest.prototype.onSocket = function onSocket(socket, err) {
     socket.on("error", socketErrorListener);
   }
   nextTick(onSocketNT, this, socket, err);
+};
+
+// The Agent module coordinates through `internals` to avoid exporting a
+// forgeable security helper from node:_http_agent. Always invoke the captured
+// built-in method; a package may replace req.onSocket, but cannot redirect this
+// bridge. The one-shot admission is bound to both request and exact socket.
+const odenCapsecBuiltinClientRequestOnSocket = ClientRequest.prototype.onSocket;
+internals.__nodeHttpAssignSocket = (request, socket, err, trusted) => {
+  if (op_node_http_capsec_no_reuse() && trusted && socket && !err) {
+    WeakMapPrototypeSet(odenHttpSocketAssignments, request, socket);
+  }
+  try {
+    return FunctionPrototypeCall(
+      odenCapsecBuiltinClientRequestOnSocket,
+      request,
+      socket,
+      err,
+    );
+  } finally {
+    if (
+      WeakMapPrototypeGet(odenHttpSocketAssignments, request) === socket
+    ) {
+      WeakMapPrototypeDelete(odenHttpSocketAssignments, request);
+    }
+  }
 };
 
 function protectedHttpTransportError() {
@@ -1543,7 +1734,10 @@ function onSocketNT(req, socket, err) {
     }
 
     if (socket) {
-      if (!err && req.agent && !socket.destroyed) {
+      if (
+        !err && !isOdenCapsecHttpRequest(req) && req.agent &&
+        !socket.destroyed
+      ) {
         socket.emit("free");
       } else {
         finished(socket.destroy(err || req[kError]), (er) => {

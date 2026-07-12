@@ -93,25 +93,32 @@ allowed only at audited typed helpers named by the generator.
 | connect | check_net | op_node_getaddrinfo() | ext/node/ops/dns.rs:84 | propagated |
 | fetch | check_net | op_node_getaddrinfo() | ext/node/ops/dns.rs:84 | propagated |
 | fetch | check_net | op_node_getnameinfo() | ext/node/ops/dns.rs:287 | explicit |
-| connect | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:116 | explicit |
-| fetch | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:122 | explicit |
+| connect | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:119 | explicit |
+| fetch | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:125 | explicit |
+| connect | check_net_unix_socket | op_node_http_check_target_net() | ext/node/ops/http.rs:153 | explicit |
+| connect | check_net | op_node_http_check_target_net() | ext/node/ops/http.rs:160 | explicit |
 | listen | check_net | op_inspector_open() | ext/node/ops/inspector.rs:106 | explicit |
 | listen | check_net | op_inspector_open() | ext/node/ops/inspector.rs:151 | explicit |
-| listen | check_net_unix_socket | bind() | ext/node/ops/pipe_wrap.rs:398 | explicit |
-| listen | check_net_unix_socket | listen() | ext/node/ops/pipe_wrap.rs:433 | explicit |
-| connect | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:476 | explicit |
-| fetch | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:482 | explicit |
-| connect | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:489 | explicit |
-| listen | check_net | bind_inner() | ext/node/ops/tcp_wrap.rs:405 | explicit |
-| listen | check_net | bind6() | ext/node/ops/tcp_wrap.rs:680 | explicit |
-| fetch | check_net | connect() | ext/node/ops/tcp_wrap.rs:869 | explicit |
-| connect | check_net | connect() | ext/node/ops/tcp_wrap.rs:876 | explicit |
-| fetch | check_net_resolved | connect() | ext/node/ops/tcp_wrap.rs:900 | explicit |
-| connect | check_net_resolved | connect() | ext/node/ops/tcp_wrap.rs:908 | explicit |
-| fetch | check_net | connect6() | ext/node/ops/tcp_wrap.rs:968 | explicit |
-| connect | check_net | connect6() | ext/node/ops/tcp_wrap.rs:975 | explicit |
-| fetch | check_net_resolved | connect6() | ext/node/ops/tcp_wrap.rs:997 | explicit |
-| connect | check_net_resolved | connect6() | ext/node/ops/tcp_wrap.rs:1005 | explicit |
+| listen | check_net_unix_socket | bind() | ext/node/ops/pipe_wrap.rs:405 | explicit |
+| listen | check_net_unix_socket | listen() | ext/node/ops/pipe_wrap.rs:440 | explicit |
+| connect | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:484 | explicit |
+| fetch | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:490 | explicit |
+| connect | check_net_unix_socket | connect() | ext/node/ops/pipe_wrap.rs:497 | explicit |
+| connect | check_net_unix_socket | check_oden_http_socket_use() | ext/node/ops/pipe_wrap.rs:559 | explicit |
+| connect | check_net_unix_socket | check_oden_http_socket_use() | ext/node/ops/pipe_wrap.rs:570 | explicit |
+| listen | check_net | bind_inner() | ext/node/ops/tcp_wrap.rs:418 | explicit |
+| listen | check_net | bind6() | ext/node/ops/tcp_wrap.rs:699 | explicit |
+| fetch | check_net | connect() | ext/node/ops/tcp_wrap.rs:888 | explicit |
+| connect | check_net | connect() | ext/node/ops/tcp_wrap.rs:895 | explicit |
+| fetch | check_net_resolved | connect() | ext/node/ops/tcp_wrap.rs:919 | explicit |
+| connect | check_net_resolved | connect() | ext/node/ops/tcp_wrap.rs:927 | explicit |
+| fetch | check_net | connect6() | ext/node/ops/tcp_wrap.rs:994 | explicit |
+| connect | check_net | connect6() | ext/node/ops/tcp_wrap.rs:1001 | explicit |
+| fetch | check_net_resolved | connect6() | ext/node/ops/tcp_wrap.rs:1023 | explicit |
+| connect | check_net_resolved | connect6() | ext/node/ops/tcp_wrap.rs:1031 | explicit |
+| connect | check_net | check_oden_http_socket_use() | ext/node/ops/tcp_wrap.rs:1109 | explicit |
+| connect | check_net | check_oden_http_socket_use() | ext/node/ops/tcp_wrap.rs:1117 | explicit |
+| connect | check_net_resolved | check_oden_http_socket_use() | ext/node/ops/tcp_wrap.rs:1133 | explicit |
 | listen | check_net | op_node_udp_bind() | ext/node/ops/udp.rs:76 | explicit |
 | listen | check_net_resolved | op_node_udp_bind() | ext/node/ops/udp.rs:87 | explicit |
 | connect | check_net | op_node_udp_send() | ext/node/ops/udp.rs:584 | explicit |
@@ -169,6 +176,7 @@ registered raw-engine spec, isolated policies, and per-route goldens.
 | Deno QUIC listener | listen | inherited | ext/net/quic.rs:op_quic_endpoint_listen() | authorized can-listen endpoint |
 | Deno QUIC connect | connect | direct | ext/net/quic.rs:op_quic_endpoint_connect() | logical host plus resolved IP |
 | WebTransport connect | connect | inherited | ext/net/quic.rs:op_webtransport_connect() | authorized QUIC connection |
+| Node HTTP(S) immutable request endpoint | connect | direct | ext/node/ops/http.rs:op_node_http_check_target_net() | before Agent, Socket, TLS, or diagnostics construction |
 | Node HTTP(S) direct connection | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | socket-exposing HTTP token is connect-class in /1.1 |
 | Node HTTP(S) proxy | closed | categorical | ext/node/ops/http.rs:op_node_http_check_proxy_net() | refused in /1.1 before the legacy connect-class fallback |
 | Node TCP connect | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | untokenized raw socket |
@@ -187,12 +195,59 @@ registered raw-engine spec, isolated policies, and per-route goldens.
 | Node HTTP route: response socket write | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; registered raw-engine fixture response-socket-write |
 | Node HTTP route: CONNECT tunnel/socket delegation | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; registered raw-engine fixture connect-tunnel-raw-write |
 | Node HTTP route: 101 Upgrade socket delegation | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; registered raw-engine fixture upgrade-raw-write |
-| Node HTTP route: custom Agent.createConnection | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | raw Node TCP creation; registered raw-engine fixture custom-agent |
-| Node HTTP route: request createConnection hook | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | raw Node TCP creation; registered raw-engine fixture create-connection-hook |
+| Node HTTP route: custom Agent.createConnection | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | caller-supplied Agent factories categorically closed; registered raw-engine fixture custom-agent |
+| Node HTTP route: request createConnection hook | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | caller-supplied request factories categorically closed; registered raw-engine fixture create-connection-hook |
 | Node HTTP route: redirect hop | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | each built-in agent TCP creation; registered raw-engine fixture redirect-hop |
 | Node HTTP route: keep-alive reuse attempt | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | pool reuse closed; each request creates a checked socket; registered raw-engine fixture keepalive-reuse-closed |
 | Node HTTP route: forward-proxy target and peer | closed | behavioral | ext/node/ops/http.rs:op_node_http_check_proxy_net() | categorically refused without final-peer attestation; registered raw-engine fixture forward-proxy-closed |
+| Node HTTP route: HTTPS forward-proxy target and peer | closed | behavioral | ext/node/ops/http.rs:op_node_http_check_proxy_net() | categorically refused before proxy or TLS target connection; registered raw-engine fixture https-forward-proxy-closed |
 | Node HTTP route: Unix-domain HTTP socket | connect | behavioral | ext/node/ops/pipe_wrap.rs:connect() | built-in agent pipe creation; registered raw-engine fixture unix-socket |
+| Node HTTP handoff: concurrent fresh built-in HTTP sockets | connect | behavioral | ext/node/polyfills/_http_agent.js:addRequest() | literal no-pool Agent ignores maxSockets and creates fresh; registered raw-engine fixture queued-built-in-replacement |
+| Node HTTP handoff: concurrent fresh built-in HTTPS sockets | connect | behavioral | ext/node/polyfills/_http_agent.js:addRequest() | private HTTPS kind/factory and uncached fresh TLS transport; registered raw-engine fixture queued-built-in-https-replacement |
+| Node HTTP handoff: borrowed TCP createConnection return | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | caller-supplied request factory categorically closed; registered raw-engine fixture borrowed-create-connection |
+| Node HTTP handoff: unbranded Agent-like socket injection | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | categorically refused before addRequest; registered raw-engine fixture borrowed-agent-like |
+| Node HTTP handoff: borrowed Unix createConnection return | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | caller-supplied Unix request factory categorically closed; registered raw-engine fixture borrowed-unix-create-connection |
+| Node HTTP handoff: unbranded Unix Agent-like socket injection | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | categorically refused before addRequest; registered raw-engine fixture borrowed-unix-agent-like |
+| Node HTTP handoff: repeated caller-supplied createConnection socket | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | caller-supplied request factory closed on first request; registered raw-engine fixture borrowed-agent-like-reuse-closed |
+| Node HTTP handoff: A-owned delayed Agent-like assignment | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | unbranded Agent closed before delayed assignment; registered raw-engine fixture borrowed-delayed-agent-like |
+| Node HTTP handoff: A-owned synchronous createConnection hook | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | A-owned request factory categorically closed; registered raw-engine fixture borrowed-owner-create-connection |
+| Node HTTP handoff: A-owned callback-supplied createConnection socket | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | callback-supplied custom sockets categorically closed; registered raw-engine fixture borrowed-owner-callback-connection-closed |
+| Node HTTP handoff: A-owned synchronous Agent-like assignment | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | unbranded Agent-like object closed; registered raw-engine fixture borrowed-owner-sync-agent-like |
+| Node HTTP handoff: A-owned branded Agent addRequest override | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | non-built-in addRequest identity closed; registered raw-engine fixture borrowed-owner-branded-agent-like |
+| Node HTTP handoff: borrowed hidden-peer request factory | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | caller-supplied request factory closed before native adoption; registered raw-engine fixture borrowed-peer-create-connection |
+| Node HTTP handoff: Agent-like hidden-peer injection | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | untrusted Agent-like object closed; registered raw-engine fixture borrowed-peer-agent-like |
+| Node HTTP handoff: borrowed accepted socket request factory | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | caller-supplied request factory closed before native adoption; registered raw-engine fixture borrowed-accepted-socket-closed |
+| Node HTTP handoff: native connected TCP binding canary | connect | behavioral | ext/node/ops/tcp_wrap.rs:check_oden_http_socket_use() | declared endpoint, retained authority host, and live peer; registered raw-engine fixture native-bound-tcp-check |
+| Node HTTP handoff: native connected Unix binding canary | connect | behavioral | ext/node/ops/pipe_wrap.rs:check_oden_http_socket_use() | declared and retained lexical connect path; registered raw-engine fixture native-bound-unix-check |
+| Node HTTP handoff: native accepted TCP handle | closed | behavioral | ext/node/ops/tcp_wrap.rs:check_oden_http_socket_use() | missing private client-connect binding; registered raw-engine fixture native-accepted-tcp-closed |
+| Node HTTP handoff: native accepted Unix handle | closed | behavioral | ext/node/ops/pipe_wrap.rs:check_oden_http_socket_use() | missing retained lexical client-connect path; registered raw-engine fixture native-accepted-unix-closed |
+| Node HTTP handoff: branded Agent createConnection return override | closed | behavioral | ext/node/polyfills/_http_agent.js:__nodeHttpSnapshotOdenCapsecAgent() | private agent-kind factory identity; registered raw-engine fixture borrowed-owner-agent-return-connection-closed |
+| Node HTTP handoff: branded Agent createConnection callback override | closed | behavioral | ext/node/polyfills/_http_agent.js:__nodeHttpSnapshotOdenCapsecAgent() | private agent-kind factory identity; registered raw-engine fixture borrowed-owner-agent-callback-connection-closed |
+| Node HTTP handoff: branded Agent createSocket override | closed | behavioral | ext/node/polyfills/_http_agent.js:__nodeHttpSnapshotOdenCapsecAgent() | captured built-in createSocket identity; registered raw-engine fixture borrowed-owner-agent-create-socket-closed |
+| Node HTTP handoff: HTTP Agent presented to HTTPS request | closed | behavioral | ext/node/polyfills/_http_agent.js:__nodeHttpSnapshotOdenCapsecAgent() | private request protocol must match private Agent kind; registered raw-engine fixture cross-kind-http-agent-for-https-closed |
+| Node HTTP handoff: HTTPS Agent with HTTP factory identity | closed | behavioral | ext/node/polyfills/_http_agent.js:__nodeHttpSnapshotOdenCapsecAgent() | private Agent kind requires its exact registered factory; registered raw-engine fixture cross-kind-https-agent-http-factory-closed |
+| Node HTTP handoff: invalid falsy Agent value | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | remaining falsy/unbranded Agent rejected before no-agent path; registered raw-engine fixture falsy-agent-zero-closed |
+| Node HTTP handoff: ClientRequest agent prototype accessor | connect | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | closure-local Agent plus own compatibility property; registered raw-engine fixture client-request-agent-accessor |
+| Node HTTP handoff: alternating addRequest getter | connect | behavioral | ext/node/polyfills/_http_agent.js:__nodeHttpSnapshotOdenCapsecAgent() | single capture and direct built-in invocation; registered raw-engine fixture alternating-add-request-getter |
+| Node HTTP handoff: alternating createSocket getter | connect | behavioral | ext/node/polyfills/_http_agent.js:__nodeHttpSnapshotOdenCapsecAgent() | single capture and direct built-in invocation; registered raw-engine fixture alternating-create-socket-getter |
+| Node HTTP handoff: alternating createConnection getter | connect | behavioral | ext/node/polyfills/_http_agent.js:__nodeHttpSnapshotOdenCapsecAgent() | same captured factory identity is classified and invoked; registered raw-engine fixture alternating-create-connection-getter |
+| Node HTTP handoff: public Agent free injection | connect | behavioral | ext/node/polyfills/_http_agent.js:Agent() | no-pool free handler destroys offered socket; registered raw-engine fixture public-agent-free-injection |
+| Node HTTP handoff: public Socket free injection | connect | behavioral | ext/node/polyfills/_http_agent.js:Agent() | no-pool free handler destroys offered socket; registered raw-engine fixture public-socket-free-injection |
+| Node HTTP handoff: public freeSockets injection | connect | behavioral | ext/node/polyfills/_http_agent.js:addRequest() | no-pool addRequest never reads public freeSockets; registered raw-engine fixture public-free-sockets-injection |
+| Node HTTP handoff: public Agent pool and queue state poisoning | connect | behavioral | ext/node/polyfills/_http_agent.js:addRequest() | no-pool add/create/destroy/keylog never read public maps; registered raw-engine fixture public-agent-pool-state-poison |
+| Node HTTP handoff: forged Agent endpoint and proxy options | connect | behavioral | ext/node/polyfills/_http_agent.js:createSocket() | normalized request endpoint restored after private option merge; registered raw-engine fixture forged-agent-endpoint-options |
+| Node HTTP handoff: tampered ClientRequest.onSocket | connect | behavioral | ext/node/polyfills/_http_client.js:onSocket() | closure-captured request+expected-socket bridge; registered raw-engine fixture tampered-client-on-socket |
+| Node HTTP handoff: HTTPS options.socket adoption | closed | behavioral | ext/node/polyfills/https.ts:createConnection() | closed before tls.connect; registered raw-engine fixture borrowed-https-options-socket-closed |
+| Node HTTP handoff: alternating port getter | connect | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | single immutable endpoint snapshot; registered raw-engine fixture alternating-port-getter |
+| Node HTTP handoff: alternating port coercion object | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | non-primitive port rejected before coercion or transport; registered raw-engine fixture alternating-port-coercion-closed |
+| Node HTTP handoff: malformed primitive port string | closed | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | strict validatePort rejection before endpoint precheck; registered raw-engine fixture invalid-port-string-closed |
+| Node HTTP handoff: alternating hostname getter | connect | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | single immutable endpoint snapshot; registered raw-engine fixture alternating-hostname-getter |
+| Node HTTP handoff: alternating socketPath getter | connect | behavioral | ext/node/polyfills/_http_client.js:ClientRequest() | single normalized lexical endpoint snapshot; registered raw-engine fixture alternating-socket-path-getter |
+| Node HTTP handoff: net.client.socket diagnostics subscriber | connect | behavioral | ext/node/polyfills/net.ts:connect() | protected token suppresses synchronous socket publication; registered raw-engine fixture net-client-socket-diagnostics-closed |
+| Node HTTP handoff: tampered net.Socket prototype | closed | behavioral | ext/node/polyfills/net.ts:assertProtectedOdenHttpSocketPrototypeIntegrity() | prototype integrity refusal before socket construction; registered raw-engine fixture tampered-net-socket-prototype-closed |
+| Node HTTP handoff: tampered tls.TLSSocket prototype | closed | behavioral | ext/node/polyfills/_tls_wrap.js:assertProtectedOdenHttpTlsIntegrity() | prototype integrity refusal before TLS construction; registered raw-engine fixture tampered-tls-socket-prototype-closed |
+| Node HTTP handoff: native declared host differs from retained TCP binding | closed | behavioral | ext/node/ops/tcp_wrap.rs:check_oden_http_socket_use() | actual authority host and live peer rechecked; registered raw-engine fixture native-hidden-peer-check |
+| Node HTTP handoff: native accepted peer handle | closed | behavioral | ext/node/ops/tcp_wrap.rs:check_oden_http_socket_use() | missing private client-connect binding; registered raw-engine fixture native-accepted-peer-closed |
 
 ## Permission methods (closed inventory)
 
@@ -285,7 +340,7 @@ registered raw-engine spec, isolated policies, and per-route goldens.
 - ext/net/quic.rs:987
 - ext/node/ops/ipc.rs:201
 - ext/node/ops/ipc.rs:212
-- ext/node/ops/tcp_wrap.rs:784
+- ext/node/ops/tcp_wrap.rs:803
 - ext/node/ops/tls.rs:773
 - ext/node/ops/tls.rs:774
 - ext/node/ops/udp.rs:125

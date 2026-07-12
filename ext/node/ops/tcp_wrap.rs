@@ -45,6 +45,12 @@ enum SocketType {
   Server = 1,
 }
 
+#[derive(Clone)]
+struct OdenConnectedTcpEndpoint {
+  authority_host: String,
+  peer: SocketAddr,
+}
+
 /// Inspect a raw descriptor without taking ownership. Under the capsec
 /// profile, adopting any INET/INET6 socket is categorically closed: this API
 /// carries no immutable source-resource identity, so it cannot distinguish a
@@ -223,6 +229,11 @@ pub struct TCPWrap {
   net_perm_token: RefCell<Option<deno_net::ops::NetPermToken>>,
   /// Opaque endpoint-bound proof installed only by the built-in HTTP agent.
   oden_http_net_token: RefCell<Option<NodeHttpNetToken>>,
+  /// The authority-bearing host and concrete peer selected by the native
+  /// connect operation. This stays private so a later Node HTTP request can
+  /// reauthorize a borrowed socket without trusting reflectable JS fields.
+  /// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  oden_connected_endpoint: RefCell<Option<OdenConnectedTcpEndpoint>>,
 }
 
 // SAFETY: TCPWrap is a cppgc-managed object; the GC traces it via the base field.
@@ -282,6 +293,7 @@ impl TCPWrap {
         socket_type: Cell::new(socket_type),
         net_perm_token: RefCell::new(None),
         oden_http_net_token: RefCell::new(None),
+        oden_connected_endpoint: RefCell::new(None),
       }
     } else {
       // Error path - create with null handle
@@ -312,6 +324,7 @@ impl TCPWrap {
         socket_type: Cell::new(socket_type),
         net_perm_token: RefCell::new(None),
         oden_http_net_token: RefCell::new(None),
+        oden_connected_endpoint: RefCell::new(None),
       }
     }
   }
@@ -438,9 +451,15 @@ impl TCPWrap {
   }
 
   fn refresh_network_peer(&self) {
+    if let Some(peer) = self.connected_peer() {
+      self.base.set_network_peer(peer);
+    }
+  }
+
+  fn connected_peer(&self) -> Option<SocketAddr> {
     let tcp = self.tcp_ptr();
     if tcp.is_null() {
-      return;
+      return None;
     }
     // SAFETY: tcp is live and storage follows uv_tcp_getpeername's contract.
     unsafe {
@@ -450,11 +469,11 @@ impl TCPWrap {
         tcp,
         storage.as_mut_ptr() as *mut _,
         &mut len,
-      ) == 0
-        && let Some(peer) = storage.assume_init().as_socket()
+      ) != 0
       {
-        self.base.set_network_peer(peer);
+        return None;
       }
+      storage.assume_init().as_socket()
     }
   }
 }
@@ -943,6 +962,13 @@ impl TCPWrap {
       unsafe {
         let _ = Box::from_raw(req_ptr as *mut ConnectReqData);
       }
+    } else {
+      self
+        .oden_connected_endpoint
+        .replace(Some(OdenConnectedTcpEndpoint {
+          authority_host: check_host,
+          peer: socket_addr,
+        }));
     }
     Ok(ret)
   }
@@ -1038,8 +1064,79 @@ impl TCPWrap {
       unsafe {
         let _ = Box::from_raw(req_ptr as *mut ConnectReqData);
       }
+    } else {
+      self
+        .oden_connected_endpoint
+        .replace(Some(OdenConnectedTcpEndpoint {
+          authority_host: check_host,
+          peer: socket_addr,
+        }));
     }
     Ok(ret)
+  }
+
+  /// Reauthorize a connected socket for a Node HTTP request actor. The
+  /// declared request target and the connect-time authority target are both
+  /// checked; the live native peer must still equal the privately recorded
+  /// candidate. An adopted, accepted, swapped, or otherwise unbound handle is
+  /// categorically refused under `/1.1`.
+  /// @ref LLP 0019#fetch-versus-connect [implements]
+  /// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  #[nofast]
+  #[rename("checkOdenHttpSocketUse")]
+  #[stack_trace]
+  fn check_oden_http_socket_use(
+    &self,
+    state: &mut OpState,
+    #[string] request_host: &str,
+    request_port: u16,
+    #[string] api_name: &str,
+    require_connected_peer: bool,
+  ) -> Result<i32, deno_permissions::PermissionCheckError> {
+    if !oden_capsec_profile_is("oden/capsec/1.1") {
+      return Ok(0);
+    }
+    let Some(binding) = self.oden_connected_endpoint.borrow().clone() else {
+      return Ok(
+        if !require_connected_peer && self.connected_peer().is_none() {
+          1
+        } else {
+          uv_compat::UV_EACCES
+        },
+      );
+    };
+    let permissions = state.borrow_mut::<PermissionsContainer>();
+    permissions.check_net(
+      NetPermissionAction::Connect,
+      &(request_host, Some(request_port)),
+      api_name,
+    )?;
+    if !binding.authority_host.eq_ignore_ascii_case(request_host)
+      || binding.peer.port() != request_port
+    {
+      permissions.check_net(
+        NetPermissionAction::Connect,
+        &(binding.authority_host.as_str(), Some(binding.peer.port())),
+        api_name,
+      )?;
+    }
+    let Some(peer) = self.connected_peer() else {
+      return Ok(if require_connected_peer {
+        uv_compat::UV_EACCES
+      } else {
+        1
+      });
+    };
+    if peer != binding.peer {
+      return Ok(uv_compat::UV_EACCES);
+    }
+    permissions.check_net_resolved(
+      NetPermissionAction::Connect,
+      &peer.ip(),
+      peer.port(),
+      api_name,
+    )?;
+    Ok(0)
   }
 
   /// Populates the output object with remote address info. Returns 0 on

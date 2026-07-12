@@ -1,0 +1,7 @@
+{
+  "mode": "enforce",
+  "grants": {
+    "socket-owner": "network:connect:localhost",
+    "socket-borrower": "network:connect:allowed.example"
+  }
+}

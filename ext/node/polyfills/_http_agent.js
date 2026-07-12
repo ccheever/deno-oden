@@ -1,16 +1,22 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 
-import { core, primordials } from "ext:core/mod.js";
+import { core, internals, primordials } from "ext:core/mod.js";
 import {
   op_get_env_no_permission_check,
   op_node_http_capsec_no_reuse,
   op_node_http_net_token,
 } from "ext:core/ops";
 import {
+  hasOdenHttpRequestActor,
   runWithOdenHttpRequestActor,
+  runWithRequiredOdenHttpRequestActor,
 } from "ext:deno_node/internal/http/oden_actor.js";
 import * as net from "node:net";
+import {
+  createConnection as odenCapsecBuiltinNetCreateConnection,
+  isIP as odenCapsecBuiltinNetIsIP,
+} from "node:net";
 import httpProxy from "node:_http_proxy";
 const lazyTls = core.createLazyLoader("node:tls");
 const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
@@ -43,6 +49,7 @@ const {
   ArrayPrototypeShift,
   ArrayPrototypeSome,
   ArrayPrototypeSplice,
+  Error,
   FunctionPrototypeCall,
   NumberIsFinite,
   NumberParseInt,
@@ -53,6 +60,7 @@ const {
   ObjectValues,
   RegExpPrototypeExec,
   SafeRegExp,
+  SafeWeakMap,
   SafeWeakSet,
   StringPrototypeIndexOf,
   StringPrototypeSlice,
@@ -63,11 +71,34 @@ const {
 
 const KEEP_ALIVE_TIMEOUT_RE = new SafeRegExp("^timeout=(\\d+)");
 const odenCapsecNoReuseAgents = new SafeWeakSet();
-const odenCapsecUsedSockets = new SafeWeakSet();
+const odenCapsecAgentKinds = new SafeWeakMap();
+const odenCapsecAgentOptions = new SafeWeakMap();
+let odenCapsecHttpsCreateConnection;
+// A request admitted by _http_client carries the only exact-profile route
+// into the captured built-in addRequest/createSocket methods and factory.
+// Stage bits are consumed at method entry, before any public request/Agent
+// state is observed or any network effect can occur.
+const odenCapsecAgentRequests = new SafeWeakMap();
 
 const kOnKeylog = Symbol("onkeylog");
 const kRequestOptions = Symbol("requestOptions");
 const kRequestAsyncResource = Symbol("requestAsyncResource");
+
+function callbackOdenAgentSocketError() {
+  const error = new Error(
+    "oden capsec: callback-supplied custom Node HTTP Agent sockets are closed",
+  );
+  error.code = "ERR_ACCESS_DENIED";
+  return error;
+}
+
+function untrustedOdenAgentMethodError() {
+  const error = new Error(
+    "oden capsec: public Node HTTP Agent socket creation is closed",
+  );
+  error.code = "ERR_ACCESS_DENIED";
+  return error;
+}
 // New Agent code.
 
 // The largest departure from the previous implementation is that
@@ -156,6 +187,11 @@ export function Agent(options) {
   // turn reuse back on after construction.
   if (op_node_http_capsec_no_reuse()) {
     odenCapsecNoReuseAgents.add(this);
+    odenCapsecAgentKinds.set(this, {
+      __proto__: null,
+      createConnection: odenCapsecBuiltinCreateConnection,
+      protocol: "http:",
+    });
   }
 
   this.defaultPort = this.options.defaultPort || 80;
@@ -167,6 +203,12 @@ export function Agent(options) {
 
   // Don't confuse net and make it think that we're connecting to a pipe
   this.options.path = null;
+  if (odenCapsecNoReuseAgents.has(this)) {
+    odenCapsecAgentOptions.set(this, {
+      __proto__: null,
+      ...this.options,
+    });
+  }
   this.requests = ObjectCreate(null);
   this.sockets = ObjectCreate(null);
   this.freeSockets = ObjectCreate(null);
@@ -200,6 +242,14 @@ export function Agent(options) {
   httpProxy.initAgentProxy(this, this.options);
 
   this.on("free", (socket, options) => {
+    // The /1.1 Agent is deliberately not a pool. Public `free` dispatch is a
+    // socket-injection surface (including socket.emit("free")), so it may
+    // only close the offered socket. Fresh concurrent requests are created
+    // directly by the privately staged addRequest path below.
+    if (odenCapsecNoReuseAgents.has(this)) {
+      socket.destroy();
+      return;
+    }
     const name = this.getName(options);
     debug("agent.on(free)", name);
 
@@ -213,16 +263,6 @@ export function Agent(options) {
     // interleave with nextTick, so a server FIN may arrive before 'free'
     // runs, making the socket non-writable but not yet destroyed.
     if (socket.destroyed) {
-      return;
-    }
-
-    // Never assign a protected-profile socket to a queued or later request:
-    // doing so would skip DNS/final-peer mediation for the new principal.
-    if (
-      odenCapsecNoReuseAgents.has(this) &&
-      odenCapsecUsedSockets.has(socket)
-    ) {
-      socket.destroy();
       return;
     }
 
@@ -287,12 +327,15 @@ export function Agent(options) {
   });
 
   // Don't emit keylog events unless there is a listener for them.
-  this.on("newListener", maybeEnableKeylog);
+  if (!odenCapsecNoReuseAgents.has(this)) {
+    this.on("newListener", maybeEnableKeylog);
+  }
 }
 ObjectSetPrototypeOf(Agent.prototype, EventEmitter.prototype);
 ObjectSetPrototypeOf(Agent, EventEmitter);
 
 function maybeEnableKeylog(eventName) {
+  if (odenCapsecNoReuseAgents.has(this)) return;
   if (eventName === "keylog") {
     this.removeListener("newListener", maybeEnableKeylog);
     // Future sockets will listen on keylog at creation.
@@ -317,7 +360,7 @@ function withOdenHttpNetToken(options, apiName) {
   const port = NumberIsFinite(rawPort) && rawPort >= 0 && rawPort <= 65535
     ? rawPort
     : 0;
-  return {
+  const protectedOptions = {
     __proto__: null,
     ...options,
     __odenHttpNetToken: op_node_http_net_token(
@@ -327,6 +370,30 @@ function withOdenHttpNetToken(options, apiName) {
       apiName,
     ),
   };
+  if (op_node_http_capsec_no_reuse()) {
+    delete protectedOptions.fd;
+    delete protectedOptions.handle;
+    delete protectedOptions.onread;
+    delete protectedOptions.signal;
+    delete protectedOptions.socket;
+  }
+  return protectedOptions;
+}
+
+function createNetConnection(options, callback) {
+  if (op_node_http_capsec_no_reuse()) {
+    return FunctionPrototypeCall(
+      odenCapsecBuiltinNetCreateConnection,
+      net,
+      options,
+    );
+  }
+  return FunctionPrototypeCall(
+    net.createConnection,
+    net,
+    options,
+    callback,
+  );
 }
 
 // Default connection factory. When a proxy applies to the request, we
@@ -367,9 +434,12 @@ Agent.prototype.createConnection = function createConnection(options, cb) {
         cb,
       );
     }
-    return net.createConnection(withOdenHttpNetToken(connectOpts, apiName), cb);
+    return createNetConnection(
+      withOdenHttpNetToken(connectOpts, apiName),
+      cb,
+    );
   }
-  return net.createConnection(withOdenHttpNetToken(options, apiName), cb);
+  return createNetConnection(withOdenHttpNetToken(options, apiName), cb);
 };
 
 // Get the key for a given set of request options
@@ -405,6 +475,38 @@ Agent.prototype.addRequest = function addRequest(
   port, /* legacy */
   localAddress, /* legacy */
 ) {
+  if (odenCapsecNoReuseAgents.has(this)) {
+    const state = odenCapsecAgentRequests.get(req);
+    if (
+      state === undefined || state.agent !== this || !state.addRequestStage
+    ) {
+      throw untrustedOdenAgentMethodError();
+    }
+    state.addRequestStage = false;
+
+    // @ref LLP 0019#protected-metadata-endpoints [implements] -- /1.1 uses a
+    // literal no-pool Agent: maxSockets/maxTotalSockets are availability
+    // hints only, and mutable requests/sockets/freeSockets arrays are never
+    // read or populated. Every admitted request receives a fresh transport.
+    return invokeOdenCapsecCreateSocket(
+      this,
+      req,
+      options,
+      (err, socket, trustedAssignment) => {
+        if (err) {
+          assignRequestSocket(this, req, socket, err, false);
+        } else {
+          setRequestSocket(
+            this,
+            req,
+            socket,
+            trustedAssignment,
+          );
+        }
+      },
+    );
+  }
+
   // Legacy API: addRequest(req, host, port, localAddress)
   if (typeof options === "string") {
     options = {
@@ -488,30 +590,78 @@ Agent.prototype.addRequest = function addRequest(
 };
 
 Agent.prototype.createSocket = function createSocket(req, options, cb) {
-  options = { __proto__: null, ...options, ...this.options };
+  let odenCapsecState;
+  if (odenCapsecNoReuseAgents.has(this)) {
+    odenCapsecState = odenCapsecAgentRequests.get(req);
+    if (
+      odenCapsecState === undefined ||
+      odenCapsecState.agent !== this ||
+      !odenCapsecState.createSocketStage
+    ) {
+      throw untrustedOdenAgentMethodError();
+    }
+    odenCapsecState.createSocketStage = false;
+  }
+
+  const agentOptions = odenCapsecState === undefined
+    ? this.options
+    : odenCapsecAgentOptions.get(this);
+  options = odenCapsecState === undefined
+    ? { __proto__: null, ...options, ...agentOptions }
+    : { __proto__: null, ...agentOptions, ...options };
+  if (odenCapsecState !== undefined) {
+    delete options._proxy;
+    delete options._proxyProtocol;
+    delete options._proxyTargetHost;
+    delete options._proxyTargetPort;
+    delete options._proxyUseProxyConnection;
+    options.path = options.socketPath || null;
+  }
   if (options.socketPath) {
     options.path = options.socketPath;
   }
 
   if (!options.servername && options.servername !== "") {
-    options.servername = calculateServerName(options, req);
+    options.servername = odenCapsecState === undefined
+      ? calculateServerName(options, req)
+      : (odenCapsecBuiltinNetIsIP(options.host) ? "" : options.host);
   }
 
   // Make sure per-request timeout is respected.
-  const timeout = req.timeout || this.options.timeout || undefined;
+  const timeout = odenCapsecState === undefined
+    ? (req.timeout || this.options.timeout || undefined)
+    : options.timeout;
   if (timeout) {
     options.timeout = timeout;
   }
 
-  const name = this.getName(options);
-  options._agentKey = name;
+  const name = odenCapsecState === undefined ? this.getName(options) : "";
+  if (odenCapsecState === undefined) options._agentKey = name;
 
   debug("createConnection", name, options);
   options.encoding = null;
 
-  const oncreate = once((err, s) => {
+  const oncreate = once((err, s, source) => {
+    if (
+      !err && s && source === "callback" &&
+      odenCapsecState !== undefined
+    ) {
+      err = callbackOdenAgentSocketError();
+      s.destroy(err);
+    }
     if (err) {
       return cb(err);
+    }
+    if (odenCapsecState !== undefined) {
+      // Never expose a protected socket through public Agent pool state before
+      // the request+socket-bound client bridge performs native reauthorization.
+      // A synchronous factory return is admitted only after the factory frame
+      // has unwound; callback delivery is categorically closed.
+      return cb(
+        null,
+        s,
+        source === "return",
+      );
     }
     if (!this.sockets[name]) {
       this.sockets[name] = [];
@@ -524,19 +674,128 @@ Agent.prototype.createSocket = function createSocket(req, options, cb) {
   });
 
   // When keepAlive is true, pass the related options to createConnection
-  if (this.keepAlive) {
+  if (odenCapsecState === undefined && this.keepAlive) {
     options.keepAlive = this.keepAlive;
     options.keepAliveInitialDelay = this.keepAliveMsecs;
   }
 
-  const newSocket = runWithOdenHttpRequestActor(
-    req,
-    () => this.createConnection(options, oncreate),
-  );
+  const createConnection = odenCapsecState === undefined
+    ? this.createConnection
+    : odenCapsecState.createConnection;
+  const runWithActor = odenCapsecState === undefined
+    ? runWithOdenHttpRequestActor
+    : runWithRequiredOdenHttpRequestActor;
+  const newSocket = runWithActor(req, () => {
+    if (odenCapsecState !== undefined) {
+      return FunctionPrototypeCall(createConnection, this, options);
+    }
+    return FunctionPrototypeCall(
+      createConnection,
+      this,
+      options,
+      (err, socket) => oncreate(err, socket, "callback"),
+    );
+  });
   if (newSocket) {
-    oncreate(null, newSocket);
+    oncreate(null, newSocket, "return");
   }
 };
+
+// Snapshot the exact built-in assignment path after its methods are installed.
+// A package may override any of them, but cannot make its replacement equal
+// these closure-private identities.
+const odenCapsecBuiltinAddRequest = Agent.prototype.addRequest;
+const odenCapsecBuiltinCreateConnection = Agent.prototype.createConnection;
+const odenCapsecBuiltinCreateSocket = Agent.prototype.createSocket;
+internals.__odenRegisterTrustedNodeHttpAgentCreateConnection = (factory) => {
+  odenCapsecHttpsCreateConnection = factory;
+};
+internals.__odenBrandTrustedNodeHttpsAgent = (agent) => {
+  if (
+    odenCapsecNoReuseAgents.has(agent) &&
+    odenCapsecHttpsCreateConnection !== undefined
+  ) {
+    odenCapsecAgentKinds.set(agent, {
+      __proto__: null,
+      createConnection: odenCapsecHttpsCreateConnection,
+      protocol: "https:",
+    });
+  }
+};
+internals.__nodeHttpOdenCapsecAgentProtocol = (agent) =>
+  odenCapsecAgentKinds.get(agent)?.protocol;
+
+internals.__nodeHttpSnapshotOdenCapsecAgent = (
+  agent,
+  request,
+  requestProtocol,
+) => {
+  if (
+    !odenCapsecNoReuseAgents.has(agent) ||
+    !hasOdenHttpRequestActor(request)
+  ) return false;
+
+  // Read each time-varying property exactly once. The captured identities are
+  // both classified and invoked; no getter can return a trusted method for an
+  // admission check and a different method for the effect or assignment.
+  const addRequest = agent.addRequest;
+  const createSocket = agent.createSocket;
+  const createConnection = agent.createConnection;
+  const kind = odenCapsecAgentKinds.get(agent);
+  if (
+    kind === undefined || kind.protocol !== requestProtocol ||
+    addRequest !== odenCapsecBuiltinAddRequest ||
+    createSocket !== odenCapsecBuiltinCreateSocket ||
+    createConnection !== kind.createConnection
+  ) {
+    return false;
+  }
+  odenCapsecAgentRequests.set(request, {
+    __proto__: null,
+    agent,
+    addRequestStage: false,
+    createSocketStage: false,
+    createConnection,
+  });
+  return true;
+};
+
+internals.__nodeHttpAddOdenCapsecRequest = (agent, request, options) => {
+  const state = odenCapsecAgentRequests.get(request);
+  if (state === undefined || state.agent !== agent) {
+    throw untrustedOdenAgentMethodError();
+  }
+  state.addRequestStage = true;
+  try {
+    return FunctionPrototypeCall(
+      odenCapsecBuiltinAddRequest,
+      agent,
+      request,
+      options,
+    );
+  } finally {
+    state.addRequestStage = false;
+  }
+};
+
+function invokeOdenCapsecCreateSocket(agent, request, options, callback) {
+  const state = odenCapsecAgentRequests.get(request);
+  if (state === undefined || state.agent !== agent) {
+    throw untrustedOdenAgentMethodError();
+  }
+  state.createSocketStage = true;
+  try {
+    return FunctionPrototypeCall(
+      odenCapsecBuiltinCreateSocket,
+      agent,
+      request,
+      options,
+      callback,
+    );
+  } finally {
+    state.createSocketStage = false;
+  }
+}
 
 function calculateServerName(options, req) {
   let servername = options.host;
@@ -621,6 +880,10 @@ function installListeners(agent, s, options) {
 }
 
 Agent.prototype.removeSocket = function removeSocket(s, options) {
+  // Protected Agents never expose or consume pool/queue state. A public
+  // removeSocket call is cleanup-only and cannot create for a reflected req.
+  if (odenCapsecNoReuseAgents.has(this)) return;
+
   const name = this.getName(options);
   debug("removeSocket", name, "writable:", s.writable);
   const sets = [this.sockets];
@@ -728,6 +991,7 @@ Agent.prototype.reuseSocket = function reuseSocket(socket, req) {
 };
 
 Agent.prototype.destroy = function destroy() {
+  if (odenCapsecNoReuseAgents.has(this)) return;
   const sets = [this.freeSockets, this.sockets];
   for (let s = 0; s < sets.length; s++) {
     const set = sets[s];
@@ -741,13 +1005,32 @@ Agent.prototype.destroy = function destroy() {
   }
 };
 
-function setRequestSocket(agent, req, socket) {
+function assignRequestSocket(agent, req, socket, err, trustedAssignment) {
   if (odenCapsecNoReuseAgents.has(agent)) {
-    // A replacement socket created for a queued request reaches the `free`
-    // handler before it has served anything. Brand only at assignment so that
-    // handler may assign the fresh socket once, while every later free event
-    // destroys it instead of reusing it.
-    odenCapsecUsedSockets.add(socket);
+    return internals.__nodeHttpAssignSocket(
+      req,
+      socket,
+      err,
+      trustedAssignment,
+    );
+  }
+  return req.onSocket(socket, err);
+}
+
+function setRequestSocket(
+  agent,
+  req,
+  socket,
+  trustedAssignment = false,
+) {
+  if (odenCapsecNoReuseAgents.has(agent)) {
+    if (!trustedAssignment) {
+      const error = untrustedOdenAgentMethodError();
+      socket?.destroy(error);
+      return assignRequestSocket(agent, req, socket, error, false);
+    }
+    assignRequestSocket(agent, req, socket, undefined, true);
+    return;
   }
   req.onSocket(socket);
   const agentTimeout = agent.options.timeout || 0;

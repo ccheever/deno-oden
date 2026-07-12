@@ -120,6 +120,7 @@ for (
   const name of [
     "accept",
     "bind",
+    "checkOdenHttpSocketUse",
     "checkProtectedInspectorUse",
     "close",
     "connect",

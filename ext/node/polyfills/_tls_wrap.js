@@ -23,6 +23,8 @@ const {
   JSONParse,
   JSONStringify,
   ObjectDefineProperty,
+  ObjectGetOwnPropertyDescriptor,
+  ObjectHasOwn,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   RegExpPrototypeExec,
@@ -47,7 +49,10 @@ const {
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
 } = primordials;
-const { op_get_env_no_permission_check } = core.ops;
+const {
+  op_get_env_no_permission_check,
+  op_node_http_capsec_no_reuse,
+} = core.ops;
 const {
   ArrayIsArray,
   ObjectAssign,
@@ -56,7 +61,10 @@ const {
 const assert = core.loadExtScript(
   "ext:deno_node/internal/assert.mjs",
 );
-const net = core.createLazyLoader("node:net")().default;
+const netModule = core.createLazyLoader("node:net")();
+const net = netModule.default;
+const odenCapsecBuiltinNetSocket = netModule.Socket;
+const odenCapsecBuiltinNetIsIP = netModule.isIP;
 const {
   createSecureContext,
   translatePeerCertificate,
@@ -375,6 +383,8 @@ function initRead(tlsSocket, socket) {
 
 function TLSSocket(socket, opts) {
   const tlsOptions = { ...opts };
+  const protectedOdenHttp = !!tlsOptions.__odenHttpNetToken &&
+    op_node_http_capsec_no_reuse();
 
   this._tlsOptions = { ...tlsOptions };
   this._secureEstablished = false;
@@ -430,7 +440,7 @@ function TLSSocket(socket, opts) {
     validateFunction(tlsOptions.SNICallback, "options.SNICallback");
   }
 
-  FunctionPrototypeCall(net.Socket, this, {
+  const socketOptions = {
     handle: wrapTlsHandle(this, wrap, handle, tlsOptions),
     allowHalfOpen: socket ? socket.allowHalfOpen : tlsOptions.allowHalfOpen,
     autoDestroy: true,
@@ -439,14 +449,36 @@ function TLSSocket(socket, opts) {
     highWaterMark: tlsOptions.highWaterMark,
     onread: !socket ? tlsOptions.onread : null,
     signal: tlsOptions.signal,
-  });
+  };
+  if (tlsOptions.__odenHttpNetToken) {
+    socketOptions.__odenHttpNetToken = tlsOptions.__odenHttpNetToken;
+  }
+  FunctionPrototypeCall(odenCapsecBuiltinNetSocket, this, socketOptions);
 
   // Proxy for API compatibility
   this.ssl = this._handle;
 
-  this.on("error", this._tlsError);
+  if (protectedOdenHttp) {
+    FunctionPrototypeCall(
+      odenHttpTlsPrototypeIntegrity.on,
+      this,
+      "error",
+      this._tlsError,
+    );
+  } else {
+    this.on("error", this._tlsError);
+  }
 
-  this._init(socket, wrap);
+  if (protectedOdenHttp) {
+    FunctionPrototypeCall(
+      odenHttpTlsPrototypeIntegrity.init,
+      this,
+      socket,
+      wrap,
+    );
+  } else {
+    this._init(socket, wrap);
+  }
   registerTlsSocketReinitializer(this, (handle) => {
     reinitializeTlsSocket(this, handle, tlsOptions);
   });
@@ -463,7 +495,16 @@ function TLSSocket(socket, opts) {
       }
     }
   };
-  this.on("finish", this[kMaybeDestroy]);
+  if (protectedOdenHttp) {
+    FunctionPrototypeCall(
+      odenHttpTlsPrototypeIntegrity.on,
+      this,
+      "finish",
+      this[kMaybeDestroy],
+    );
+  } else {
+    this.on("finish", this[kMaybeDestroy]);
+  }
 
   // Read on next tick so the caller has a chance to setup listeners
   nextTick(initRead, this, socket);
@@ -1626,8 +1667,72 @@ function onConnectSecure() {
   this.removeListener("end", onConnectEnd);
 }
 
-function normalizeConnectArgs(listArgs) {
-  const args = net._normalizeArgs(listArgs);
+const odenCapsecBuiltinNormalizeArgs = netModule._normalizeArgs;
+const odenHttpTlsPrototypeIntegrity = {
+  __proto__: null,
+  init: TLSSocket.prototype._init,
+  on: TLSSocket.prototype.on,
+  once: TLSSocket.prototype.once,
+  prependListener: TLSSocket.prototype.prependListener,
+  releaseControl: TLSSocket.prototype._releaseControl,
+  setServername: TLSSocket.prototype.setServername,
+  setSession: TLSSocket.prototype.setSession,
+  setTimeout: TLSSocket.prototype.setTimeout,
+  socketConnect: TLSSocket.prototype.connect,
+  start: TLSSocket.prototype._start,
+};
+
+function hasProtectedOdenHttpOptions(options) {
+  return op_node_http_capsec_no_reuse() && options !== null &&
+    typeof options === "object" &&
+    ObjectHasOwn(options, "__odenHttpNetToken") &&
+    !!options.__odenHttpNetToken;
+}
+
+function assertProtectedOdenHttpTlsIntegrity() {
+  if (
+    !hasExactTlsDataMethod("_init", odenHttpTlsPrototypeIntegrity.init) ||
+    !hasExactTlsDataMethod(
+      "_releaseControl",
+      odenHttpTlsPrototypeIntegrity.releaseControl,
+    ) ||
+    !hasExactTlsDataMethod(
+      "setServername",
+      odenHttpTlsPrototypeIntegrity.setServername,
+    ) ||
+    !hasExactTlsDataMethod(
+      "setSession",
+      odenHttpTlsPrototypeIntegrity.setSession,
+    ) ||
+    !hasExactTlsDataMethod("_start", odenHttpTlsPrototypeIntegrity.start) ||
+    ObjectGetOwnPropertyDescriptor(TLSSocket.prototype, "on") !== undefined ||
+    ObjectGetOwnPropertyDescriptor(TLSSocket.prototype, "once") !==
+      undefined ||
+    ObjectGetOwnPropertyDescriptor(TLSSocket.prototype, "prependListener") !==
+      undefined ||
+    ObjectGetOwnPropertyDescriptor(TLSSocket.prototype, "setTimeout") !==
+      undefined ||
+    ObjectGetOwnPropertyDescriptor(TLSSocket.prototype, "connect") !==
+      undefined
+  ) {
+    const error = new Error(
+      "oden capsec: modified Node TLS socket prototype is closed",
+    );
+    error.code = "ERR_ACCESS_DENIED";
+    throw error;
+  }
+}
+
+function hasExactTlsDataMethod(name, expected) {
+  const descriptor = ObjectGetOwnPropertyDescriptor(TLSSocket.prototype, name);
+  return descriptor !== undefined && descriptor.get === undefined &&
+    descriptor.set === undefined && descriptor.value === expected;
+}
+
+function normalizeConnectArgs(listArgs, protectedOdenHttp) {
+  const args = protectedOdenHttp
+    ? FunctionPrototypeCall(odenCapsecBuiltinNormalizeArgs, net, listArgs)
+    : net._normalizeArgs(listArgs);
   const options = args[0];
   const cb = args[1];
 
@@ -1644,10 +1749,13 @@ function connect(...args) {
   if (args.length === 0) {
     createSecureContext({ ciphers: DEFAULT_CIPHERS });
   }
-  args = normalizeConnectArgs(args);
+  const protectedOdenHttp = hasProtectedOdenHttpOptions(args[0]);
+  if (protectedOdenHttp) assertProtectedOdenHttpTlsIntegrity();
+  args = normalizeConnectArgs(args, protectedOdenHttp);
   let options = args[0];
   const cb = args[1];
   const allowUnauthorized = getAllowUnauthorized();
+  const netIsIP = protectedOdenHttp ? odenCapsecBuiltinNetIsIP : net.isIP;
 
   options = {
     rejectUnauthorized: !allowUnauthorized,
@@ -1656,6 +1764,21 @@ function connect(...args) {
     minDHSize: 1024,
     ...options,
   };
+
+  if (protectedOdenHttp) {
+    assertProtectedOdenHttpTlsIntegrity();
+    if (options.socket !== undefined) {
+      const error = new Error(
+        "oden capsec: TLS adoption of a caller-supplied socket is closed",
+      );
+      error.code = "ERR_ACCESS_DENIED";
+      throw error;
+    }
+    delete options.onread;
+    delete options.signal;
+    delete options.handle;
+    delete options.fd;
+  }
 
   if (!options.secureProtocol && !options.minVersion && !options.maxVersion) {
     const defaults = getDefaultProtocolVersions();
@@ -1674,7 +1797,7 @@ function connect(...args) {
   validateNumber(options.minDHSize, "options.minDHSize", 1);
 
   // Reject IP addresses in servername (RFC 6066)
-  if (options.servername && net.isIP(options.servername)) {
+  if (options.servername && netIsIP(options.servername)) {
     throw new ERR_INVALID_ARG_VALUE(
       "options.servername",
       options.servername,
@@ -1685,7 +1808,7 @@ function connect(...args) {
   const context = options.secureContext || createSecureContext(options);
 
   // Default servername to host for SNI (matches Node.js behavior)
-  if (!options.servername && options.host && !net.isIP(options.host)) {
+  if (!options.servername && options.host && !netIsIP(options.host)) {
     options.servername = options.host;
   }
 
@@ -1702,6 +1825,9 @@ function connect(...args) {
     servername: options.servername,
     onread: options.onread,
     signal: options.signal,
+    __odenHttpNetToken: protectedOdenHttp
+      ? options.__odenHttpNetToken
+      : undefined,
   });
 
   options.rejectUnauthorized = options.rejectUnauthorized !== false;
@@ -1709,32 +1835,103 @@ function connect(...args) {
   tlssock[kConnectOptions] = options;
 
   if (cb) {
-    tlssock.once("secureConnect", cb);
+    if (protectedOdenHttp) {
+      FunctionPrototypeCall(
+        odenHttpTlsPrototypeIntegrity.once,
+        tlssock,
+        "secureConnect",
+        cb,
+      );
+    } else {
+      tlssock.once("secureConnect", cb);
+    }
   }
 
   if (!options.socket) {
     if (options.timeout) {
-      tlssock.setTimeout(options.timeout);
+      if (protectedOdenHttp) {
+        FunctionPrototypeCall(
+          odenHttpTlsPrototypeIntegrity.setTimeout,
+          tlssock,
+          options.timeout,
+        );
+      } else {
+        tlssock.setTimeout(options.timeout);
+      }
     }
-    tlssock.connect(options, tlssock._start);
+    if (protectedOdenHttp) {
+      FunctionPrototypeCall(
+        odenHttpTlsPrototypeIntegrity.socketConnect,
+        tlssock,
+        options,
+        odenHttpTlsPrototypeIntegrity.start,
+      );
+    } else {
+      tlssock.connect(options, tlssock._start);
+    }
   }
 
-  tlssock._releaseControl();
+  if (protectedOdenHttp) {
+    FunctionPrototypeCall(
+      odenHttpTlsPrototypeIntegrity.releaseControl,
+      tlssock,
+    );
+  } else {
+    tlssock._releaseControl();
+  }
 
   if (options.session) {
-    tlssock.setSession(options.session);
+    if (protectedOdenHttp) {
+      FunctionPrototypeCall(
+        odenHttpTlsPrototypeIntegrity.setSession,
+        tlssock,
+        options.session,
+      );
+    } else {
+      tlssock.setSession(options.session);
+    }
   }
 
   if (options.servername) {
-    tlssock.setServername(options.servername);
+    if (protectedOdenHttp) {
+      FunctionPrototypeCall(
+        odenHttpTlsPrototypeIntegrity.setServername,
+        tlssock,
+        options.servername,
+      );
+    } else {
+      tlssock.setServername(options.servername);
+    }
   }
 
   if (options.socket) {
-    tlssock._start();
+    if (protectedOdenHttp) {
+      FunctionPrototypeCall(
+        odenHttpTlsPrototypeIntegrity.start,
+        tlssock,
+      );
+    } else {
+      tlssock._start();
+    }
   }
 
-  tlssock.on("secure", onConnectSecure);
-  tlssock.prependListener("end", onConnectEnd);
+  if (protectedOdenHttp) {
+    FunctionPrototypeCall(
+      odenHttpTlsPrototypeIntegrity.on,
+      tlssock,
+      "secure",
+      onConnectSecure,
+    );
+    FunctionPrototypeCall(
+      odenHttpTlsPrototypeIntegrity.prependListener,
+      tlssock,
+      "end",
+      onConnectEnd,
+    );
+  } else {
+    tlssock.on("secure", onConnectSecure);
+    tlssock.prependListener("end", onConnectEnd);
+  }
 
   return tlssock;
 }

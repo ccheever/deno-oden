@@ -13,6 +13,12 @@
       "output": "routes_connect.out",
       "exitCode": 0
     },
+    "borrowed_socket_peer_and_unbound_handles_cannot_launder_endpoint": {
+      "args": "run --allow-all app.js handoff-peer",
+      "envs": { "ODEN_CAPSEC_POLICY": "handoff_peer.json" },
+      "output": "handoff_peer.out",
+      "exitCode": 0
+    },
     "scheme_classifier_closes_blob_unknown_and_file_without_fs": {
       "args": "run --allow-all app.js schemes closed",
       "envs": { "ODEN_CAPSEC_POLICY": "fetch.json" },

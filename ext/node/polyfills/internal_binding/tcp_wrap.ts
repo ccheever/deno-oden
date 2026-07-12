@@ -53,6 +53,7 @@ for (
     "accept",
     "bind",
     "bind6",
+    "checkOdenHttpSocketUse",
     "checkProtectedInspectorUse",
     "close",
     "connect",

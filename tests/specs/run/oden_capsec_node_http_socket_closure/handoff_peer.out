@@ -1,0 +1,6 @@
+NODE_HTTP_SOCKET_ROUTE borrowed-peer-create-connection DENIED
+NODE_HTTP_SOCKET_ROUTE borrowed-peer-agent-like DENIED
+NODE_HTTP_SOCKET_ROUTE native-hidden-peer-check DENIED
+NODE_HTTP_SOCKET_ROUTE borrowed-accepted-socket-closed DENIED
+NODE_HTTP_SOCKET_ROUTE native-accepted-peer-closed DENIED
+NODE_HTTP_SOCKET_HANDOFF_PEER_CLOSURE PASS

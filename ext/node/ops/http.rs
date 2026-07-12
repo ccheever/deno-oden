@@ -1,5 +1,8 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::borrow::Cow;
+use std::path::Path;
+
 use deno_core::GarbageCollected;
 use deno_core::OpState;
 use deno_core::op2;
@@ -121,6 +124,41 @@ pub fn op_node_http_check_proxy_net(
   } else {
     state.borrow_mut::<PermissionsContainer>().check_net(
       NetPermissionAction::Fetch,
+      &(hostname, Some(port)),
+      api_name,
+    )
+  }
+}
+
+/// Check the immutable request endpoint before any built-in Agent/Socket/TLS
+/// construction. This keeps a fetch-only denial ahead of synchronous public
+/// diagnostics and prototype hooks; the later native binding check still
+/// authenticates the actual connected endpoint and live peer.
+#[op2(stack_trace)]
+pub fn op_node_http_check_target_net(
+  state: &mut OpState,
+  #[string] hostname: &str,
+  port: u16,
+  #[string] path: Option<String>,
+  #[string] api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  let permissions = state.borrow_mut::<PermissionsContainer>();
+  if let Some(path) = path {
+    let checked = permissions.check_open(
+      Cow::Borrowed(Path::new(&path)),
+      deno_permissions::OpenAccessKind::ReadWriteNoFollow,
+      Some(api_name),
+    )?;
+    #[cfg(unix)]
+    permissions.check_net_unix_socket(
+      NetPermissionAction::Connect,
+      &checked,
+      Some(api_name),
+    )?;
+    Ok(())
+  } else {
+    permissions.check_net(
+      NetPermissionAction::Connect,
       &(hostname, Some(port)),
       api_name,
     )

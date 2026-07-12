@@ -9,6 +9,7 @@
 
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use deno_core::CppgcInherits;
@@ -176,6 +177,11 @@ pub struct PipeWrap {
   #[allow(dead_code, reason = "stored for parity with TCPWrap::socket_type")]
   pipe_type: Cell<PipeType>,
   oden_http_net_token: RefCell<Option<NodeHttpNetToken>>,
+  /// Absolute authority path selected by the native connect operation. An
+  /// accepted or adopted pipe has no such client binding and cannot be lent
+  /// to a `/1.1` Node HTTP request.
+  /// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  oden_connected_path: RefCell<Option<PathBuf>>,
 }
 
 // SAFETY: PipeWrap is a cppgc-managed object; the GC traces it via the base field.
@@ -231,6 +237,7 @@ impl PipeWrap {
       handle: Some(pipe),
       pipe_type: Cell::new(pipe_type),
       oden_http_net_token: RefCell::new(None),
+      oden_connected_path: RefCell::new(None),
     }
   }
 
@@ -470,6 +477,7 @@ impl PipeWrap {
       deno_permissions::OpenAccessKind::ReadWriteNoFollow,
       Some("node:net.createConnection()"),
     )?;
+    let connected_path = checked.to_path_buf();
     #[cfg(unix)]
     if let Some(api_name) = self.oden_http_api_name(path) {
       if oden_capsec_profile_is("oden/capsec/1.1") {
@@ -515,8 +523,58 @@ impl PipeWrap {
       unsafe {
         let _ = Box::from_raw(req_ptr as *mut ConnectReqData);
       }
+    } else {
+      self.oden_connected_path.replace(Some(connected_path));
     }
     Ok(ret)
+  }
+
+  /// Reauthorize both the declared Unix target and the privately retained
+  /// connect target before a Node HTTP request adopts this live pipe.
+  /// @ref LLP 0019#fetch-versus-connect [implements]
+  /// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  #[nofast]
+  #[rename("checkOdenHttpSocketUse")]
+  #[stack_trace]
+  fn check_oden_http_socket_use(
+    &self,
+    state: &mut OpState,
+    #[string] request_path: &str,
+    #[string] api_name: &str,
+  ) -> Result<i32, deno_permissions::PermissionCheckError> {
+    if !oden_capsec_profile_is("oden/capsec/1.1") {
+      return Ok(0);
+    }
+    let Some(connected_path) = self.oden_connected_path.borrow().clone() else {
+      return Ok(uv_compat::UV_EACCES);
+    };
+    let permissions = state.borrow_mut::<PermissionsContainer>();
+    let request_path = permissions.check_open(
+      std::borrow::Cow::Borrowed(std::path::Path::new(request_path)),
+      deno_permissions::OpenAccessKind::ReadWriteNoFollow,
+      Some(api_name),
+    )?;
+    #[cfg(unix)]
+    {
+      permissions.check_net_unix_socket(
+        NetPermissionAction::Connect,
+        &request_path,
+        Some(api_name),
+      )?;
+      if &*request_path != connected_path.as_path() {
+        let connected_path = permissions.check_open(
+          std::borrow::Cow::Owned(connected_path),
+          deno_permissions::OpenAccessKind::ReadWriteNoFollow,
+          Some(api_name),
+        )?;
+        permissions.check_net_unix_socket(
+          NetPermissionAction::Connect,
+          &connected_path,
+          Some(api_name),
+        )?;
+      }
+    }
+    Ok(0)
   }
 
   /// Set the number of pending pipe instances (Windows named pipes only).

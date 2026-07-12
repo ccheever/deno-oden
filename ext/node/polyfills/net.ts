@@ -23,7 +23,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const { op_node_http_capsec_no_reuse } = core.ops;
 
 const { BlockList, SocketAddress } = core.loadExtScript(
@@ -34,6 +34,7 @@ const {
   EventEmitter,
   protectedEventEmitterEmit: protectedSocketEmit,
   protectedEventEmitterOff: protectedSocketOff,
+  protectedEventEmitterOn: protectedSocketOn,
   protectedEventEmitterOnce: protectedSocketOnce,
 } = core.loadExtScript("ext:deno_node/_events.mjs");
 const {
@@ -158,6 +159,7 @@ const nativeProtectedSetKeepAlive = TCP.prototype.setKeepAlive;
 const nativeProtectedSetNoDelay = TCP.prototype.setNoDelay;
 const nativeProtectedSetNetPermToken = TCP.prototype.setNetPermToken;
 const nativeProtectedSetTcpOdenHttpNetToken = TCP.prototype.setOdenHttpNetToken;
+const nativeOdenHttpTcpSocketUse = TCP.prototype.checkOdenHttpSocketUse;
 const nativeProtectedWriteBuffer = TCP.prototype.writeBuffer;
 const nativeProtectedWritev = TCP.prototype.writev;
 const nativeProtectedWriteUtf8String = TCP.prototype.writeUtf8String;
@@ -191,6 +193,7 @@ const {
 } = core.loadExtScript("ext:deno_node/internal_binding/pipe_wrap.ts");
 const nativeProtectedSetPipeOdenHttpNetToken =
   Pipe.prototype.setOdenHttpNetToken;
+const nativeOdenHttpPipeSocketUse = Pipe.prototype.checkOdenHttpSocketUse;
 const nativeProtectedPipeConnect = Pipe.prototype.connect;
 const {
   getNativeTransport: getTlsNativeTransport,
@@ -254,6 +257,7 @@ const {
   ArrayPrototypePush,
   ArrayPrototypeSplice,
   Boolean,
+  Error,
   FunctionPrototypeBind,
   FunctionPrototypeCall,
   MapPrototypeGet,
@@ -262,6 +266,7 @@ const {
   NumberIsNaN,
   NumberParseInt,
   ObjectDefineProperty,
+  ObjectGetOwnPropertyDescriptor,
   ObjectHasOwn,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
@@ -271,12 +276,15 @@ const {
   ReflectHas,
   SafeArrayIterator,
   SafeWeakMap,
+  SafeWeakSet,
   StringPrototypeCharCodeAt,
   Symbol,
   SymbolAsyncDispose,
   WeakMapPrototypeDelete,
   WeakMapPrototypeGet,
   WeakMapPrototypeSet,
+  WeakSetPrototypeAdd,
+  WeakSetPrototypeHas,
 } = primordials;
 
 // Opaque HTTP-operation tokens never live on the public Socket. The built-in
@@ -301,6 +309,118 @@ const protectedSocketOnreadOptions = new SafeWeakMap();
 const protectedSocketPreclosed = new SafeWeakMap();
 const canceledConnectRequests = new SafeWeakMap();
 const pendingSocketWrites = new SafeWeakMap();
+const pendingOdenHttpSocketUses = new SafeWeakMap();
+const assignedOdenHttpSockets = new SafeWeakSet();
+
+// Authenticate a Node HTTP socket assignment through the closure-private
+// Socket -> native-handle identity. Package code can replace `_handle`, the
+// request options, or native prototype properties, so the HTTP client calls
+// this snapshotted bridge rather than reflecting any of those values.
+// @ref LLP 0019#fetch-versus-connect [implements]
+// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+function odenHttpSocketUseError(apiName, detail = "") {
+  return errnoException(
+    MapPrototypeGet(codeMap, "EACCES"),
+    `${apiName} socket assignment${detail}`,
+  );
+}
+
+function checkOdenHttpSocketHandle(
+  handle,
+  hostname,
+  port,
+  path,
+  apiName,
+  requireConnectedPeer,
+) {
+  let result;
+  if (
+    path === undefined &&
+    ObjectPrototypeIsPrototypeOf(TCP.prototype, handle)
+  ) {
+    result = FunctionPrototypeCall(
+      nativeOdenHttpTcpSocketUse,
+      handle,
+      hostname,
+      port,
+      apiName,
+      requireConnectedPeer,
+    );
+  } else if (
+    typeof path === "string" &&
+    ObjectPrototypeIsPrototypeOf(Pipe.prototype, handle)
+  ) {
+    result = FunctionPrototypeCall(
+      nativeOdenHttpPipeSocketUse,
+      handle,
+      path,
+      apiName,
+    );
+  } else {
+    result = MapPrototypeGet(codeMap, "EACCES");
+  }
+  return result;
+}
+
+function checkOdenHttpSocketUse(socket, hostname, port, path, apiName) {
+  if (!op_node_http_capsec_no_reuse()) return;
+  if (WeakSetPrototypeHas(assignedOdenHttpSockets, socket)) {
+    throw odenHttpSocketUseError(apiName, " already assigned");
+  }
+  WeakSetPrototypeAdd(assignedOdenHttpSockets, socket);
+  const publicHandle = WeakMapPrototypeGet(canonicalSocketHandles, socket);
+  const handle = publicHandle === undefined
+    ? undefined
+    : (getTlsNativeTransport(publicHandle) ?? publicHandle);
+  const result = checkOdenHttpSocketHandle(
+    handle,
+    hostname,
+    port,
+    path,
+    apiName,
+    false,
+  );
+  if (result === 1) {
+    WeakMapPrototypeSet(pendingOdenHttpSocketUses, socket, {
+      __proto__: null,
+      apiName,
+      context: core.getAsyncContext(),
+      hostname,
+      path,
+      port,
+    });
+  } else if (result !== 0) {
+    throw odenHttpSocketUseError(apiName);
+  }
+}
+
+function finishOdenHttpSocketUses(socket, connectedHandle) {
+  const use = WeakMapPrototypeGet(pendingOdenHttpSocketUses, socket);
+  if (use === undefined) return;
+  WeakMapPrototypeDelete(pendingOdenHttpSocketUses, socket);
+  const canonicalHandle = WeakMapPrototypeGet(canonicalSocketHandles, socket);
+  const canonicalTransport = canonicalHandle === undefined
+    ? undefined
+    : (getTlsNativeTransport(canonicalHandle) ?? canonicalHandle);
+  if (canonicalTransport !== connectedHandle) {
+    throw odenHttpSocketUseError(use.apiName);
+  }
+  const result = _runInAsyncContext(
+    use.context,
+    () =>
+      checkOdenHttpSocketHandle(
+        connectedHandle,
+        use.hostname,
+        use.port,
+        use.path,
+        use.apiName,
+        true,
+      ),
+  );
+  if (result !== 0) throw odenHttpSocketUseError(use.apiName);
+}
+
+internals.__nodeNetCheckOdenHttpSocketUse = checkOdenHttpSocketUse;
 
 function protectedSocketPublicWrite(chunk, encoding, callback) {
   return protectedWritableWrite(this, chunk, encoding, callback);
@@ -845,9 +965,8 @@ function _afterConnectImpl(
   // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
   const protectedInspectorPeer = getNativeProtectedInspectorPeer(handle);
 
-  let socket = typeof protectedInspectorPeer === "string"
-    ? WeakMapPrototypeGet(canonicalSocketOwners, handle)
-    : handle[ownerSymbol];
+  let socket = WeakMapPrototypeGet(canonicalSocketOwners, handle) ??
+    handle[ownerSymbol];
   if (socket === undefined) {
     if (typeof protectedInspectorPeer === "string") {
       FunctionPrototypeCall(nativeProtectedClose, handle);
@@ -881,6 +1000,22 @@ function _afterConnectImpl(
   debug("afterConnect");
 
   assert(socket.connecting);
+
+  if (status === 0) {
+    try {
+      // A custom Agent may assign a still-connecting Socket. Recheck its live
+      // native peer under every captured HTTP request actor before `connect`
+      // listeners can flush queued request bytes.
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+      finishOdenHttpSocketUses(socket, handle);
+    } catch (error) {
+      FunctionPrototypeCall(nativeProtectedReadStop, handle);
+      FunctionPrototypeCall(nativeProtectedClose, handle);
+      socket.connecting = false;
+      socket.destroy(error);
+      return;
+    }
+  }
 
   socket.connecting = false;
   socket._sockname = null;
@@ -1769,8 +1904,15 @@ function _onReadableStreamEnd(this: Socket) {
 }
 
 // Called when creating new Socket, or when re-using a closed Socket
-function _initSocketHandle(socket: Socket) {
-  socket._undestroy();
+function _initSocketHandle(socket: Socket, protectedOdenHttp = false) {
+  if (protectedOdenHttp) {
+    FunctionPrototypeCall(
+      odenHttpSocketPrototypeIntegrity.undestroy,
+      socket,
+    );
+  } else {
+    socket._undestroy();
+  }
   socket._sockname = undefined;
 
   // Handle creation may be deferred to bind() or connect() time.
@@ -2300,6 +2442,10 @@ function Socket(options) {
     options = { ...options };
   }
 
+  if (hasProtectedOdenHttpOptions(options)) {
+    assertProtectedOdenHttpSocketPrototypeIntegrity();
+  }
+
   if (options.objectMode) {
     throw new ERR_INVALID_ARG_VALUE(
       "options.objectMode",
@@ -2427,9 +2573,18 @@ function Socket(options) {
     }
   }
 
-  this.on("end", _onReadableStreamEnd);
+  if (hasProtectedOdenHttpOptions(options)) {
+    FunctionPrototypeCall(
+      protectedSocketOn,
+      this,
+      "end",
+      _onReadableStreamEnd,
+    );
+  } else {
+    this.on("end", _onReadableStreamEnd);
+  }
 
-  _initSocketHandle(this);
+  _initSocketHandle(this, hasProtectedOdenHttpOptions(options));
 
   if (this._handle && options.readable !== false) {
     if (options.pauseOnCreate) {
@@ -2460,6 +2615,10 @@ Socket.prototype.connect = function (...args) {
   const options = normalized[0];
   const cb = normalized[1];
   let odenHttpAsyncContext;
+  const protectedOdenHttpConnect = hasProtectedOdenHttpOptions(options);
+  if (protectedOdenHttpConnect) {
+    assertProtectedOdenHttpSocketPrototypeIntegrity();
+  }
 
   if (ObjectHasOwn(options, "__odenHttpNetToken")) {
     const odenHttpNetToken = options.__odenHttpNetToken;
@@ -2480,13 +2639,9 @@ Socket.prototype.connect = function (...args) {
     throw new ERR_MISSING_ARGS(["options", "port", "path"]);
   }
 
-  if (netClientSocketChannel.hasSubscribers) {
-    netClientSocketChannel.publish({
-      socket: this,
-    });
-  }
-
-  if (this.write !== Socket.prototype.write) {
+  if (
+    !protectedOdenHttpConnect && this.write !== Socket.prototype.write
+  ) {
     this.write = Socket.prototype.write;
   }
 
@@ -2505,7 +2660,7 @@ Socket.prototype.connect = function (...args) {
       ? new Pipe(PipeConstants.SOCKET)
       : new TCP(TCPConstants.SOCKET);
 
-    _initSocketHandle(this);
+    _initSocketHandle(this, protectedOdenHttpConnect);
   }
 
   const connectHandle = getNativeConnectHandle(
@@ -2515,6 +2670,14 @@ Socket.prototype.connect = function (...args) {
     this,
     connectHandle,
   );
+  if (
+    !(validatedOdenHttpNetToken && op_node_http_capsec_no_reuse()) &&
+    netClientSocketChannel.hasSubscribers
+  ) {
+    netClientSocketChannel.publish({
+      socket: this,
+    });
+  }
   // Internal resolution is a stage of the parent operation: raw net and
   // socket-exposing /1.1 HTTP are connect-class, while frozen /1 tokenized
   // HTTP preserves its fetch-class contract.
@@ -2549,10 +2712,21 @@ Socket.prototype.connect = function (...args) {
   connectHandle[kAsyncContext] = connectAsyncContext;
 
   if (cb !== null) {
-    this.once("connect", cb);
+    if (protectedOdenHttpConnect) {
+      FunctionPrototypeCall(protectedSocketOnce, this, "connect", cb);
+    } else {
+      this.once("connect", cb);
+    }
   }
 
-  this._unrefTimer();
+  if (protectedOdenHttpConnect) {
+    FunctionPrototypeCall(
+      odenHttpSocketPrototypeIntegrity.unrefTimer,
+      this,
+    );
+  } else {
+    this._unrefTimer();
+  }
 
   this.connecting = true;
 
@@ -2566,13 +2740,17 @@ Socket.prototype.connect = function (...args) {
     );
   } else {
     if (options.keepAlive !== undefined) {
-      this.setKeepAlive(
-        !!options.keepAlive,
-        options.keepAliveInitialDelay,
-      );
+      if (!protectedOdenHttpConnect) {
+        this.setKeepAlive(
+          !!options.keepAlive,
+          options.keepAliveInitialDelay,
+        );
+      }
     }
     if (options.noDelay !== undefined) {
-      this.setNoDelay(options.noDelay);
+      if (!protectedOdenHttpConnect) {
+        this.setNoDelay(options.noDelay);
+      }
     }
     _lookupAndConnect(this, options);
   }
@@ -2902,6 +3080,76 @@ Socket.prototype._unrefTimer = function () {
     }
   }
 };
+
+// Snapshot every public Socket method reached synchronously while a built-in
+// HTTP(S) factory constructs and starts a transport. The authenticated /1.1
+// path checks these identities before `new Socket` and again before connect,
+// so prototype tampering fails before a socket can be published or opened.
+const odenHttpSocketPrototypeIntegrity = {
+  __proto__: null,
+  connect: Socket.prototype.connect,
+  on: Socket.prototype.on,
+  once: Socket.prototype.once,
+  read: Socket.prototype.read,
+  setKeepAlive: Socket.prototype.setKeepAlive,
+  setNoDelay: Socket.prototype.setNoDelay,
+  setTimeout: Socket.prototype.setTimeout,
+  unrefTimer: Socket.prototype._unrefTimer,
+  undestroy: Socket.prototype._undestroy,
+  write: Socket.prototype.write,
+};
+
+function hasProtectedOdenHttpOptions(options) {
+  return op_node_http_capsec_no_reuse() &&
+    ObjectHasOwn(options, "__odenHttpNetToken") &&
+    Boolean(options.__odenHttpNetToken);
+}
+
+function assertProtectedOdenHttpSocketPrototypeIntegrity() {
+  if (
+    !hasExactSocketDataMethod(
+      "connect",
+      odenHttpSocketPrototypeIntegrity.connect,
+    ) ||
+    !hasExactSocketDataMethod(
+      "read",
+      odenHttpSocketPrototypeIntegrity.read,
+    ) ||
+    !hasExactSocketDataMethod(
+      "setKeepAlive",
+      odenHttpSocketPrototypeIntegrity.setKeepAlive,
+    ) ||
+    !hasExactSocketDataMethod(
+      "setNoDelay",
+      odenHttpSocketPrototypeIntegrity.setNoDelay,
+    ) ||
+    !hasExactSocketDataMethod(
+      "setTimeout",
+      odenHttpSocketPrototypeIntegrity.setTimeout,
+    ) ||
+    !hasExactSocketDataMethod(
+      "_unrefTimer",
+      odenHttpSocketPrototypeIntegrity.unrefTimer,
+    ) ||
+    ObjectGetOwnPropertyDescriptor(Socket.prototype, "on") !== undefined ||
+    ObjectGetOwnPropertyDescriptor(Socket.prototype, "once") !== undefined ||
+    ObjectGetOwnPropertyDescriptor(Socket.prototype, "_undestroy") !==
+      undefined ||
+    ObjectGetOwnPropertyDescriptor(Socket.prototype, "write") !== undefined
+  ) {
+    const error = new Error(
+      "oden capsec: modified Node Socket prototype is closed",
+    );
+    error.code = "ERR_ACCESS_DENIED";
+    throw error;
+  }
+}
+
+function hasExactSocketDataMethod(name, expected) {
+  const descriptor = ObjectGetOwnPropertyDescriptor(Socket.prototype, name);
+  return descriptor !== undefined && descriptor.get === undefined &&
+    descriptor.set === undefined && descriptor.value === expected;
+}
 
 Socket.prototype._final = function (cb) {
   const protectedHandle = WeakMapPrototypeGet(protectedSocketHandles, this);
@@ -3293,17 +3541,35 @@ function connect(path: string, connectionListener?: () => void): Socket;
 function connect(...args: unknown[]) {
   const normalized = _normalizeArgs(args);
   const options = normalized[0] as Partial<NetConnectOptions>;
+  const protectedOdenHttp = hasProtectedOdenHttpOptions(options);
+  if (protectedOdenHttp) {
+    assertProtectedOdenHttpSocketPrototypeIntegrity();
+  }
   debug("createConnection", normalized);
   const socket = new Socket(options);
 
   if (options.timeout) {
-    socket.setTimeout(options.timeout);
+    if (protectedOdenHttp) {
+      FunctionPrototypeCall(
+        odenHttpSocketPrototypeIntegrity.setTimeout,
+        socket,
+        options.timeout,
+      );
+    } else {
+      socket.setTimeout(options.timeout);
+    }
   }
 
   // `Socket.prototype.connect` publishes `net.client.socket` so that all
   // entry points (net.connect, net.createConnection, new net.Socket().connect,
   // tls.connect via TLSSocket extending Socket) emit exactly once.
-  return socket.connect(normalized);
+  return protectedOdenHttp
+    ? FunctionPrototypeCall(
+      odenHttpSocketPrototypeIntegrity.connect,
+      socket,
+      normalized,
+    )
+    : socket.connect(normalized);
 }
 
 const createConnection = connect;
