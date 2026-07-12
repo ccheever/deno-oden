@@ -29,6 +29,7 @@ const {
 const {
   captureDeliveryCallback,
   createStreamUseAdmission,
+  getStreamUseGuard,
   linkStreamUseGuard,
   markStreamOperationIterable,
   markTrustedDeliveryCallback,
@@ -75,8 +76,20 @@ const {
 const kEmpty = Symbol("kEmpty");
 const kEof = Symbol("kEof");
 const pendingPromiseOperatorIterators = new SafeWeakMap();
+let createAdmittedReadableAsyncIterator;
 
 function operationIterable(source, iterator) {
+  if (iterator === undefined && getStreamUseGuard(source) !== undefined) {
+    // A stream-returning operator is lazy: capture its source admission only
+    // when a downstream operation actually starts consuming the operator.
+    // Capturing at map/filter construction would make passage of the returned
+    // Readable transfer the constructor's authority.
+    // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+    createAdmittedReadableAsyncIterator ??= core.loadExtScript(
+      "ext:deno_node/internal/streams/readable.js",
+    ).createAdmittedReadableAsyncIterator;
+    iterator = createAdmittedReadableAsyncIterator(source);
+  }
   return iterator === undefined ? source : {
     [SymbolAsyncIterator]() {
       return iterator;

@@ -373,6 +373,12 @@ function streamUseAdmissionContext(stream, admission) {
   return context;
 }
 
+function currentStreamUseAdmissionContext() {
+  return activeStreamUseAdmissionContexts[
+    activeStreamUseAdmissionContexts.length - 1
+  ];
+}
+
 function runWithStreamUseAdmission(stream, admission, callback) {
   const admittedContext = streamUseAdmissionContext(stream, admission);
   const parts = admission.parts;
@@ -854,6 +860,7 @@ return {
   captureCurrentDeliveryCallback,
   captureTrustedDeliveryCallback,
   createStreamUseAdmission,
+  currentStreamUseAdmissionContext,
   getStreamUseGuard,
   getStreamDestroyDeliverySnapshot,
   hasStreamUseGuard,

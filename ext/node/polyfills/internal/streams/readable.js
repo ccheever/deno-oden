@@ -145,6 +145,8 @@ const {
   ArrayPrototypeSlice,
   ArrayPrototypeSplice,
   ArrayPrototypeUnshift,
+  AsyncGeneratorPrototype,
+  AsyncGeneratorPrototypeNext,
   DataViewPrototypeGetBuffer,
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
@@ -158,6 +160,7 @@ const {
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   Promise,
+  PromiseReject,
   ReflectApply,
   SafeSet,
   SafeWeakMap,
@@ -174,6 +177,9 @@ const {
   WeakMapPrototypeGet,
   WeakMapPrototypeSet,
 } = primordials;
+
+const AsyncGeneratorPrototypeReturn = AsyncGeneratorPrototype.return;
+const AsyncGeneratorPrototypeThrow = AsyncGeneratorPrototype.throw;
 
 Readable.ReadableState = ReadableState;
 
@@ -480,8 +486,18 @@ function pauseReadable(stream) {
   return FunctionPrototypeCall(ReadablePrototypePause, stream);
 }
 
-function resumeReadable(stream) {
-  return FunctionPrototypeCall(ReadablePrototypeResume, stream);
+function resumeReadable(stream, operationContext = undefined) {
+  if (
+    operationContext === undefined || getStreamUseGuard(stream) === undefined
+  ) {
+    return FunctionPrototypeCall(ReadablePrototypeResume, stream);
+  }
+  const admission = createStreamUseAdmission(stream, operationContext);
+  return runWithStreamUseAdmission(
+    stream,
+    admission,
+    () => FunctionPrototypeCall(ReadablePrototypeResume, stream),
+  );
 }
 
 function addReadableListener(stream, type, listener) {
@@ -2572,10 +2588,47 @@ function streamToAsyncIterator(stream, options, admittedOperation) {
     stream = Readable.wrap(stream, { objectMode: true });
   }
 
-  const iter = createAsyncIterator(stream, options, admittedOperation);
+  const generator = createAsyncIterator(stream, options, admittedOperation);
+  const iter = admittedOperation === undefined
+    ? createPublicReadableAsyncIterator(stream, generator)
+    : generator;
   iter.stream = stream;
   linkStreamUseGuard(stream, iter);
   return iter;
+}
+
+function createPublicReadableAsyncIterator(stream, generator) {
+  // Async-generator bodies resume from loader-only frames, so a public
+  // iterator cannot safely use the context retained by generator creation.
+  // Keep the branded generator closure-private and authenticate each `next`
+  // caller before that exact request enters it. A passed iterator therefore
+  // grants nothing: its new holder must independently pass the stream guard,
+  // while the admitted call's continuation inherits only its initiating
+  // operation actor.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  return ObjectSetPrototypeOf({
+    next(value) {
+      try {
+        const admission = createStreamUseAdmission(stream);
+        return runWithStreamUseAdmission(
+          stream,
+          admission,
+          () => AsyncGeneratorPrototypeNext(generator, value),
+        );
+      } catch (error) {
+        return PromiseReject(error);
+      }
+    },
+    return(value) {
+      return ReflectApply(AsyncGeneratorPrototypeReturn, generator, [value]);
+    },
+    throw(error) {
+      return ReflectApply(AsyncGeneratorPrototypeThrow, generator, [error]);
+    },
+    [SymbolAsyncIterator]() {
+      return this;
+    },
+  }, AsyncGeneratorPrototype);
 }
 
 async function* createAsyncIterator(stream, options, admittedOperation) {

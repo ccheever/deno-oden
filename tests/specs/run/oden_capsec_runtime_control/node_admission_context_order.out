@@ -1,1 +1,1 @@
-{"sameActor":"ALLOWED","actorAB":"DENIED","actorBA":"DENIED","untrustedSchedule":"LIVE","missingSchedule":"ADMISSION"}
+{"sameActor":"ALLOWED","actorAB":"DENIED","actorBA":"DENIED","untrustedSchedule":"LIVE","missingSchedule":"ADMISSION","concurrentNodeIterator":"CLOSED","concurrentWebDefaultPull":"CLOSED","concurrentWebBYOBPull":"CLOSED"}

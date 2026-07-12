@@ -57,11 +57,11 @@ const pingTimer = section(
 const backing = section(
   streams,
   "function getReadableStreamResourceBacking(stream)",
-  "async function readableStreamCollectIntoUint8Array(stream)",
+  "function readableStreamCollectIntoUint8Array(stream)",
 );
 const collector = section(
   streams,
-  "async function readableStreamCollectIntoUint8Array(stream)",
+  "function readableStreamCollectIntoUint8Array(stream)",
   "function writableStreamForRid(",
 );
 const nodePipe = section(
@@ -139,6 +139,16 @@ const webReaderFastPath = section(
   "class ReadableStreamDefaultReader",
   "class ReadableStreamBYOBReadIntoRequest",
 );
+const webBytePull = section(
+  streams,
+  "function readableByteStreamControllerCallPullIfNeeded(controller)",
+  "function readableByteStreamControllerClearAlgorithms(controller)",
+);
+const webDefaultPull = section(
+  streams,
+  "function readableStreamDefaultControllerCallPullIfNeeded(controller)",
+  "function readableStreamDefaultControllerCanCloseOrEnqueue(controller)",
+);
 
 function guardCaughtBeforeQueueInspection(text, streamMarker) {
   const streamIndex = text.indexOf(streamMarker);
@@ -171,6 +181,15 @@ const evidence = {
     "linkStreamUseGuard(iterable, guardedIterable);",
   ) && nodeFrom.includes(
     "linkStreamUseGuard(guardedIterable, readable);",
+  ),
+  nodeIteratorCallTimeActor: nodeIterator.includes(
+    "const generator = createAsyncIterator(stream, options, admittedOperation);",
+  ) && nodeIterator.includes(
+    "? createPublicReadableAsyncIterator(stream, generator)",
+  ) && nodeIterator.includes(
+    "const admission = createStreamUseAdmission(stream);",
+  ) && nodeIterator.includes(
+    "() => AsyncGeneratorPrototypeNext(generator, value)",
   ),
   nodePipeReadableDestinationPropagation: ordered(
     nodePipe,
@@ -280,6 +299,41 @@ const evidence = {
   ) && guardCaughtBeforeQueueInspection(
     webReaderFastPath,
     "const stream = this[_stream]",
+  ),
+  webPullCallTimeActor: webBytePull.includes(
+    "const pendingOperationContext = WeakMapPrototypeGet(",
+  ) && webBytePull.includes(
+    "const operationContext = WeakMapPrototypeGet(",
+  ) && webBytePull.includes(
+    "() => readableByteStreamControllerStartPull(controller)",
+  ) && webDefaultPull.includes(
+    "const pendingOperationContext = WeakMapPrototypeGet(",
+  ) && webDefaultPull.includes(
+    "const operationContext = WeakMapPrototypeGet(",
+  ) && webDefaultPull.includes(
+    "() => readableStreamDefaultControllerStartPull(controller)",
+  ),
+  webPullActorSlotFirstWriter: webBytePull.includes(
+    "!WeakMapPrototypeHas(readableControllerPullOperationContexts, controller)",
+  ) && webDefaultPull.includes(
+    "!WeakMapPrototypeHas(readableControllerPullOperationContexts, controller)",
+  ) && ordered(
+    webBytePull,
+    "const pendingOperationContext = WeakMapPrototypeGet(",
+    "const shouldPull = readableByteStreamControllerShouldCallPull(controller);",
+  ) && ordered(
+    webDefaultPull,
+    "const pendingOperationContext = WeakMapPrototypeGet(",
+    "const shouldPull = readableStreamDefaultcontrollerShouldCallPull(",
+  ),
+  webPullCallbackActorSeparation: streams.includes(
+    "const readableUnderlyingSourceCallbackRecords = new SafeWeakMap();",
+  ) && streams.includes(
+    "markReadableStreamTrustedCallback(underlyingSource.pull);",
+  ) && streams.includes("if (record.trusted) return invoke();") && ordered(
+    streams,
+    "if (record.trusted) return invoke();",
+    "runWithActiveReadableOperationContext(record.callbackContext, invoke)",
   ),
   webBYOBViewClosurePrivate: streams.includes(
     "const readableBYOBRequestViews = new SafeWeakMap();",

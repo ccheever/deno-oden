@@ -20,6 +20,7 @@ const {
   captureCurrentDeliveryCallback,
   captureDeliveryCallback,
   captureTrustedDeliveryCallback,
+  currentStreamUseAdmissionContext,
   markStreamCleanupDeliveryCallback,
   markStreamTrustedDeliveryCallback,
   markTrustedDeliveryCallback,
@@ -49,6 +50,7 @@ const { addEventEmitterListener } = core.loadExtScript(
 const {
   acquireReadableStreamDefaultReader,
   acquireWritableStreamDefaultWriter,
+  markReadableStreamTrustedCallback,
   markWritableStreamTrustedCallback,
   readableByteStreamControllerClose,
   readableByteStreamControllerEnqueue,
@@ -186,7 +188,12 @@ function newStreamReadableFromReadableStream(
 
   function readFromWeb() {
     uponPromiseWithCurrent(
-      readableStreamDefaultReaderReadPromise(reader),
+      // Bridge the Node read admission into the protected Web reader. The Web
+      // helper ignores this context on ordinary streams.
+      readableStreamDefaultReaderReadPromise(
+        reader,
+        currentStreamUseAdmissionContext(),
+      ),
       (chunk) => {
         try {
           if (chunk.done) {
@@ -489,7 +496,10 @@ function newStreamDuplexFromReadableWritablePair(
 
   function readFromWeb() {
     uponPromiseWithCurrent(
-      readableStreamDefaultReaderReadPromise(reader),
+      readableStreamDefaultReaderReadPromise(
+        reader,
+        currentStreamUseAdmissionContext(),
+      ),
       (chunk) => {
         try {
           if (chunk.done) {
@@ -745,7 +755,11 @@ function newReadableStreamFromStreamReadable(
       : runCapturedCallback(capturedPause, streamReadable, []);
   const resumeNodeReadable = () =>
     registeredReadable
-      ? resumeReadable(streamReadable)
+      // This loader-owned pull bridges a Web operation into Node. Preserve
+      // the exact actor that authenticated the Web read so Node's scheduled
+      // resume cannot recapture only adapter frames.
+      // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+      ? resumeReadable(streamReadable, core.getAsyncContext())
       : runCapturedCallback(capturedResume, streamReadable, []);
 
   const evaluateStrategyOrFallback = (strategy) => {
@@ -843,6 +857,9 @@ function newReadableStreamFromStreamReadable(
   if (isByteStream) {
     underlyingSource.type = "bytes";
   }
+  markReadableStreamTrustedCallback(underlyingSource.start);
+  markReadableStreamTrustedCallback(underlyingSource.pull);
+  markReadableStreamTrustedCallback(underlyingSource.cancel);
   const readable = new ReadableStream(underlyingSource, strategy);
   registerStreamGuardAttachHook(streamReadable, (guard) => {
     setReadableStreamUseGuard(readable, guard);
