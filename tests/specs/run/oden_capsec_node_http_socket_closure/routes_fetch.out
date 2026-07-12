@@ -1,1 +1,11 @@
+NODE_HTTP_SOCKET_ROUTE request-socket-event-property DENIED
+NODE_HTTP_SOCKET_ROUTE response-socket-write DENIED
+NODE_HTTP_SOCKET_ROUTE connect-tunnel-raw-write DENIED
+NODE_HTTP_SOCKET_ROUTE upgrade-raw-write DENIED
+NODE_HTTP_SOCKET_ROUTE custom-agent DENIED
+NODE_HTTP_SOCKET_ROUTE create-connection-hook DENIED
+NODE_HTTP_SOCKET_ROUTE redirect-hop DENIED
+NODE_HTTP_SOCKET_ROUTE keepalive-reuse-closed DENIED
+NODE_HTTP_SOCKET_ROUTE forward-proxy-closed DENIED
+NODE_HTTP_SOCKET_ROUTE unix-socket DENIED
 NODE_HTTP_SOCKET_ROUTES fetch PASS

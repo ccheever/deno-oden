@@ -1,6 +1,6 @@
 {
   "mode": "enforce",
   "grants": {
-    "node-http-closure-probe": "network:fetch:*"
+    "node-http-closure-probe": "network:fetch:*,network:connect:*"
   }
 }

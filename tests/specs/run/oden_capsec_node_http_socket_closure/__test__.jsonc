@@ -1,12 +1,8 @@
 {
-  // `/1.1` closes the old fetch-token downgrade for every socket-bearing
-  // Node HTTP route and applies one scheme classification before transport.
   "tempDir": true,
   "tests": {
     "fetch_grant_cannot_reach_node_http_sockets": {
       "args": "run --allow-all app.js routes fetch",
-      // Filesystem authority lets the Unix-socket route reach its distinct
-      // network:connect check instead of passing on an earlier path denial.
       "envs": { "ODEN_CAPSEC_POLICY": "fetch_routes.json" },
       "output": "routes_fetch.out",
       "exitCode": 0

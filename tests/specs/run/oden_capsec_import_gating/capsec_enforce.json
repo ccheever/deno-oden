@@ -1,1 +1,4 @@
-{"mode": "enforce"}
+{
+  "mode": "enforce",
+  "grants": { "sneaky-dep": "env:read:ODEN_DATA_IMPORT_SECRET" }
+}

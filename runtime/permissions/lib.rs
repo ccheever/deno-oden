@@ -123,8 +123,18 @@ pub enum OdenUrlSchemeClass {
   ClosedUnknown,
 }
 
+fn oden_capsec_normalize_url_scheme(scheme: &str) -> String {
+  // URL.protocol includes one trailing delimiter while url::Url::scheme()
+  // does not. Strip at most that one delimiter: accepting every trailing ':'
+  // would misclassify malformed `http::` as network authority.
+  scheme
+    .strip_suffix(':')
+    .unwrap_or(scheme)
+    .to_ascii_lowercase()
+}
+
 pub fn oden_capsec_classify_url_scheme(scheme: &str) -> OdenUrlSchemeClass {
-  let normalized = scheme.trim_end_matches(':').to_ascii_lowercase();
+  let normalized = oden_capsec_normalize_url_scheme(scheme);
   match normalized.as_str() {
     "http" | "https" => OdenUrlSchemeClass::Network,
     "file" => OdenUrlSchemeClass::File,
@@ -1548,6 +1558,47 @@ pub fn oden_capsec_gate_url_scheme(
   oden_capsec_gate_url_scheme_inner(scheme, api_name, None)
 }
 
+/// Require a URL-consuming network facade to receive an actual network
+/// scheme. The shared classifier permits file/data/runtime-internal schemes to
+/// continue to their own boundaries, but Node HTTP exposes a raw socket and
+/// has no such alternate boundary. A caller-controlled Agent protocol must not
+/// reinterpret those classes as `network:connect`.
+// @ref LLP 0019#fetch-versus-connect [implements]
+pub fn oden_capsec_require_network_url_scheme(
+  scheme: &str,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  let class = oden_capsec_gate_url_scheme(scheme, api_name)?;
+  if !oden_capsec_profile_is("oden/capsec/1.1")
+    || class == OdenUrlSchemeClass::Network
+  {
+    return Ok(());
+  }
+
+  oden_capsec_readiness_gate()?;
+  let principal = oden_capsec_principal();
+  let label = principal.label();
+  let normalized = oden_capsec_normalize_url_scheme(scheme);
+  oden_capsec_audit_record(
+    &label,
+    "protocol",
+    "classify",
+    &normalized,
+    "DENY(non-network scheme at network surface)",
+    None,
+  );
+  Err(PermissionCheckError::PermissionDenied(
+    PermissionDeniedError {
+      access: format!("{api_name} URL scheme {normalized:?}"),
+      name: "capsec",
+      custom_message: Some(format!(
+        "oden capsec: {api_name} cannot use {normalized}: because this surface requires a network URL scheme"
+      )),
+      state: PermissionState::Denied,
+    },
+  ))
+}
+
 fn oden_capsec_gate_url_scheme_inner(
   scheme: &str,
   api_name: &str,
@@ -1566,7 +1617,7 @@ fn oden_capsec_gate_url_scheme_inner(
   oden_capsec_readiness_gate()?;
   let principal = explicit_principal.unwrap_or_else(oden_capsec_principal);
   let label = principal.label();
-  let normalized = scheme.trim_end_matches(':').to_ascii_lowercase();
+  let normalized = oden_capsec_normalize_url_scheme(scheme);
   let reason = match class {
     OdenUrlSchemeClass::ClosedBlob => {
       "blob ownership and cross-principal delegation are not modeled"
@@ -3699,7 +3750,7 @@ fn oden_handle_inactive() -> PermissionCheckError {
 // runtime/file schemes continue to their own operation boundaries. Both static
 // and dynamic imports are attributed to the referrer: a dependency's *static*
 // remote import is as much a supply-chain reach as a dynamic one.
-// @ref llp/0001-adding-capability-security-to-deno.plan.md (Import gating; Principals; Loader principal index)
+// @ref LLP 0019#fetch-versus-connect [implements]
 pub fn oden_capsec_gate_import(
   specifier: &Url,
   referrer: &Url,
@@ -3741,7 +3792,7 @@ pub fn oden_capsec_gate_import(
   let target = specifier.as_str();
   let deny = mode == OdenMode::Enforce;
   let verdict = if deny {
-    "DENY(remote/data import default-denied under enforce)"
+    "DENY(import graph default-denied under active profile)"
   } else if mode == OdenMode::Audit {
     "audit(record)"
   } else {
@@ -3755,7 +3806,7 @@ pub fn oden_capsec_gate_import(
         name: "capsec",
         custom_message: Some(format!(
           "oden capsec: principal \"{label}\" may not import {scheme}: code \
-           (remote/data imports are default-denied for packages under enforce)"
+           (this scheme is graph-gated for packages by the active capsec profile)"
         )),
         state: PermissionState::Denied,
       },
@@ -10587,6 +10638,7 @@ mod tests {
     assert_eq!(oden_capsec_classify_url_scheme("ext:"), RuntimeInternal);
     assert_eq!(oden_capsec_classify_url_scheme("deno:"), RuntimeInternal);
     assert_eq!(oden_capsec_classify_url_scheme("blob:"), ClosedBlob);
+    assert_eq!(oden_capsec_classify_url_scheme("http::"), ClosedUnknown);
     assert_eq!(
       oden_capsec_classify_url_scheme("future-transport:"),
       ClosedUnknown

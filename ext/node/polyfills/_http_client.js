@@ -26,6 +26,7 @@
 
 import { core, internals, primordials } from "ext:core/mod.js";
 import {
+  op_node_http_capsec_no_reuse,
   op_node_http_check_proxy_net,
   op_node_http_check_url_scheme,
 } from "ext:core/ops";
@@ -515,10 +516,16 @@ function ClientRequest(input, options, cb) {
 
   // @ref LLP 0019#fetch-versus-connect [implements] -- A custom agent cannot
   // reinterpret blob/unknown schemes as network authority.
-  op_node_http_check_url_scheme(
-    protocol,
-    protocol === "https:" ? "node:https.request()" : "node:http.request()",
-  );
+  // Preserve stock Node coercion/order while unarmed. Under the exact /1.1
+  // profile, pass only a primitive protocol to the native classifier; an
+  // object-valued protocol becomes the closed unknown class instead of gaining
+  // a time-varying ToString path into network authority.
+  if (op_node_http_capsec_no_reuse()) {
+    op_node_http_check_url_scheme(
+      typeof protocol === "string" ? protocol : "",
+      protocol === "https:" ? "node:https.request()" : "node:http.request()",
+    );
+  }
 
   if (options.path) {
     const path = String(options.path);

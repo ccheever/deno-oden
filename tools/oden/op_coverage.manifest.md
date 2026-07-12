@@ -44,7 +44,7 @@ run the generator and commit. Drift fails the rebase canary.
 | ffi:load | FfiQueryDescriptor | path or * | ffi |
 | fs:read | ReadDescriptor / ReadQueryDescriptor | canonical path or * | fs:read:<path> |
 | fs:write | WriteDescriptor / WriteQueryDescriptor | canonical path or * | fs:write:<path> |
-| import:graph | ModuleLoader inner_resolve capsec gate (referrer-attributed) | resolved import specifier (data:/blob:/http(s):) | remote/data imports default-denied for package principals under enforce |
+| import:graph | ModuleLoader inner_resolve capsec gate (referrer-attributed) | resolved HTTP(S) graph target; frozen /1 also gates data:/blob: | package HTTP(S) imports deny; /1.1 data is quarantined non-capability and blob/unknown close structurally |
 | network:connect | NetDescriptor (typed operation action) | host, URL, vsock, or unix socket | network:connect:<endpoint> |
 | network:fetch | NetDescriptor / ImportDescriptor (typed operation action) | direct HTTP(S) host/redirect, vsock, or Unix socket; attested proxy only in a later profile | network:fetch:<endpoint> |
 | network:listen | NetDescriptor (typed operation action) | bound host, vsock, or unix socket | network:listen:<endpoint> |
@@ -92,8 +92,8 @@ allowed only at the two audited typed helpers named by the generator.
 | connect | check_net_resolved | op_quic_endpoint_connect() | ext/net/quic.rs:582 | explicit |
 | fetch | check_net | op_node_getaddrinfo() | ext/node/ops/dns.rs:71 | explicit |
 | fetch | check_net | op_node_getnameinfo() | ext/node/ops/dns.rs:274 | explicit |
-| connect | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:115 | explicit |
-| fetch | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:121 | explicit |
+| connect | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:116 | explicit |
+| fetch | check_net | op_node_http_check_proxy_net() | ext/node/ops/http.rs:122 | explicit |
 | listen | check_net | op_inspector_open() | ext/node/ops/inspector.rs:106 | explicit |
 | listen | check_net | op_inspector_open() | ext/node/ops/inspector.rs:151 | explicit |
 | listen | check_net_unix_socket | bind() | ext/node/ops/pipe_wrap.rs:398 | explicit |
@@ -117,31 +117,32 @@ allowed only at the two audited typed helpers named by the generator.
 | connect | check_net_resolved | op_node_udp_send() | ext/node/ops/udp.rs:604 | explicit |
 | connect | check_net_url | op_ws_check_permission_and_cancel_handle() | ext/websocket/lib.rs:134 | explicit |
 | connect | check_net_url | op_ws_create() | ext/websocket/lib.rs:524 | explicit |
-| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:11665 | explicit |
-| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:12922 | explicit |
-| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:12952 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12979 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12985 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:12995 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13001 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13019 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13024 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13048 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13057 | explicit |
-| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13067 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16155 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16164 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16178 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16185 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16192 | explicit |
-| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16200 | explicit |
+| fetch | check_net_url | test_check_net_url() | runtime/permissions/lib.rs:11717 | explicit |
+| connect | check_net | test_net_fully_qualified_domain_name() | runtime/permissions/lib.rs:12974 | explicit |
+| connect | check_net | test_net_ip_subnet() | runtime/permissions/lib.rs:13004 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13031 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13037 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13047 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13053 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13071 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13076 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13100 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13109 | explicit |
+| connect | check_net | test_net_ipv4_mapped_ipv6() | runtime/permissions/lib.rs:13119 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16207 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16216 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16230 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16237 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16244 | explicit |
+| connect | check_net | test_net_fqdn_with_subdomain_wildcard() | runtime/permissions/lib.rs:16252 | explicit |
 
 ## Network resource/API action matrix
 
 Resource-creating and packet-originating APIs are registered explicitly.
 Direct rows must contain the named classified check; categorical rows
 must contain their closed-surface guard; inherited rows consume an
-already-authorized resource named in the note.
+already-authorized resource named in the note. Behavioral rows bind a
+registered raw-engine spec, isolated policies, and per-route goldens.
 
 | Surface | Action | Enforcement | Rust owner | Note |
 | --- | --- | --- | --- | --- |
@@ -180,16 +181,16 @@ already-authorized resource named in the note.
 | Node DNS lookup/reverse lookup | fetch | direct | ext/node/ops/dns.rs:op_node_getaddrinfo() | query target |
 | Node DNS reverse lookup (v1 resolve fold) | fetch | direct | ext/node/ops/dns.rs:op_node_getnameinfo() | query target |
 | Node inspector listener | listen | direct | ext/node/ops/inspector.rs:op_inspector_open() | inspector bind host/port |
-| Node HTTP route: request socket event/property | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; raw-engine fixture request-socket-event-property |
-| Node HTTP route: response socket write | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; raw-engine fixture response-socket-write |
-| Node HTTP route: CONNECT tunnel/socket delegation | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; raw-engine fixture connect-tunnel-raw-write |
-| Node HTTP route: 101 Upgrade socket delegation | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; raw-engine fixture upgrade-raw-write |
-| Node HTTP route: custom Agent.createConnection | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | raw Node TCP creation; raw-engine fixture custom-agent |
-| Node HTTP route: request createConnection hook | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | raw Node TCP creation; raw-engine fixture create-connection-hook |
-| Node HTTP route: redirect hop | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | each built-in agent TCP creation; raw-engine fixture redirect-hop |
-| Node HTTP route: keep-alive reuse attempt | connect | direct | ext/node/ops/tcp_wrap.rs:connect() | pool reuse closed; each request creates a checked socket; raw-engine fixture keepalive-reuse-closed |
-| Node HTTP route: forward-proxy target and peer | closed | categorical | ext/node/ops/http.rs:op_node_http_check_proxy_net() | categorically refused without final-peer attestation; raw-engine fixture forward-proxy-closed |
-| Node HTTP route: Unix-domain HTTP socket | connect | direct | ext/node/ops/pipe_wrap.rs:connect() | built-in agent pipe creation; raw-engine fixture unix-socket |
+| Node HTTP route: request socket event/property | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; registered raw-engine fixture request-socket-event-property |
+| Node HTTP route: response socket write | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; registered raw-engine fixture response-socket-write |
+| Node HTTP route: CONNECT tunnel/socket delegation | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; registered raw-engine fixture connect-tunnel-raw-write |
+| Node HTTP route: 101 Upgrade socket delegation | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | built-in agent TCP creation; registered raw-engine fixture upgrade-raw-write |
+| Node HTTP route: custom Agent.createConnection | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | raw Node TCP creation; registered raw-engine fixture custom-agent |
+| Node HTTP route: request createConnection hook | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | raw Node TCP creation; registered raw-engine fixture create-connection-hook |
+| Node HTTP route: redirect hop | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | each built-in agent TCP creation; registered raw-engine fixture redirect-hop |
+| Node HTTP route: keep-alive reuse attempt | connect | behavioral | ext/node/ops/tcp_wrap.rs:connect() | pool reuse closed; each request creates a checked socket; registered raw-engine fixture keepalive-reuse-closed |
+| Node HTTP route: forward-proxy target and peer | closed | behavioral | ext/node/ops/http.rs:op_node_http_check_proxy_net() | categorically refused without final-peer attestation; registered raw-engine fixture forward-proxy-closed |
+| Node HTTP route: Unix-domain HTTP socket | connect | behavioral | ext/node/ops/pipe_wrap.rs:connect() | built-in agent pipe creation; registered raw-engine fixture unix-socket |
 
 ## Permission methods (closed inventory)
 

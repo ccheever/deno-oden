@@ -1273,9 +1273,10 @@ impl<TGraphContainer: ModuleGraphContainer>
       ensure_not_jsr_non_jsr_remote_import(&specifier, &referrer)?;
       // Oden capsec import gate: attribute the import to the referrer (the
       // module issuing it) — sound because the loader knows the referrer
-      // synchronously, unlike the op-dispatch stack. A package pulling remote /
-      // data: code is default-denied under enforce. Inert unless capsec armed.
-      // @ref llp/0001-adding-capability-security-to-deno.plan.md (Import gating)
+      // synchronously, unlike the op-dispatch stack. `/1.1` admits inline data
+      // as a non-capability under quarantine attribution, closes blob/unknown,
+      // and keeps package HTTP(S) graph admission denied. Inert unless armed.
+      // @ref LLP 0019#fetch-versus-connect [implements]
       deno_runtime::deno_permissions::oden_capsec_gate_import(
         &specifier,
         &referrer,

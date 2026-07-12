@@ -3,20 +3,24 @@
   // in the supplied URL. Blob/unknown structural closure and HTTP(S) graph
   // admission are covered by oden_capsec_node_http_socket_closure.
   "tests": {
-    "dep_inline_data_import_allowed_under_1_1": {
+    "dep_inline_data_import_is_quarantined_under_1_1": {
       "args": "run --allow-all dep_app.js",
-      "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json" },
-      "output": "baseline.out",
+      "envs": {
+        "ODEN_CAPSEC_POLICY": "capsec_enforce.json",
+        "ODEN_DATA_IMPORT_SECRET": "s3cret"
+      },
+      "output": "quarantine.out",
       "exitCode": 0
     },
-    "root_remote_import_allowed_under_enforce": {
+    "root_inline_data_import_allowed_under_enforce": {
       "args": "run --allow-all root_app.js",
       "envs": { "ODEN_CAPSEC_POLICY": "capsec_enforce.json" },
       "output": "root_ok.out",
       "exitCode": 0
     },
-    "baseline_capsec_off_allows": {
+    "baseline_capsec_off_preserves_data_module_behavior": {
       "args": "run --allow-all dep_app.js",
+      "envs": { "ODEN_DATA_IMPORT_SECRET": "s3cret" },
       "output": "baseline.out",
       "exitCode": 0
     }

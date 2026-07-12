@@ -7,8 +7,8 @@ use deno_core::v8;
 use deno_permissions::NetPermissionAction;
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
-use deno_permissions::oden_capsec_gate_url_scheme;
 use deno_permissions::oden_capsec_profile_is;
+use deno_permissions::oden_capsec_require_network_url_scheme;
 
 /// Opaque, endpoint-bound proof that the built-in Node HTTP agent is opening
 /// this socket for request/response traffic rather than for `node:net`.
@@ -79,15 +79,16 @@ pub fn op_node_http_net_token(
 }
 
 /// Classify the request protocol before Node's agent or a caller-supplied
-/// connection hook can select a transport. Protocol validation remains in the
-/// Node compatibility layer; this closes blob/unknown schemes first under the
-/// Stage-B profile so no custom agent can reinterpret them as network grants.
+/// connection hook can select a transport. A caller can mutate Agent.protocol,
+/// so the native boundary itself requires HTTP(S) under the Stage-B profile;
+/// filesystem, inline, runtime-internal, blob, and unknown schemes cannot be
+/// reinterpreted as network grants.
 #[op2(fast, stack_trace)]
 pub fn op_node_http_check_url_scheme(
   #[string] scheme: &str,
   #[string] api_name: &str,
 ) -> Result<(), PermissionCheckError> {
-  oden_capsec_gate_url_scheme(scheme, api_name).map(|_| ())
+  oden_capsec_require_network_url_scheme(scheme, api_name)
 }
 
 // When a node:http / node:https request is routed through a proxy, the socket

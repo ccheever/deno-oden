@@ -108,11 +108,14 @@ const CHECKLIST: HoleClass[] = [
   // --- Principal-classification confusion ------------------------------------
   {
     category: "classification-confusion",
-    attack: "data:/blob: minted code borrows a package's authority",
+    attack: "data:/blob:/remote minted code borrows a package's authority",
     status: "closed",
-    tests: ["oden_capsec_import_gating"],
+    tests: [
+      "oden_capsec_import_gating",
+      "oden_capsec_node_http_socket_closure",
+    ],
     note:
-      "data:/blob:/remote imports by a package are default-denied under enforce; classify() sends them to quarantine",
+      "/1.1 admits inline data bytes but attributes their module to Quarantine; a granted importer cannot lend that authority. Blob/unknown schemes close structurally and package HTTP(S) graph admission denies before fetch",
   },
   {
     category: "classification-confusion",

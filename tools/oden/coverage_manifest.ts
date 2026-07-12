@@ -97,9 +97,9 @@ const CAPABILITY_TAXONOMY: Record<string, TaxonomyEntry> = {
   },
   "import:graph": {
     deno: "ModuleLoader inner_resolve capsec gate (referrer-attributed)",
-    target: "resolved import specifier (data:/blob:/http(s):)",
+    target: "resolved HTTP(S) graph target; frozen /1 also gates data:/blob:",
     grant:
-      "remote/data imports default-denied for package principals under enforce",
+      "package HTTP(S) imports deny; /1.1 data is quarantined non-capability and blob/unknown close structurally",
   },
 };
 
@@ -243,6 +243,24 @@ function enclosingFn(masked: string, offset: number): string {
   let found = "<module>";
   for (let m; (m = re.exec(masked)) && m.index < offset;) found = m[1];
   return found;
+}
+
+function rustFunctionBodyMasked(src: string, fnName: string): string {
+  const masked = maskRust(src);
+  const fnMatch = new RegExp(`\\bfn\\s+${fnName}\\b`).exec(masked);
+  if (fnMatch === null) throw new Error(`missing Rust function ${fnName}()`);
+  const open = masked.indexOf("{", fnMatch.index + fnMatch[0].length);
+  if (open === -1) {
+    throw new Error(`missing body for Rust function ${fnName}()`);
+  }
+  let depth = 0;
+  for (let i = open; i < masked.length; i++) {
+    if (masked[i] === "{") depth++;
+    if (masked[i] === "}" && --depth === 0) {
+      return masked.slice(open + 1, i);
+    }
+  }
+  throw new Error(`unterminated body for Rust function ${fnName}()`);
 }
 
 function closeParen(masked: string, open: number): number {
@@ -413,11 +431,22 @@ type NodeHttpSocketRoute = {
 
 const NODE_HTTP_SOCKET_FIXTURE =
   "tests/specs/run/oden_capsec_node_http_socket_closure/node_modules/node-http-closure-probe/index.js";
+const NODE_HTTP_SOCKET_SPEC =
+  "tests/specs/run/oden_capsec_node_http_socket_closure/__test__.jsonc";
+const NODE_HTTP_SOCKET_FETCH_POLICY =
+  "tests/specs/run/oden_capsec_node_http_socket_closure/fetch_routes.json";
+const NODE_HTTP_SOCKET_CONNECT_POLICY =
+  "tests/specs/run/oden_capsec_node_http_socket_closure/connect.json";
+const NODE_HTTP_SOCKET_FETCH_GOLDEN =
+  "tests/specs/run/oden_capsec_node_http_socket_closure/routes_fetch.out";
+const NODE_HTTP_SOCKET_CONNECT_GOLDEN =
+  "tests/specs/run/oden_capsec_node_http_socket_closure/routes_connect.out";
 
 // Every route in Node's request/response API that can reveal, delegate, or
 // reuse the transport must lead to a connect-class native boundary or a
-// stronger categorical closure. Fixture IDs are source-checked so adding a
-// manifest-only claim cannot close a gap.
+// stronger categorical closure. The generated rows are behavioral claims:
+// validation binds every ID to the registered spec, distinct policies, and
+// per-route goldens, while separate source checks pin the token classifiers.
 const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
   {
     action: "connect",
@@ -504,8 +533,10 @@ const NODE_HTTP_SOCKET_ROUTES: NodeHttpSocketRoute[] = [
 // Resource-creating and packet-originating network surfaces. Direct rows must
 // contain a classified check in the named function. Categorical rows must call
 // their named closed-surface guard. Inherited rows name the operation that
-// consumes an already-authorized resource; every function is existence-checked
-// so upstream renames or removals are manifest drift.
+// consumes an already-authorized resource. Node route rows are behavioral and
+// bind exact spec registration, isolated policies, per-route output, and the
+// profile-specific TCP/Unix token classifiers. Every function is also
+// existence-checked so upstream renames or removals are manifest drift.
 const NETWORK_SURFACES: NetworkSurface[] = [
   {
     surface: "fetch() HTTP(S)",
@@ -826,32 +857,119 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
       );
     }
   }
+  const tcpBody = rustFunctionBodyMasked(
+    Deno.readTextFileSync(ROOT + "ext/node/ops/tcp_wrap.rs"),
+    "oden_net_decision",
+  ).replace(/\s+/g, " ");
+  if (
+    !/Some\s*\(\s*api_name\s*\)\s+if\s+oden_capsec_profile_is\s*\([^)]*\)\s*=>\s*\{\s*\(\s*NetPermissionAction::Connect\s*,\s*api_name\s*\)/
+      .test(
+        tcpBody,
+      ) ||
+    !/Some\s*\(\s*api_name\s*\)\s*=>\s*\(\s*NetPermissionAction::Fetch\s*,\s*api_name\s*\)/
+      .test(
+        tcpBody,
+      )
+  ) {
+    errors.push(
+      "Node HTTP TCP token must select Connect in /1.1 and preserve the unarmed Fetch fallback",
+    );
+  }
+
+  const pipeBody = rustFunctionBodyMasked(
+    Deno.readTextFileSync(ROOT + "ext/node/ops/pipe_wrap.rs"),
+    "connect",
+  ).replace(/\s+/g, " ");
+  if (
+    !/if\s+let\s+Some\s*\(\s*api_name\s*\)\s*=\s*self\.oden_http_api_name\s*\(\s*path\s*\)\s*\{.*?if\s+oden_capsec_profile_is\s*\([^)]*\)\s*\{.*?check_net_unix_socket\s*\(\s*NetPermissionAction::Connect.*?\}\s*else\s*\{.*?check_net_unix_socket\s*\(\s*NetPermissionAction::Fetch/
+      .test(
+        pipeBody,
+      )
+  ) {
+    errors.push(
+      "Node HTTP Unix token must select Connect in /1.1 and preserve the unarmed Fetch fallback",
+    );
+  }
+
   const fixture = Deno.readTextFileSync(ROOT + NODE_HTTP_SOCKET_FIXTURE);
+  const spec = JSON.parse(Deno.readTextFileSync(ROOT + NODE_HTTP_SOCKET_SPEC));
+  const fetchPolicy = JSON.parse(
+    Deno.readTextFileSync(ROOT + NODE_HTTP_SOCKET_FETCH_POLICY),
+  );
+  const connectPolicy = JSON.parse(
+    Deno.readTextFileSync(ROOT + NODE_HTTP_SOCKET_CONNECT_POLICY),
+  );
+  const fetchGolden = Deno.readTextFileSync(
+    ROOT + NODE_HTTP_SOCKET_FETCH_GOLDEN,
+  );
+  const connectGolden = Deno.readTextFileSync(
+    ROOT + NODE_HTTP_SOCKET_CONNECT_GOLDEN,
+  );
+
+  const fetchSpec = spec.tests?.fetch_grant_cannot_reach_node_http_sockets;
+  if (
+    fetchSpec?.args !== "run --allow-all app.js routes fetch" ||
+    fetchSpec?.envs?.ODEN_CAPSEC_POLICY !== "fetch_routes.json" ||
+    fetchSpec?.output !== "routes_fetch.out" || fetchSpec?.exitCode !== 0
+  ) {
+    errors.push("Node HTTP fetch-denial route spec registration drifted");
+  }
+  const connectSpec = spec.tests
+    ?.connect_grant_covers_explicit_node_http_socket_routes;
+  if (
+    connectSpec?.args !== "run --allow-all app.js routes connect" ||
+    connectSpec?.envs?.ODEN_CAPSEC_POLICY !== "connect.json" ||
+    connectSpec?.output !== "routes_connect.out" || connectSpec?.exitCode !== 0
+  ) {
+    errors.push("Node HTTP connect route spec registration drifted");
+  }
+
+  const fetchCaps = new Set(
+    String(fetchPolicy.grants?.["node-http-closure-probe"] ?? "").split(","),
+  );
+  if (
+    !fetchCaps.has("network:fetch:*") || fetchCaps.has("network:connect:*") ||
+    !fetchCaps.has("fs:read:/") || !fetchCaps.has("fs:write:/")
+  ) {
+    errors.push(
+      "Node HTTP fetch route policy must isolate network:fetch while clearing Unix filesystem prechecks",
+    );
+  }
+  const connectCaps = new Set(
+    String(connectPolicy.grants?.["node-http-closure-probe"] ?? "").split(","),
+  );
+  if (
+    !connectCaps.has("network:connect:*") ||
+    !connectCaps.has("fs:read:/") || !connectCaps.has("fs:write:/")
+  ) {
+    errors.push(
+      "Node HTTP connect route policy must include connect and Unix filesystem authority",
+    );
+  }
+
   for (const row of NODE_HTTP_SOCKET_ROUTES) {
-    const src = Deno.readTextFileSync(ROOT + row.file);
-    if (row.action === "connect") {
-      if (!direct.has(`${row.file}:${row.fn}:connect`)) {
-        errors.push(
-          `${row.route}: ${row.file}:${row.fn}() has no classified connect check`,
-        );
-      }
-    } else {
-      const closedCalls = collectCalls(
-        src,
-        /\b(?<name>oden_capsec_reject_forward_proxy)\s*\(/g,
-        false,
-      );
-      if (!closedCalls.some((call) => call.fn === row.fn)) {
-        errors.push(
-          `${row.route}: ${row.file}:${row.fn}() has no categorical proxy closure`,
-        );
-      }
-    }
-    if (!fixture.includes(`\"${row.fixture}\"`)) {
+    const occurrenceCount = fixture.split(`\"${row.fixture}\"`).length - 1;
+    if (occurrenceCount !== 1) {
       errors.push(
-        `${row.route}: fixture ${row.fixture} missing from ${NODE_HTTP_SOCKET_FIXTURE}`,
+        `${row.route}: fixture ${row.fixture} must occur exactly once in ${NODE_HTTP_SOCKET_FIXTURE}`,
       );
     }
+    const fetchLine = `NODE_HTTP_SOCKET_ROUTE ${row.fixture} DENIED`;
+    const connectOutcome = row.action === "connect" ? "CONNECTED" : "DENIED";
+    const connectLine =
+      `NODE_HTTP_SOCKET_ROUTE ${row.fixture} ${connectOutcome}`;
+    if (!fetchGolden.split("\n").includes(fetchLine)) {
+      errors.push(`${row.route}: fetch-denial golden row missing`);
+    }
+    if (!connectGolden.split("\n").includes(connectLine)) {
+      errors.push(`${row.route}: connect golden row missing`);
+    }
+  }
+  if (!fetchGolden.includes("NODE_HTTP_SOCKET_ROUTES fetch PASS")) {
+    errors.push("Node HTTP fetch route aggregate golden missing");
+  }
+  if (!connectGolden.includes("NODE_HTTP_SOCKET_ROUTES connect PASS")) {
+    errors.push("Node HTTP connect route aggregate golden missing");
   }
   if (errors.length > 0) {
     throw new Error(
@@ -1055,7 +1173,12 @@ function renderNetworkSurfaces(): string[] {
   out.push(
     "must contain their closed-surface guard; inherited rows consume an",
   );
-  out.push("already-authorized resource named in the note.");
+  out.push(
+    "already-authorized resource named in the note. Behavioral rows bind a",
+  );
+  out.push(
+    "registered raw-engine spec, isolated policies, and per-route goldens.",
+  );
   out.push("");
   out.push("| Surface | Action | Enforcement | Rust owner | Note |");
   out.push("| --- | --- | --- | --- | --- |");
@@ -1065,9 +1188,8 @@ function renderNetworkSurfaces(): string[] {
     );
   }
   for (const row of NODE_HTTP_SOCKET_ROUTES) {
-    const enforcement = row.action === "closed" ? "categorical" : "direct";
     out.push(
-      `| Node HTTP route: ${row.route} | ${row.action} | ${enforcement} | ${row.file}:${row.fn}() | ${row.boundary}; raw-engine fixture ${row.fixture} |`,
+      `| Node HTTP route: ${row.route} | ${row.action} | behavioral | ${row.file}:${row.fn}() | ${row.boundary}; registered raw-engine fixture ${row.fixture} |`,
     );
   }
   out.push("");

@@ -90,15 +90,45 @@ async function runRoutes(expected) {
   }
 }
 
+async function runSchemes(expected) {
+  let connections = 0;
+  let requests = 0;
+  const server = http.createServer((request, response) => {
+    requests++;
+    if (request.url === "/module.js") {
+      response.writeHead(200, { "content-type": "text/javascript" });
+      response.end("export default 'REMOTE_BORROWED';");
+    } else {
+      response.writeHead(200, { connection: "close" });
+      response.end("network scheme reached TCP");
+    }
+  });
+  server.on("connection", () => connections++);
+  const sockets = track(server);
+  await listen(server, { hostname: "127.0.0.1", port: 0 });
+  try {
+    await runUrlSchemeMatrix(
+      expected,
+      new URL("./fixture.txt", import.meta.url),
+      `http://127.0.0.1:${server.address().port}`,
+    );
+    if (connections !== 0 || requests !== 0) {
+      throw new Error(
+        `non-network scheme reached ${connections} TCP connection(s) and ${requests} HTTP request(s)`,
+      );
+    }
+  } finally {
+    await close(server, sockets);
+  }
+}
+
 const fixtureMode = Deno.env.get("ODEN_TEST_FIXTURE_MODE") ?? Deno.args[0];
-const fixtureExpected = Deno.env.get("ODEN_TEST_FIXTURE_EXPECTED") ?? Deno.args[1];
+const fixtureExpected = Deno.env.get("ODEN_TEST_FIXTURE_EXPECTED") ??
+  Deno.args[1];
 if (fixtureMode === "routes") {
   await runRoutes(fixtureExpected);
 } else if (fixtureMode === "schemes") {
-  await runUrlSchemeMatrix(
-    fixtureExpected,
-    new URL("./fixture.txt", import.meta.url),
-  );
+  await runSchemes(fixtureExpected);
 } else {
   throw new Error(`unknown fixture mode: ${fixtureMode}`);
 }
