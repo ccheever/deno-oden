@@ -93,6 +93,7 @@ pub enum AuthorityStateError {
   CacheKeyStale,
   Serialization(String),
   SessionRowIdentity(String),
+  UntypedSessionMutation,
   LockPoisoned,
 }
 
@@ -148,6 +149,9 @@ impl fmt::Display for AuthorityStateError {
       Self::SessionRowIdentity(error) => {
         write!(formatter, "session-row identity refused: {error}")
       }
+      Self::UntypedSessionMutation => formatter.write_str(
+        "session rows require a stable-ID typed authority transaction",
+      ),
       Self::LockPoisoned => {
         formatter.write_str("runtime authority state lock is poisoned")
       }
@@ -834,7 +838,7 @@ impl AuthorityTransaction {
       selector,
     )?;
     if admission == SessionRowAdmission::Insert {
-      self.upsert(
+      self.upsert_row(
         AuthorityRowKind::SessionRevocation,
         ids.revocation().to_string(),
         selector,
@@ -885,13 +889,13 @@ impl AuthorityTransaction {
       .map(AuthorityRowKind::SessionRevocation)
       .contains_key(positive_ids.revocation())
     {
-      self.remove(
+      self.remove_row(
         AuthorityRowKind::SessionRevocation,
         positive_ids.revocation().to_string(),
       )?;
     }
     if positive_admission == SessionRowAdmission::Insert {
-      self.upsert(
+      self.upsert_row(
         AuthorityRowKind::SessionPositive,
         positive_ids.positive().to_string(),
         positive_selector,
@@ -901,6 +905,21 @@ impl AuthorityTransaction {
   }
 
   pub(crate) fn upsert(
+    &mut self,
+    kind: AuthorityRowKind,
+    row_id: String,
+    selector: &CanonicalAuthoritySelector,
+  ) -> Result<(), AuthorityStateError> {
+    if matches!(
+      kind,
+      AuthorityRowKind::SessionPositive | AuthorityRowKind::SessionRevocation
+    ) {
+      return self.reject(AuthorityStateError::UntypedSessionMutation);
+    }
+    self.upsert_row(kind, row_id, selector)
+  }
+
+  fn upsert_row(
     &mut self,
     kind: AuthorityRowKind,
     row_id: String,
@@ -920,6 +939,20 @@ impl AuthorityTransaction {
     kind: AuthorityRowKind,
     row_id: String,
   ) -> Result<(), AuthorityStateError> {
+    if matches!(
+      kind,
+      AuthorityRowKind::SessionPositive | AuthorityRowKind::SessionRevocation
+    ) {
+      return self.reject(AuthorityStateError::UntypedSessionMutation);
+    }
+    self.remove_row(kind, row_id)
+  }
+
+  fn remove_row(
+    &mut self,
+    kind: AuthorityRowKind,
+    row_id: String,
+  ) -> Result<(), AuthorityStateError> {
     if let Err(error) = validate_component(
       "authorityRow.rowId",
       &row_id,
@@ -930,6 +963,39 @@ impl AuthorityTransaction {
     self.reserve_change(kind, &row_id)?;
     self.changes.push(RowChange::Remove { kind, row_id });
     Ok(())
+  }
+
+  #[cfg(test)]
+  pub(crate) fn upsert_session_row_for_test(
+    &mut self,
+    kind: AuthorityRowKind,
+    row_id: String,
+    selector: &CanonicalAuthoritySelector,
+  ) -> Result<(), AuthorityStateError> {
+    if !matches!(
+      kind,
+      AuthorityRowKind::SessionPositive | AuthorityRowKind::SessionRevocation
+    ) {
+      return self
+        .reject(AuthorityStateError::InvalidField("test.sessionRowKind"));
+    }
+    self.upsert_row(kind, row_id, selector)
+  }
+
+  #[cfg(test)]
+  pub(crate) fn remove_session_row_for_test(
+    &mut self,
+    kind: AuthorityRowKind,
+    row_id: String,
+  ) -> Result<(), AuthorityStateError> {
+    if !matches!(
+      kind,
+      AuthorityRowKind::SessionPositive | AuthorityRowKind::SessionRevocation
+    ) {
+      return self
+        .reject(AuthorityStateError::InvalidField("test.sessionRowKind"));
+    }
+    self.remove_row(kind, row_id)
   }
 }
 
@@ -2309,10 +2375,40 @@ mod tests {
   ) -> RuntimeAuthorityReadView {
     let mut transaction = state.begin_transaction().unwrap();
     let selector = selector(value, 0);
-    transaction
-      .upsert(kind, row_id.to_string(), &selector)
-      .unwrap();
+    upsert_row_for_test(&mut transaction, kind, row_id, &selector).unwrap();
     state.commit(transaction).unwrap()
+  }
+
+  fn upsert_row_for_test(
+    transaction: &mut AuthorityTransaction,
+    kind: AuthorityRowKind,
+    row_id: &str,
+    selector: &CanonicalAuthoritySelector,
+  ) -> Result<(), AuthorityStateError> {
+    match kind {
+      AuthorityRowKind::SessionPositive
+      | AuthorityRowKind::SessionRevocation => transaction
+        .upsert_session_row_for_test(kind, row_id.to_string(), selector),
+      AuthorityRowKind::NegativeOverlay | AuthorityRowKind::Revocation => {
+        transaction.upsert(kind, row_id.to_string(), selector)
+      }
+    }
+  }
+
+  fn remove_row_for_test(
+    transaction: &mut AuthorityTransaction,
+    kind: AuthorityRowKind,
+    row_id: &str,
+  ) -> Result<(), AuthorityStateError> {
+    match kind {
+      AuthorityRowKind::SessionPositive
+      | AuthorityRowKind::SessionRevocation => {
+        transaction.remove_session_row_for_test(kind, row_id.to_string())
+      }
+      AuthorityRowKind::NegativeOverlay | AuthorityRowKind::Revocation => {
+        transaction.remove(kind, row_id.to_string())
+      }
+    }
   }
 
   #[test]
@@ -2403,7 +2499,7 @@ mod tests {
       }
 
       let mut remove = state.begin_transaction().unwrap();
-      remove.remove(kind, "row".to_string()).unwrap();
+      remove_row_for_test(&mut remove, kind, "row").unwrap();
       let view = state.commit(remove).unwrap();
       assert_eq!(view.generations().negative_overlay(), negative_step * 3);
       assert_eq!(view.generations().revocation(), revocation_step * 3);
@@ -2428,9 +2524,13 @@ mod tests {
       let mut transaction = state.begin_transaction().unwrap();
       for item in 0..=index % 3 {
         let selector = selector(&format!("value-{index}-{item}"), 0);
-        transaction
-          .upsert(kind, format!("row-{index}-{item}"), &selector)
-          .unwrap();
+        upsert_row_for_test(
+          &mut transaction,
+          kind,
+          &format!("row-{index}-{item}"),
+          &selector,
+        )
+        .unwrap();
       }
       let previous = state.read_view().unwrap().generations();
       let current = state.commit(transaction).unwrap().generations();
@@ -2468,7 +2568,7 @@ mod tests {
 
     let mut rejected = state.begin_transaction().unwrap();
     rejected
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "candidate".to_string(),
         &selector("candidate", 0),
@@ -2496,7 +2596,7 @@ mod tests {
 
     let mut accepted = state.begin_transaction().unwrap();
     accepted
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "candidate".to_string(),
         &selector("candidate", 0),
@@ -2527,7 +2627,7 @@ mod tests {
     let initial = state.read_view().unwrap();
     let mut transaction = state.begin_transaction_from(&initial).unwrap();
     transaction
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "prepared-row".to_string(),
         &selector("prepared", 0),
@@ -2685,7 +2785,7 @@ mod tests {
     let mut stale = state.begin_transaction_from(&old_view).unwrap();
     let stale_selector = selector("stale-value", 0);
     stale
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "stale-row".to_string(),
         &stale_selector,
@@ -2786,7 +2886,7 @@ mod tests {
       serde_json::json!({ "kind": "env-name", "name": "other" });
     let mut inject = conflicting_state.begin_transaction().unwrap();
     inject
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         ids.positive().to_string(),
         &conflict,
@@ -2808,6 +2908,92 @@ mod tests {
         .selector(),
       &conflict
     );
+  }
+
+  #[test]
+  fn generic_mutation_cannot_insert_remove_or_replace_session_rows() {
+    let owner = principal();
+    let mut positive = selector("session", 0);
+    positive.projection_id = "projection.env:read.positive/2".to_string();
+    let mut revocation = positive.clone();
+    revocation.projection_id = "projection.env:read.negative/2".to_string();
+
+    for (kind, selector) in [
+      (AuthorityRowKind::SessionPositive, &positive),
+      (AuthorityRowKind::SessionRevocation, &revocation),
+    ] {
+      let empty = RuntimeAuthorityState::new(identity());
+      let mut insert = empty.begin_transaction().unwrap();
+      assert_eq!(
+        insert.upsert(kind, "caller-chosen".to_string(), selector),
+        Err(AuthorityStateError::UntypedSessionMutation)
+      );
+      assert!(matches!(
+        empty.commit(insert),
+        Err(AuthorityStateError::UntypedSessionMutation)
+      ));
+      assert_eq!(empty.read_view().unwrap().row_count(), 0);
+
+      let state = RuntimeAuthorityState::new(identity());
+      let ids =
+        session_row_ids(&identity(), &owner, &owner, &positive).unwrap();
+      let row_id = match kind {
+        AuthorityRowKind::SessionPositive => ids.positive(),
+        AuthorityRowKind::SessionRevocation => ids.revocation(),
+        AuthorityRowKind::NegativeOverlay | AuthorityRowKind::Revocation => {
+          unreachable!()
+        }
+      };
+      let mut setup = state.begin_transaction().unwrap();
+      match kind {
+        AuthorityRowKind::SessionPositive => {
+          setup
+            .reconcile_session_grant(&owner, &owner, &positive, &revocation)
+            .unwrap();
+        }
+        AuthorityRowKind::SessionRevocation => {
+          setup
+            .upsert_session_revocation(&owner, &owner, &revocation)
+            .unwrap();
+        }
+        AuthorityRowKind::NegativeOverlay | AuthorityRowKind::Revocation => {
+          unreachable!()
+        }
+      }
+      state.commit(setup).unwrap();
+
+      let mut remove = state.begin_transaction().unwrap();
+      assert_eq!(
+        remove.remove(kind, row_id.to_string()),
+        Err(AuthorityStateError::UntypedSessionMutation)
+      );
+      assert!(matches!(
+        state.commit(remove),
+        Err(AuthorityStateError::UntypedSessionMutation)
+      ));
+
+      let mut replacement = selector.clone();
+      replacement.projection_id =
+        format!("{}.substitution", selector.projection_id);
+      let mut replace = state.begin_transaction().unwrap();
+      assert_eq!(
+        replace.upsert(kind, row_id.to_string(), &replacement),
+        Err(AuthorityStateError::UntypedSessionMutation)
+      );
+      assert!(matches!(
+        state.commit(replace),
+        Err(AuthorityStateError::UntypedSessionMutation)
+      ));
+      assert_eq!(
+        state
+          .read_view()
+          .unwrap()
+          .row(kind, row_id)
+          .unwrap()
+          .selector(),
+        selector
+      );
+    }
   }
 
   #[test]
@@ -2839,9 +3025,7 @@ mod tests {
       state.cache_insert(key, cache_value(overflowed, 0)).unwrap();
       let mut transaction = state.begin_transaction().unwrap();
       let selector = selector("value", 0);
-      transaction
-        .upsert(kind, "row".to_string(), &selector)
-        .unwrap();
+      upsert_row_for_test(&mut transaction, kind, "row", &selector).unwrap();
       assert!(matches!(
         state.commit(transaction),
         Err(AuthorityStateError::GenerationOverflow(field)) if field == overflowed
@@ -2870,7 +3054,7 @@ mod tests {
     let mut transaction = state.begin_transaction().unwrap();
     let valid_selector = selector("value", 0);
     transaction
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "valid".to_string(),
         &valid_selector,
@@ -2906,11 +3090,15 @@ mod tests {
     let mut transaction = state.begin_transaction().unwrap();
     let first = selector("first", 0);
     transaction
-      .upsert(AuthorityRowKind::SessionPositive, "row".to_string(), &first)
+      .upsert_session_row_for_test(
+        AuthorityRowKind::SessionPositive,
+        "row".to_string(),
+        &first,
+      )
       .unwrap();
     let second = selector("second", 0);
     assert_eq!(
-      transaction.upsert(
+      transaction.upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "row".to_string(),
         &second,
@@ -3009,7 +3197,7 @@ mod tests {
       )
       .unwrap();
     transaction
-      .remove(
+      .remove_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "shared-source".to_string(),
       )
@@ -3063,7 +3251,7 @@ mod tests {
     );
     let mut first_transaction = state.begin_transaction().unwrap();
     first_transaction
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "first".to_string(),
         &first_selector,
@@ -3075,7 +3263,7 @@ mod tests {
 
     let mut over_total = state.begin_transaction().unwrap();
     over_total
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "second".to_string(),
         &second_selector,
