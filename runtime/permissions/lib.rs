@@ -2962,6 +2962,104 @@ enum OdenAuditChannel {
   Broken { authenticated: bool },
 }
 
+#[derive(Debug)]
+enum OdenAuditKeyHandoff {
+  Absent,
+  Loaded(Vec<u8>),
+  Broken,
+}
+
+#[cfg(unix)]
+fn oden_audit_key_same_identity(
+  expected: &std::fs::Metadata,
+  actual: &std::fs::Metadata,
+) -> bool {
+  use std::os::unix::fs::MetadataExt;
+
+  expected.dev() == actual.dev() && expected.ino() == actual.ino()
+}
+
+#[cfg(not(unix))]
+fn oden_audit_key_same_identity(
+  _expected: &std::fs::Metadata,
+  _actual: &std::fs::Metadata,
+) -> bool {
+  true
+}
+
+// @ref LLP 0019#authenticated-verification-only-bootstrap-and-evidence [implements] -- The audit key is a one-shot authenticated handoff: inspect, no-follow open, identity-match, unlink, and read only from the retained descriptor.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "single-threaded bootstrap securely opens and consumes the parent-created one-shot audit key before V8"
+)]
+fn oden_capsec_consume_audit_key(path: &Path) -> OdenAuditKeyHandoff {
+  let expected = match std::fs::symlink_metadata(path) {
+    Ok(metadata) => metadata,
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+      return OdenAuditKeyHandoff::Absent;
+    }
+    Err(_) => return OdenAuditKeyHandoff::Broken,
+  };
+  // Reject non-regular objects before open so a FIFO/device can never make
+  // bootstrap block or read external bytes. A symlink is left untouched; the
+  // engine neither follows it nor removes its target.
+  if !expected.file_type().is_file() || expected.file_type().is_symlink() {
+    return OdenAuditKeyHandoff::Broken;
+  }
+
+  let mut options = std::fs::OpenOptions::new();
+  options.read(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+  }
+  let mut file = match options.open(path) {
+    Ok(file) => file,
+    Err(_) => return OdenAuditKeyHandoff::Broken,
+  };
+  let opened = match file.metadata() {
+    Ok(metadata) => metadata,
+    Err(_) => return OdenAuditKeyHandoff::Broken,
+  };
+  if !opened.is_file() || !oden_audit_key_same_identity(&expected, &opened) {
+    return OdenAuditKeyHandoff::Broken;
+  }
+
+  // Reinspect the directory entry immediately before unlink. This refuses a
+  // deterministic pre/open or post-open replacement rather than consuming a
+  // path that no longer names the retained descriptor.
+  let current = match std::fs::symlink_metadata(path) {
+    Ok(metadata) => metadata,
+    Err(_) => return OdenAuditKeyHandoff::Broken,
+  };
+  if !current.file_type().is_file()
+    || current.file_type().is_symlink()
+    || !oden_audit_key_same_identity(&opened, &current)
+  {
+    return OdenAuditKeyHandoff::Broken;
+  }
+  if std::fs::remove_file(path).is_err() {
+    return OdenAuditKeyHandoff::Broken;
+  }
+
+  // Once the exact opened pathname is consumed, every later size/read/EOF
+  // failure remains an authenticated broken handoff. Bytes always come from
+  // the retained descriptor, never from a second pathname lookup.
+  if opened.len() != 32 {
+    return OdenAuditKeyHandoff::Broken;
+  }
+  let mut key = vec![0; 32];
+  if file.read_exact(&mut key).is_err() {
+    return OdenAuditKeyHandoff::Broken;
+  }
+  let mut trailing = [0; 1];
+  match file.read(&mut trailing) {
+    Ok(0) => OdenAuditKeyHandoff::Loaded(key),
+    _ => OdenAuditKeyHandoff::Broken,
+  }
+}
+
 impl OdenAuditChannel {
   #[allow(
     clippy::disallowed_methods,
@@ -2978,32 +3076,10 @@ impl OdenAuditChannel {
       };
     };
     let key_path = control_root.join("audit.key");
-    let key_metadata = std::fs::symlink_metadata(&key_path);
-    let key = match key_metadata {
-      Ok(metadata)
-        if metadata.file_type().is_file()
-          && !metadata.file_type().is_symlink()
-          && metadata.len() == 32 =>
-      {
-        let key = std::fs::read(&key_path);
-        let removed = std::fs::remove_file(&key_path);
-        match (key, removed) {
-          (Ok(key), Ok(())) if key.len() == 32 => Some(key),
-          _ => {
-            return Self::Broken {
-              authenticated: true,
-            };
-          }
-        }
-      }
-      Ok(_) => {
-        let _ = std::fs::remove_file(&key_path);
-        return Self::Broken {
-          authenticated: true,
-        };
-      }
-      Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-      Err(_) => {
+    let key = match oden_capsec_consume_audit_key(&key_path) {
+      OdenAuditKeyHandoff::Absent => None,
+      OdenAuditKeyHandoff::Loaded(key) => Some(key),
+      OdenAuditKeyHandoff::Broken => {
         return Self::Broken {
           authenticated: true,
         };
@@ -10915,6 +10991,134 @@ mod tests {
       oden_capsec_classify_url_scheme("future-transport:"),
       ClosedUnknown
     );
+  }
+
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "isolated security test constructs the one-shot audit key handoff directly"
+  )]
+  fn oden_audit_key_regular_file_is_loaded_and_consumed() {
+    let dir = std::env::temp_dir().join(format!(
+      "oden-audit-key-regular-{}-{}",
+      std::process::id(),
+      rand::random::<u64>()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("audit.key");
+    assert!(matches!(
+      oden_capsec_consume_audit_key(&path),
+      OdenAuditKeyHandoff::Absent
+    ));
+    std::fs::write(&path, [7; 32]).unwrap();
+
+    let OdenAuditKeyHandoff::Loaded(key) = oden_capsec_consume_audit_key(&path)
+    else {
+      panic!("regular audit key was not loaded");
+    };
+    assert_eq!(key, vec![7; 32]);
+    assert_eq!(
+      std::fs::symlink_metadata(&path).unwrap_err().kind(),
+      std::io::ErrorKind::NotFound
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+  }
+
+  #[cfg(unix)]
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "isolated security test proves a one-shot key symlink is neither followed nor consumed"
+  )]
+  fn oden_audit_key_symlink_is_refused_without_touching_target() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!(
+      "oden-audit-key-symlink-{}-{}",
+      std::process::id(),
+      rand::random::<u64>()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let target = dir.join("target");
+    let path = dir.join("audit.key");
+    std::fs::write(&target, [11; 32]).unwrap();
+    symlink(&target, &path).unwrap();
+
+    assert!(matches!(
+      oden_capsec_consume_audit_key(&path),
+      OdenAuditKeyHandoff::Broken
+    ));
+    assert!(
+      std::fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink()
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), vec![11; 32]);
+    std::fs::remove_dir_all(dir).unwrap();
+  }
+
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "isolated security test constructs malformed one-shot audit key objects directly"
+  )]
+  fn oden_audit_key_wrong_size_is_consumed_but_wrong_type_is_not() {
+    let dir = std::env::temp_dir().join(format!(
+      "oden-audit-key-shape-{}-{}",
+      std::process::id(),
+      rand::random::<u64>()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("audit.key");
+    std::fs::write(&path, [3; 31]).unwrap();
+    assert!(matches!(
+      oden_capsec_consume_audit_key(&path),
+      OdenAuditKeyHandoff::Broken
+    ));
+    assert_eq!(
+      std::fs::symlink_metadata(&path).unwrap_err().kind(),
+      std::io::ErrorKind::NotFound
+    );
+
+    std::fs::create_dir(&path).unwrap();
+    assert!(matches!(
+      oden_capsec_consume_audit_key(&path),
+      OdenAuditKeyHandoff::Broken
+    ));
+    assert!(std::fs::metadata(&path).unwrap().is_dir());
+    std::fs::remove_dir_all(dir).unwrap();
+  }
+
+  #[cfg(unix)]
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "isolated security test compares deterministic Unix file identities"
+  )]
+  fn oden_audit_key_identity_requires_the_same_unix_object() {
+    let dir = std::env::temp_dir().join(format!(
+      "oden-audit-key-identity-{}-{}",
+      std::process::id(),
+      rand::random::<u64>()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let first = dir.join("first");
+    let alias = dir.join("alias");
+    let other = dir.join("other");
+    std::fs::write(&first, [1; 32]).unwrap();
+    std::fs::hard_link(&first, &alias).unwrap();
+    std::fs::write(&other, [2; 32]).unwrap();
+    let first_metadata = std::fs::metadata(&first).unwrap();
+    assert!(oden_audit_key_same_identity(
+      &first_metadata,
+      &std::fs::metadata(&alias).unwrap()
+    ));
+    assert!(!oden_audit_key_same_identity(
+      &first_metadata,
+      &std::fs::metadata(&other).unwrap()
+    ));
+    std::fs::remove_dir_all(dir).unwrap();
   }
 
   #[test]
