@@ -50,6 +50,7 @@ mod oden_protected;
 mod oden_rev2_authority;
 mod oden_rev2_context;
 mod oden_rev2_executable;
+mod oden_rev2_permission;
 mod oden_rev2_policy;
 mod oden_rev2_protocol;
 mod oden_rev2_runtime;
@@ -64,6 +65,10 @@ pub mod rev2;
 #[path = "oden_rev2_registry_generated.rs"]
 mod rev2_registry_generated;
 
+pub use oden_rev2_context::OdenRev2RuntimeAuthorityContext;
+pub use oden_rev2_permission::OdenRev2PermissionError;
+pub use oden_rev2_permission::OdenRev2PermissionOperation;
+pub use oden_rev2_permission::oden_capsec_rev2_permission_operation;
 pub use oden_rev2_policy::OdenRev2CompiledBuildIdentity;
 pub use oden_rev2_policy::OdenRev2LoadState;
 pub use oden_rev2_policy::OdenRev2LoadedPolicyContext;
@@ -1685,24 +1690,25 @@ fn oden_capsec_gate_url_scheme_inner(
 pub const ODEN_CAPSEC_REV2_UNARMED_EXIT_CODE: i32 = 75;
 
 static ODEN_CAPSEC_REV2_BOOTSTRAP: OnceLock<
-  Result<OdenRev2LoadedPolicyContext, String>,
+  Result<Arc<OdenRev2RuntimeAuthorityContext>, String>,
 > = OnceLock::new();
 
-pub fn oden_capsec_rev2_loaded_policy_context()
--> Option<&'static OdenRev2LoadedPolicyContext> {
+/// The one process-wide C04 authority context. Clones retain the same sealed
+/// host object; no policy bytes or independently constructible state cross the
+/// permissions boundary.
+pub fn oden_capsec_rev2_runtime_authority_context()
+-> Option<Arc<OdenRev2RuntimeAuthorityContext>> {
   ODEN_CAPSEC_REV2_BOOTSTRAP
     .get()
     .and_then(|result| result.as_ref().ok())
+    .cloned()
 }
 
 pub fn oden_capsec_rev2_bootstrap_exit_code() -> Option<i32> {
-  // C03 authenticates and verifies the immutable plane, but C04 still owns
-  // installing its typed permission/handle protocol into every operation
-  // seam. No Rev2 launch may reach V8 merely because a hermetic conformance
-  // status says that its artifact could arm.
-  ODEN_CAPSEC_REV2_BOOTSTRAP
-    .get()
-    .map(|_| ODEN_CAPSEC_REV2_UNARMED_EXIT_CODE)
+  match ODEN_CAPSEC_REV2_BOOTSTRAP.get() {
+    Some(Ok(_)) | None => None,
+    Some(Err(_)) => Some(ODEN_CAPSEC_REV2_UNARMED_EXIT_CODE),
+  }
 }
 
 #[allow(
@@ -1723,9 +1729,10 @@ pub fn oden_capsec_init_control_plane(
   } else {
     oden_capsec_armed()
   };
+  let mut rev2_armed = false;
   let _ = oden_capsec_project_root();
   if let Some(snapshot) = explicit_rev2.as_deref() {
-    let result = if explicit_policy.is_some() {
+    let loaded_result = if explicit_policy.is_some() {
       // Consume/unlink any securely opened one-shot candidate even though the
       // mixed protocol is unconditionally refused. This prevents a rejected
       // handoff retaining receipt or host-binding material on disk.
@@ -1740,7 +1747,7 @@ pub fn oden_capsec_init_control_plane(
     } else {
       oden_capsec_consume_rev2_snapshot(snapshot, &rev2_build_identity)
     };
-    let evidence = match &result {
+    let evidence = match &loaded_result {
       Ok(context) => context.evidence(),
       Err(reason) => serde_json::json!({
         "v": 1,
@@ -1768,7 +1775,12 @@ pub fn oden_capsec_init_control_plane(
         "blockers": [reason],
       }),
     };
-    let _ = ODEN_CAPSEC_REV2_BOOTSTRAP.set(result);
+    // @ref LLP 0019#stage-c-runtime-authority-and-typed-permission-checkpoint-c04--eng-24017 [implements] -- Only an authenticated Armable C03 context can claim and construct the process-wide C04 context, before the CLI creates V8.
+    let runtime_result = loaded_result.and_then(|loaded| {
+      OdenRev2RuntimeAuthorityContext::install(loaded).map(Arc::new)
+    });
+    rev2_armed = runtime_result.is_ok();
+    let _ = ODEN_CAPSEC_REV2_BOOTSTRAP.set(runtime_result);
     oden_capsec_write_audit_record(&evidence);
   } else {
     // Keep the frozen Rev1 initialization order unchanged when no Rev2
@@ -1802,7 +1814,7 @@ pub fn oden_capsec_init_control_plane(
       std::env::remove_var(name);
     }
   }
-  armed
+  armed || rev2_armed
 }
 
 #[allow(
@@ -2068,10 +2080,11 @@ pub(crate) fn oden_capsec_current_principal_label() -> Option<String> {
   Some(oden_capsec_principal().label())
 }
 
-/// The already-validated fields of a `Deno.PermissionDescriptor`. Runtime ops
-/// validate with the stock query parser first, then hand this borrowed view to
-/// layer 2. Package calls never mutate layer-1 state; ambient calls fall
-/// through to stock Deno unchanged.
+/// The closed known fields of a `Deno.PermissionDescriptor`. Revision 1 ops
+/// validate with the stock query parser before using this view. An installed
+/// Revision 2 context instead selects a generated exact-field branch and uses
+/// the stock parser only for spelling/path syntax, never for an authority
+/// decision or wildcard fallback.
 /// @ref llp/0015-dynamic-permissions-with-ceiling.plan.md (Deno.permissions.request)
 pub struct OdenDynamicPermissionDescriptor<'a> {
   pub name: &'a str,
@@ -5057,6 +5070,14 @@ fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
 /// domain. This is host state, not a caller-provided actor claim.
 /// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
 pub fn oden_rev2_capture_live_principals() -> Vec<rev2::PrincipalRef> {
+  oden_rev2_capture_live_permission_actors().0
+}
+
+/// Capture the constrained principal set and the nearest live effect owner in
+/// one synchronous host observation. The tuple is crate-private so callers
+/// cannot substitute JavaScript-provided attribution between the two fields.
+pub(crate) fn oden_rev2_capture_live_permission_actors()
+-> (Vec<rev2::PrincipalRef>, rev2::PrincipalRef) {
   let mut mapped = Vec::new();
   let mut push = |principal: OdenPrincipal, locator: Option<&str>| {
     if principal != OdenPrincipal::Runtime {
@@ -5101,9 +5122,10 @@ pub fn oden_rev2_capture_live_principals() -> Vec<rev2::PrincipalRef> {
       None,
     ));
   }
+  let overlay_owner = mapped[0].clone();
   mapped.sort();
   mapped.dedup();
-  mapped
+  (mapped, overlay_owner)
 }
 
 fn oden_rev2_map_attributed_principal(

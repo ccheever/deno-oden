@@ -38,6 +38,8 @@ use crate::rev2::CanonicalEffect;
 use crate::rev2::PositiveSource;
 use crate::rev2::PrincipalRef;
 use crate::rev2::canonical_json;
+#[cfg(test)]
+use crate::rev2_registry_generated::REV2_RUNTIME_NEGATIVE_REENTRY_PHASES;
 use crate::rev2_registry_generated::{
   REV2_RUNTIME_AUTHORITY_MAX_ROW_BYTES, REV2_RUNTIME_AUTHORITY_MAX_ROWS,
   REV2_RUNTIME_AUTHORITY_MAX_TOTAL_BYTES, REV2_RUNTIME_CACHE_MAX_DIMENSIONS,
@@ -48,7 +50,7 @@ use crate::rev2_registry_generated::{
   REV2_RUNTIME_GENERATION_TRANSITIONS,
   REV2_RUNTIME_MAX_CANONICAL_COMPONENT_BYTES,
   REV2_RUNTIME_MAX_CANONICAL_EFFECT_BYTES,
-  REV2_RUNTIME_MAX_TRANSACTION_MUTATIONS, REV2_RUNTIME_NEGATIVE_REENTRY_PHASES,
+  REV2_RUNTIME_MAX_TRANSACTION_MUTATIONS,
 };
 
 pub const DECISION_CACHE_MAX_ENTRIES: usize = REV2_RUNTIME_CACHE_MAX_ENTRIES;
@@ -2156,6 +2158,7 @@ impl RuntimeAuthorityState {
     inner.cache.insert(key, value)
   }
 
+  #[cfg(test)]
   pub fn cache_candidate(
     &self,
     key: &DecisionCacheKey,
@@ -2191,12 +2194,14 @@ impl RuntimeAuthorityState {
 
 /// A cache hit is deliberately a candidate paired with the exact read view;
 /// callers must evaluate current negatives against this view before reuse.
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct DecisionCacheCandidate {
   value: DecisionCacheValue,
   read_view: RuntimeAuthorityReadView,
 }
 
+#[cfg(test)]
 impl DecisionCacheCandidate {
   pub fn read_view(&self) -> &RuntimeAuthorityReadView {
     &self.read_view
@@ -2234,12 +2239,14 @@ impl DecisionCacheCandidate {
   }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct ValidatedDecisionCacheHit {
   value: DecisionCacheValue,
   read_view: RuntimeAuthorityReadView,
 }
 
+#[cfg(test)]
 impl ValidatedDecisionCacheHit {
   pub fn value(&self) -> &DecisionCacheValue {
     &self.value

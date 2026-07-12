@@ -2,10 +2,10 @@
 
 use ::deno_permissions::PermissionState;
 use ::deno_permissions::PermissionsContainer;
-use deno_core::FromV8;
 use deno_core::OpState;
 use deno_core::ToV8;
 use deno_core::op2;
+use serde::Deserialize;
 
 deno_core::extension!(
   deno_permissions,
@@ -14,9 +14,17 @@ deno_core::extension!(
     op_revoke_permission,
     op_request_permission,
   ],
+  state = |state| {
+    if let Some(context) =
+      ::deno_permissions::oden_capsec_rev2_runtime_authority_context()
+    {
+      state.put(context);
+    }
+  },
 );
 
-#[derive(FromV8)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionArgs {
   name: String,
   path: Option<String>,
@@ -64,6 +72,9 @@ pub enum PermissionError {
   #[class(inherit)]
   #[error("{0}")]
   RunDescriptorParse(#[from] ::deno_permissions::RunDescriptorParseError),
+  #[class(generic)]
+  #[error("{0}")]
+  Rev2(String),
 }
 
 fn query_permission(
@@ -96,11 +107,47 @@ fn dynamic_descriptor(
   }
 }
 
+fn resolve_rev2_permission<T>(
+  candidate: Option<Result<T, PermissionError>>,
+) -> Result<Option<T>, PermissionError> {
+  candidate.transpose()
+}
+
+fn rev2_permission(
+  state: &OpState,
+  args: &PermissionArgs,
+  operation: ::deno_permissions::OdenRev2PermissionOperation,
+) -> Option<Result<PermissionState, PermissionError>> {
+  let context = state
+    .try_borrow::<std::sync::Arc<
+      ::deno_permissions::OdenRev2RuntimeAuthorityContext,
+    >>()
+    .cloned()?;
+  let permissions = state.borrow::<PermissionsContainer>();
+  Some(
+    ::deno_permissions::oden_capsec_rev2_permission_operation(
+      context.as_ref(),
+      permissions,
+      operation,
+      &dynamic_descriptor(args),
+    )
+    .map_err(|error| PermissionError::Rev2(error.to_string())),
+  )
+}
+
 #[op2(stack_trace)]
 pub fn op_query_permission(
   state: &mut OpState,
-  #[scoped] args: PermissionArgs,
+  #[serde] args: PermissionArgs,
 ) -> Result<PermissionStatus, PermissionError> {
+  let rev2 = rev2_permission(
+    state,
+    &args,
+    ::deno_permissions::OdenRev2PermissionOperation::Query,
+  );
+  if let Some(permission) = resolve_rev2_permission(rev2)? {
+    return Ok(PermissionStatus::from(permission));
+  }
   let permissions = state.borrow::<PermissionsContainer>();
   // Validate through the stock descriptor parser first. Layer 2 then
   // overrides the status for a package principal without mutating layer 1.
@@ -115,8 +162,16 @@ pub fn op_query_permission(
 #[op2(stack_trace)]
 pub fn op_revoke_permission(
   state: &mut OpState,
-  #[scoped] args: PermissionArgs,
+  #[serde] args: PermissionArgs,
 ) -> Result<PermissionStatus, PermissionError> {
+  let rev2 = rev2_permission(
+    state,
+    &args,
+    ::deno_permissions::OdenRev2PermissionOperation::Revoke,
+  );
+  if let Some(permission) = resolve_rev2_permission(rev2)? {
+    return Ok(PermissionStatus::from(permission));
+  }
   let permissions = state.borrow::<PermissionsContainer>();
   // Validation only; package revoke is a session overlay and must not narrow
   // the process-global permission object for every other principal.
@@ -143,8 +198,16 @@ pub fn op_revoke_permission(
 #[op2(stack_trace)]
 pub fn op_request_permission(
   state: &mut OpState,
-  #[scoped] args: PermissionArgs,
+  #[serde] args: PermissionArgs,
 ) -> Result<PermissionStatus, PermissionError> {
+  let rev2 = rev2_permission(
+    state,
+    &args,
+    ::deno_permissions::OdenRev2PermissionOperation::Request,
+  );
+  if let Some(permission) = resolve_rev2_permission(rev2)? {
+    return Ok(PermissionStatus::from(permission));
+  }
   let permissions = state.borrow::<PermissionsContainer>();
   // Validation only. A package request is decided against its immutable
   // escalation ceiling and can update only its layer-2 session overlay; it
@@ -167,4 +230,29 @@ pub fn op_request_permission(
     _ => return Err(PermissionError::InvalidPermissionName(args.name)),
   };
   Ok(PermissionStatus::from(perm))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn installed_rev2_refusal_propagates_without_rev1_fallback() {
+    let result = resolve_rev2_permission::<PermissionState>(Some(Err(
+      PermissionError::Rev2("generated refusal".to_string()),
+    )));
+    assert!(matches!(
+      result,
+      Err(PermissionError::Rev2(reason)) if reason == "generated refusal"
+    ));
+  }
+
+  #[test]
+  fn absent_rev2_context_selects_the_existing_path() {
+    assert!(
+      resolve_rev2_permission::<PermissionState>(None)
+        .unwrap()
+        .is_none()
+    );
+  }
 }

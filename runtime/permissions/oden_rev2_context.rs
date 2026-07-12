@@ -674,11 +674,33 @@ impl OdenRev2RuntimeAuthorityContext {
     view: &RuntimeAuthorityReadView,
     facts: OdenRev2OperationAuthorityFacts,
   ) -> Result<DecisionPolicyInput, String> {
+    self.decision_policy_for_view(view, facts, true)
+  }
+
+  /// Project a policy from the immutable proposed view supplied by
+  /// `compare_propose_validate_commit`. The view is intentionally not yet the
+  /// globally current publication; the typed commit path compares its exact
+  /// base publication before exposing the validated result.
+  pub(crate) fn decision_policy_for_proposed_operation(
+    &self,
+    view: &RuntimeAuthorityReadView,
+    facts: OdenRev2OperationAuthorityFacts,
+  ) -> Result<DecisionPolicyInput, String> {
+    self.decision_policy_for_view(view, facts, false)
+  }
+
+  fn decision_policy_for_view(
+    &self,
+    view: &RuntimeAuthorityReadView,
+    facts: OdenRev2OperationAuthorityFacts,
+    require_current_publication: bool,
+  ) -> Result<DecisionPolicyInput, String> {
     if view.identity() != &self.identity
-      || !self
-        .authority_state
-        .is_current(view)
-        .map_err(|_| format!("{CONTEXT_ERROR}-READ-VIEW"))?
+      || (require_current_publication
+        && !self
+          .authority_state
+          .is_current(view)
+          .map_err(|_| format!("{CONTEXT_ERROR}-READ-VIEW"))?)
       || view.is_fail_closed()
     {
       return Err(format!("{CONTEXT_ERROR}-READ-VIEW"));
@@ -816,7 +838,10 @@ impl OdenRev2OperationAuthorityFacts {
   /// Capture only facts whose authentication is complete in C04 today.
   /// Implicit-self inventories, live path identities, and handles remain
   /// closed until their owning host verifiers can construct unforgeable facts.
-  fn new(quota_owner: PrincipalRef, terminal_evidence_id: String) -> Self {
+  pub(crate) fn new(
+    quota_owner: PrincipalRef,
+    terminal_evidence_id: String,
+  ) -> Self {
     Self {
       quota_owner,
       terminal_evidence_id,
@@ -1811,7 +1836,7 @@ mod tests {
     let mut transaction =
       context.authority_state().begin_transaction().unwrap();
     transaction
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "session:exact".to_string(),
         &selector,
@@ -1837,7 +1862,7 @@ mod tests {
       SelectorPolarity::Negative,
     );
     transaction
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionRevocation,
         "revoke:exact".to_string(),
         &negative,
@@ -1849,6 +1874,73 @@ mod tests {
         .decision_policy_for_operation(&stale, empty_operation_facts())
         .is_err()
     );
+  }
+
+  #[test]
+  fn proposed_transaction_policy_projects_only_through_typed_commit_path() {
+    let key = [44_u8; 32];
+    let context = install_for_test(armable_loaded(
+      policy_fixtures::candidate_snapshot(
+        policy_fixtures::hermetic_target(),
+        None,
+      ),
+      &key,
+    ));
+    let owner = principal();
+    let revocation = canonical_selector(
+      Some(owner.clone()),
+      "PROPOSED",
+      SelectorPolarity::Negative,
+    );
+    let base = context.authority_state().read_view().unwrap();
+    let mut transaction = context
+      .authority_state()
+      .begin_transaction_from(&base)
+      .unwrap();
+    transaction
+      .upsert_session_revocation(&owner, &owner, &revocation)
+      .unwrap();
+    let proposal = context
+      .authority_state()
+      .propose_transaction(transaction)
+      .unwrap();
+
+    assert!(
+      context
+        .decision_policy_for_operation(
+          proposal.read_view(),
+          empty_operation_facts(),
+        )
+        .is_err(),
+      "an unpublished proposed view must not pass the current-view API",
+    );
+    let projected = context
+      .decision_policy_for_proposed_operation(
+        proposal.read_view(),
+        empty_operation_facts(),
+      )
+      .unwrap();
+    assert_eq!(projected.generations.negative_overlay, "1");
+    assert_eq!(projected.generations.revocation, "1");
+    assert_eq!(projected.generations.session_overlay, "1");
+
+    let validated = proposal
+      .validate(|view| {
+        context
+          .decision_policy_for_proposed_operation(view, empty_operation_facts())
+          .map_err(|_| {
+            crate::oden_rev2_authority::AuthorityStateError::InvalidField(
+              "proposedPolicy",
+            )
+          })
+      })
+      .unwrap();
+    let committed = context
+      .authority_state()
+      .commit_validated(validated)
+      .unwrap();
+    assert_eq!(committed.output().generations.session_overlay, "1");
+    assert_eq!(committed.read_view().generations().session_overlay(), 1,);
   }
 
   #[test]

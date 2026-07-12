@@ -494,7 +494,7 @@ fn transition_dispositions_from_generated(
 /// Select one closed descriptor branch from the generated C04 protocol.
 /// Unknown, refused, and operation-inapplicable rows fail closed before a
 /// batch can retain caller-controlled effects.
-fn select_generated_permission_branch(
+pub(crate) fn select_generated_permission_branch(
   branch_id: &str,
   operation: PermissionOperation,
 ) -> Result<SelectedGeneratedPermissionBranch, PermissionProtocolError> {
@@ -555,7 +555,7 @@ pub(crate) struct VerifiedPermissionActorSet {
 }
 
 impl VerifiedPermissionActorSet {
-  fn capture_host(
+  pub(crate) fn capture_host(
     constrained_principals: &[PrincipalRef],
     overlay_owner: PrincipalRef,
   ) -> Result<Self, PermissionProtocolError> {
@@ -639,7 +639,7 @@ impl NormalizedPermissionEffect {
     )
   }
 
-  fn capture_generated_slot(
+  pub(crate) fn capture_generated_slot(
     slot_id: String,
     effect_owner: PrincipalRef,
     selector: CanonicalAuthoritySelector,
@@ -765,7 +765,7 @@ pub(crate) struct NormalizedPermissionBatch {
 }
 
 impl NormalizedPermissionBatch {
-  fn capture_host(
+  pub(crate) fn capture_host(
     state: &RuntimeAuthorityState,
     read_view: &RuntimeAuthorityReadView,
     batch_sequence: OdenRev2PermissionBatchSequence,
@@ -942,7 +942,7 @@ impl NormalizedPermissionBatch {
     canonical_serialization(self, MAX_CANONICAL_BATCH_BYTES, "permissionBatch")
   }
 
-  fn session_revoke_transaction(
+  pub(crate) fn session_revoke_transaction(
     &self,
     state: &RuntimeAuthorityState,
     current_result: &PermissionBatchResult,
@@ -1020,7 +1020,7 @@ fn validate_positive_source(
 }
 
 impl PermissionDimensionResult {
-  fn capture_host(
+  pub(crate) fn capture_host(
     principal: PrincipalRef,
     state: PermissionState,
     positive_source: Option<PositiveSource>,
@@ -1061,7 +1061,7 @@ pub(crate) struct PermissionEffectResult {
 }
 
 impl PermissionEffectResult {
-  fn capture_host(
+  pub(crate) fn capture_host(
     slot_id: String,
     dimensions: &[PermissionDimensionResult],
   ) -> Result<Self, PermissionProtocolError> {
@@ -1138,7 +1138,7 @@ pub(crate) struct PermissionBatchResult {
 }
 
 impl PermissionBatchResult {
-  fn capture_complete(
+  pub(crate) fn capture_complete(
     batch: &NormalizedPermissionBatch,
     observed_view: &RuntimeAuthorityReadView,
     effects: &[PermissionEffectResult],
@@ -1209,7 +1209,7 @@ impl PermissionBatchResult {
     Ok(result)
   }
 
-  fn capture_query_current(
+  pub(crate) fn capture_query_current(
     state: &RuntimeAuthorityState,
     batch: &NormalizedPermissionBatch,
     observed_view: &RuntimeAuthorityReadView,
@@ -1226,7 +1226,7 @@ impl PermissionBatchResult {
     Ok(result)
   }
 
-  fn capture_proposed_mutation(
+  pub(crate) fn capture_proposed_mutation(
     batch: &NormalizedPermissionBatch,
     proposed_view: &RuntimeAuthorityReadView,
     effects: &[PermissionEffectResult],
@@ -1409,12 +1409,14 @@ pub(crate) struct AuthenticatedExternalPermissionDecision<'batch> {
 /// effects, typed owners, actor set, and base publication. No transaction
 /// builder exists yet: stable session-row identity and the exact missing-row
 /// projection must come from the future generated semantic registry batch.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct AuthenticatedExternalRequestGrant<'batch> {
   batch: &'batch NormalizedPermissionBatch,
   authority_view: RuntimeAuthorityReadView,
 }
 
+#[cfg(test)]
 impl<'batch> AuthenticatedExternalRequestGrant<'batch> {
   fn into_session_transaction(
     self,
@@ -1467,6 +1469,7 @@ impl<'batch> AuthenticatedExternalRequestGrant<'batch> {
 /// Authentication is necessary but insufficient: all seven generated
 /// negative strata must be re-evaluated against the exact current view before
 /// an external answer can become a result or mutation permit.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct NegativeReentryProof<'batch> {
   decision: ExternalPermissionDecision,
@@ -1475,6 +1478,7 @@ pub(crate) struct NegativeReentryProof<'batch> {
 }
 
 impl<'batch> AuthenticatedExternalPermissionDecision<'batch> {
+  #[cfg(test)]
   fn revalidate_current_negatives<F>(
     self,
     state: &RuntimeAuthorityState,
@@ -1506,6 +1510,7 @@ impl<'batch> AuthenticatedExternalPermissionDecision<'batch> {
   }
 }
 
+#[cfg(test)]
 impl<'batch> NegativeReentryProof<'batch> {
   fn into_request_grant(
     self,
@@ -2667,7 +2672,7 @@ mod tests {
 
     let mut intervening = state.begin_transaction().unwrap();
     intervening
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "session:intervening".to_string(),
         &selector(&owner, "HOME"),
@@ -2870,7 +2875,7 @@ mod tests {
           effects[0].canonical_effect().projection_id.clone();
       }
       transaction
-        .upsert(kind, row_id.to_string(), &row_selector)
+        .upsert_session_row_for_test(kind, row_id.to_string(), &row_selector)
         .unwrap();
       let dimensions = if result_state == PermissionState::Granted {
         vec![dimension(&owner, PermissionState::Granted, "slot:0")]
@@ -2938,7 +2943,7 @@ mod tests {
       batch(&state, &view, 61, PermissionOperation::Request, &effects);
     let mut transaction = state.begin_transaction_from(&view).unwrap();
     transaction
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "test:must-rollback".to_string(),
         effects[0].selector(),
@@ -2996,7 +3001,7 @@ mod tests {
       batch(&state, &view, 12, PermissionOperation::Request, &effects);
     let mut generation_transaction = state.begin_transaction().unwrap();
     generation_transaction
-      .upsert(
+      .upsert_session_row_for_test(
         AuthorityRowKind::SessionPositive,
         "session:generation-test".to_string(),
         &selector(&owner, "HOME"),
