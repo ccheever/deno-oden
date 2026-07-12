@@ -53,6 +53,7 @@ mod oden_rev2_executable;
 mod oden_rev2_policy;
 mod oden_rev2_protocol;
 mod oden_rev2_runtime;
+mod oden_rev2_session;
 pub mod prompter;
 mod runtime_descriptor_parser;
 pub mod which;

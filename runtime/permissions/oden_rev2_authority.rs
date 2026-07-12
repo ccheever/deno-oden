@@ -21,6 +21,7 @@ use serde::Serializer;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -28,28 +29,53 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 
+use crate::oden_rev2_session::{
+  OdenRev2SessionRowIds, SessionRowAdmission, classify_same_id_row,
+  session_row_ids,
+};
 use crate::rev2::CanonicalAuthoritySelector;
 use crate::rev2::CanonicalEffect;
 use crate::rev2::PositiveSource;
 use crate::rev2::PrincipalRef;
 use crate::rev2::canonical_json;
+use crate::rev2_registry_generated::{
+  REV2_RUNTIME_AUTHORITY_MAX_ROW_BYTES, REV2_RUNTIME_AUTHORITY_MAX_ROWS,
+  REV2_RUNTIME_AUTHORITY_MAX_TOTAL_BYTES, REV2_RUNTIME_CACHE_MAX_DIMENSIONS,
+  REV2_RUNTIME_CACHE_MAX_EFFECTS, REV2_RUNTIME_CACHE_MAX_ENTRIES,
+  REV2_RUNTIME_CACHE_MAX_ENTRY_BYTES, REV2_RUNTIME_CACHE_MAX_PRINCIPALS,
+  REV2_RUNTIME_CACHE_MAX_RECEIPT_DEPENDENCIES,
+  REV2_RUNTIME_CACHE_MAX_TOTAL_BYTES, REV2_RUNTIME_DECISION_CACHE_KEY_SCHEMA,
+  REV2_RUNTIME_GENERATION_TRANSITIONS,
+  REV2_RUNTIME_MAX_CANONICAL_COMPONENT_BYTES,
+  REV2_RUNTIME_MAX_CANONICAL_EFFECT_BYTES,
+  REV2_RUNTIME_MAX_TRANSACTION_MUTATIONS, REV2_RUNTIME_NEGATIVE_REENTRY_PHASES,
+};
 
-pub const DECISION_CACHE_MAX_ENTRIES: usize = 4_096;
-pub const DECISION_CACHE_MAX_WEIGHT_BYTES: usize = 16 * 1024 * 1024;
-pub const DECISION_CACHE_MAX_ENTRY_WEIGHT_BYTES: usize = 64 * 1024;
-pub const AUTHORITY_STATE_MAX_ROWS: usize = 4_096;
-pub const AUTHORITY_STATE_MAX_WEIGHT_BYTES: usize = 16 * 1024 * 1024;
-pub const AUTHORITY_STATE_MAX_ROW_WEIGHT_BYTES: usize = 64 * 1024;
+pub const DECISION_CACHE_MAX_ENTRIES: usize = REV2_RUNTIME_CACHE_MAX_ENTRIES;
+pub const DECISION_CACHE_MAX_WEIGHT_BYTES: usize =
+  REV2_RUNTIME_CACHE_MAX_TOTAL_BYTES;
+pub const DECISION_CACHE_MAX_ENTRY_WEIGHT_BYTES: usize =
+  REV2_RUNTIME_CACHE_MAX_ENTRY_BYTES;
+pub const AUTHORITY_STATE_MAX_ROWS: usize = REV2_RUNTIME_AUTHORITY_MAX_ROWS;
+pub const AUTHORITY_STATE_MAX_WEIGHT_BYTES: usize =
+  REV2_RUNTIME_AUTHORITY_MAX_TOTAL_BYTES;
+pub const AUTHORITY_STATE_MAX_ROW_WEIGHT_BYTES: usize =
+  REV2_RUNTIME_AUTHORITY_MAX_ROW_BYTES;
 
-const MAX_IDENTITY_COMPONENT_BYTES: usize = 4_096;
-const MAX_AUTHORITY_ROW_ID_BYTES: usize = 4_096;
-const MAX_TRANSACTION_MUTATIONS: usize = 4_096;
-const MAX_CACHE_COMPONENT_BYTES: usize = 1024 * 1024;
-const MAX_CACHE_CONSTRAINED_PRINCIPALS: usize = 4_096;
-const MAX_CACHE_EFFECTS: usize = 256;
-const MAX_CACHE_DECISION_DIMENSIONS: usize = 16_384;
-const MAX_CACHE_RECEIPT_DEPENDENCIES: usize = 4_096;
-const DECISION_CACHE_KEY_SCHEMA: &str = "oden/capsec-decision-cache-key/2";
+const MAX_IDENTITY_COMPONENT_BYTES: usize =
+  REV2_RUNTIME_MAX_CANONICAL_COMPONENT_BYTES;
+const MAX_AUTHORITY_ROW_ID_BYTES: usize =
+  REV2_RUNTIME_MAX_CANONICAL_COMPONENT_BYTES;
+const MAX_TRANSACTION_MUTATIONS: usize = REV2_RUNTIME_MAX_TRANSACTION_MUTATIONS;
+const MAX_CACHE_COMPONENT_BYTES: usize =
+  REV2_RUNTIME_MAX_CANONICAL_EFFECT_BYTES;
+const MAX_CACHE_CONSTRAINED_PRINCIPALS: usize =
+  REV2_RUNTIME_CACHE_MAX_PRINCIPALS;
+const MAX_CACHE_EFFECTS: usize = REV2_RUNTIME_CACHE_MAX_EFFECTS;
+const MAX_CACHE_DECISION_DIMENSIONS: usize = REV2_RUNTIME_CACHE_MAX_DIMENSIONS;
+const MAX_CACHE_RECEIPT_DEPENDENCIES: usize =
+  REV2_RUNTIME_CACHE_MAX_RECEIPT_DEPENDENCIES;
+const DECISION_CACHE_KEY_SCHEMA: &str = REV2_RUNTIME_DECISION_CACHE_KEY_SCHEMA;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuthorityStateError {
@@ -66,6 +92,7 @@ pub enum AuthorityStateError {
   StateFailClosed,
   CacheKeyStale,
   Serialization(String),
+  SessionRowIdentity(String),
   LockPoisoned,
 }
 
@@ -117,6 +144,9 @@ impl fmt::Display for AuthorityStateError {
           formatter,
           "canonical protocol serialization failed: {error}"
         )
+      }
+      Self::SessionRowIdentity(error) => {
+        write!(formatter, "session-row identity refused: {error}")
       }
       Self::LockPoisoned => {
         formatter.write_str("runtime authority state lock is poisoned")
@@ -420,6 +450,11 @@ impl AuthorityRow {
     row.encoded_weight_bytes = serde_json::to_vec(&row)
       .map_err(|error| AuthorityStateError::Serialization(error.to_string()))?
       .len();
+    if row.encoded_weight_bytes > AUTHORITY_STATE_MAX_ROW_WEIGHT_BYTES {
+      return Err(AuthorityStateError::AuthorityCapacityExceeded(
+        "per-row byte bound",
+      ));
+    }
     Ok(row)
   }
 
@@ -612,7 +647,26 @@ struct GenerationImpact {
 }
 
 impl GenerationImpact {
-  fn record(&mut self, kind: AuthorityRowKind) {
+  fn record(
+    &mut self,
+    kind: AuthorityRowKind,
+  ) -> Result<(), AuthorityStateError> {
+    let transition_id = match kind {
+      AuthorityRowKind::SessionPositive => {
+        "generation.session-positive-change/2"
+      }
+      AuthorityRowKind::SessionRevocation => {
+        "generation.session-revocation-change/2"
+      }
+      AuthorityRowKind::NegativeOverlay => "generation.other-negative-change/2",
+      AuthorityRowKind::Revocation => {
+        "generation.revocation-inventory-change/2"
+      }
+    };
+    let transition = REV2_RUNTIME_GENERATION_TRANSITIONS
+      .iter()
+      .find(|transition| transition.id == transition_id)
+      .ok_or(AuthorityStateError::InvalidField("generationTransition"))?;
     match kind {
       AuthorityRowKind::SessionPositive => {
         self.session_overlay = true;
@@ -630,6 +684,34 @@ impl GenerationImpact {
         self.revocation = true;
       }
     }
+    let expected = match kind {
+      AuthorityRowKind::SessionPositive => {
+        ["sessionOverlay"].into_iter().collect::<BTreeSet<_>>()
+      }
+      AuthorityRowKind::SessionRevocation => {
+        ["negativeOverlay", "revocation", "sessionOverlay"]
+          .into_iter()
+          .collect::<BTreeSet<_>>()
+      }
+      AuthorityRowKind::NegativeOverlay => {
+        ["negativeOverlay"].into_iter().collect::<BTreeSet<_>>()
+      }
+      AuthorityRowKind::Revocation => ["negativeOverlay", "revocation"]
+        .into_iter()
+        .collect::<BTreeSet<_>>(),
+    };
+    let generated = transition
+      .increments
+      .iter()
+      .copied()
+      .collect::<BTreeSet<_>>();
+    if generated != expected
+      || transition.cache_disposition != "clear-before-publication"
+      || transition.publication != "atomic-rows-vector-and-cache"
+    {
+      return Err(AuthorityStateError::InvalidField("generationTransition"));
+    }
+    Ok(())
   }
 
   fn is_empty(self) -> bool {
@@ -699,6 +781,123 @@ impl AuthorityTransaction {
       return self.reject(AuthorityStateError::DuplicateMutation);
     }
     Ok(())
+  }
+
+  fn session_admission(
+    &mut self,
+    kind: AuthorityRowKind,
+    row_id: &str,
+    selector: &CanonicalAuthoritySelector,
+  ) -> Result<SessionRowAdmission, AuthorityStateError> {
+    let existing = self
+      .base_publication
+      .rows
+      .map(kind)
+      .get(row_id)
+      .map(AuthorityRow::selector);
+    classify_same_id_row(existing, selector).map_err(|error| {
+      let error = AuthorityStateError::SessionRowIdentity(error.to_string());
+      if self.construction_error.is_none() {
+        self.construction_error = Some(error.clone());
+      }
+      error
+    })
+  }
+
+  fn derive_session_row_ids(
+    &mut self,
+    overlay_owner: &PrincipalRef,
+    principal: &PrincipalRef,
+    selector: &CanonicalAuthoritySelector,
+  ) -> Result<OdenRev2SessionRowIds, AuthorityStateError> {
+    match session_row_ids(&self.identity, overlay_owner, principal, selector) {
+      Ok(ids) => Ok(ids),
+      Err(error) => {
+        self.reject(AuthorityStateError::SessionRowIdentity(error.to_string()))
+      }
+    }
+  }
+
+  /// Publish one stable session revocation. The row ID is always derived from
+  /// the generated polarity-neutral tuple; callers cannot choose it.
+  pub(crate) fn upsert_session_revocation(
+    &mut self,
+    overlay_owner: &PrincipalRef,
+    principal: &PrincipalRef,
+    selector: &CanonicalAuthoritySelector,
+  ) -> Result<SessionRowAdmission, AuthorityStateError> {
+    let ids =
+      self.derive_session_row_ids(overlay_owner, principal, selector)?;
+    let admission = self.session_admission(
+      AuthorityRowKind::SessionRevocation,
+      ids.revocation(),
+      selector,
+    )?;
+    if admission == SessionRowAdmission::Insert {
+      self.upsert(
+        AuthorityRowKind::SessionRevocation,
+        ids.revocation().to_string(),
+        selector,
+      )?;
+    }
+    Ok(admission)
+  }
+
+  /// Atomically remove the exact paired revocation and install the positive
+  /// session row. Both selectors must describe the same polarity-neutral
+  /// principal/capability/resource tuple; same-ID substitutions refuse.
+  pub(crate) fn reconcile_session_grant(
+    &mut self,
+    overlay_owner: &PrincipalRef,
+    principal: &PrincipalRef,
+    positive_selector: &CanonicalAuthoritySelector,
+    revocation_selector: &CanonicalAuthoritySelector,
+  ) -> Result<SessionRowAdmission, AuthorityStateError> {
+    let positive_ids = self.derive_session_row_ids(
+      overlay_owner,
+      principal,
+      positive_selector,
+    )?;
+    let revocation_ids = self.derive_session_row_ids(
+      overlay_owner,
+      principal,
+      revocation_selector,
+    )?;
+    if positive_ids != revocation_ids {
+      return self.reject(AuthorityStateError::SessionRowIdentity(
+        "positive and revocation selectors describe different logical rows"
+          .to_string(),
+      ));
+    }
+    let positive_admission = self.session_admission(
+      AuthorityRowKind::SessionPositive,
+      positive_ids.positive(),
+      positive_selector,
+    )?;
+    self.session_admission(
+      AuthorityRowKind::SessionRevocation,
+      positive_ids.revocation(),
+      revocation_selector,
+    )?;
+    if self
+      .base_publication
+      .rows
+      .map(AuthorityRowKind::SessionRevocation)
+      .contains_key(positive_ids.revocation())
+    {
+      self.remove(
+        AuthorityRowKind::SessionRevocation,
+        positive_ids.revocation().to_string(),
+      )?;
+    }
+    if positive_admission == SessionRowAdmission::Insert {
+      self.upsert(
+        AuthorityRowKind::SessionPositive,
+        positive_ids.positive().to_string(),
+        positive_selector,
+      )?;
+    }
+    Ok(positive_admission)
   }
 
   pub(crate) fn upsert(
@@ -1039,7 +1238,7 @@ impl DecisionCacheKey {
     constrained_principals: Vec<PrincipalRef>,
     overlay_owner: PrincipalRef,
     effects: Vec<DecisionCacheEffect>,
-    mut receipt_dependencies: Vec<ReceiptDependency>,
+    receipt_dependencies: Vec<ReceiptDependency>,
   ) -> Result<Self, AuthorityStateError> {
     cache_dimension_bound(
       constrained_principals.len(),
@@ -1061,14 +1260,24 @@ impl DecisionCacheKey {
       &stage_id,
       MAX_CACHE_COMPONENT_BYTES,
     )?;
-    for principal in &constrained_principals {
+    let mut canonical_principals =
+      Vec::with_capacity(constrained_principals.len());
+    let mut seen_principals =
+      HashSet::with_capacity(constrained_principals.len());
+    for principal in constrained_principals {
       let canonical =
-        canonicalize_typed("cacheKey.constrainedPrincipal", principal)?;
+        canonicalize_typed("cacheKey.constrainedPrincipal", &principal)?;
       validate_component(
         "cacheKey.constrainedPrincipal",
         &canonical,
         MAX_CACHE_COMPONENT_BYTES,
       )?;
+      if !seen_principals.insert(canonical.clone()) {
+        return Err(AuthorityStateError::InvalidField(
+          "cacheKey.constrainedPrincipals",
+        ));
+      }
+      canonical_principals.push((canonical.into_bytes(), principal));
     }
     let canonical_overlay_owner =
       canonicalize_typed("cacheKey.overlayOwner", &overlay_owner)?;
@@ -1077,19 +1286,14 @@ impl DecisionCacheKey {
       &canonical_overlay_owner,
       MAX_CACHE_COMPONENT_BYTES,
     )?;
-    let mut constrained_principals = constrained_principals;
-    constrained_principals.sort();
+    canonical_principals.sort_by(|left, right| left.0.cmp(&right.0));
+    let constrained_principals = canonical_principals
+      .into_iter()
+      .map(|(_, principal)| principal)
+      .collect::<Vec<_>>();
     if constrained_principals
-      .windows(2)
-      .any(|pair| pair[0] == pair[1])
-    {
-      return Err(AuthorityStateError::InvalidField(
-        "cacheKey.constrainedPrincipals",
-      ));
-    }
-    if constrained_principals
-      .binary_search(&overlay_owner)
-      .is_err()
+      .iter()
+      .all(|principal| principal != &overlay_owner)
     {
       return Err(AuthorityStateError::InvalidField("cacheKey.overlayOwner"));
     }
@@ -1104,15 +1308,24 @@ impl DecisionCacheKey {
       }
     }
 
-    receipt_dependencies.sort();
-    if receipt_dependencies
-      .windows(2)
-      .any(|pair| pair[0] == pair[1])
-    {
-      return Err(AuthorityStateError::InvalidField(
-        "cacheKey.receiptDependencies",
-      ));
+    let mut canonical_receipts = Vec::with_capacity(receipt_dependencies.len());
+    let mut seen_receipts = HashSet::with_capacity(receipt_dependencies.len());
+    for dependency in receipt_dependencies {
+      let canonical =
+        canonicalize_typed("cacheKey.receiptDependency", &dependency)?
+          .into_bytes();
+      if !seen_receipts.insert(canonical.clone()) {
+        return Err(AuthorityStateError::InvalidField(
+          "cacheKey.receiptDependencies",
+        ));
+      }
+      canonical_receipts.push((canonical, dependency));
     }
+    canonical_receipts.sort_by(|left, right| left.0.cmp(&right.0));
+    let receipt_dependencies = canonical_receipts
+      .into_iter()
+      .map(|(_, dependency)| dependency)
+      .collect::<Vec<_>>();
 
     let mut key = Self {
       schema: DECISION_CACHE_KEY_SCHEMA,
@@ -1234,7 +1447,7 @@ pub struct DecisionCacheValue {
 impl DecisionCacheValue {
   pub(crate) fn new(
     decision: CachedDecision,
-    mut dimensions: Vec<DecisionDimension>,
+    dimensions: Vec<DecisionDimension>,
     negative_inventory_digest: String,
     valid_until_monotonic: Option<u64>,
   ) -> Result<Self, AuthorityStateError> {
@@ -1246,15 +1459,25 @@ impl DecisionCacheValue {
       "cacheValue.negativeInventoryDigest",
       &negative_inventory_digest,
     )?;
-    dimensions.sort_by(|left, right| {
-      (&left.slot_id, &left.principal).cmp(&(&right.slot_id, &right.principal))
-    });
-    if dimensions.windows(2).any(|pair| {
-      pair[0].slot_id == pair[1].slot_id
-        && pair[0].principal == pair[1].principal
-    }) {
-      return Err(AuthorityStateError::InvalidField("cacheValue.dimensions"));
+    let mut canonical_dimensions = Vec::with_capacity(dimensions.len());
+    let mut seen_dimensions = HashSet::with_capacity(dimensions.len());
+    for dimension in dimensions {
+      let principal = canonicalize_typed(
+        "cacheDimension.principalIdentity",
+        &dimension.principal,
+      )?;
+      if !seen_dimensions.insert((dimension.slot_id.clone(), principal)) {
+        return Err(AuthorityStateError::InvalidField("cacheValue.dimensions"));
+      }
+      let canonical =
+        canonicalize_typed("cacheDimension", &dimension)?.into_bytes();
+      canonical_dimensions.push((canonical, dimension));
     }
+    canonical_dimensions.sort_by(|left, right| left.0.cmp(&right.0));
+    let dimensions = canonical_dimensions
+      .into_iter()
+      .map(|(_, dimension)| dimension)
+      .collect::<Vec<_>>();
     // Preserve the shared core's `deny > masked > allow` ordering; a prompt is
     // an interaction candidate below a terminal masked result and above allow.
     let collapsed = if dimensions
@@ -1755,7 +1978,7 @@ impl RuntimeAuthorityState {
         }
       };
       if rows.apply(change)? {
-        impact.record(kind);
+        impact.record(kind)?;
       }
     }
     rows.validate_complete(self.authority_limits)?;
@@ -1909,6 +2132,49 @@ pub struct DecisionCacheCandidate {
 }
 
 impl DecisionCacheCandidate {
+  pub fn read_view(&self) -> &RuntimeAuthorityReadView {
+    &self.read_view
+  }
+
+  /// Consume a cache candidate only after a caller re-evaluates every
+  /// generated negative stratum against the candidate's exact immutable view.
+  pub fn revalidate_current_negatives<F>(
+    self,
+    state: &RuntimeAuthorityState,
+    evaluate: F,
+  ) -> Result<ValidatedDecisionCacheHit, AuthorityStateError>
+  where
+    F: FnOnce(
+      &RuntimeAuthorityReadView,
+      &DecisionCacheValue,
+      &[crate::rev2_registry_generated::Rev2RuntimeNegativeReentryPhase],
+    ) -> Result<(), AuthorityStateError>,
+  {
+    if !state.is_current(&self.read_view)? {
+      return Err(AuthorityStateError::GenerationChanged);
+    }
+    evaluate(
+      &self.read_view,
+      &self.value,
+      REV2_RUNTIME_NEGATIVE_REENTRY_PHASES,
+    )?;
+    if !state.is_current(&self.read_view)? {
+      return Err(AuthorityStateError::GenerationChanged);
+    }
+    Ok(ValidatedDecisionCacheHit {
+      value: self.value,
+      read_view: self.read_view,
+    })
+  }
+}
+
+#[derive(Clone, Debug)]
+pub struct ValidatedDecisionCacheHit {
+  value: DecisionCacheValue,
+  read_view: RuntimeAuthorityReadView,
+}
+
+impl ValidatedDecisionCacheHit {
   pub fn value(&self) -> &DecisionCacheValue {
     &self.value
   }
@@ -1935,8 +2201,12 @@ mod tests {
   }
 
   fn named_principal(key: &str) -> PrincipalRef {
+    principal_of_kind(PrincipalKind::Package, key)
+  }
+
+  fn principal_of_kind(kind: PrincipalKind, key: &str) -> PrincipalRef {
     PrincipalRef {
-      kind: PrincipalKind::Package,
+      kind,
       key: key.to_string(),
     }
   }
@@ -2166,7 +2436,7 @@ mod tests {
       let current = state.commit(transaction).unwrap().generations();
       current.ensure_monotonic_from(&previous).unwrap();
       let mut impact = GenerationImpact::default();
-      impact.record(kind);
+      impact.record(kind).unwrap();
       expected = expected.advance(impact).unwrap();
       assert_eq!(current, expected);
     }
@@ -2372,7 +2642,40 @@ mod tests {
       .unwrap();
     let candidate = state.cache_candidate(&current_key, 0).unwrap().unwrap();
     assert_eq!(candidate.read_view().generations(), current.generations());
-    assert_eq!(candidate.value().decision(), CachedDecision::Allow);
+    let validated = candidate
+      .revalidate_current_negatives(&state, |view, value, phases| {
+        assert_eq!(view.generations(), current.generations());
+        assert_eq!(value.decision(), CachedDecision::Allow);
+        assert_eq!(phases.len(), 7);
+        assert!(
+          phases
+            .iter()
+            .all(|phase| phase.strata == [1, 2, 3, 4, 5, 6, 7])
+        );
+        Ok(())
+      })
+      .unwrap();
+    assert_eq!(validated.value().decision(), CachedDecision::Allow);
+    assert_eq!(validated.read_view().generations(), current.generations());
+
+    let race_key =
+      cache_key(current.identity(), current.generations(), "negative-race");
+    state
+      .cache_insert(race_key.clone(), cache_value("negative-race", 0))
+      .unwrap();
+    let candidate = state.cache_candidate(&race_key, 0).unwrap().unwrap();
+    assert!(matches!(
+      candidate.revalidate_current_negatives(&state, |_, _, _| {
+        upsert_once(
+          &state,
+          AuthorityRowKind::NegativeOverlay,
+          "negative-race",
+          "negative-race",
+        );
+        Ok(())
+      }),
+      Err(AuthorityStateError::GenerationChanged)
+    ));
   }
 
   #[test]
@@ -2412,6 +2715,98 @@ mod tests {
     assert_eq!(
       rolled_back.ensure_monotonic_from(&previous),
       Err(AuthorityStateError::GenerationRollback("negativeOverlay"))
+    );
+  }
+
+  #[test]
+  fn session_specific_transactions_are_polarity_separated_and_collision_safe() {
+    let state = RuntimeAuthorityState::new(identity());
+    let owner = principal();
+    let mut positive = selector("session", 0);
+    positive.projection_id = "projection.env:read.positive/2".to_string();
+    let mut revocation = positive.clone();
+    revocation.projection_id = "projection.env:read.negative/2".to_string();
+    let initial = state.read_view().unwrap();
+    let ids =
+      session_row_ids(initial.identity(), &owner, &owner, &positive).unwrap();
+
+    let mut revoke = state.begin_transaction().unwrap();
+    assert_eq!(
+      revoke
+        .upsert_session_revocation(&owner, &owner, &revocation)
+        .unwrap(),
+      SessionRowAdmission::Insert
+    );
+    state.commit(revoke).unwrap();
+    let revoked = state.read_view().unwrap();
+    assert!(
+      revoked
+        .row(AuthorityRowKind::SessionRevocation, ids.revocation())
+        .is_some()
+    );
+    assert!(
+      revoked
+        .row(AuthorityRowKind::SessionPositive, ids.positive())
+        .is_none()
+    );
+
+    let mut grant = state.begin_transaction().unwrap();
+    assert_eq!(
+      grant
+        .reconcile_session_grant(&owner, &owner, &positive, &revocation)
+        .unwrap(),
+      SessionRowAdmission::Insert
+    );
+    state.commit(grant).unwrap();
+    let granted = state.read_view().unwrap();
+    assert!(
+      granted
+        .row(AuthorityRowKind::SessionRevocation, ids.revocation())
+        .is_none()
+    );
+    assert_eq!(
+      granted
+        .row(AuthorityRowKind::SessionPositive, ids.positive())
+        .unwrap()
+        .selector(),
+      &positive
+    );
+
+    let mut idempotent = state.begin_transaction().unwrap();
+    assert_eq!(
+      idempotent
+        .reconcile_session_grant(&owner, &owner, &positive, &revocation)
+        .unwrap(),
+      SessionRowAdmission::Idempotent
+    );
+
+    let conflicting_state = RuntimeAuthorityState::new(identity());
+    let mut conflict = positive.clone();
+    conflict.resource =
+      serde_json::json!({ "kind": "env-name", "name": "other" });
+    let mut inject = conflicting_state.begin_transaction().unwrap();
+    inject
+      .upsert(
+        AuthorityRowKind::SessionPositive,
+        ids.positive().to_string(),
+        &conflict,
+      )
+      .unwrap();
+    conflicting_state.commit(inject).unwrap();
+    let mut refused = conflicting_state.begin_transaction().unwrap();
+    assert!(matches!(
+      refused.reconcile_session_grant(&owner, &owner, &positive, &revocation,),
+      Err(AuthorityStateError::SessionRowIdentity(_))
+    ));
+    assert!(conflicting_state.commit(refused).is_err());
+    assert_eq!(
+      conflicting_state
+        .read_view()
+        .unwrap()
+        .row(AuthorityRowKind::SessionPositive, ids.positive())
+        .unwrap()
+        .selector(),
+      &conflict
     );
   }
 
@@ -2773,19 +3168,17 @@ mod tests {
     let production_oversize =
       selector("production-oversize", AUTHORITY_STATE_MAX_ROW_WEIGHT_BYTES);
     let mut transaction = production.begin_transaction().unwrap();
-    transaction
-      .upsert(
+    assert!(matches!(
+      transaction.upsert(
         AuthorityRowKind::NegativeOverlay,
         "production-oversize".to_string(),
         &production_oversize,
-      )
-      .unwrap();
-    assert!(matches!(
-      production.commit(transaction),
+      ),
       Err(AuthorityStateError::AuthorityCapacityExceeded(
         "per-row byte bound"
       ))
     ));
+    assert!(production.commit(transaction).is_err());
     assert_eq!(production.read_view().unwrap().row_count(), 0);
   }
 
@@ -2847,6 +3240,101 @@ mod tests {
       )
       .is_ok()
     );
+  }
+
+  #[test]
+  fn cache_sets_use_complete_jcs_element_order() {
+    let package_a = named_principal("pkg:owner");
+    let root_z = principal_of_kind(PrincipalKind::Root, "z");
+    let key = DecisionCacheKey::new(
+      "permission-query".to_string(),
+      "edge-canonical-sets".to_string(),
+      "initial".to_string(),
+      RuntimeAuthorityMode::Enforce,
+      identity(),
+      RuntimeGenerationVector::initial(),
+      vec![root_z.clone(), package_a.clone()],
+      package_a.clone(),
+      vec![effect("canonical-sets")],
+      vec![
+        ReceiptDependency::new("receipt-a".to_string(), 9, 8, 7).unwrap(),
+        ReceiptDependency::new("receipt-z".to_string(), 1, 2, 3).unwrap(),
+      ],
+    )
+    .unwrap();
+    assert_eq!(key.constrained_principals[0], package_a);
+    assert_eq!(key.constrained_principals[1], root_z);
+    assert_eq!(key.receipt_dependencies[0].receipt_id, "receipt-z");
+    assert_eq!(key.receipt_dependencies[0].issuer_generation.0, 1);
+    assert_eq!(key.receipt_dependencies[0].receipt_negative_generation.0, 2);
+    assert_eq!(key.receipt_dependencies[0].monotonic_deadline.0, 3);
+    let canonical_receipts = key
+      .receipt_dependencies
+      .iter()
+      .map(|dependency| {
+        canonicalize_typed("test.receiptDependency", dependency).unwrap()
+      })
+      .collect::<Vec<_>>();
+    let mut sorted_receipts = canonical_receipts.clone();
+    sorted_receipts.sort();
+    assert_eq!(canonical_receipts, sorted_receipts);
+
+    let allow = |slot: &str, principal: PrincipalRef, source_id: &str| {
+      DecisionDimension::new(
+        slot.to_string(),
+        principal,
+        CachedDecision::Allow,
+        Some(PositiveSource {
+          kind: "static-floor".to_string(),
+          source_id: source_id.to_string(),
+          generation: Some("7".to_string()),
+        }),
+      )
+      .unwrap()
+    };
+    let dimensions = vec![
+      DecisionDimension::new(
+        "slot-0".to_string(),
+        principal_of_kind(PrincipalKind::Root, "deny"),
+        CachedDecision::Deny,
+        None,
+      )
+      .unwrap(),
+      allow("slot-a", named_principal("package"), "source-z"),
+      allow(
+        "slot-z",
+        principal_of_kind(PrincipalKind::Root, "root"),
+        "source-a",
+      ),
+    ];
+    let value = DecisionCacheValue::new(
+      CachedDecision::Deny,
+      dimensions,
+      digest(b'N'),
+      None,
+    )
+    .unwrap();
+    assert_eq!(value.dimensions[0].decision, CachedDecision::Allow);
+    assert_eq!(
+      value.dimensions[0]
+        .positive_source
+        .as_ref()
+        .unwrap()
+        .source_id,
+      "source-a"
+    );
+    assert_eq!(value.dimensions[1].decision, CachedDecision::Allow);
+    assert_eq!(value.dimensions[2].decision, CachedDecision::Deny);
+    let canonical_dimensions = value
+      .dimensions
+      .iter()
+      .map(|dimension| {
+        canonicalize_typed("test.cacheDimension", dimension).unwrap()
+      })
+      .collect::<Vec<_>>();
+    let mut sorted_dimensions = canonical_dimensions.clone();
+    sorted_dimensions.sort();
+    assert_eq!(canonical_dimensions, sorted_dimensions);
   }
 
   #[test]

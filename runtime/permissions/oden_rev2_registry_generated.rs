@@ -1050,8 +1050,8 @@ pub struct Rev2TargetStatus {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-RQDIPntAtC-HcEFnGEwY-S7BUDjKUKUX3rQTGC9ucEw";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-yAnpYXwQmiE4NXTyzrYx46wVSTsL240xU6MHLKfGmmA";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-gqOSZykagyo1k7Y5NQEnSgYWYzvn54edkPxZu8v1t1E";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-bt6W9HkSh7pGGqby7lVzMEWFg1HcWPoaCArHj87olbg";
 pub const REV2_ADVERTISED_TARGETS: &[&str] = &[];
 
 pub const REV2_TARGET_STATUS: &[Rev2TargetStatus] = &[
@@ -67332,6 +67332,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:run,command:<retained logical executable>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:1",
+            "positiveChannels": [
+              "ambient-root",
+              "floor"
+            ],
             "sourceResourceDescription": "exact retained logical executable"
           },
           {
@@ -67342,6 +67346,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:sys,kind:<generated exact Deno spelling>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:2",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "exact generated system-information kind"
           },
           {
@@ -67352,6 +67363,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:ffi,path:<retained logical library>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:4",
+            "positiveChannels": [
+              "ambient-root",
+              "floor"
+            ],
             "sourceResourceDescription": "exact retained logical native library"
           },
           {
@@ -67362,6 +67377,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:read,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:5",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "exact requested scoped read path"
           },
           {
@@ -67372,6 +67394,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:write,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:6",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "exact requested scoped write path"
           }
         ],
@@ -67393,7 +67422,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         "maskedCommit": null,
         "positiveChannels": [
           "ambient-root",
-          "floor"
+          "floor",
+          "handle",
+          "mode-fallback",
+          "session"
         ],
         "principalSources": [
           "captured-constrained-set"
@@ -69772,6 +69804,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:sys,kind:<generated exact Deno spelling>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:2",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "exact generated system-information kind"
           },
           {
@@ -69782,6 +69821,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:read,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:5",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "exact requested scoped read path"
           },
           {
@@ -69792,6 +69838,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:write,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:6",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "exact requested scoped write path"
           }
         ],
@@ -71448,6 +71501,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:run,command:<retained logical executable>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:1",
+            "positiveChannels": [
+              "ambient-root",
+              "floor"
+            ],
             "sourceResourceDescription": "exact retained logical executable"
           },
           {
@@ -71458,6 +71515,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:sys,kind:<generated exact Deno spelling>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:2",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "exact generated system-information kind"
           },
           {
@@ -71468,6 +71532,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:ffi,path:<retained logical library>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:4",
+            "positiveChannels": [
+              "ambient-root",
+              "floor"
+            ],
             "sourceResourceDescription": "exact retained logical native library"
           },
           {
@@ -71478,6 +71546,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:read,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:5",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "exact requested scoped read path"
           },
           {
@@ -71488,6 +71563,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "when the closed descriptor is exactly {name:write,path:<nonempty scoped path>}",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:6",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "exact requested scoped write path"
           }
         ],
@@ -71509,7 +71591,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         "maskedCommit": null,
         "positiveChannels": [
           "ambient-root",
-          "floor"
+          "floor",
+          "handle",
+          "mode-fallback",
+          "session"
         ],
         "principalSources": [
           "captured-constrained-set"

@@ -38,14 +38,20 @@ use std::os::unix::fs::FileExt;
 
 use crate::oden_rev2_policy::OdenRev2RetainedObject;
 use crate::rev2::PrincipalRef;
+use crate::rev2_registry_generated::REV2_RUNTIME_EXECUTABLE_MAX_AGGREGATE_BYTES;
+use crate::rev2_registry_generated::REV2_RUNTIME_EXECUTABLE_MAX_IMAGE_BYTES;
+use crate::rev2_registry_generated::REV2_RUNTIME_EXECUTABLE_MAX_IMAGES;
 
 const STAGE_ERROR_PREFIX: &str = "OD-CAP-REV2-EXECUTABLE-STAGE";
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
-// C04 provisional limits. Generated per-target limits replace these before a
-// target may advertise Rev2; until then exceeding any bound refuses arming.
-const MAX_INSTALLED_EXECUTABLES: usize = 256;
-const MAX_EXECUTABLE_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_EXECUTABLE_AGGREGATE_BYTES: u64 = 1024 * 1024 * 1024;
+// C04 provisional limits come from the reviewed generated runtime contract.
+// Per-target limits still replace these before a target may advertise Rev2;
+// until then exceeding any generated bound refuses arming.
+const MAX_INSTALLED_EXECUTABLES: usize = REV2_RUNTIME_EXECUTABLE_MAX_IMAGES;
+const MAX_EXECUTABLE_IMAGE_BYTES: u64 =
+  REV2_RUNTIME_EXECUTABLE_MAX_IMAGE_BYTES as u64;
+const MAX_EXECUTABLE_AGGREGATE_BYTES: u64 =
+  REV2_RUNTIME_EXECUTABLE_MAX_AGGREGATE_BYTES as u64;
 
 struct BoundedRetainedExecutable<'a> {
   object: &'a OdenRev2RetainedObject,
@@ -1054,6 +1060,22 @@ mod tests {
     std::fs::remove_file(oversized).unwrap();
     std::fs::remove_file(source).unwrap();
     std::fs::remove_dir(root).unwrap();
+  }
+
+  #[test]
+  fn generated_runtime_contract_owns_executable_stage_bounds() {
+    assert_eq!(
+      MAX_INSTALLED_EXECUTABLES,
+      REV2_RUNTIME_EXECUTABLE_MAX_IMAGES
+    );
+    assert_eq!(
+      MAX_EXECUTABLE_IMAGE_BYTES,
+      REV2_RUNTIME_EXECUTABLE_MAX_IMAGE_BYTES as u64
+    );
+    assert_eq!(
+      MAX_EXECUTABLE_AGGREGATE_BYTES,
+      REV2_RUNTIME_EXECUTABLE_MAX_AGGREGATE_BYTES as u64
+    );
   }
 
   #[test]

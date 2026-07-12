@@ -26,13 +26,13 @@ use serde_json::Value;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::compiler_fence;
 
 use crate::oden_rev2_authority::AuthorityStateError;
-#[cfg(test)]
 use crate::oden_rev2_authority::AuthorityTransaction;
 #[cfg(test)]
 use crate::oden_rev2_authority::CommittedAuthorityTransaction;
@@ -45,21 +45,39 @@ use crate::rev2::CanonicalAuthoritySelector;
 use crate::rev2::CanonicalEffect;
 use crate::rev2::PositiveSource;
 use crate::rev2::PrincipalRef;
+use crate::rev2_registry_generated::{
+  REV2_RUNTIME_EXTERNAL_RESPONSE_MAC_DOMAIN,
+  REV2_RUNTIME_EXTERNAL_RESPONSE_SCHEMA, REV2_RUNTIME_MAX_BATCH_EFFECTS,
+  REV2_RUNTIME_MAX_CANONICAL_BATCH_BYTES,
+  REV2_RUNTIME_MAX_CANONICAL_COMPONENT_BYTES,
+  REV2_RUNTIME_MAX_CANONICAL_EFFECT_BYTES,
+  REV2_RUNTIME_MAX_CANONICAL_RESULT_BYTES,
+  REV2_RUNTIME_MAX_CONSTRAINED_PRINCIPALS,
+  REV2_RUNTIME_MAX_PRINCIPAL_EFFECT_DIMENSIONS,
+  REV2_RUNTIME_PERMISSION_BATCH_DIGEST_DOMAIN,
+  REV2_RUNTIME_PERMISSION_BATCH_SCHEMA, REV2_RUNTIME_PERMISSION_BRANCHES,
+  REV2_RUNTIME_PERMISSION_RESULT_SCHEMA,
+};
 
-const PERMISSION_BATCH_SCHEMA: &str = "oden/capsec-permission-batch/2";
-const PERMISSION_RESULT_SCHEMA: &str = "oden/capsec-permission-result/2";
-const EXTERNAL_RESPONSE_SCHEMA: &str = "oden/capsec-permission-response/2";
-const PERMISSION_BATCH_DIGEST_DOMAIN: &[u8] = b"oden:capsec:permission-batch:2";
+const PERMISSION_BATCH_SCHEMA: &str = REV2_RUNTIME_PERMISSION_BATCH_SCHEMA;
+const PERMISSION_RESULT_SCHEMA: &str = REV2_RUNTIME_PERMISSION_RESULT_SCHEMA;
+const EXTERNAL_RESPONSE_SCHEMA: &str = REV2_RUNTIME_EXTERNAL_RESPONSE_SCHEMA;
+const PERMISSION_BATCH_DIGEST_DOMAIN: &[u8] =
+  REV2_RUNTIME_PERMISSION_BATCH_DIGEST_DOMAIN.as_bytes();
 const EXTERNAL_RESPONSE_MAC_DOMAIN: &[u8] =
-  b"oden:capsec:permission-response:2";
+  REV2_RUNTIME_EXTERNAL_RESPONSE_MAC_DOMAIN.as_bytes();
 
-const MAX_COMPONENT_BYTES: usize = 4_096;
-const MAX_CANONICAL_EFFECT_BYTES: usize = 1024 * 1024;
-const MAX_CANONICAL_BATCH_BYTES: usize = 4 * 1024 * 1024;
-const MAX_CANONICAL_RESULT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_GENERATED_EFFECTS: usize = 256;
-const MAX_CONSTRAINED_PRINCIPALS: usize = 4_096;
-const MAX_PRINCIPAL_EFFECT_PRODUCT: usize = 16_384;
+const MAX_COMPONENT_BYTES: usize = REV2_RUNTIME_MAX_CANONICAL_COMPONENT_BYTES;
+const MAX_CANONICAL_EFFECT_BYTES: usize =
+  REV2_RUNTIME_MAX_CANONICAL_EFFECT_BYTES;
+const MAX_CANONICAL_BATCH_BYTES: usize = REV2_RUNTIME_MAX_CANONICAL_BATCH_BYTES;
+const MAX_CANONICAL_RESULT_BYTES: usize =
+  REV2_RUNTIME_MAX_CANONICAL_RESULT_BYTES;
+const MAX_GENERATED_EFFECTS: usize = REV2_RUNTIME_MAX_BATCH_EFFECTS;
+const MAX_CONSTRAINED_PRINCIPALS: usize =
+  REV2_RUNTIME_MAX_CONSTRAINED_PRINCIPALS;
+const MAX_PRINCIPAL_EFFECT_PRODUCT: usize =
+  REV2_RUNTIME_MAX_PRINCIPAL_EFFECT_DIMENSIONS;
 const MAX_CANONICAL_U64_BYTES: usize = 20;
 const EXTERNAL_RESPONSE_KEY_BYTES: usize = 32;
 
@@ -327,6 +345,7 @@ enum PermissionAtomicity {
 #[derive(Clone, Debug)]
 pub(crate) struct GeneratedPermissionSlotSpec {
   slot_id: String,
+  operation_effect_slot_id: String,
   capability: String,
   positive_projection_id: String,
   negative_projection_id: String,
@@ -336,12 +355,17 @@ pub(crate) struct GeneratedPermissionSlotSpec {
 impl GeneratedPermissionSlotSpec {
   fn capture_generated(
     slot_id: String,
+    operation_effect_slot_id: String,
     capability: String,
     positive_projection_id: String,
     negative_projection_id: String,
     transitions: PermissionTransitionDispositions,
   ) -> Result<Self, PermissionProtocolError> {
     validate_component("generatedSlotId", &slot_id)?;
+    validate_component(
+      "generatedOperationEffectSlotId",
+      &operation_effect_slot_id,
+    )?;
     validate_component("generatedSlotCapability", &capability)?;
     validate_component(
       "generatedSlotPositiveProjection",
@@ -353,6 +377,7 @@ impl GeneratedPermissionSlotSpec {
     )?;
     Ok(Self {
       slot_id,
+      operation_effect_slot_id,
       capability,
       positive_projection_id,
       negative_projection_id,
@@ -427,6 +452,96 @@ impl SelectedGeneratedPermissionBranch {
   }
 }
 
+fn transition_dispositions_from_generated(
+  query: &str,
+  request: &str,
+  revoke: &str,
+) -> Result<PermissionTransitionDispositions, PermissionProtocolError> {
+  let query = match query {
+    "evaluate" | "evaluate-static-only" => PermissionQueryDisposition::Evaluate,
+    "refuse-static-only" | "refuse-unsupported-descriptor" => {
+      PermissionQueryDisposition::Refuse
+    }
+    _ => return Err(PermissionProtocolError::InvalidField("queryTransition")),
+  };
+  let request = match request {
+    "compare-and-commit-session-positive" => {
+      PermissionRequestDisposition::AddSessionPositive
+    }
+    "refuse-static-only" | "refuse-unsupported-descriptor" => {
+      PermissionRequestDisposition::Refuse
+    }
+    _ => {
+      return Err(PermissionProtocolError::InvalidField("requestTransition"));
+    }
+  };
+  let revoke = match revoke {
+    "compare-and-commit-session-revocation" => {
+      PermissionRevokeDisposition::AddSessionNegative
+    }
+    "refuse-static-only" | "refuse-unsupported-descriptor" => {
+      PermissionRevokeDisposition::Refuse
+    }
+    _ => return Err(PermissionProtocolError::InvalidField("revokeTransition")),
+  };
+  Ok(PermissionTransitionDispositions {
+    query,
+    request,
+    revoke,
+  })
+}
+
+/// Select one closed descriptor branch from the generated C04 protocol.
+/// Unknown, refused, and operation-inapplicable rows fail closed before a
+/// batch can retain caller-controlled effects.
+fn select_generated_permission_branch(
+  branch_id: &str,
+  operation: PermissionOperation,
+) -> Result<SelectedGeneratedPermissionBranch, PermissionProtocolError> {
+  let branch = REV2_RUNTIME_PERMISSION_BRANCHES
+    .iter()
+    .find(|candidate| candidate.id == branch_id)
+    .ok_or(PermissionProtocolError::SlotNotGenerated)?;
+  if branch.disposition != "normalize" {
+    return Err(PermissionProtocolError::TransitionRefused);
+  }
+  let coverage_edge_id = match operation {
+    PermissionOperation::Query => branch.operation_edge_ids.query,
+    PermissionOperation::Request => branch.operation_edge_ids.request,
+    PermissionOperation::Revoke => branch.operation_edge_ids.revoke,
+  };
+  let mut slots = Vec::with_capacity(branch.slot_order.len());
+  for slot in branch.slot_order {
+    let operation_effect_slot_id = match operation {
+      PermissionOperation::Query => slot.operation_effect_slot_ids.query,
+      PermissionOperation::Request => slot.operation_effect_slot_ids.request,
+      PermissionOperation::Revoke => slot.operation_effect_slot_ids.revoke,
+    };
+    let transitions = transition_dispositions_from_generated(
+      slot.transitions.query,
+      slot.transitions.request,
+      slot.transitions.revoke,
+    )?;
+    let Some(operation_effect_slot_id) = operation_effect_slot_id else {
+      return Err(PermissionProtocolError::TransitionRefused);
+    };
+    slots.push(GeneratedPermissionSlotSpec::capture_generated(
+      slot.slot_id.to_string(),
+      operation_effect_slot_id.to_string(),
+      slot.capability.to_string(),
+      slot.positive_projection_id.to_string(),
+      slot.negative_projection_id.to_string(),
+      transitions,
+    )?);
+  }
+  SelectedGeneratedPermissionBranch::capture_generated(
+    branch.id.to_string(),
+    coverage_edge_id.to_string(),
+    slots,
+    MAX_PRINCIPAL_EFFECT_PRODUCT,
+  )
+}
+
 /// One host-verified live attribution capture.
 ///
 /// Construction stays private to this dormant protocol module until the
@@ -453,20 +568,31 @@ impl VerifiedPermissionActorSet {
       ));
     }
     validate_component("overlayOwner.key", &overlay_owner.key)?;
-    let mut constrained_principals = constrained_principals.to_vec();
-    for principal in &constrained_principals {
+    let mut canonical_principals =
+      Vec::with_capacity(constrained_principals.len());
+    let mut seen_principals =
+      HashSet::with_capacity(constrained_principals.len());
+    for principal in constrained_principals {
       validate_component("constrainedPrincipal.key", &principal.key)?;
+      let canonical = canonical_serialization(
+        principal,
+        MAX_CANONICAL_EFFECT_BYTES,
+        "constrainedPrincipal",
+      )?
+      .into_bytes();
+      if !seen_principals.insert(canonical.clone()) {
+        return Err(PermissionProtocolError::DuplicatePrincipal);
+      }
+      canonical_principals.push((canonical, principal.clone()));
     }
-    constrained_principals.sort();
+    canonical_principals.sort_by(|left, right| left.0.cmp(&right.0));
+    let constrained_principals = canonical_principals
+      .into_iter()
+      .map(|(_, principal)| principal)
+      .collect::<Vec<_>>();
     if constrained_principals
-      .windows(2)
-      .any(|pair| pair[0] == pair[1])
-    {
-      return Err(PermissionProtocolError::DuplicatePrincipal);
-    }
-    if constrained_principals
-      .binary_search(&overlay_owner)
-      .is_err()
+      .iter()
+      .all(|principal| principal != &overlay_owner)
     {
       return Err(PermissionProtocolError::OverlayOwnerNotConstrained);
     }
@@ -492,6 +618,7 @@ impl VerifiedPermissionActorSet {
 /// identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NormalizedPermissionEffect {
+  slot_id: String,
   effect_owner: PrincipalRef,
   selector: CanonicalAuthoritySelector,
   canonical_effect: CanonicalEffect,
@@ -503,6 +630,22 @@ impl NormalizedPermissionEffect {
     selector: CanonicalAuthoritySelector,
     canonical_effect: CanonicalEffect,
   ) -> Result<Self, PermissionProtocolError> {
+    let slot_id = canonical_effect.effect_slot_id.clone();
+    Self::capture_generated_slot(
+      slot_id,
+      effect_owner,
+      selector,
+      canonical_effect,
+    )
+  }
+
+  fn capture_generated_slot(
+    slot_id: String,
+    effect_owner: PrincipalRef,
+    selector: CanonicalAuthoritySelector,
+    canonical_effect: CanonicalEffect,
+  ) -> Result<Self, PermissionProtocolError> {
+    validate_component("effect.logicalSlotId", &slot_id)?;
     validate_component("effect.slotId", &canonical_effect.effect_slot_id)?;
     validate_component("effect.effectOwner.key", &effect_owner.key)?;
     validate_component(
@@ -537,6 +680,7 @@ impl NormalizedPermissionEffect {
       "canonicalEffect",
     )?;
     Ok(Self {
+      slot_id,
       effect_owner,
       selector,
       canonical_effect,
@@ -544,7 +688,7 @@ impl NormalizedPermissionEffect {
   }
 
   pub(crate) fn slot_id(&self) -> &str {
-    &self.canonical_effect.effect_slot_id
+    &self.slot_id
   }
 
   pub(crate) fn effect_owner(&self) -> &PrincipalRef {
@@ -655,8 +799,8 @@ impl NormalizedPermissionBatch {
     let mut canonical_effects = BTreeSet::new();
     for (effect, generated_slot) in effects.iter().zip(&generated.slot_order) {
       if constrained_principals
-        .binary_search(effect.effect_owner())
-        .is_err()
+        .iter()
+        .all(|principal| principal != effect.effect_owner())
       {
         return Err(PermissionProtocolError::EffectOwnerNotConstrained);
       }
@@ -674,6 +818,11 @@ impl NormalizedPermissionBatch {
         return Err(PermissionProtocolError::SlotNotGenerated);
       }
       let canonical_effect = effect.canonical_effect();
+      if canonical_effect.effect_slot_id
+        != generated_slot.operation_effect_slot_id
+      {
+        return Err(PermissionProtocolError::EffectEdgeMismatch);
+      }
       if canonical_effect.edge_id != generated.coverage_edge_id {
         return Err(PermissionProtocolError::EffectEdgeMismatch);
       }
@@ -792,6 +941,44 @@ impl NormalizedPermissionBatch {
   ) -> Result<String, PermissionProtocolError> {
     canonical_serialization(self, MAX_CANONICAL_BATCH_BYTES, "permissionBatch")
   }
+
+  fn session_revoke_transaction(
+    &self,
+    state: &RuntimeAuthorityState,
+    current_result: &PermissionBatchResult,
+  ) -> Result<AuthorityTransaction, PermissionProtocolError> {
+    require_current_view(state, &self.authority_view)?;
+    if self.operation != PermissionOperation::Revoke
+      || current_result.batch_sequence != self.batch_sequence
+      || current_result.operation != PermissionOperation::Revoke
+      || current_result.batch_digest != self.batch_digest
+      || current_result.identity != self.identity
+      || current_result.observed_generations
+        != self.authority_view.generations()
+      || current_result.effects.len() != self.effects.len()
+    {
+      return Err(PermissionProtocolError::ExternalMutationRefused);
+    }
+    let mut transaction = state.begin_transaction_from(&self.authority_view)?;
+    for (effect, result) in self.effects.iter().zip(current_result.effects()) {
+      if effect.slot_id() != result.slot_id() {
+        return Err(PermissionProtocolError::IncompleteResult);
+      }
+      for dimension in result.dimensions() {
+        let mut revocation_selector = effect.selector().clone();
+        revocation_selector.principal = Some(dimension.principal().clone());
+        revocation_selector.projection_id =
+          effect.canonical_effect().projection_id.clone();
+        transaction.upsert_session_revocation(
+          self.overlay_owner(),
+          dimension.principal(),
+          &revocation_selector,
+        )?;
+      }
+    }
+    require_current_view(state, &self.authority_view)?;
+    Ok(transaction)
+  }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -885,14 +1072,31 @@ impl PermissionEffectResult {
     if dimensions.len() > MAX_CONSTRAINED_PRINCIPALS {
       return Err(PermissionProtocolError::BoundExceeded("resultDimensions"));
     }
-    let mut dimensions = dimensions.to_vec();
-    dimensions.sort_by(|left, right| left.principal.cmp(&right.principal));
-    if dimensions
-      .windows(2)
-      .any(|pair| pair[0].principal == pair[1].principal)
-    {
-      return Err(PermissionProtocolError::DuplicatePrincipal);
+    let mut canonical_dimensions = Vec::with_capacity(dimensions.len());
+    let mut seen_principals = HashSet::with_capacity(dimensions.len());
+    for dimension in dimensions {
+      let principal = canonical_serialization(
+        &dimension.principal,
+        MAX_CANONICAL_EFFECT_BYTES,
+        "resultDimension.principal",
+      )?
+      .into_bytes();
+      if !seen_principals.insert(principal) {
+        return Err(PermissionProtocolError::DuplicatePrincipal);
+      }
+      let canonical = canonical_serialization(
+        dimension,
+        MAX_CANONICAL_EFFECT_BYTES,
+        "resultDimension",
+      )?
+      .into_bytes();
+      canonical_dimensions.push((canonical, dimension.clone()));
     }
+    canonical_dimensions.sort_by(|left, right| left.0.cmp(&right.0));
+    let dimensions = canonical_dimensions
+      .into_iter()
+      .map(|(_, dimension)| dimension)
+      .collect::<Vec<_>>();
     let state = dimensions
       .iter()
       .map(PermissionDimensionResult::state)
@@ -947,16 +1151,40 @@ impl PermissionBatchResult {
         .iter()
         .zip(batch.effects())
         .any(|(result, effect)| result.slot_id() != effect.slot_id())
-      || effects.iter().any(|effect| {
-        effect.dimensions().len() != batch.constrained_principals().len()
-          || effect
-            .dimensions()
-            .iter()
-            .zip(batch.constrained_principals())
-            .any(|(dimension, principal)| dimension.principal() != principal)
-      })
     {
       return Err(PermissionProtocolError::IncompleteResult);
+    }
+    let expected_principals = batch
+      .constrained_principals()
+      .iter()
+      .map(|principal| {
+        canonical_serialization(
+          principal,
+          MAX_CANONICAL_EFFECT_BYTES,
+          "resultExpectedPrincipal",
+        )
+        .map(String::into_bytes)
+      })
+      .collect::<Result<HashSet<_>, _>>()?;
+    for effect in effects {
+      if effect.dimensions().len() != expected_principals.len() {
+        return Err(PermissionProtocolError::IncompleteResult);
+      }
+      let actual_principals = effect
+        .dimensions()
+        .iter()
+        .map(|dimension| {
+          canonical_serialization(
+            dimension.principal(),
+            MAX_CANONICAL_EFFECT_BYTES,
+            "resultObservedPrincipal",
+          )
+          .map(String::into_bytes)
+        })
+        .collect::<Result<HashSet<_>, _>>()?;
+      if actual_principals != expected_principals {
+        return Err(PermissionProtocolError::IncompleteResult);
+      }
     }
     let aggregate_state = effects
       .iter()
@@ -1097,6 +1325,29 @@ pub(crate) struct AuthenticatedExternalPermissionResponse {
   authentication_tag: [u8; 32],
 }
 
+impl Serialize for AuthenticatedExternalPermissionResponse {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut response = serializer
+      .serialize_struct("AuthenticatedExternalPermissionResponse", 8)?;
+    response.serialize_field("schema", EXTERNAL_RESPONSE_SCHEMA)?;
+    response.serialize_field("batchSequence", &self.batch_sequence)?;
+    response.serialize_field("operation", &self.operation)?;
+    response.serialize_field("batchDigest", &self.batch_digest)?;
+    response.serialize_field("identity", &self.identity)?;
+    response
+      .serialize_field("expectedGenerations", &self.expected_generations)?;
+    response.serialize_field("decision", &self.decision)?;
+    response.serialize_field(
+      "authenticationTag",
+      &URL_SAFE_NO_PAD.encode(self.authentication_tag),
+    )?;
+    response.end()
+  }
+}
+
 impl AuthenticatedExternalPermissionResponse {
   #[allow(clippy::too_many_arguments)]
   fn capture_host(
@@ -1164,7 +1415,98 @@ pub(crate) struct AuthenticatedExternalRequestGrant<'batch> {
   authority_view: RuntimeAuthorityReadView,
 }
 
+impl<'batch> AuthenticatedExternalRequestGrant<'batch> {
+  fn into_session_transaction(
+    self,
+    state: &RuntimeAuthorityState,
+    pre_result: &PermissionBatchResult,
+  ) -> Result<AuthorityTransaction, PermissionProtocolError> {
+    require_current_view(state, &self.authority_view)?;
+    if pre_result.batch_sequence != self.batch.batch_sequence
+      || pre_result.operation != PermissionOperation::Request
+      || pre_result.batch_digest != self.batch.batch_digest
+      || pre_result.identity != self.batch.identity
+      || pre_result.observed_generations != self.authority_view.generations()
+      || pre_result.effects.len() != self.batch.effects.len()
+      || pre_result.state == PermissionState::Denied
+    {
+      return Err(PermissionProtocolError::ExternalMutationRefused);
+    }
+    let mut transaction = state.begin_transaction_from(&self.authority_view)?;
+    for (effect, result) in self.batch.effects.iter().zip(pre_result.effects())
+    {
+      if effect.slot_id() != result.slot_id() {
+        return Err(PermissionProtocolError::IncompleteResult);
+      }
+      for dimension in result.dimensions() {
+        match dimension.state() {
+          PermissionState::Granted => continue,
+          PermissionState::Denied => {
+            return Err(PermissionProtocolError::ExternalMutationRefused);
+          }
+          PermissionState::Prompt => {}
+        }
+        let mut positive_selector = effect.selector().clone();
+        positive_selector.principal = Some(dimension.principal().clone());
+        let mut revocation_selector = positive_selector.clone();
+        revocation_selector.projection_id =
+          effect.canonical_effect().projection_id.clone();
+        transaction.reconcile_session_grant(
+          self.batch.overlay_owner(),
+          dimension.principal(),
+          &positive_selector,
+          &revocation_selector,
+        )?;
+      }
+    }
+    require_current_view(state, &self.authority_view)?;
+    Ok(transaction)
+  }
+}
+
+/// Authentication is necessary but insufficient: all seven generated
+/// negative strata must be re-evaluated against the exact current view before
+/// an external answer can become a result or mutation permit.
+#[derive(Debug)]
+pub(crate) struct NegativeReentryProof<'batch> {
+  decision: ExternalPermissionDecision,
+  batch: &'batch NormalizedPermissionBatch,
+  authority_view: RuntimeAuthorityReadView,
+}
+
 impl<'batch> AuthenticatedExternalPermissionDecision<'batch> {
+  fn revalidate_current_negatives<F>(
+    self,
+    state: &RuntimeAuthorityState,
+    evaluate: F,
+  ) -> Result<NegativeReentryProof<'batch>, PermissionProtocolError>
+  where
+    F: FnOnce(
+      &RuntimeAuthorityReadView,
+      &NormalizedPermissionBatch,
+      &[crate::rev2_registry_generated::Rev2RuntimeNegativeReentryPhase],
+    ) -> Result<(), PermissionProtocolError>,
+  {
+    if !state.is_current(&self.authority_view)? {
+      return Err(PermissionProtocolError::StaleAuthorityView);
+    }
+    evaluate(
+      &self.authority_view,
+      self.batch,
+      crate::rev2_registry_generated::REV2_RUNTIME_NEGATIVE_REENTRY_PHASES,
+    )?;
+    if !state.is_current(&self.authority_view)? {
+      return Err(PermissionProtocolError::StaleAuthorityView);
+    }
+    Ok(NegativeReentryProof {
+      decision: self.decision,
+      batch: self.batch,
+      authority_view: self.authority_view,
+    })
+  }
+}
+
+impl<'batch> NegativeReentryProof<'batch> {
   fn into_request_grant(
     self,
   ) -> Result<AuthenticatedExternalRequestGrant<'batch>, PermissionProtocolError>
@@ -1305,8 +1647,12 @@ mod tests {
   }
 
   fn principal(key: &str) -> PrincipalRef {
+    principal_of_kind(PrincipalKind::Package, key)
+  }
+
+  fn principal_of_kind(kind: PrincipalKind, key: &str) -> PrincipalRef {
     PrincipalRef {
-      kind: PrincipalKind::Package,
+      kind,
       key: key.to_string(),
     }
   }
@@ -1357,6 +1703,7 @@ mod tests {
     transitions: PermissionTransitionDispositions,
   ) -> GeneratedPermissionSlotSpec {
     GeneratedPermissionSlotSpec::capture_generated(
+      slot.to_string(),
       slot.to_string(),
       "env:read".to_string(),
       "projection.env:read.positive/2".to_string(),
@@ -1511,6 +1858,184 @@ mod tests {
       batch.batch_digest(),
       "sha256-210pltsUw3p05PMinLp3ZV8Zh6b4600hrEVSnh4-3bE"
     );
+  }
+
+  #[test]
+  fn generated_protocol_drives_branch_slots_bounds_and_response_schema() {
+    let owner = principal("pkg:owner");
+    let generated = select_generated_permission_branch(
+      "permission.read.scoped/2",
+      PermissionOperation::Query,
+    )
+    .unwrap();
+    assert_eq!(
+      generated.coverage_edge_id(),
+      "native-op:runtime/ops/permissions.rs#op_query_permission"
+    );
+    assert_eq!(generated.slot_order[0].slot_id, "permission.read:slot:0");
+    assert_eq!(
+      generated.slot_order[0].operation_effect_slot_id,
+      "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:5"
+    );
+    assert_eq!(
+      generated.principal_effect_bound,
+      MAX_PRINCIPAL_EFFECT_PRODUCT
+    );
+    assert_eq!(MAX_GENERATED_EFFECTS, REV2_RUNTIME_MAX_BATCH_EFFECTS);
+
+    let canonical_effect = CanonicalEffect {
+      edge_id: generated.coverage_edge_id().to_string(),
+      effect_slot_id: generated.slot_order[0].operation_effect_slot_id.clone(),
+      capability: "fs:read".to_string(),
+      effect_owner: owner.key.clone(),
+      projection_id: "projection.fs:read.negative/2".to_string(),
+      occurrence: serde_json::json!({
+        "effectOwner": owner.key,
+        "finalObjectState": {
+          "identity": { "kind": "opaque-token", "value": "file:example" },
+          "kind": "existing",
+        },
+        "followMode": "follow-final",
+        "lexicalPath": { "encoding": "unicode", "value": "example.txt" },
+        "parentIdentity": { "kind": "opaque-token", "value": "dir:example" },
+        "root": "$PROJECT",
+        "rootBindingId": "root-binding:project",
+      }),
+    };
+    let effect = NormalizedPermissionEffect::capture_generated_slot(
+      generated.slot_order[0].slot_id.clone(),
+      owner.clone(),
+      CanonicalAuthoritySelector {
+        principal: Some(owner.clone()),
+        capability: "fs:read".to_string(),
+        projection_id: "projection.fs:read.positive/2".to_string(),
+        resource: serde_json::json!({
+          "kind": "path-exact",
+          "path": { "encoding": "unicode", "value": "example.txt" },
+          "root": "$PROJECT",
+        }),
+      },
+      canonical_effect,
+    )
+    .unwrap();
+    let state = RuntimeAuthorityState::new(identity("run-generated"));
+    let view = state.read_view().unwrap();
+    let batch = NormalizedPermissionBatch::capture_host(
+      &state,
+      &view,
+      sequence(1),
+      PermissionOperation::Query,
+      &generated,
+      &actors(std::slice::from_ref(&owner), &owner),
+      &[effect],
+    )
+    .unwrap();
+    assert_eq!(batch.effects()[0].slot_id(), "permission.read:slot:0");
+    assert_eq!(
+      batch.canonical_json().unwrap().len() <= MAX_CANONICAL_BATCH_BYTES,
+      true
+    );
+
+    let response = signed_response(&authenticator(), &batch);
+    let encoded = serde_json::to_value(response).unwrap();
+    assert_eq!(encoded["schema"], REV2_RUNTIME_EXTERNAL_RESPONSE_SCHEMA);
+    assert_ne!(
+      REV2_RUNTIME_EXTERNAL_RESPONSE_SCHEMA,
+      REV2_RUNTIME_EXTERNAL_RESPONSE_MAC_DOMAIN
+    );
+
+    assert_eq!(
+      select_generated_permission_branch(
+        "permission.env.scoped-refusal/2",
+        PermissionOperation::Query,
+      )
+      .unwrap_err(),
+      PermissionProtocolError::TransitionRefused
+    );
+    assert_eq!(
+      select_generated_permission_branch(
+        "permission.run.scoped/2",
+        PermissionOperation::Request,
+      )
+      .unwrap_err(),
+      PermissionProtocolError::TransitionRefused
+    );
+  }
+
+  #[test]
+  fn protocol_sets_use_complete_jcs_element_order() {
+    let state = RuntimeAuthorityState::new(identity("run-canonical-sets"));
+    let view = state.read_view().unwrap();
+    let package_a = principal_of_kind(PrincipalKind::Package, "a");
+    let root_z = principal_of_kind(PrincipalKind::Root, "z");
+    let actors = actors(&[root_z.clone(), package_a.clone()], &package_a);
+    let generated = generated_branch(&["slot:0"], 2);
+    let effects = [effect("slot:0", &package_a, "HOME")];
+    let batch = NormalizedPermissionBatch::capture_host(
+      &state,
+      &view,
+      sequence(8),
+      PermissionOperation::Query,
+      &generated,
+      &actors,
+      &effects,
+    )
+    .unwrap();
+    let encoded: Value =
+      serde_json::from_str(&batch.canonical_json().unwrap()).unwrap();
+    assert_eq!(
+      encoded["constrainedPrincipals"],
+      serde_json::json!([
+        { "key": "a", "kind": "package" },
+        { "key": "z", "kind": "root" },
+      ])
+    );
+
+    let dimension = |principal: PrincipalRef, source_id: &str| {
+      PermissionDimensionResult::capture_host(
+        principal,
+        PermissionState::Granted,
+        Some(PositiveSource {
+          kind: "static-floor".to_string(),
+          source_id: source_id.to_string(),
+          generation: None,
+        }),
+      )
+      .unwrap()
+    };
+    let result = PermissionEffectResult::capture_host(
+      "slot:0".to_string(),
+      &[
+        dimension(package_a, "source-z"),
+        dimension(root_z, "source-a"),
+      ],
+    )
+    .unwrap();
+    assert_eq!(result.dimensions[0].principal.kind, PrincipalKind::Root);
+    assert_eq!(result.dimensions[1].principal.kind, PrincipalKind::Package);
+    let complete = PermissionBatchResult::capture_query_current(
+      &state,
+      &batch,
+      &view,
+      std::slice::from_ref(&result),
+    )
+    .unwrap();
+    assert_eq!(complete.state(), PermissionState::Granted);
+    let canonical = result
+      .dimensions
+      .iter()
+      .map(|dimension| {
+        canonical_serialization(
+          dimension,
+          MAX_CANONICAL_EFFECT_BYTES,
+          "testDimension",
+        )
+        .unwrap()
+      })
+      .collect::<Vec<_>>();
+    let mut sorted = canonical.clone();
+    sorted.sort();
+    assert_eq!(canonical, sorted);
   }
 
   #[test]
@@ -2210,12 +2735,40 @@ mod tests {
     let authenticated = authenticator
       .authenticate(&state, &request_batch, &response)
       .unwrap();
-    let grant = authenticated.into_request_grant().unwrap();
+    let proof = authenticated
+      .revalidate_current_negatives(
+        &state,
+        |proof_view, proof_batch, phases| {
+          assert_eq!(proof_view.generations(), view.generations());
+          assert_eq!(proof_batch.batch_digest(), request_batch.batch_digest());
+          assert_eq!(phases.len(), 7);
+          assert!(
+            phases
+              .iter()
+              .all(|phase| phase.strata == [1, 2, 3, 4, 5, 6, 7])
+          );
+          Ok(())
+        },
+      )
+      .unwrap();
+    let grant = proof.into_request_grant().unwrap();
     assert_eq!(grant.batch.batch_digest(), request_batch.batch_digest());
     assert_eq!(grant.batch.effects(), request_batch.effects());
     assert_eq!(grant.batch.overlay_owner(), &owner);
     assert!(state.is_current(&grant.authority_view).unwrap());
-    drop(grant);
+    let prompt = PermissionEffectResult::capture_host(
+      "slot:0".to_string(),
+      &[dimension(&owner, PermissionState::Prompt, "slot:0")],
+    )
+    .unwrap();
+    let pre_result =
+      PermissionBatchResult::capture_complete(&request_batch, &view, &[prompt])
+        .unwrap();
+    let transaction =
+      grant.into_session_transaction(&state, &pre_result).unwrap();
+    let proposed = state.propose_transaction(transaction).unwrap();
+    assert_eq!(proposed.read_view().row_count(), 1);
+    drop(proposed);
     assert_eq!(state.read_view().unwrap().row_count(), 0);
 
     let denied_batch =
@@ -2228,6 +2781,8 @@ mod tests {
     assert_eq!(
       authenticator
         .authenticate(&state, &denied_batch, &denied_response)
+        .unwrap()
+        .revalidate_current_negatives(&state, |_, _, _| Ok(()))
         .unwrap()
         .into_request_grant()
         .unwrap_err(),
@@ -2244,17 +2799,47 @@ mod tests {
         authenticator
           .authenticate(&state, &non_request, &response)
           .unwrap()
+          .revalidate_current_negatives(&state, |_, _, _| Ok(()))
+          .unwrap()
           .into_request_grant()
           .unwrap_err(),
         PermissionProtocolError::ExternalMutationRefused
       );
     }
 
-    // A grant proof exposes neither an authority transaction nor row-id or
-    // selector inputs. Until generated stable row identity exists, producing
-    // and dropping proofs cannot persist even an exact row, much less launder
-    // an unrelated caller-selected row.
+    // A grant proof exposes neither an authority transaction nor caller-chosen
+    // row IDs. The separate generated session adapter owns stable identity and
+    // transaction reconciliation.
     assert_eq!(state.read_view().unwrap().row_count(), 0);
+
+    let race_batch = batch(
+      &state,
+      &state.read_view().unwrap(),
+      54,
+      PermissionOperation::Request,
+      &effects,
+    );
+    let race_response = signed_response(&authenticator, &race_batch);
+    let race = authenticator
+      .authenticate(&state, &race_batch, &race_response)
+      .unwrap();
+    assert_eq!(
+      race
+        .revalidate_current_negatives(&state, |_, _, _| {
+          let mut negative = state.begin_transaction().unwrap();
+          negative
+            .upsert(
+              AuthorityRowKind::NegativeOverlay,
+              "negative:race".to_string(),
+              &selector(&owner, "HOME"),
+            )
+            .unwrap();
+          state.commit(negative).unwrap();
+          Ok(())
+        })
+        .unwrap_err(),
+      PermissionProtocolError::StaleAuthorityView
+    );
   }
 
   #[test]
@@ -2310,6 +2895,37 @@ mod tests {
       assert!(committed.read_view().row(kind, row_id).is_some());
       assert!(state.is_current(committed.read_view()).unwrap());
     }
+  }
+
+  #[test]
+  fn generated_revoke_builder_uses_stable_session_transaction() {
+    let owner = principal("pkg:owner");
+    let state = RuntimeAuthorityState::new(identity("run-revoke-builder"));
+    let view = state.read_view().unwrap();
+    let effects = [effect("slot:0", &owner, "HOME")];
+    let batch = batch(&state, &view, 61, PermissionOperation::Revoke, &effects);
+    let current = PermissionEffectResult::capture_host(
+      "slot:0".to_string(),
+      &[dimension(&owner, PermissionState::Granted, "slot:0")],
+    )
+    .unwrap();
+    let current_result =
+      PermissionBatchResult::capture_complete(&batch, &view, &[current])
+        .unwrap();
+    let transaction = batch
+      .session_revoke_transaction(&state, &current_result)
+      .unwrap();
+    let proposed = state.propose_transaction(transaction).unwrap();
+    let rows = proposed
+      .read_view()
+      .rows(AuthorityRowKind::SessionRevocation)
+      .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+      rows[0].selector().projection_id,
+      effects[0].canonical_effect().projection_id
+    );
+    assert_eq!(state.read_view().unwrap().row_count(), 0);
   }
 
   #[test]

@@ -49,7 +49,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::rev2_registry_generated::{
     REV2_PROFILE, REV2_REGISTRY_DIGEST, REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON,
-    REV2_VOCAB_DIGEST,
+    REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN, REV2_VOCAB_DIGEST,
 };
 
 pub const REASON_SCHEMA_INVALID: &str = "OD-CAP-SCHEMA-INVALID";
@@ -907,6 +907,8 @@ struct EdgeEffect {
     condition: Option<String>,
     source_resource_description: String,
     cardinality: String,
+    #[serde(default)]
+    positive_channels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2261,6 +2263,18 @@ impl Rev2Core {
         let edge = self.edges.get(&effect.edge_id).ok_or_else(|| {
             CoreError::new(REASON_EDGE_SET_INVALID, format!("unknown edge {}", effect.edge_id))
         })?;
+        // Alternative branches can bind different positive-source domains.
+        // The generated effect row is authoritative when present; legacy and
+        // homogeneous edges continue to use the edge-wide intersection.
+        let positive_channels = edge
+            .effects
+            .iter()
+            .find(|candidate| {
+                candidate.effect_slot_id == effect.effect_slot_id
+                    && candidate.capability == effect.capability
+            })
+            .and_then(|candidate| candidate.positive_channels.as_ref())
+            .unwrap_or(&edge.positive_channels);
         if edge.gate.mechanism == "deny-only" && !principal.is_root() {
             return Ok(deny(3, REASON_LIFECYCLE));
         }
@@ -2361,10 +2375,7 @@ impl Rev2Core {
             // vocabulary. An unknown future predicate fails closed until its
             // generated evaluator lands.
             let root_edge_ok = definition.root_edge_predicate_id.is_none();
-            let predicate_channel_ok = edge
-                .positive_channels
-                .iter()
-                .any(|channel| channel == "floor");
+            let predicate_channel_ok = positive_channels.iter().any(|channel| channel == "floor");
             if !(edge_ok
                 && positive_required_ok
                 && receipt_ok
@@ -2385,7 +2396,7 @@ impl Rev2Core {
         }
 
         if definition.channels.iter().any(|channel| channel == "floor")
-            && edge.positive_channels.iter().any(|channel| channel == "floor")
+            && positive_channels.iter().any(|channel| channel == "floor")
         {
             let row = if let Some(row) = protected_static {
                 Some(row)
@@ -2428,7 +2439,7 @@ impl Rev2Core {
             true
         };
         let lease_eligible = definition.channels.iter().any(|channel| channel == "handle")
-            && edge.positive_channels.iter().any(|channel| channel == "handle")
+            && positive_channels.iter().any(|channel| channel == "handle")
             && !definition.constraints.iter().any(|constraint| {
                 constraint == "static-only" || constraint == "nondelegable"
             });
@@ -2452,7 +2463,7 @@ impl Rev2Core {
             }
         }
         if definition.channels.iter().any(|channel| channel == "session")
-            && edge.positive_channels.iter().any(|channel| channel == "session")
+            && positive_channels.iter().any(|channel| channel == "session")
             && within_escalation_ceiling
         {
             if let Some(row) = self.find_matching_named(
@@ -2474,10 +2485,7 @@ impl Rev2Core {
             }
         }
         if self.implicit_self_registered(&effect.capability)
-            && edge
-                .positive_channels
-                .iter()
-                .any(|channel| channel == "implicit-self")
+            && positive_channels.iter().any(|channel| channel == "implicit-self")
         {
             let mut implicit_row = None;
             for row in &policy.implicit_self {
@@ -2504,10 +2512,7 @@ impl Rev2Core {
             }
         }
         if principal.is_root()
-            && edge
-                .positive_channels
-                .iter()
-                .any(|channel| channel == "ambient-root")
+            && positive_channels.iter().any(|channel| channel == "ambient-root")
         {
             return Ok(allow(
                 13,
@@ -2560,7 +2565,7 @@ impl Rev2Core {
             });
         }
         if matches!(policy.mode, Mode::Permissive | Mode::Audit)
-            && edge.positive_channels.iter().any(|channel| channel == "mode-fallback")
+            && positive_channels.iter().any(|channel| channel == "mode-fallback")
             && !definition.constraints.iter().any(|constraint| constraint == "static-only")
         {
             let source = serde_json::json!({
@@ -4943,7 +4948,7 @@ fn protected_row_digest(
         "predicateId": predicate_id,
         "reasonDigest": reason_digest,
     });
-    domain_digest("oden:capsec:protected-row:2", &preimage)
+    domain_digest(REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN, &preimage)
 }
 
 fn generated_id_version(id: &str) -> Option<&str> {
@@ -6068,7 +6073,28 @@ fn validate_edge_semantics(edge_id: &str, semantics: &EdgeSemantics) -> Result<(
                     .condition
                     .as_ref()
                     .is_some_and(|condition| condition.trim().is_empty())
+                || effect.positive_channels.as_ref().is_some_and(|channels| {
+                    semantics.effect_mode != "alternative"
+                        || channels.iter().any(|channel| {
+                            !matches!(
+                                channel.as_str(),
+                                "ambient-root"
+                                    | "floor"
+                                    | "handle"
+                                    | "implicit-self"
+                                    | "mode-fallback"
+                                    | "session"
+                            )
+                        })
+                })
         });
+    let branch_channel_overrides = semantics
+        .effects
+        .iter()
+        .filter(|effect| effect.positive_channels.is_some())
+        .count();
+    let invalid = invalid
+        || branch_channel_overrides != 0 && branch_channel_overrides != semantics.effects.len();
     if invalid {
         return Err(CoreError::new(
             REASON_SCHEMA_INVALID,
@@ -6218,6 +6244,16 @@ mod tests {
         "loader-branch:cli/module_loader.rs#npm-package-load:effect-slot:0";
     const SYS_EDGE: &str = "native-op:ext/node/ops/os/mod.rs#op_cpus";
     const SYS_SLOT: &str = "native-op:ext/node/ops/os/mod.rs#op_cpus:effect-slot:0";
+    const PERMISSION_QUERY_EDGE: &str =
+        "native-op:runtime/ops/permissions.rs#op_query_permission";
+    const PERMISSION_QUERY_SYS_SLOT: &str =
+        "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:2";
+    const PERMISSION_QUERY_RUN_SLOT: &str =
+        "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:1";
+    const PERMISSION_REVOKE_EDGE: &str =
+        "native-op:runtime/ops/permissions.rs#op_revoke_permission";
+    const PERMISSION_REVOKE_SYS_SLOT: &str =
+        "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:2";
     const ALTERNATIVE_EDGE: &str =
         "native-op:ext/node/ops/http2/session.rs#Http2Session::active_stream_count";
     const ALTERNATIVE_CONNECT_SLOT: &str =
@@ -6495,6 +6531,20 @@ mod tests {
             effect_owner: "owner:pkg".to_string(),
             occurrence: json!({ "effectOwner": "owner:pkg", "kind": kind }),
         }
+    }
+
+    fn permission_sys_effect(edge_id: &str, effect_slot_id: &str, kind: &str) -> EffectInput {
+        let mut effect = sys_effect(kind);
+        effect.edge_id = edge_id.to_string();
+        effect.effect_slot_id = effect_slot_id.to_string();
+        effect
+    }
+
+    fn permission_run_effect() -> EffectInput {
+        let mut effect = spawn_effect();
+        effect.edge_id = PERMISSION_QUERY_EDGE.to_string();
+        effect.effect_slot_id = PERMISSION_QUERY_RUN_SLOT.to_string();
+        effect
     }
 
     fn alternative_connect_effect() -> EffectInput {
@@ -7336,6 +7386,73 @@ mod tests {
         let allowed = core.decide_stage(&request, &rules).unwrap();
         assert_eq!(allowed.outcome, Outcome::Allow);
         assert_eq!(allowed.effects[0].dimensions[0].stratum, 11);
+    }
+
+    #[test]
+    fn permission_alternative_branches_select_their_own_positive_channels() {
+        let core = Rev2Core::embedded().unwrap();
+        let principal = package("permission-session");
+        let sys_selector = selector(
+            Some(principal.clone()),
+            "sys:read",
+            json!({ "kind": "cpus" }),
+        );
+        let mut rules = policy(Mode::Enforce);
+        rules.session_grants.push(named("session:sys", sys_selector.clone()));
+        rules.escalation_ceiling.push(named("ceiling:sys", sys_selector));
+
+        for (edge, slot) in [
+            (PERMISSION_QUERY_EDGE, PERMISSION_QUERY_SYS_SLOT),
+            (PERMISSION_REVOKE_EDGE, PERMISSION_REVOKE_SYS_SLOT),
+        ] {
+            let decision = core
+                .decide_stage(
+                    &stage(
+                        "permission-dynamic",
+                        vec![principal.clone()],
+                        vec![permission_sys_effect(edge, slot, "cpus")],
+                    ),
+                    &rules,
+                )
+                .unwrap();
+            assert_eq!(decision.outcome, Outcome::Allow);
+            assert_eq!(decision.effects[0].dimensions[0].stratum, 11);
+            assert_eq!(
+                decision.effects[0].dimensions[0]
+                    .positive_source
+                    .as_ref()
+                    .unwrap()
+                    .kind,
+                "session-row"
+            );
+        }
+
+        // The same alternative edge contains a static-only run branch. Its
+        // branch-local allowlist excludes session authority even though the
+        // edge-wide union admits it for the dynamic branches.
+        let run_selector = spawn_selector(principal.clone());
+        rules
+            .session_grants
+            .push(named("session:run", run_selector.clone()));
+        rules
+            .escalation_ceiling
+            .push(named("ceiling:run", run_selector));
+        let decision = core
+            .decide_stage(
+                &stage(
+                    "permission-static",
+                    vec![principal],
+                    vec![permission_run_effect()],
+                ),
+                &rules,
+            )
+            .unwrap();
+        assert_eq!(decision.outcome, Outcome::Deny);
+        assert_eq!(decision.effects[0].dimensions[0].stratum, 17);
+        assert_eq!(
+            decision.effects[0].dimensions[0].reason_code,
+            REASON_MISSING_AUTHORITY
+        );
     }
 
     #[test]

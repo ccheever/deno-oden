@@ -51,6 +51,7 @@ use crate::rev2::SelectorPolarity;
 use crate::rev2::domain_digest;
 use crate::rev2_registry_generated::REV2_PROFILE;
 use crate::rev2_registry_generated::REV2_REGISTRY_DIGEST;
+use crate::rev2_registry_generated::REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN;
 use crate::rev2_registry_generated::REV2_VOCAB_DIGEST;
 
 const CONTEXT_ERROR: &str = "OD-CAP-REV2-RUNTIME-CONTEXT";
@@ -1024,6 +1025,20 @@ fn compile_rows(
         }
         validate_digest(&protected.reason_digest)?;
         validate_digest(&protected.canonical_row_digest)?;
+        let protected_row = serde_json::json!({
+          "sourceId": row.source_id,
+          "selector": row.selector,
+          "predicateId": protected.predicate_id,
+          "reasonDigest": protected.reason_digest,
+        });
+        let expected_digest = domain_digest(
+          REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN,
+          &protected_row,
+        )
+        .map_err(|_| format!("{CONTEXT_ERROR}-PROTECTED-DIGEST"))?;
+        if protected.canonical_row_digest != expected_digest {
+          return Err(format!("{CONTEXT_ERROR}-PROTECTED-DIGEST"));
+        }
         if !protected_digests.insert(protected.canonical_row_digest.clone()) {
           return Err(format!("{CONTEXT_ERROR}-PROTECTED-DUPLICATE"));
         }
@@ -1587,6 +1602,67 @@ mod tests {
       "selector": canonical_selector(None, "TOKEN", SelectorPolarity::Negative),
     }]);
     snapshot
+  }
+
+  #[test]
+  fn protected_static_row_uses_generated_digest_domain_and_exact_preimage() {
+    let principal = principal();
+    let selector = canonical_selector(
+      Some(principal.clone()),
+      "TOKEN",
+      SelectorPolarity::Positive,
+    );
+    let source_id = "floor:protected";
+    let predicate_id = "predicate.protected-receipt/2";
+    let reason_digest = digest(37);
+    let basis = serde_json::json!({
+      "sourceId": source_id,
+      "selector": selector,
+      "predicateId": predicate_id,
+      "reasonDigest": reason_digest,
+    });
+    let canonical_row_digest =
+      domain_digest(REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN, &basis).unwrap();
+    let make_row = |row_digest: String| AuthorityRowWire {
+      source_id: source_id.to_string(),
+      selector: selector.clone(),
+      protected: Some(ProtectedWire {
+        predicate_id: predicate_id.to_string(),
+        reason_digest: reason_digest.clone(),
+        canonical_row_digest: row_digest,
+      }),
+    };
+
+    let core = Rev2Core::embedded().unwrap();
+    let mut sources = BTreeSet::new();
+    let mut protected = BTreeSet::new();
+    let compiled = compile_rows(
+      vec![make_row(canonical_row_digest)],
+      Some(&principal),
+      SelectorPolarity::Positive,
+      true,
+      &core,
+      &mut sources,
+      &mut protected,
+    )
+    .unwrap();
+    assert_eq!(compiled.len(), 1);
+
+    let mut sources = BTreeSet::new();
+    let mut protected = BTreeSet::new();
+    assert_eq!(
+      compile_rows(
+        vec![make_row(digest(38))],
+        Some(&principal),
+        SelectorPolarity::Positive,
+        true,
+        &core,
+        &mut sources,
+        &mut protected,
+      )
+      .unwrap_err(),
+      "OD-CAP-REV2-RUNTIME-CONTEXT-PROTECTED-DIGEST"
+    );
   }
 
   fn armable_loaded(
