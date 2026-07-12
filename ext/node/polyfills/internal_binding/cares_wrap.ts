@@ -45,6 +45,7 @@ const {
   SafeRegExp,
   SafeSet,
   SafeSetIterator,
+  SafeWeakMap,
   SetPrototypeAdd,
   SetPrototypeClear,
   SetPrototypeDelete,
@@ -53,7 +54,8 @@ const {
   StringPrototypePadStart,
   StringPrototypeReplace,
   StringPrototypeSplit,
-  Symbol,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet,
 } = primordials;
 const {
   op_dns_resolve,
@@ -93,16 +95,25 @@ const DNS_ORDER_VERBATIM = 0;
 const DNS_ORDER_IPV4_FIRST = 1;
 const DNS_ORDER_IPV6_FIRST = 2;
 
-// Module-private marker placed on the getaddrinfo completion callback used by
-// net.connect's *built-in* lookup. Only a callback bearing this symbol is
-// handed the NetPermToken from a lookup, so the token never escapes to a
-// user-supplied dns.lookup callback or a custom net.connect `lookup` function.
-// User code cannot reference this symbol, so it can neither receive the token
-// nor forge the marker. See GHSA-fhjh-jqv7-m238.
-const kPermTokenSink = Symbol("kPermTokenSink");
-const kPermTokenAction = Symbol("kPermTokenAction");
 const NET_ACTION_FETCH = 0;
 const NET_ACTION_CONNECT = 1;
+// Callback identity, rather than a reflectable property, authenticates the
+// built-in net.connect lookup. A Proxy callback cannot forge membership or
+// recover the NetPermToken by returning truthy values for unknown symbols.
+// See GHSA-fhjh-jqv7-m238.
+const permTokenSinkActions = new SafeWeakMap();
+
+function registerNetPermTokenSink(callback: object, action: number) {
+  WeakMapPrototypeSet(permTokenSinkActions, callback, action);
+}
+
+function getNetPermTokenSinkAction(callback: object | undefined) {
+  return WeakMapPrototypeGet(permTokenSinkActions, callback);
+}
+
+function isNetPermTokenSink(callback: object) {
+  return WeakMapPrototypeGet(permTokenSinkActions, callback) !== undefined;
+}
 
 class GetAddrInfoReqWrap extends AsyncWrap {
   family!: number;
@@ -143,12 +154,11 @@ function getaddrinfo(
     let error = 0;
     let netPermToken: object | undefined;
     try {
-      // Built-in net.connect marks its private callback with the parent
+      // Built-in net.connect registers its private callback with the parent
       // operation's action. Caller-visible node:dns remains the v1 fetch fold.
       // @ref LLP 0019#network-protocol-classes-remain-separate [implements]
-      const action = req.callback[kPermTokenSink]
-        ? req.callback[kPermTokenAction]
-        : NET_ACTION_FETCH;
+      const action = getNetPermTokenSinkAction(req.callback) ??
+        NET_ACTION_FETCH;
       netPermToken = await op_node_getaddrinfo(
         hostname,
         req.port || undefined,
@@ -926,10 +936,10 @@ return {
   QueryReqWrap,
   ChannelWrap,
   strerror,
-  kPermTokenSink,
-  kPermTokenAction,
+  isNetPermTokenSink,
   NET_ACTION_CONNECT,
   NET_ACTION_FETCH,
+  registerNetPermTokenSink,
   default: {
     DNS_ORDER_VERBATIM,
     DNS_ORDER_IPV4_FIRST,

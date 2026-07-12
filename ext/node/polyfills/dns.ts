@@ -71,7 +71,7 @@ const {
   GetAddrInfoReqWrap,
   GetNameInfoReqWrap,
   QueryReqWrap,
-  kPermTokenSink,
+  isNetPermTokenSink,
 } = core.loadExtScript("ext:deno_node/internal_binding/cares_wrap.ts");
 const { domainToASCII } = core.loadExtScript(
   "ext:deno_node/internal/idna.ts",
@@ -94,10 +94,10 @@ function onlookup(
     return this.callback(dnsException(err, "getaddrinfo", this.hostname));
   }
 
-  // The NetPermToken is only handed to net.connect's built-in lookup, which
-  // tags its callback with `kPermTokenSink`. User-supplied callbacks never
-  // bear the marker and so never observe the token (GHSA-fhjh-jqv7-m238).
-  if (this.callback[kPermTokenSink]) {
+  // The NetPermToken is handed only to a built-in net.connect callback whose
+  // identity was registered in closure-private state. User callbacks and
+  // property-forging Proxy callbacks never observe it (GHSA-fhjh-jqv7-m238).
+  if (isNetPermTokenSink(this.callback)) {
     this.callback(
       null,
       addresses[0],
@@ -130,9 +130,9 @@ function onlookupall(
     };
   }
 
-  // Only net.connect's built-in lookup (tagged with `kPermTokenSink`) is given
-  // the NetPermToken; user-supplied callbacks never observe it.
-  if (this.callback[kPermTokenSink]) {
+  // Only a registered built-in net.connect callback is given the NetPermToken;
+  // user-supplied callbacks never observe it.
+  if (isNetPermTokenSink(this.callback)) {
     this.callback(null, parsedAddresses, undefined, netPermToken);
   } else {
     this.callback(null, parsedAddresses);

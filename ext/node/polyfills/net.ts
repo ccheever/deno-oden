@@ -206,10 +206,9 @@ const { isWindows } = core.loadExtScript("ext:deno_node/_util/os.ts");
 const { ADDRCONFIG, lookup: dnsLookup } = core.createLazyLoader("node:dns")()
   .default;
 const {
-  kPermTokenAction,
-  kPermTokenSink,
   NET_ACTION_CONNECT,
   NET_ACTION_FETCH,
+  registerNetPermTokenSink,
 } = core.loadExtScript("ext:deno_node/internal_binding/cares_wrap.ts");
 const {
   codeMap,
@@ -2040,13 +2039,14 @@ function _lookupAndConnect(self: Socket, options: TcpSocketConnectOptions) {
       }
     }
 
-    // Tag the trusted callback so the built-in dns.lookup hands it the
-    // NetPermToken; user-supplied lookups never receive it.
+    // Register the trusted callback by identity so the built-in dns.lookup
+    // hands it the NetPermToken; user callbacks and Proxies cannot forge it.
     if (usingDefaultLookup) {
-      emitLookup[kPermTokenSink] = true;
-      emitLookup[kPermTokenAction] =
+      registerNetPermTokenSink(
+        emitLookup,
         WeakMapPrototypeGet(canonicalSocketDnsActions, self) ??
-          NET_ACTION_CONNECT;
+          NET_ACTION_CONNECT,
+      );
     }
     lookup(host, getLookupDnsOpts(), emitLookup);
   });
@@ -2216,13 +2216,14 @@ function _lookupAndConnectMultiple(
       );
     }
 
-    // Tag the trusted callback so the built-in dns.lookup hands it the
-    // NetPermToken; user-supplied lookups never receive it.
+    // Register the trusted callback by identity so the built-in dns.lookup
+    // hands it the NetPermToken; user callbacks and Proxies cannot forge it.
     if (usingDefaultLookup) {
-      emitLookup[kPermTokenSink] = true;
-      emitLookup[kPermTokenAction] =
+      registerNetPermTokenSink(
+        emitLookup,
         WeakMapPrototypeGet(canonicalSocketDnsActions, self) ??
-          NET_ACTION_CONNECT;
+          NET_ACTION_CONNECT,
+      );
     }
     lookup(host, dnsopts, emitLookup);
   });

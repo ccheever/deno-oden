@@ -925,7 +925,7 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
     );
   }
   const markedLookupActions = nodeNetSource.match(
-    /emitLookup\[kPermTokenSink\] = true; emitLookup\[kPermTokenAction\] = WeakMapPrototypeGet\(canonicalSocketDnsActions, self\) \?\? NET_ACTION_CONNECT;/g,
+    /registerNetPermTokenSink\( emitLookup, WeakMapPrototypeGet\(canonicalSocketDnsActions, self\) \?\? NET_ACTION_CONNECT, \);/g,
   ) ?? [];
   if (markedLookupActions.length !== 2) {
     errors.push(
@@ -936,13 +936,25 @@ function validateNetworkSurfaces(network: NetworkCheck[]): void {
     ROOT + "ext/node/polyfills/internal_binding/cares_wrap.ts",
   ).replace(/\s+/g, " ");
   if (
-    !/const action = req\.callback\[kPermTokenSink\] \? req\.callback\[kPermTokenAction\] : NET_ACTION_FETCH;/
+    !/const permTokenSinkActions = new SafeWeakMap\(\);/.test(caresSource) ||
+    !/const action = getNetPermTokenSinkAction\(req\.callback\) \?\? NET_ACTION_FETCH;/
       .test(
         caresSource,
       )
   ) {
     errors.push(
       "Node standalone DNS must stay Fetch while only authenticated internal lookups carry a parent action",
+    );
+  }
+  const dnsJsSource = Deno.readTextFileSync(
+    ROOT + "ext/node/polyfills/dns.ts",
+  ).replace(/\s+/g, " ");
+  if (
+    (dnsJsSource.match(/isNetPermTokenSink\(this\.callback\)/g) ?? [])
+      .length !== 2
+  ) {
+    errors.push(
+      "Node DNS must forward NetPermToken only to identity-registered built-in callbacks",
     );
   }
 
