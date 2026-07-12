@@ -97,6 +97,45 @@ enum OdenRev2HostChildExportKind {
   LiteralWrite,
 }
 
+/// Scoped owner used while a plaintext value is still being validated. Every
+/// fallible constructor path drops this guard; successful construction moves
+/// the allocation into the longer-lived secret-bearing wrapper.
+struct OdenRev2SecretString(String);
+
+impl OdenRev2SecretString {
+  fn new(value: String) -> Self {
+    Self(value)
+  }
+
+  fn get(&self) -> &str {
+    &self.0
+  }
+
+  fn take(&mut self) -> String {
+    std::mem::take(&mut self.0)
+  }
+}
+
+impl Drop for OdenRev2SecretString {
+  fn drop(&mut self) {
+    best_effort_zeroize_string(&mut self.0);
+    #[cfg(test)]
+    ODEN_REV2_SECRET_GUARD_DROPS.with(|drops| drops.set(drops.get() + 1));
+  }
+}
+
+#[cfg(test)]
+std::thread_local! {
+  static ODEN_REV2_SECRET_GUARD_DROPS: std::cell::Cell<usize> = const {
+    std::cell::Cell::new(0)
+  };
+}
+
+#[cfg(test)]
+fn secret_guard_drop_count() -> usize {
+  ODEN_REV2_SECRET_GUARD_DROPS.with(std::cell::Cell::get)
+}
+
 /// One host-sealed child export. Private fields and the absence of serde
 /// implementations keep this outside every JS/oracle wire shape.
 pub struct OdenRev2HostChildExport {
@@ -173,10 +212,10 @@ impl OdenRev2HostChildExport {
     value: impl Into<String>,
     requiredness: OdenRev2RequiredForCommit,
   ) -> Result<Self, OdenRev2HostError> {
+    let value = OdenRev2SecretString::new(value.into());
     let effect_owner = effect_owner.into();
     let owner_generation = owner_generation.into();
     let name = name.into();
-    let value = value.into();
     let target_kind = match kind {
       OdenRev2HostChildExportKind::BrokerRead => "broker",
       OdenRev2HostChildExportKind::PrincipalOverlayRead => "principal-overlay",
@@ -210,6 +249,7 @@ impl OdenRev2HostChildExport {
     name: impl Into<String>,
     value: impl Into<String>,
   ) -> Result<Self, OdenRev2HostError> {
+    let value = OdenRev2SecretString::new(value.into());
     let effect_owner = effect_owner.into();
     let owner_generation = owner_generation.into();
     let name = name.into();
@@ -230,7 +270,7 @@ impl OdenRev2HostChildExport {
           "targetKind": "child-launch",
         }),
       },
-      value.into(),
+      value,
       OdenRev2RequiredForCommit::Optional,
     )
   }
@@ -239,7 +279,7 @@ impl OdenRev2HostChildExport {
     edge: OdenRev2HostSpawnEdge,
     kind: OdenRev2HostChildExportKind,
     mut effect: EffectInput,
-    value: String,
+    mut value: OdenRev2SecretString,
     requiredness: OdenRev2RequiredForCommit,
   ) -> Result<Self, OdenRev2HostError> {
     let occurrence = effect
@@ -292,7 +332,7 @@ impl OdenRev2HostChildExport {
       || effect.effect_owner.trim().is_empty()
       || effect.effect_owner.len() > 1024
       || !valid_env_name(name)
-      || !valid_env_value(&value)
+      || !valid_env_value(value.get())
       || occurrence.len() != expected_keys.len()
       || expected_keys
         .iter()
@@ -318,7 +358,7 @@ impl OdenRev2HostChildExport {
       edge,
       kind,
       effect,
-      value,
+      value: value.take(),
     })
   }
 }
@@ -2177,7 +2217,7 @@ mod tests {
         OdenRev2HostSpawnEdge::DenoSpawnChild,
         OdenRev2HostChildExportKind::BrokerRead,
         caller_requiredness,
-        "value".to_string(),
+        OdenRev2SecretString::new("value".to_string()),
         OdenRev2RequiredForCommit::Required,
       ),
       Err(OdenRev2HostError::UntrustedRequiredForCommit)
@@ -2213,7 +2253,7 @@ mod tests {
           OdenRev2HostSpawnEdge::DenoSpawnChild,
           OdenRev2HostChildExportKind::BrokerRead,
           forged,
-          "value".to_string(),
+          OdenRev2SecretString::new("value".to_string()),
           OdenRev2RequiredForCommit::Required,
         ),
         Err(OdenRev2HostError::InvalidChildExport)
@@ -2373,6 +2413,48 @@ mod tests {
     assert_eq!(name, "TOKEN");
     assert_eq!(value, "transferred-secret");
     best_effort_zeroize_string(&mut value);
+  }
+
+  #[test]
+  fn invalid_child_export_construction_drops_zeroizing_value_guards() {
+    let before = secret_guard_drop_count();
+    let broker_secret = "broker-invalid-secret";
+    let principal_secret = "principal-invalid-secret";
+    let literal_secret = "literal-invalid-secret";
+
+    let broker = OdenRev2HostChildExport::capture_broker_env_read_host(
+      OdenRev2HostSpawnEdge::DenoSpawnChild,
+      "owner:pkg",
+      "0",
+      "",
+      broker_secret,
+      OdenRev2RequiredForCommit::Required,
+    )
+    .unwrap_err();
+    let principal =
+      OdenRev2HostChildExport::capture_principal_overlay_env_read_host(
+        OdenRev2HostSpawnEdge::NodeSpawnChild,
+        "owner:pkg",
+        "01",
+        "TOKEN",
+        principal_secret,
+        OdenRev2RequiredForCommit::Optional,
+      )
+      .unwrap_err();
+    let literal = OdenRev2HostChildExport::capture_literal_env_write_host(
+      OdenRev2HostSpawnEdge::DeprecatedRun,
+      "owner:pkg",
+      "0",
+      "A=B",
+      literal_secret,
+    )
+    .unwrap_err();
+
+    assert_eq!(secret_guard_drop_count(), before + 3);
+    let diagnostics = format!("{broker}; {principal}; {literal}");
+    for secret in [broker_secret, principal_secret, literal_secret] {
+      assert!(!diagnostics.contains(secret));
+    }
   }
 
   #[test]
