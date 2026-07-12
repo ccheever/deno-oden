@@ -112,7 +112,7 @@ switch (scenario) {
     // `install` gates the resolved graph more than once. The final report uses
     // the fresh verdict populated by the first gate, while capture below proves
     // that this command did perform the provider lookup.
-    const record = expectPublicAdd("clean", "socket", true, false);
+    const record = expectPublicAdd("clean", "socket", false, false);
     assertEquals(record.finding, undefined, "clean finding");
     assertEquals(report.error, undefined, "clean report error");
     break;
@@ -217,14 +217,53 @@ switch (scenario) {
   case "cache_seed": {
     assertEquals(report.mode, "default", "scan mode");
     expectRecords(1, { clean: 1 });
-    expectPublicAdd("clean", "socket", true, false);
+    expectPublicAdd("clean", "socket", false, false);
     assertEquals(report.error, undefined, "seed report error");
+    break;
+  }
+  case "strict_cache_seed": {
+    assertEquals(report.mode, "default", "scan mode");
+    expectRecords(1, { clean: 1 });
+    expectPublicAdd("clean", "socket", false, false);
+    assertEquals(report.error, undefined, "strict seed report error");
+    break;
+  }
+  case "strict_cached_outage": {
+    assertEquals(report.mode, "strict", "scan mode");
+    expectRecords(1, { unverified: 1 });
+    const record = expectPublicAdd("unverified", "socket", false, false);
+    assertEquals(
+      record.finding?.type,
+      "provider_unavailable",
+      "strict cached outage finding type",
+    );
+    assertEquals(
+      report.error,
+      "Socket strict scan has no valid verdict for 1 package(s): @denotest/add@1.0.0",
+      "strict cached outage error",
+    );
+    break;
+  }
+  case "audit_cached_outage": {
+    assertEquals(report.mode, "audit", "scan mode");
+    expectRecords(1, { unverified: 1 });
+    const record = expectPublicAdd("unverified", "socket", false, false);
+    assertEquals(
+      record.finding?.type,
+      "provider_unavailable",
+      "audit cached outage finding type",
+    );
+    assertEquals(
+      report.error,
+      "Socket audit has no current verdict for 1 package(s): @denotest/add@1.0.0",
+      "audit cached outage error",
+    );
     break;
   }
   case "stale_seed": {
     assertEquals(report.mode, "default", "scan mode");
     expectRecords(1, { clean: 1 });
-    expectPublicAdd("clean", "socket", true, true);
+    expectPublicAdd("clean", "socket", false, false);
     assertEquals(report.error, undefined, "seed report error");
     break;
   }
@@ -249,7 +288,7 @@ switch (scenario) {
       status: "clean",
       provider: "socket",
       registry: "http://localhost:4260/",
-      cached: true,
+      cached: false,
       stale: false,
       dependency_path: ["chalk@5.0.1"],
     });
@@ -307,12 +346,15 @@ const expectedCaptures: Record<string, string[]> = {
   warm_default: ["pkg:npm/@denotest/add@1.0.0"],
   cache_seed: ["pkg:npm/@denotest/add@1.0.0"],
   cache_fresh: [],
+  strict_cache_seed: ["pkg:npm/@denotest/add@1.0.0"],
+  strict_cached_outage: ["pkg:npm/@denotest/add@1.0.0"],
+  audit_cached_outage: ["pkg:npm/@denotest/add@1.0.0"],
   stale_seed: ["pkg:npm/@denotest/add@1.0.0"],
-  stale_cached: ["pkg:npm/@denotest/add@1.0.0"],
+  stale_cached: [],
   // The private @denotest/basic identity must never leave the installer.
   private_registry: ["pkg:npm/chalk@5.0.1"],
-  // Both verdicts are cached, so a second install should not send either
-  // identity after the private registry configuration has been removed.
+  // This no-op consumes neither identity. If refresh work runs on a later
+  // linking operation, persisted tarball provenance still excludes private.
   private_registry_from_persisted_tarball: [],
 };
 

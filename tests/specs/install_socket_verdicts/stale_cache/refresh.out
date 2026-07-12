@@ -1,1 +1,1 @@
-[WILDCARD]Socket could not refresh 1 cached package verdict(s); honoring the stale conclusive state. Run `oden audit` to retry.[WILDCARD]
+[WILDCARD]Socket is honoring 1 stale cached package verdict(s); a best-effort refresh was queued off the blocking path. Run `oden audit` to require a current result.[WILDCARD]

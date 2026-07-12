@@ -176,7 +176,7 @@
         }
       ]
     },
-    "fresh_cached_verdict_skips_provider": {
+    "fresh_cached_verdict_is_only_default_mode_advisory": {
       "steps": [
         {
           "cwd": "fresh_cache",
@@ -219,6 +219,90 @@
           ],
           "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
           "output": "ok cache_fresh\n"
+        }
+      ]
+    },
+    "strict_does_not_trust_persisted_clean": {
+      "steps": [
+        {
+          "cwd": "strict_cache",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/clean/eng23999-strict-cache-seed",
+            "ODEN_SOCKET_VERDICT_TTL_SECS": "3600"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "strict_cache_seed",
+            "strict_cache/socket-report.json",
+            "eng23999-strict-cache-seed"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok strict_cache_seed\n"
+        },
+        {
+          "cwd": "strict_cache",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/outage/eng23999-strict-cache-outage",
+            "ODEN_SOCKET_SCAN_MODE": "strict",
+            "ODEN_SOCKET_VERDICT_TTL_SECS": "3600"
+          },
+          "output": "strict_cache/outage.out",
+          "exitCode": 1
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "strict_cached_outage",
+            "strict_cache/socket-report.json",
+            "eng23999-strict-cache-outage"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok strict_cached_outage\n"
+        }
+      ]
+    },
+    "audit_does_not_trust_persisted_clean": {
+      "steps": [
+        {
+          "cwd": "strict_cache",
+          "args": "install",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/clean/eng23999-audit-cache-seed",
+            "ODEN_SOCKET_VERDICT_TTL_SECS": "3600"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "strict_cache",
+          "args": "audit",
+          "envs": {
+            "ODEN_SOCKET_API_URL": "http://localhost:4268/scenario/outage/eng23999-audit-cache-outage",
+            "ODEN_SOCKET_SCAN_MODE": "audit",
+            "ODEN_SOCKET_VERDICT_TTL_SECS": "3600"
+          },
+          "output": "[WILDCARD]",
+          "exitCode": 1
+        },
+        {
+          "args": [
+            "run",
+            "-A",
+            "assert_report.ts",
+            "audit_cached_outage",
+            "strict_cache/socket-report.json",
+            "eng23999-audit-cache-outage"
+          ],
+          "envs": { "ODEN_SOCKET_SCAN_MODE": "off" },
+          "output": "ok audit_cached_outage\n"
         }
       ]
     },
