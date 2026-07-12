@@ -4874,9 +4874,15 @@ fn validate_edge_semantics(edge_id: &str, semantics: &EdgeSemantics) -> Result<(
         || semantics.barriers.authorization != "before-commit"
         || semantics.barriers.cancellation != "release-provisional-state"
         || semantics.barriers.cleanup != "always-permitted-only-when-non-authorizing"
-        || semantics.barriers.commit != "unimplemented"
+        || !matches!(
+            semantics.barriers.commit.as_str(),
+            "before-commit" | "unimplemented"
+        )
         || semantics.barriers.delivery != "unimplemented"
-        || semantics.barriers.discovery != "unimplemented"
+        || !matches!(
+            semantics.barriers.discovery.as_str(),
+            "before-next-effect-or-delivery" | "unimplemented"
+        )
         || semantics.barriers.revocation != "before-next-effect-or-delivery"
         || semantics.lifetime_contract_id != "lifetime.staged-effect/2"
         || semantics.gate.branch_id.trim().is_empty()
@@ -5551,6 +5557,37 @@ mod tests {
         );
         let duplicate = parse_strict_json(r#"{"a":1,"a":2}"#).unwrap_err();
         assert_eq!(duplicate.reason_code, REASON_SCHEMA_INVALID);
+    }
+
+    #[test]
+    fn implemented_barrier_contract_is_closed_and_accepted() {
+        let core = Rev2Core::embedded().unwrap();
+        let edge_id =
+            "native-op:runtime/ops/oden.rs#op_oden_check_protected_inspector_stream_use";
+        let edge = core.edges.get(edge_id).unwrap();
+        assert_eq!(edge.barriers.commit, "before-commit");
+        assert_eq!(
+            edge.barriers.discovery,
+            "before-next-effect-or-delivery"
+        );
+
+        let mut invalid = edge.clone();
+        invalid.barriers.commit = "release-provisional-state".to_string();
+        assert_eq!(
+            validate_edge_semantics(edge_id, &invalid)
+                .unwrap_err()
+                .reason_code,
+            REASON_SCHEMA_INVALID
+        );
+
+        invalid = edge.clone();
+        invalid.barriers.discovery = "before-commit".to_string();
+        assert_eq!(
+            validate_edge_semantics(edge_id, &invalid)
+                .unwrap_err()
+                .reason_code,
+            REASON_SCHEMA_INVALID
+        );
     }
 
     #[test]

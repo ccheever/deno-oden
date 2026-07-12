@@ -502,8 +502,8 @@ pub struct Rev2Definition {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-YjPVwcRILiACzYDdH2EXCvPGe2eJl-OyZhHo5IYzgJE";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-GgPDJ6qodxHgre2BSUvo2Fq9R0ephiW1JU1nIdw8H04";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-nJUMGJMnQHvU7ZKI3dz3aGCDSQ-2V5-Y2Qz_HhOTU7s";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-duI6taMggm2shC_TN6MLnuYAvUO4xt-8sfMvG00DoDw";
 pub const REV2_ADVERTISED_TARGETS: &[&str] = &[];
 
 pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
@@ -64935,9 +64935,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "authorization": "before-commit",
           "cancellation": "release-provisional-state",
           "cleanup": "always-permitted-only-when-non-authorizing",
-          "commit": "unimplemented",
+          "commit": "before-commit",
           "delivery": "unimplemented",
-          "discovery": "unimplemented",
+          "discovery": "before-next-effect-or-delivery",
           "revocation": "before-next-effect-or-delivery"
         },
         "completeEffectSlotIds": null,
@@ -64962,7 +64962,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "branchKind": "single",
           "condition": "a JS-backed protected stream rechecks the immutable endpoint tag at every public consumption boundary",
           "enforcementDisposition": "bidirectional",
-          "mechanism": "deny-only",
+          "mechanism": "adds-op-gate",
           "negativeClosureSpecId": null
         },
         "generationKeys": [
@@ -79175,41 +79175,43 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
       "dataTables": [
         {
           "data": null,
-          "id": "table.idna-uts46-nontransitional/icu4x-2.2.0",
+          "id": "table.idna-uts46-nontransitional/icu4x-1.5.0",
           "implementationRevision": {
             "backend": "idna-adapter-icu4x-compiled-data",
             "cargoPackages": [
               {
-                "checksum": "c56e5ee99d6e3d33bd91c5d85458b6005a22140021cc324cea84dd0e72cff3b4",
+                "checksum": "19ce3e0da2ec68599d193c93d088142efd7f9c5d6fc9b803774855747dc6a84f",
                 "features": [
-                  "compiled_data"
+                  "compiled_data",
+                  "default"
                 ],
                 "name": "icu_normalizer",
                 "source": "registry+https://github.com/rust-lang/crates.io-index",
-                "version": "2.2.0"
+                "version": "1.5.0"
               },
               {
-                "checksum": "da3be0ae77ea334f4da67c12f149704f19f81d1adf7c51cf482943e84a2bad38",
+                "checksum": "f8cafbf7aa791e9b22bec55a167906f9e1215fd475cd22adfcf660e03e989516",
                 "features": [],
                 "name": "icu_normalizer_data",
                 "source": "registry+https://github.com/rust-lang/crates.io-index",
-                "version": "2.2.0"
+                "version": "1.5.0"
               },
               {
-                "checksum": "bee3b67d0ea5c2cca5003417989af8996f8604e34fb9ddf96208a033901e70de",
+                "checksum": "93d6020766cfc6302c15dbbc9c8778c37e62c14427cb7f6e601d849e092aeef5",
                 "features": [
-                  "compiled_data"
+                  "compiled_data",
+                  "default"
                 ],
                 "name": "icu_properties",
                 "source": "registry+https://github.com/rust-lang/crates.io-index",
-                "version": "2.2.0"
+                "version": "1.5.1"
               },
               {
-                "checksum": "8e2bbb201e0c04f7b4b3e14382af113e17ba4f63e2c9d2ee626b720cbce54a14",
+                "checksum": "67a8effbc3dd3e4ba1afa8ad918d5684b8868b3b26500753effea8d2eed19569",
                 "features": [],
                 "name": "icu_properties_data",
                 "source": "registry+https://github.com/rust-lang/crates.io-index",
-                "version": "2.2.0"
+                "version": "1.5.0"
               },
               {
                 "checksum": "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de",
@@ -79224,23 +79226,23 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
                 "version": "1.1.0"
               },
               {
-                "checksum": "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714",
+                "checksum": "daca1df1c957320b2cf139ac61e7bd64fed304c5040df000a745aa1de3b4ef71",
                 "features": [
                   "compiled_data"
                 ],
                 "name": "idna_adapter",
                 "source": "registry+https://github.com/rust-lang/crates.io-index",
-                "version": "1.2.2"
+                "version": "1.2.0"
               }
             ],
             "dataGeneration": {
-              "cldrVersion": "48.2.0",
-              "icuVersion": "release-78.1rc"
+              "cldrVersion": "45.0.0",
+              "icuVersion": "icu4x/2024-05-16/75.x"
             },
             "entryPoint": "idna::domain_to_ascii_strict"
           },
           "source": "rust-idna-icu4x-compiled-data",
-          "version": "cldr-48.2.0+icu-release-78.1rc"
+          "version": "cldr-45.0.0+icu-icu4x/2024-05-16/75.x"
         },
         {
           "data": null,
@@ -79252,6 +79254,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
                 "checksum": "8f518f335dce6725a761382244631d86cf0ccb2863413590b31338feb467f9c3",
                 "features": [
                   "default",
+                  "serde",
                   "std"
                 ],
                 "name": "ipnet",
@@ -79314,7 +79317,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "string"
           ],
           "tableRefs": [
-            "table.idna-uts46-nontransitional/icu4x-2.2.0"
+            "table.idna-uts46-nontransitional/icu4x-1.5.0"
           ]
         },
         {
@@ -79363,7 +79366,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "object"
           ],
           "tableRefs": [
-            "table.idna-uts46-nontransitional/icu4x-2.2.0",
+            "table.idna-uts46-nontransitional/icu4x-1.5.0",
             "table.ip-address-classes/2",
             "table.public-suffix-input/2"
           ]
@@ -85105,7 +85108,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "algorithm": "host-kind-specific",
           "id": "host-kind-specific-canonicalization",
           "tableRefs": [
-            "table.idna-uts46-nontransitional/icu4x-2.2.0"
+            "table.idna-uts46-nontransitional/icu4x-1.5.0"
           ],
           "valueTypes": [
             "string"
@@ -85135,7 +85138,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "algorithm": "lowercase-dns-a-label",
           "id": "lowercase-idna-a-label-no-trailing-dot",
           "tableRefs": [
-            "table.idna-uts46-nontransitional/icu4x-2.2.0"
+            "table.idna-uts46-nontransitional/icu4x-1.5.0"
           ],
           "valueTypes": [
             "string"
@@ -85364,7 +85367,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "algorithm": "dns-a-label-absolute",
           "id": "dns-a-label-absolute-name/2",
           "tableRefs": [
-            "table.idna-uts46-nontransitional/icu4x-2.2.0"
+            "table.idna-uts46-nontransitional/icu4x-1.5.0"
           ],
           "valueTypes": [
             "string"

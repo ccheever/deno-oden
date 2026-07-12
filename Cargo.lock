@@ -3247,6 +3247,7 @@ dependencies = [
  "faster-hex",
  "fqdn",
  "hmac",
+ "idna",
  "ipnet",
  "libc",
  "log",

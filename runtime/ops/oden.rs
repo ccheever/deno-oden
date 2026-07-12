@@ -15,6 +15,7 @@
 //! glue's active-arming check.
 //! @ref llp/0001-adding-capability-security-to-deno.plan.md
 
+use deno_core::OpState;
 use deno_core::op2;
 use deno_permissions::PermissionCheckError;
 
@@ -87,11 +88,32 @@ pub fn op_oden_record_root_ambient_effect(
 
 #[op2(fast, stack_trace)]
 pub fn op_oden_check_protected_inspector_stream_use(
+  state: &mut OpState,
   #[string] target: String,
   #[string] api_name: String,
 ) -> Result<(), PermissionCheckError> {
+  check_protected_inspector_stream_use_inner(state, &target, &api_name)
+}
+
+fn check_protected_inspector_stream_use_inner(
+  state: &mut OpState,
+  target: &str,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  // Preserve the complete Rev1 path when no host-only Rev2 context is
+  // installed. Presence selects the single Rev2 actor path: running the Rev1
+  // policy matcher first would make Rev2 positive authority depend on a
+  // second, incompatible policy engine. The actor still binds and validates
+  // the exact structural target and stage before commit. Caller strings never
+  // carry policy, effects, requiredForCommit, or a commit permit.
+  // @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+  if let Some(context) =
+    state.try_borrow_mut::<deno_permissions::OdenRev2ArmedContext>()
+  {
+    return context.consume_protected_inspector_stream_stage(target, api_name);
+  }
   deno_permissions::oden_capsec_check_protected_inspector_stream_target(
-    &target, &api_name,
+    target, api_name,
   )
 }
 
@@ -151,4 +173,46 @@ pub fn op_oden_handle_exit() {
 #[op2(fast, stack_trace)]
 pub fn op_oden_handle_revoke(#[string] id: String) {
   deno_permissions::oden_capsec_handle_revoke(&id);
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn absent_rev2_context_preserves_the_rev1_guard_result() {
+    let target = "not-an-endpoint";
+    let api_name = "oden-rev2-seam-test";
+    let expected =
+      deno_permissions::oden_capsec_check_protected_inspector_stream_target(
+        target, api_name,
+      )
+      .unwrap_err()
+      .to_string();
+    let mut state = OpState::new(None);
+    let actual =
+      check_protected_inspector_stream_use_inner(&mut state, target, api_name)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(actual, expected);
+  }
+
+  #[test]
+  fn installed_unbound_rev2_context_fails_closed_without_a_new_op() {
+    let target = "not-an-endpoint";
+    let api_name = "oden-rev2-seam-test";
+    let rev1_error =
+      deno_permissions::oden_capsec_check_protected_inspector_stream_target(
+        target, api_name,
+      )
+      .unwrap_err()
+      .to_string();
+    let mut state = OpState::new(None);
+    state.put(deno_permissions::OdenRev2ArmedContext::unbound_host());
+    let error =
+      check_protected_inspector_stream_use_inner(&mut state, target, api_name)
+        .unwrap_err();
+    assert!(error.to_string().contains("no native stage is bound"));
+    assert_ne!(error.to_string(), rev1_error);
+  }
 }

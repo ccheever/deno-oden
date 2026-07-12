@@ -46,9 +46,29 @@ mod oden_handle;
 mod oden_policy;
 mod oden_principal_index;
 mod oden_protected;
+mod oden_rev2_runtime;
 pub mod prompter;
 mod runtime_descriptor_parser;
 pub mod which;
+
+// @ref LLP 0019#stage-c-shared-core-implementation-checkpoint-eng-24015 [implements] -- The production permission crate compiles the reviewed Rev2 core directly; runtime actors remain dormant until trusted host state installs them.
+#[path = "oden_rev2_core_generated.rs"]
+pub mod rev2;
+#[path = "oden_rev2_registry_generated.rs"]
+mod rev2_registry_generated;
+
+pub use oden_rev2_runtime::OdenRev2ArmedContext;
+pub use oden_rev2_runtime::OdenRev2CommittedLaunchEntry;
+pub use oden_rev2_runtime::OdenRev2CommittedLaunchPayload;
+pub use oden_rev2_runtime::OdenRev2HostActor;
+pub use oden_rev2_runtime::OdenRev2HostAuthorization;
+pub use oden_rev2_runtime::OdenRev2HostChildExport;
+pub use oden_rev2_runtime::OdenRev2HostCommit;
+pub use oden_rev2_runtime::OdenRev2HostError;
+pub use oden_rev2_runtime::OdenRev2HostInteraction;
+pub use oden_rev2_runtime::OdenRev2HostLaunchSeal;
+pub use oden_rev2_runtime::OdenRev2HostSpawnEdge;
+pub use oden_rev2_runtime::OdenRev2RequiredForCommit;
 
 use prompter::MAYBE_CURRENT_STACKTRACE;
 use prompter::PERMISSION_EMOJI;
@@ -4724,6 +4744,85 @@ fn oden_capsec_principal_set() -> Vec<OdenPrincipal> {
     prompter::current_oden_trusted_host_actor(),
   );
   out
+}
+
+/// Capture the live op/CPED principal intersection in the Rev2 identity
+/// domain. This is host state, not a caller-provided actor claim.
+/// @ref LLP 0019#operation-scoped-positive-authority-provenance [implements]
+pub fn oden_rev2_capture_live_principals() -> Vec<rev2::PrincipalRef> {
+  let mut mapped = Vec::new();
+  let mut push = |principal: OdenPrincipal, locator: Option<&str>| {
+    if principal != OdenPrincipal::Runtime {
+      mapped.push(oden_rev2_map_attributed_principal(principal, locator));
+    }
+  };
+
+  for frame in prompter::current_oden_stacktrace() {
+    match frame.locator.as_deref() {
+      Some(locator) => push(
+        oden_principal_index::resolve_frame(
+          frame.isolate_id,
+          frame.script_id,
+          locator,
+        ),
+        Some(locator),
+      ),
+      None if oden_capsec_runtime_display(frame.display_name.as_deref()) => {}
+      None if frame.script_id.is_some() => {
+        push(OdenPrincipal::Quarantine, None)
+      }
+      None => {}
+    }
+  }
+  if let Some(locator) = prompter::current_oden_cped_locator() {
+    push(
+      oden_principal_index::resolve_locator(&locator),
+      Some(&locator),
+    );
+  }
+  for locator in prompter::current_oden_cped_stack() {
+    push(
+      oden_principal_index::resolve_locator(&locator),
+      Some(&locator),
+    );
+  }
+  if mapped.is_empty() {
+    mapped.push(oden_rev2_map_attributed_principal(
+      oden_capsec_unattributed_principal(
+        prompter::current_oden_trusted_host_actor(),
+      ),
+      None,
+    ));
+  }
+  mapped.sort();
+  mapped.dedup();
+  mapped
+}
+
+fn oden_rev2_map_attributed_principal(
+  principal: OdenPrincipal,
+  locator: Option<&str>,
+) -> rev2::PrincipalRef {
+  let kind = match &principal {
+    OdenPrincipal::Root => rev2::PrincipalKind::Root,
+    OdenPrincipal::Runtime => rev2::PrincipalKind::Runtime,
+    OdenPrincipal::Package { .. } => rev2::PrincipalKind::Package,
+    OdenPrincipal::Jsr { .. } => rev2::PrincipalKind::Jsr,
+    OdenPrincipal::Url { .. } => rev2::PrincipalKind::Url,
+    OdenPrincipal::Quarantine => rev2::PrincipalKind::Quarantine,
+    OdenPrincipal::NoUser => rev2::PrincipalKind::NoUser,
+  };
+  let key = if matches!(
+    principal,
+    OdenPrincipal::Package { .. }
+      | OdenPrincipal::Jsr { .. }
+      | OdenPrincipal::Url { .. }
+  ) {
+    oden_capsec_compartment_key(&principal, locator)
+  } else {
+    principal.key()
+  };
+  rev2::PrincipalRef { kind, key }
 }
 
 // Deputy-class arming (LLP 0001 precedence row 3), opt-in. A capability class is
