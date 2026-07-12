@@ -719,7 +719,7 @@ async fn jupyter_armed_host_actor_does_not_launder_scheduled_package()
                 const message = String(error);
                 resolve(message.includes('principal "quarantine"')
                   ? "QUARANTINE_DENIED"
-                  : `WRONG_ACTOR:${message}`);
+                  : "WRONG_ACTOR:" + message);
               }
             }, 0));
           `)
