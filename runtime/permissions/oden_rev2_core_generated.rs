@@ -47,10 +47,12 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 
+use crate::rev2_registry_generated as generated;
 use crate::rev2_registry_generated::{
+    REV2_FILESYSTEM_CANDIDATE_CASE_PLANS, REV2_FILESYSTEM_CANDIDATE_OPERATIONS,
     REV2_PROFILE, REV2_REGISTRY_DIGEST, REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON,
     REV2_RUNTIME_NEGATIVE_INVENTORY_DOMAIN, REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN,
-    REV2_VOCAB_DIGEST,
+    REV2_TARGET_STATUS, REV2_VOCAB_DIGEST,
 };
 
 pub const REASON_SCHEMA_INVALID: &str = "OD-CAP-SCHEMA-INVALID";
@@ -748,6 +750,787 @@ pub struct StagedOperation {
     terminal_denial: Option<StructuredDenial>,
 }
 
+// The filesystem reference oracle is a semantic operation, not the detached
+// evidence wrapper. The trusted parent owns run/build/oracle identity and wraps
+// this exact expected-free input and semantic output in the evidence artifacts.
+//
+// @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
+// the Rust oracle receives the complete execution projection and initial-only
+// sandbox preimage, never manifest `expected`, trace, final state, or verdict.
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FilesystemLogicalRoot {
+    #[serde(rename = "$ABS")]
+    Abs,
+    #[serde(rename = "$HOME")]
+    Home,
+    #[serde(rename = "$PACKAGE")]
+    Package,
+    #[serde(rename = "$PROJECT")]
+    Project,
+    #[serde(rename = "$TMP")]
+    Tmp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemPlatformPath {
+    pub encoding: FilesystemPlatformPathEncoding,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemPlatformPathEncoding {
+    OpaqueBase64url,
+    Unicode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemObjectIdentity {
+    pub kind: FilesystemObjectIdentityKind,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemObjectIdentityKind {
+    OpaqueToken,
+    PlatformObject,
+    VerifiedContent,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemObjectKind {
+    BlockDevice,
+    CharacterDevice,
+    Directory,
+    Fifo,
+    Missing,
+    RegularFile,
+    Socket,
+    Symlink,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemTargetPredicate {
+    pub candidates: Vec<FilesystemTargetCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemTargetCandidate {
+    pub target: String,
+    pub feature_set: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemInvocation {
+    pub kind: FilesystemInvocationKind,
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd_root: FilesystemLogicalRoot,
+    pub entrypoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemInvocationKind {
+    Loader,
+    NativeHarness,
+    PublicCommand,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum FilesystemTargetParentRef {
+    LogicalRoot {
+        root: FilesystemLogicalRoot,
+        binding_id: String,
+    },
+    DirectoryObject {
+        object_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemTargetRef {
+    pub object_id: String,
+    pub parent: FilesystemTargetParentRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum FilesystemOperationRequest {
+    LstatSync {
+        target_ref: FilesystemTargetRef,
+    },
+    MkdirSync {
+        target_ref: FilesystemTargetRef,
+        recursive: bool,
+        requested_mode: u16,
+    },
+}
+
+impl FilesystemOperationRequest {
+    fn target_ref(&self) -> &FilesystemTargetRef {
+        match self {
+            Self::LstatSync { target_ref } | Self::MkdirSync { target_ref, .. } => target_ref,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSetup {
+    pub logical_roots: Vec<FilesystemSetupLogicalRoot>,
+    pub objects: Vec<FilesystemSetupObject>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSetupLogicalRoot {
+    pub root: FilesystemLogicalRoot,
+    pub binding_id: String,
+    pub descriptor_slot: usize,
+    pub object_identity: FilesystemObjectIdentity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSetupObject {
+    pub object_id: String,
+    pub root: FilesystemLogicalRoot,
+    pub path: FilesystemPlatformPath,
+    pub object_identity: Option<FilesystemObjectIdentity>,
+    pub kind: FilesystemObjectKind,
+    pub content: Option<FilesystemInlineContent>,
+    pub content_digest: Option<String>,
+    pub alias_target_object_id: Option<String>,
+    pub link_target_object_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemInlineContent {
+    pub kind: FilesystemInlineContentKind,
+    pub bytes: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemInlineContentKind {
+    InlineBase64url,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemPathResource {
+    pub root: FilesystemLogicalRoot,
+    pub kind: FilesystemPathResourceKind,
+    pub path: FilesystemPlatformPath,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemPathResourceKind {
+    PathExact,
+    PathTree,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemAuthorityRow {
+    pub source_id: String,
+    pub source_class: FilesystemAuthoritySourceClass,
+    pub channel: FilesystemAuthorityChannel,
+    pub polarity: SelectorPolarity,
+    pub principal_key: Option<String>,
+    pub capability: String,
+    pub resource: FilesystemPathResource,
+    pub state: FilesystemAuthorityState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemAuthoritySourceClass {
+    ProcessDenial,
+    PrincipalDenial,
+    StaticFloor,
+    EscalationCeiling,
+    SessionRevocation,
+    SessionGrant,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemAuthorityChannel {
+    Process,
+    Principal,
+    Floor,
+    EscalationCeiling,
+    Session,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemAuthorityState {
+    Active,
+    Dormant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemExecutionPlan {
+    pub actors: Vec<FilesystemExecutionActor>,
+    pub trace_phases: Vec<FilesystemTracePhase>,
+    pub resource_lifecycle: Vec<FilesystemResourceLifecycleEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemExecutionActor {
+    pub actor_id: String,
+    pub slot_id: String,
+    pub principal_key: Option<String>,
+    pub effect_owner: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemTracePhase {
+    HarnessAdmitted,
+    PublicOpEntered,
+    ActorsCaptured,
+    NamespaceGateAcquired,
+    DiscoveryComplete,
+    AuthorizationComplete,
+    SourcesRevalidated,
+    TargetRevalidated,
+    PreparationComplete,
+    PostPrepareRevalidated,
+    CoreCommitRecorded,
+    NativeCommitRecorded,
+    OperationCompleted,
+    DeliverySerialized,
+    ProvisionalResourcesReleased,
+    NamespaceGateReleased,
+    HarnessExited,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemResourceLifecycleEntry {
+    pub sequence: usize,
+    pub phase: FilesystemTracePhase,
+    pub resource_id: String,
+    pub resource_class: FilesystemResourceClass,
+    pub transition: FilesystemResourceTransition,
+    pub owner_before: Option<String>,
+    pub owner_after: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemResourceClass {
+    InheritedRoot,
+    Arena,
+    ActorToken,
+    NamespaceGate,
+    AuthorityHandle,
+    PreparedChild,
+    ProvisionalResource,
+    DeliveryLease,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemResourceTransition {
+    Acquire,
+    Transfer,
+    Release,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemFaultPlan {
+    pub barrier_id: String,
+    pub phase: FilesystemFaultPhase,
+    pub action: FilesystemFaultAction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemFaultPhase {
+    AfterDiscovery,
+    AfterAuthorization,
+    AfterSourceRevalidation,
+    AfterTargetRevalidation,
+    AfterPreparation,
+    AfterPostPrepareRevalidation,
+    AfterCoreCommit,
+    AfterNativeCommit,
+    BeforeDelivery,
+    DuringDelivery,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum FilesystemFaultAction {
+    NamespaceMutation {
+        mutation: FilesystemNamespaceMutation,
+    },
+    AuthorityRevocation {
+        remove_source_ids: Vec<String>,
+        activate_source_ids: Vec<String>,
+    },
+    ActorSequence {
+        operation: FilesystemActorSequenceOperation,
+    },
+    NativeCommit {
+        outcome: FilesystemNativeCommitOutcome,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemNamespaceMutation {
+    pub kind: FilesystemNamespaceMutationKind,
+    pub object_id: String,
+    pub replacement_object_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemNamespaceMutationKind {
+    LinkSwap,
+    ParentReplacement,
+    PathReplacement,
+    RootReplacement,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemActorSequenceOperation {
+    Cancel,
+    OmitObservation,
+    OmitPostPrepareRevalidation,
+    OmitNativeCommit,
+    RepeatNativeCommit,
+    CompleteAfterNotCommitted,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemNativeCommitOutcome {
+    RaceExisting,
+    NotCommitted,
+    UncertainAfterSyscall,
+    PanicAfterMutationBegin,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemExecutionMode {
+    Audit,
+    Enforce,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemInputMutation {
+    None,
+    TargetPathDotDot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemExecutionProjection {
+    pub case_id: String,
+    pub edge_id: String,
+    pub requirement_id: String,
+    pub case_kind: String,
+    pub case_plan_digest: String,
+    pub mode: FilesystemExecutionMode,
+    pub constrained_principal_keys: Vec<String>,
+    pub effect_owner_key: String,
+    pub input_mutation: FilesystemInputMutation,
+    pub target_predicate: FilesystemTargetPredicate,
+    pub invocation: FilesystemInvocation,
+    pub operation_request: FilesystemOperationRequest,
+    pub setup: FilesystemSetup,
+    pub principals: Vec<PrincipalRef>,
+    pub authority_rows: Vec<FilesystemAuthorityRow>,
+    pub execution: FilesystemExecutionPlan,
+    pub fault_plan: Option<FilesystemFaultPlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemMetadataProjection {
+    pub mode: u32,
+    pub size: String,
+    pub link_count: String,
+    pub device: String,
+    pub inode: String,
+    pub uid: Option<String>,
+    pub gid: Option<String>,
+    pub rdev: Option<String>,
+    pub block_size: Option<String>,
+    pub blocks: Option<String>,
+    pub accessed_time_ns: Option<String>,
+    pub modified_time_ns: Option<String>,
+    pub changed_time_ns: Option<String>,
+    pub birth_time_ns: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemRealizedObjectState {
+    pub kind: FilesystemObjectKind,
+    pub identity: Option<FilesystemObjectIdentity>,
+    pub metadata: Option<FilesystemMetadataProjection>,
+    pub content_digest: Option<String>,
+    pub alias_target_object_id: Option<String>,
+    pub link_target_object_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemInitialSandboxInventory {
+    pub schema: String,
+    pub phase: FilesystemSandboxPhase,
+    pub logical_roots: Vec<FilesystemRealizedLogicalRoot>,
+    pub objects: Vec<FilesystemInitialSandboxObject>,
+    pub unexpected_entries: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemSandboxPhase {
+    Initial,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemRealizedLogicalRoot {
+    pub root: FilesystemLogicalRoot,
+    pub binding_id: String,
+    pub fixture_identity: FilesystemObjectIdentity,
+    pub platform_identity: FilesystemObjectIdentity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemInitialSandboxObject {
+    pub object_id: String,
+    pub root: FilesystemLogicalRoot,
+    pub path: FilesystemPlatformPath,
+    pub fixture_identity: Option<FilesystemObjectIdentity>,
+    pub state: FilesystemRealizedObjectState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemParentCaptureFacts {
+    pub captured_umask: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemCandidateOracleInput {
+    pub case_projection: FilesystemExecutionProjection,
+    pub case_projection_digest: String,
+    pub initial_sandbox: FilesystemInitialSandboxInventory,
+    pub initial_inventory_digest: String,
+    pub parent_capture_facts: FilesystemParentCaptureFacts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum FilesystemFinalObjectState {
+    Existing { identity: FilesystemObjectIdentity },
+    LinkEntry { identity: FilesystemObjectIdentity },
+    Missing,
+    Proposed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemPathOccurrence {
+    pub root: FilesystemLogicalRoot,
+    pub root_binding_id: String,
+    pub lexical_path: FilesystemPlatformPath,
+    pub follow_mode: FilesystemFollowMode,
+    pub parent_identity: FilesystemObjectIdentity,
+    pub final_object_state: FilesystemFinalObjectState,
+    pub effect_owner: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemFollowMode {
+    NoFollowFinal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemEffectSlot {
+    pub slot_id: String,
+    pub capability: String,
+    pub effect_owner: String,
+    pub occurrence: FilesystemPathOccurrence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemOracleNormalization {
+    pub operation_request: FilesystemOperationRequest,
+    pub runtime_slots: Vec<FilesystemEffectSlot>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemCoreEvaluationPhase {
+    Initial,
+    PostFault,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemCoreDimension {
+    pub slot_id: String,
+    pub principal_key: String,
+    pub outcome: FilesystemCoreOutcome,
+    pub stratum: u8,
+    pub reason_code: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemCoreOutcome {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemCoreEvaluation {
+    pub sequence: usize,
+    pub phase: FilesystemCoreEvaluationPhase,
+    pub outcome: FilesystemCoreOutcome,
+    pub dimensions: Vec<FilesystemCoreDimension>,
+    pub committed_slot_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSharedCoreEffectInput {
+    pub identity: EngineIdentity,
+    pub edge_id: String,
+    pub effect_slot_id: String,
+    pub capability: String,
+    pub effect_owner: String,
+    pub occurrence: FilesystemPathOccurrence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSharedCoreStageRequest {
+    pub identity: EngineIdentity,
+    pub stage_id: String,
+    pub principals: Vec<PrincipalRef>,
+    pub effects: Vec<FilesystemSharedCoreEffectInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSharedCoreCanonicalEffect {
+    pub edge_id: String,
+    pub effect_slot_id: String,
+    pub capability: String,
+    pub effect_owner: String,
+    pub projection_id: String,
+    pub occurrence: FilesystemPathOccurrence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSharedCoreDimension {
+    pub principal: PrincipalRef,
+    pub outcome: FilesystemCoreOutcome,
+    pub stratum: u8,
+    pub reason_code: String,
+    pub positive_source: Option<PositiveSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSharedCoreEffectDecision {
+    pub effect: FilesystemSharedCoreCanonicalEffect,
+    pub outcome: FilesystemCoreOutcome,
+    pub dimensions: Vec<FilesystemSharedCoreDimension>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSharedCoreStageDecision {
+    pub stage_id: String,
+    pub outcome: FilesystemCoreOutcome,
+    pub effects: Vec<FilesystemSharedCoreEffectDecision>,
+    pub committed_effects: Vec<FilesystemSharedCoreCanonicalEffect>,
+    pub omitted_effect_slot_ids: Vec<String>,
+    pub canonical_effects_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSharedCoreEvaluation {
+    pub sequence: usize,
+    pub phase: FilesystemCoreEvaluationPhase,
+    pub stage_request: FilesystemSharedCoreStageRequest,
+    pub stage_decision: FilesystemSharedCoreStageDecision,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemCoreDisposition {
+    Evaluated,
+    NotReached,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemExpectedCore {
+    pub disposition: FilesystemCoreDisposition,
+    pub evaluations: Vec<FilesystemCoreEvaluation>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemDecision {
+    Allow,
+    Deny,
+    Refuse,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemDelivery {
+    Delivered,
+    NotApplicable,
+    Withheld,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemCleanup {
+    Complete,
+    NotStarted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemExpectedResult {
+    pub class: String,
+    pub digest: Option<FilesystemExpectedResultDigest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemExpectedResultDigest {
+    pub source: FilesystemExpectedDigestSource,
+    pub algorithm: FilesystemExpectedDigestAlgorithm,
+    pub domain: String,
+    pub preimage: FilesystemExpectedDigestPreimage,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemExpectedDigestSource {
+    InitialTargetMetadata,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemExpectedDigestAlgorithm {
+    HjcsSha256Base64url,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemExpectedDigestPreimage {
+    ExactInitialFilesystemMetadataProjectionJcs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemObservedResult {
+    pub class: String,
+    pub digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemSideEffectKind {
+    Create,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemSideEffect {
+    pub kind: FilesystemSideEffectKind,
+    pub object_id: String,
+    pub digest: Option<String>,
+    pub final_kind: Option<FilesystemObjectKind>,
+    pub mode: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemExpectedOutcome {
+    pub slots: Vec<FilesystemEffectSlot>,
+    pub decision: FilesystemDecision,
+    pub result: FilesystemExpectedResult,
+    pub side_effects: Vec<FilesystemSideEffect>,
+    pub delivery: FilesystemDelivery,
+    pub cleanup: FilesystemCleanup,
+    pub core: FilesystemExpectedCore,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemExpectedObservation {
+    pub case_id: String,
+    pub edge_id: String,
+    pub requirement_id: String,
+    pub case_kind: String,
+    pub slots: Vec<FilesystemEffectSlot>,
+    pub decision: FilesystemDecision,
+    pub result: FilesystemObservedResult,
+    pub side_effects: Vec<FilesystemSideEffect>,
+    pub delivery: FilesystemDelivery,
+    pub cleanup: FilesystemCleanup,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesystemCandidateOracleOutput {
+    pub core_identity: EngineIdentity,
+    pub normalization: FilesystemOracleNormalization,
+    pub normalized_slots_digest: String,
+    pub core_evaluations: Vec<FilesystemSharedCoreEvaluation>,
+    pub expected_outcome: FilesystemExpectedOutcome,
+    pub expected_outcome_digest: String,
+    pub expected_observation: FilesystemExpectedObservation,
+    pub expected_observation_digest: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(
     tag = "operation",
@@ -785,6 +1568,9 @@ enum OracleRequest {
     DecideStage {
         stage: StageRequest,
         policy: Box<DecisionPolicyInput>,
+    },
+    EvaluateFilesystemCandidate {
+        input: Box<FilesystemCandidateOracleInput>,
     },
 }
 
@@ -2773,9 +3559,19 @@ impl Rev2Core {
                     && selector == requested)
             }
             "path-exact-or-tree" => {
-                Ok(selector.get("kind").and_then(Value::as_str) == Some("path-exact")
-                    && selector.get("root") == occurrence.get("root")
-                    && selector.get("path") == occurrence.get("lexicalPath"))
+                if selector.get("kind").and_then(Value::as_str) != Some("path-exact")
+                    || selector.get("root") != occurrence.get("root")
+                {
+                    return Ok(false);
+                }
+                let Some(selector_path) = selector.get("path") else {
+                    return Ok(false);
+                };
+                let Some(lexical_path) = occurrence.get("lexicalPath") else {
+                    return Ok(false);
+                };
+                Ok(decode_platform_path_bytes(selector_path)?
+                    == decode_platform_path_bytes(lexical_path)?)
             }
             _ => Ok(false),
         }
@@ -3553,7 +4349,7 @@ impl Rev2Core {
                 let encoding = object.get("encoding").and_then(Value::as_str).ok_or_else(|| {
                     CoreError::new(REASON_SCHEMA_INVALID, "platform path has no encoding")
                 })?;
-                let _payload = object.get("value").and_then(Value::as_str).ok_or_else(|| {
+                let payload = object.get("value").and_then(Value::as_str).ok_or_else(|| {
                     CoreError::new(REASON_SCHEMA_INVALID, "platform path has no value")
                 })?;
                 if !matches!(encoding, "opaque-base64url" | "unicode") {
@@ -3562,6 +4358,7 @@ impl Rev2Core {
                         "unknown platform path encoding",
                     ));
                 }
+                decode_platform_path_payload(encoding, payload)?;
             }
             "occurrence.dns-query/2"
                 if object
@@ -4414,6 +5211,3029 @@ impl StagedOperation {
     }
 }
 
+const FILESYSTEM_EXECUTION_PROJECTION_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-execution-projection:2";
+const FILESYSTEM_SANDBOX_INVENTORY_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-sandbox-inventory:2";
+const FILESYSTEM_CASE_PLAN_DIGEST_DOMAIN: &str = "oden:capsec:filesystem-case-plan:2";
+const FILESYSTEM_LSTAT_METADATA_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-lstat-metadata:2";
+const FILESYSTEM_NORMALIZED_SLOTS_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-normalized-slots:2";
+const FILESYSTEM_EXPECTED_OUTCOME_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-expected-outcome:2";
+const FILESYSTEM_EXPECTED_OBSERVATION_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-observed-result:2";
+const FILESYSTEM_SANDBOX_INVENTORY_SCHEMA: &str =
+    "oden/capsec-filesystem-sandbox-inventory/2";
+
+fn generated_case_kind(
+    kind: generated::Rev2FilesystemCandidateCaseKind,
+) -> &'static str {
+    use generated::Rev2FilesystemCandidateCaseKind as Kind;
+    match kind {
+        Kind::AuthorableCrossActionDenial => "authorable-cross-action-denial",
+        Kind::AuthorableMissingPrincipalDenial => "authorable-missing-principal-denial",
+        Kind::AuthorableNegative => "authorable-negative",
+        Kind::AuthorableNoUserDenial => "authorable-no-user-denial",
+        Kind::AuthorablePositive => "authorable-positive",
+        Kind::AuthorableQuarantineDenial => "authorable-quarantine-denial",
+        Kind::AuthorableWrongPrincipalDenial => "authorable-wrong-principal-denial",
+        Kind::LstatExisting => "lstat-existing",
+        Kind::LstatFinalMissing => "lstat-final-missing",
+        Kind::LstatLinkEntry => "lstat-link-entry",
+        Kind::MalformedResourceRefusal => "malformed-resource-refusal",
+        Kind::MkdirExistingConflict => "mkdir-existing-conflict",
+        Kind::MkdirLinkConflict => "mkdir-link-conflict",
+        Kind::MkdirMissingCreate => "mkdir-missing-create",
+        Kind::MultiEffectAllAuthorized => "multi-effect-all-authorized",
+        Kind::MultiEffectNMinusOneDenied => "multi-effect-n-minus-one-denied",
+        Kind::MultiEffectNoPartialCommit => "multi-effect-no-partial-commit",
+        Kind::StagedBarrierAuthorization => "staged-barrier:authorization",
+        Kind::StagedBarrierCancellation => "staged-barrier:cancellation",
+        Kind::StagedBarrierCleanup => "staged-barrier:cleanup",
+        Kind::StagedBarrierRevocation => "staged-barrier:revocation",
+    }
+}
+
+fn generated_case_plan(
+    case_kind: &str,
+) -> Result<&'static generated::Rev2FilesystemCandidateCasePlanSpec, CoreError> {
+    REV2_FILESYSTEM_CANDIDATE_CASE_PLANS
+        .iter()
+        .find(|plan| generated_case_kind(plan.case_kind) == case_kind)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("unknown filesystem candidate case kind {case_kind}"),
+            )
+        })
+}
+
+fn generated_case_plan_digest(case_kind: &str) -> Result<String, CoreError> {
+    let payload = parse_strict_json(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON)?;
+    let plans = payload
+        .pointer("/policyRulesAndClassifiers/filesystemCandidateCasePlans")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "generated filesystem case-plan payload is missing",
+            )
+        })?;
+    let plan = plans
+        .iter()
+        .find(|plan| plan.get("caseKind").and_then(Value::as_str) == Some(case_kind))
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("generated filesystem case plan is missing {case_kind}"),
+            )
+        })?;
+    hjcs_digest(FILESYSTEM_CASE_PLAN_DIGEST_DOMAIN, plan)
+}
+
+fn operation_edge_id(
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+) -> &'static str {
+    match operation {
+        generated::Rev2FilesystemCandidateOperationSpec::LstatSync { edge_id, .. }
+        | generated::Rev2FilesystemCandidateOperationSpec::MkdirSync { edge_id, .. } => edge_id,
+    }
+}
+
+fn generated_operation(
+    edge_id: &str,
+) -> Result<&'static generated::Rev2FilesystemCandidateOperationSpec, CoreError> {
+    REV2_FILESYSTEM_CANDIDATE_OPERATIONS
+        .iter()
+        .find(|operation| operation_edge_id(operation) == edge_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("unknown filesystem candidate edge {edge_id}"),
+            )
+        })
+}
+
+fn operation_slots(
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+) -> &'static [generated::Rev2FilesystemCandidateSlotSpec] {
+    match operation {
+        generated::Rev2FilesystemCandidateOperationSpec::LstatSync { ordered_slots, .. }
+        | generated::Rev2FilesystemCandidateOperationSpec::MkdirSync { ordered_slots, .. } => {
+            ordered_slots
+        }
+    }
+}
+
+fn operation_classifications(
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+) -> &'static [generated::Rev2FilesystemCandidateTargetStateClassificationSpec] {
+    match operation {
+        generated::Rev2FilesystemCandidateOperationSpec::LstatSync {
+            target_state_classifications,
+            ..
+        }
+        | generated::Rev2FilesystemCandidateOperationSpec::MkdirSync {
+            target_state_classifications,
+            ..
+        } => target_state_classifications,
+    }
+}
+
+fn operation_authorized_outcomes(
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+) -> &'static [generated::Rev2FilesystemCandidateAuthorizedOutcomeSpec] {
+    match operation {
+        generated::Rev2FilesystemCandidateOperationSpec::LstatSync {
+            authorized_outcomes,
+            ..
+        }
+        | generated::Rev2FilesystemCandidateOperationSpec::MkdirSync {
+            authorized_outcomes,
+            ..
+        } => authorized_outcomes,
+    }
+}
+
+fn generated_capability(
+    capability: generated::Rev2CapabilityId,
+) -> Result<&'static str, CoreError> {
+    match capability {
+        generated::Rev2CapabilityId::FsList => Ok("fs:list"),
+        generated::Rev2CapabilityId::FsWrite => Ok("fs:write"),
+        _ => Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem operation contains a non-filesystem candidate capability",
+        )),
+    }
+}
+
+fn generated_initial_kind(
+    kind: FilesystemObjectKind,
+) -> generated::Rev2FilesystemCandidateInitialObjectKind {
+    use generated::Rev2FilesystemCandidateInitialObjectKind as Generated;
+    match kind {
+        FilesystemObjectKind::BlockDevice => Generated::BlockDevice,
+        FilesystemObjectKind::CharacterDevice => Generated::CharacterDevice,
+        FilesystemObjectKind::Directory => Generated::Directory,
+        FilesystemObjectKind::Fifo => Generated::Fifo,
+        FilesystemObjectKind::Missing => Generated::Missing,
+        FilesystemObjectKind::RegularFile => Generated::RegularFile,
+        FilesystemObjectKind::Socket => Generated::Socket,
+        FilesystemObjectKind::Symlink => Generated::Symlink,
+    }
+}
+
+fn generated_target_edge_id(
+    edge_id: generated::Rev2FilesystemCandidateOperationEdgeId,
+) -> &'static str {
+    use generated::Rev2FilesystemCandidateOperationEdgeId as Edge;
+    match edge_id {
+        Edge::NativeOpExtFsOpsRsOpFsLstatSync => {
+            "native-op:ext/fs/ops.rs#op_fs_lstat_sync"
+        }
+        Edge::NativeOpExtFsOpsRsOpFsMkdirSync => {
+            "native-op:ext/fs/ops.rs#op_fs_mkdir_sync"
+        }
+    }
+}
+
+fn generated_trace_phase(
+    phase: FilesystemTracePhase,
+) -> generated::Rev2FilesystemCandidateTracePhase {
+    use generated::Rev2FilesystemCandidateTracePhase as Generated;
+    match phase {
+        FilesystemTracePhase::HarnessAdmitted => Generated::HarnessAdmitted,
+        FilesystemTracePhase::PublicOpEntered => Generated::PublicOpEntered,
+        FilesystemTracePhase::ActorsCaptured => Generated::ActorsCaptured,
+        FilesystemTracePhase::NamespaceGateAcquired => Generated::NamespaceGateAcquired,
+        FilesystemTracePhase::DiscoveryComplete => Generated::DiscoveryComplete,
+        FilesystemTracePhase::AuthorizationComplete => Generated::AuthorizationComplete,
+        FilesystemTracePhase::SourcesRevalidated => Generated::SourcesRevalidated,
+        FilesystemTracePhase::TargetRevalidated => Generated::TargetRevalidated,
+        FilesystemTracePhase::PreparationComplete => Generated::PreparationComplete,
+        FilesystemTracePhase::PostPrepareRevalidated => Generated::PostPrepareRevalidated,
+        FilesystemTracePhase::CoreCommitRecorded => Generated::CoreCommitRecorded,
+        FilesystemTracePhase::NativeCommitRecorded => Generated::NativeCommitRecorded,
+        FilesystemTracePhase::OperationCompleted => Generated::OperationCompleted,
+        FilesystemTracePhase::DeliverySerialized => Generated::DeliverySerialized,
+        FilesystemTracePhase::ProvisionalResourcesReleased => {
+            Generated::ProvisionalResourcesReleased
+        }
+        FilesystemTracePhase::NamespaceGateReleased => Generated::NamespaceGateReleased,
+        FilesystemTracePhase::HarnessExited => Generated::HarnessExited,
+    }
+}
+
+fn filesystem_trace_phase(
+    phase: generated::Rev2FilesystemCandidateTracePhase,
+) -> FilesystemTracePhase {
+    use generated::Rev2FilesystemCandidateTracePhase as Generated;
+    match phase {
+        Generated::HarnessAdmitted => FilesystemTracePhase::HarnessAdmitted,
+        Generated::PublicOpEntered => FilesystemTracePhase::PublicOpEntered,
+        Generated::ActorsCaptured => FilesystemTracePhase::ActorsCaptured,
+        Generated::NamespaceGateAcquired => FilesystemTracePhase::NamespaceGateAcquired,
+        Generated::DiscoveryComplete => FilesystemTracePhase::DiscoveryComplete,
+        Generated::AuthorizationComplete => FilesystemTracePhase::AuthorizationComplete,
+        Generated::SourcesRevalidated => FilesystemTracePhase::SourcesRevalidated,
+        Generated::TargetRevalidated => FilesystemTracePhase::TargetRevalidated,
+        Generated::PreparationComplete => FilesystemTracePhase::PreparationComplete,
+        Generated::PostPrepareRevalidated => FilesystemTracePhase::PostPrepareRevalidated,
+        Generated::CoreCommitRecorded => FilesystemTracePhase::CoreCommitRecorded,
+        Generated::NativeCommitRecorded => FilesystemTracePhase::NativeCommitRecorded,
+        Generated::OperationCompleted => FilesystemTracePhase::OperationCompleted,
+        Generated::DeliverySerialized => FilesystemTracePhase::DeliverySerialized,
+        Generated::ProvisionalResourcesReleased => {
+            FilesystemTracePhase::ProvisionalResourcesReleased
+        }
+        Generated::NamespaceGateReleased => FilesystemTracePhase::NamespaceGateReleased,
+        Generated::HarnessExited => FilesystemTracePhase::HarnessExited,
+    }
+}
+
+fn target_state(
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+    kind: FilesystemObjectKind,
+) -> Result<generated::Rev2FilesystemCandidateTargetState, CoreError> {
+    let generated_kind = generated_initial_kind(kind);
+    operation_classifications(operation)
+        .iter()
+        .find(|classification| classification.initial_kinds.contains(&generated_kind))
+        .map(|classification| classification.target_state)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem target kind has no generated classification",
+            )
+        })
+}
+
+fn validate_generated_operation_model(
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+) -> Result<(), CoreError> {
+    use generated::*;
+    let valid = match operation {
+        Rev2FilesystemCandidateOperationSpec::LstatSync {
+            follow_mode,
+            input_bindings,
+            ordered_slots,
+            result_model_id,
+            ..
+        } => {
+            *follow_mode == Rev2FilesystemCandidateFollowMode::NoFollowFinal
+                && input_bindings.target_ref
+                    == Rev2FilesystemCandidateTargetRefInput::OperationRequestTargetRef
+                && input_bindings.target_state
+                    == Rev2FilesystemCandidateTargetStateInput::InitialSandboxObjectStateByTargetRef
+                && input_bindings.parent_identity
+                    == Rev2FilesystemCandidateParentIdentityInput::InitialSandboxParentIdentityByTargetRef
+                && input_bindings.slot_actors
+                    == Rev2FilesystemCandidateSlotActorsInput::ExecutionPlanActorBySlot
+                && *result_model_id
+                    == Rev2FilesystemCandidateLstatResultModelId::FilesystemResultLstatNoFollow2
+                && matches!(
+                    ordered_slots,
+                    [Rev2FilesystemCandidateSlotSpec {
+                        role: Rev2FilesystemCandidateSlotRole::TargetListObservation,
+                        capability: Rev2CapabilityId::FsList,
+                        ..
+                    }]
+                )
+        }
+        Rev2FilesystemCandidateOperationSpec::MkdirSync {
+            follow_mode,
+            input_bindings,
+            recursive_policy,
+            mode_derivation,
+            ordered_slots,
+            result_model_id,
+            ..
+        } => {
+            *follow_mode == Rev2FilesystemCandidateFollowMode::NoFollowFinal
+                && input_bindings.target_ref
+                    == Rev2FilesystemCandidateTargetRefInput::OperationRequestTargetRef
+                && input_bindings.target_state
+                    == Rev2FilesystemCandidateTargetStateInput::InitialSandboxObjectStateByTargetRef
+                && input_bindings.parent_identity
+                    == Rev2FilesystemCandidateParentIdentityInput::InitialSandboxParentIdentityByTargetRef
+                && input_bindings.slot_actors
+                    == Rev2FilesystemCandidateSlotActorsInput::ExecutionPlanActorBySlot
+                && input_bindings.requested_mode
+                    == Rev2FilesystemCandidateRequestedModeInput::OperationRequestRequestedMode
+                && input_bindings.captured_umask
+                    == Rev2FilesystemCandidateCapturedUmaskInput::ParentCaptureCapturedUmask
+                && *recursive_policy == Rev2FilesystemCandidateRecursivePolicy::RequireFalse
+                && mode_derivation.algorithm
+                    == Rev2FilesystemCandidateModeAlgorithm::DirectoryTypeOrMaskedRequestMinusUmask
+                && mode_derivation.requested_mode_mask == 0o777
+                && mode_derivation.captured_umask_mask == 0o777
+                && mode_derivation.required_captured_umask == 0o077
+                && mode_derivation.directory_type_bits == 0o040000
+                && *result_model_id
+                    == Rev2FilesystemCandidateMkdirResultModelId::FilesystemResultMkdirNoReplace2
+                && matches!(
+                    ordered_slots,
+                    [
+                        Rev2FilesystemCandidateSlotSpec {
+                            role: Rev2FilesystemCandidateSlotRole::TargetWriteIntent,
+                            capability: Rev2CapabilityId::FsWrite,
+                            ..
+                        },
+                        Rev2FilesystemCandidateSlotSpec {
+                            role: Rev2FilesystemCandidateSlotRole::TargetListObservation,
+                            capability: Rev2CapabilityId::FsList,
+                            ..
+                        }
+                    ]
+                )
+        }
+    };
+    if !valid {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "generated filesystem operation uses an unsupported future contract",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_generated_authorized_outcome(
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+    state: generated::Rev2FilesystemCandidateTargetState,
+    outcome: &generated::Rev2FilesystemCandidateAuthorizedOutcomeSpec,
+) -> Result<(), CoreError> {
+    use generated::*;
+    let common = outcome.target_state == state
+        && outcome.delivery == Rev2FilesystemCandidateDelivery::Delivered
+        && outcome.cleanup == Rev2FilesystemCandidateCleanup::Complete
+        && outcome.normalized_slot_states.len() == operation_slots(operation).len()
+        && outcome
+            .normalized_slot_states
+            .iter()
+            .zip(operation_slots(operation))
+            .all(|(normalized, slot)| {
+                normalized.effect_slot_id == slot.effect_slot_id
+                    && match normalized.final_object_state {
+                        Rev2FilesystemCandidateFinalObjectState::Existing
+                        | Rev2FilesystemCandidateFinalObjectState::LinkEntry => {
+                            normalized.identity_source
+                                == Rev2FilesystemCandidateIdentitySource::InitialTargetIdentity
+                        }
+                        Rev2FilesystemCandidateFinalObjectState::Missing
+                        | Rev2FilesystemCandidateFinalObjectState::Proposed => {
+                            normalized.identity_source
+                                == Rev2FilesystemCandidateIdentitySource::None
+                        }
+                    }
+            });
+    let model_valid = match (operation, state) {
+        (
+            Rev2FilesystemCandidateOperationSpec::LstatSync { .. },
+            Rev2FilesystemCandidateTargetState::Existing
+            | Rev2FilesystemCandidateTargetState::LinkEntry,
+        ) => {
+            outcome.native_result.class == Rev2FilesystemCandidateNativeResultClass::LstatComplete
+                && outcome.native_result.metadata_digest.is_some_and(|model| {
+                    model.source
+                        == Rev2FilesystemCandidateMetadataDigestSource::InitialTargetMetadata
+                        && model.algorithm
+                            == Rev2FilesystemCandidateMetadataDigestAlgorithm::HjcsSha256Base64url
+                        && model.domain
+                            == Rev2FilesystemCandidateMetadataDigestDomain::OdenCapsecFilesystemLstatMetadata2
+                        && model.preimage
+                            == Rev2FilesystemCandidateMetadataDigestPreimage::ExactInitialFilesystemMetadataProjectionJcs
+                })
+                && outcome.permitted_side_effects.is_empty()
+        }
+        (
+            Rev2FilesystemCandidateOperationSpec::LstatSync { .. },
+            Rev2FilesystemCandidateTargetState::Missing,
+        ) => {
+            outcome.native_result.class == Rev2FilesystemCandidateNativeResultClass::LstatNotFound
+                && outcome.native_result.metadata_digest.is_none()
+                && outcome.permitted_side_effects.is_empty()
+        }
+        (
+            Rev2FilesystemCandidateOperationSpec::MkdirSync { .. },
+            Rev2FilesystemCandidateTargetState::Existing
+            | Rev2FilesystemCandidateTargetState::LinkEntry,
+        ) => {
+            outcome.native_result.class
+                == Rev2FilesystemCandidateNativeResultClass::MkdirAlreadyExists
+                && outcome.native_result.metadata_digest.is_none()
+                && outcome.permitted_side_effects.is_empty()
+        }
+        (
+            Rev2FilesystemCandidateOperationSpec::MkdirSync { .. },
+            Rev2FilesystemCandidateTargetState::Missing,
+        ) => {
+            outcome.native_result.class == Rev2FilesystemCandidateNativeResultClass::MkdirComplete
+                && outcome.native_result.metadata_digest.is_none()
+                && matches!(
+                    outcome.permitted_side_effects,
+                    [Rev2FilesystemCandidateCreateSideEffect {
+                        kind: Rev2FilesystemCandidateSideEffectKind::Create,
+                        object_id_source:
+                            Rev2FilesystemCandidateSideEffectObjectIdSource::TargetRefObjectId,
+                        digest_source: Rev2FilesystemCandidateSideEffectDigestSource::None,
+                        final_kind: Rev2FilesystemCandidateSideEffectFinalKind::Directory,
+                        mode_source:
+                            Rev2FilesystemCandidateSideEffectModeSource::EffectiveDirectoryMode,
+                    }]
+                )
+        }
+    };
+    if !common || !model_valid {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "generated filesystem outcome uses an unsupported future result contract",
+        ));
+    }
+    Ok(())
+}
+
+fn mode_matches_case_plan(
+    mode: FilesystemExecutionMode,
+    plan: generated::Rev2FilesystemCandidateExecutionMode,
+) -> bool {
+    matches!(
+        (mode, plan),
+        (
+            FilesystemExecutionMode::Audit,
+            generated::Rev2FilesystemCandidateExecutionMode::Audit
+        ) | (
+            FilesystemExecutionMode::Enforce,
+            generated::Rev2FilesystemCandidateExecutionMode::Enforce
+        )
+    )
+}
+
+fn mutation_matches_case_plan(
+    mutation: FilesystemInputMutation,
+    plan: generated::Rev2FilesystemCandidateInputMutation,
+) -> bool {
+    matches!(
+        (mutation, plan),
+        (
+            FilesystemInputMutation::None,
+            generated::Rev2FilesystemCandidateInputMutation::None
+        ) | (
+            FilesystemInputMutation::TargetPathDotDot,
+            generated::Rev2FilesystemCandidateInputMutation::TargetPathDotDot
+        )
+    )
+}
+
+fn validate_fault_plan(
+    projection: &FilesystemExecutionProjection,
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+    plan: &generated::Rev2FilesystemCandidateCasePlanSpec,
+) -> Result<(), CoreError> {
+    use generated::Rev2FilesystemCandidateFaultPlan as Generated;
+    let expected = match plan.fault_plan {
+        Generated::None => None,
+        Generated::CancelSafeBoundary => Some(FilesystemFaultPlan {
+            barrier_id: "case-plan:after-authorization".to_string(),
+            phase: FilesystemFaultPhase::AfterAuthorization,
+            action: FilesystemFaultAction::ActorSequence {
+                operation: FilesystemActorSequenceOperation::Cancel,
+            },
+        }),
+        Generated::OmitRequiredStage => match operation {
+            generated::Rev2FilesystemCandidateOperationSpec::LstatSync { .. } => {
+                Some(FilesystemFaultPlan {
+                    barrier_id: "case-plan:after-target-revalidation".to_string(),
+                    phase: FilesystemFaultPhase::AfterTargetRevalidation,
+                    action: FilesystemFaultAction::ActorSequence {
+                        operation: FilesystemActorSequenceOperation::OmitObservation,
+                    },
+                })
+            }
+            generated::Rev2FilesystemCandidateOperationSpec::MkdirSync { .. } => {
+                Some(FilesystemFaultPlan {
+                    barrier_id: "case-plan:after-preparation".to_string(),
+                    phase: FilesystemFaultPhase::AfterPreparation,
+                    action: FilesystemFaultAction::ActorSequence {
+                        operation: FilesystemActorSequenceOperation::OmitPostPrepareRevalidation,
+                    },
+                })
+            }
+        },
+        Generated::RevokeAllAfterAuthorization | Generated::RevokeLastAfterAuthorization => {
+            let indexes: Vec<usize> = if plan.fault_plan == Generated::RevokeAllAfterAuthorization {
+                (0..operation_slots(operation).len()).collect()
+            } else {
+                vec![operation_slots(operation).len() - 1]
+            };
+            Some(FilesystemFaultPlan {
+                barrier_id: "case-plan:after-authorization".to_string(),
+                phase: FilesystemFaultPhase::AfterAuthorization,
+                action: FilesystemFaultAction::AuthorityRevocation {
+                    remove_source_ids: indexes
+                        .iter()
+                        .map(|index| format!("case:session-grant:{index}"))
+                        .collect(),
+                    activate_source_ids: indexes
+                        .iter()
+                        .map(|index| format!("case:session-revocation:{index}"))
+                        .collect(),
+                },
+            })
+        }
+    };
+    if projection.fault_plan != expected {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem fault plan differs from the generated case plan",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_case_principal_plan(
+    projection: &FilesystemExecutionProjection,
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+    plan: &generated::Rev2FilesystemCandidateCasePlanSpec,
+) -> Result<Option<String>, CoreError> {
+    use generated::Rev2FilesystemCandidatePrincipalPlan as Plan;
+    let owner = projection
+        .principals
+        .iter()
+        .find(|principal| principal.key == projection.effect_owner_key)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem effect owner is absent from the principal pool",
+            )
+        })?;
+    let actor_principal = match plan.principal_plan {
+        Plan::Actor => {
+            if projection.principals.len() != 1
+                || owner.kind != PrincipalKind::Package
+                || projection.constrained_principal_keys != [projection.effect_owner_key.clone()]
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem projection does not implement the actor principal plan",
+                ));
+            }
+            Some(projection.effect_owner_key.clone())
+        }
+        Plan::ActorAndOther => {
+            let other = projection
+                .principals
+                .iter()
+                .find(|principal| principal.key != projection.effect_owner_key)
+                .ok_or_else(|| {
+                    CoreError::new(
+                        REASON_SCHEMA_INVALID,
+                        "filesystem actor-and-other plan has no other principal",
+                    )
+                })?;
+            if projection.principals.len() != 2
+                || projection
+                    .principals
+                    .iter()
+                    .any(|principal| principal.kind != PrincipalKind::Package)
+                || projection.constrained_principal_keys
+                    != [projection.effect_owner_key.clone(), other.key.clone()]
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem projection does not implement the actor-and-other principal plan",
+                ));
+            }
+            Some(projection.effect_owner_key.clone())
+        }
+        Plan::ActorUnconstrained => {
+            if projection.principals.len() != 1
+                || owner.kind != PrincipalKind::Package
+                || !projection.constrained_principal_keys.is_empty()
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem projection does not implement the unconstrained actor plan",
+                ));
+            }
+            None
+        }
+        Plan::ExplicitNoUser => {
+            if projection.principals.len() != 1
+                || owner.kind != PrincipalKind::NoUser
+                || projection.constrained_principal_keys != [projection.effect_owner_key.clone()]
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem projection does not implement the explicit no-user plan",
+                ));
+            }
+            Some(projection.effect_owner_key.clone())
+        }
+        Plan::Quarantine => {
+            if projection.principals.len() != 1
+                || owner.kind != PrincipalKind::Quarantine
+                || projection.constrained_principal_keys != [projection.effect_owner_key.clone()]
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem projection does not implement the quarantine plan",
+                ));
+            }
+            Some(projection.effect_owner_key.clone())
+        }
+    };
+    if projection.execution.actors.len() != operation_slots(operation).len() {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem case plan actor count differs from operation slots",
+        ));
+    }
+    let mut actor_ids = BTreeSet::new();
+    for (actor, slot) in projection
+        .execution
+        .actors
+        .iter()
+        .zip(operation_slots(operation))
+    {
+        if actor.actor_id.is_empty()
+            || actor.actor_id.len() > 4096
+            || !actor.actor_id.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+            || !actor_ids.insert(actor.actor_id.as_str())
+            || actor.slot_id != slot.effect_slot_id
+            || actor.principal_key != actor_principal
+            || actor.effect_owner != projection.effect_owner_key
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem actor binding differs from the generated principal and slot plan",
+            ));
+        }
+    }
+    Ok(actor_principal)
+}
+
+fn case_authority_row(
+    source_id: String,
+    source_class: FilesystemAuthoritySourceClass,
+    principal_key: Option<String>,
+    capability: String,
+    resource: &FilesystemPathResource,
+    state: FilesystemAuthorityState,
+) -> FilesystemAuthorityRow {
+    let (channel, polarity) = match source_class {
+        FilesystemAuthoritySourceClass::ProcessDenial => {
+            (FilesystemAuthorityChannel::Process, SelectorPolarity::Negative)
+        }
+        FilesystemAuthoritySourceClass::PrincipalDenial => {
+            (FilesystemAuthorityChannel::Principal, SelectorPolarity::Negative)
+        }
+        FilesystemAuthoritySourceClass::StaticFloor => {
+            (FilesystemAuthorityChannel::Floor, SelectorPolarity::Positive)
+        }
+        FilesystemAuthoritySourceClass::EscalationCeiling => (
+            FilesystemAuthorityChannel::EscalationCeiling,
+            SelectorPolarity::Positive,
+        ),
+        FilesystemAuthoritySourceClass::SessionRevocation => {
+            (FilesystemAuthorityChannel::Session, SelectorPolarity::Negative)
+        }
+        FilesystemAuthoritySourceClass::SessionGrant => {
+            (FilesystemAuthorityChannel::Session, SelectorPolarity::Positive)
+        }
+    };
+    FilesystemAuthorityRow {
+        source_id,
+        source_class,
+        channel,
+        polarity,
+        principal_key,
+        capability,
+        resource: resource.clone(),
+        state,
+    }
+}
+
+fn filesystem_authority_rows_equal(
+    actual: &[FilesystemAuthorityRow],
+    expected: &[FilesystemAuthorityRow],
+) -> Result<bool, CoreError> {
+    if actual.len() != expected.len() {
+        return Ok(false);
+    }
+    for (actual, expected) in actual.iter().zip(expected) {
+        if actual.source_id != expected.source_id
+            || actual.source_class != expected.source_class
+            || actual.channel != expected.channel
+            || actual.polarity != expected.polarity
+            || actual.principal_key != expected.principal_key
+            || actual.capability != expected.capability
+            || actual.state != expected.state
+            || actual.resource.root != expected.resource.root
+            || actual.resource.kind != expected.resource.kind
+            || platform_path_bytes(&actual.resource.path)?
+                != platform_path_bytes(&expected.resource.path)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_case_authority_plan(
+    projection: &FilesystemExecutionProjection,
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+    plan: &generated::Rev2FilesystemCandidateCasePlanSpec,
+    target: &FilesystemSetupObject,
+    actor_principal: Option<&str>,
+) -> Result<(), CoreError> {
+    use generated::Rev2FilesystemCandidateAuthorityPlan as Plan;
+    let actor_key = actor_principal.unwrap_or(&projection.effect_owner_key);
+    let other_key = projection
+        .principals
+        .iter()
+        .find(|principal| principal.key != projection.effect_owner_key)
+        .map(|principal| principal.key.as_str());
+    let resource = FilesystemPathResource {
+        root: target.root,
+        kind: FilesystemPathResourceKind::PathExact,
+        path: target.path.clone(),
+    };
+    let row = |source_id: String,
+               source_class: FilesystemAuthoritySourceClass,
+               principal_key: Option<&str>,
+               capability: String,
+               state: FilesystemAuthorityState| {
+        case_authority_row(
+            source_id,
+            source_class,
+            principal_key.map(str::to_string),
+            capability,
+            &resource,
+            state,
+        )
+    };
+    let static_rows = |principal_key: &str| -> Result<Vec<_>, CoreError> {
+        operation_slots(operation)
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                Ok(row(
+                    format!("case:static:{index}"),
+                    FilesystemAuthoritySourceClass::StaticFloor,
+                    Some(principal_key),
+                    generated_capability(slot.capability)?.to_string(),
+                    FilesystemAuthorityState::Active,
+                ))
+            })
+            .collect()
+    };
+    let expected = match plan.authority_plan {
+        Plan::None => Vec::new(),
+        Plan::StaticAll | Plan::NoUserStaticAll => static_rows(actor_key)?,
+        Plan::PrincipalDenialOverStaticAll => {
+            let mut rows = static_rows(actor_key)?;
+            for (index, slot) in operation_slots(operation).iter().enumerate() {
+                rows.push(row(
+                    format!("case:principal-denial:{index}"),
+                    FilesystemAuthoritySourceClass::PrincipalDenial,
+                    Some(actor_key),
+                    generated_capability(slot.capability)?.to_string(),
+                    FilesystemAuthorityState::Active,
+                ));
+            }
+            rows
+        }
+        Plan::PrincipalDenialLastOverStaticAll => {
+            let mut rows = static_rows(actor_key)?;
+            let index = operation_slots(operation).len() - 1;
+            let slot = &operation_slots(operation)[index];
+            rows.push(row(
+                format!("case:principal-denial:{index}"),
+                FilesystemAuthoritySourceClass::PrincipalDenial,
+                Some(actor_key),
+                generated_capability(slot.capability)?.to_string(),
+                FilesystemAuthorityState::Active,
+            ));
+            rows
+        }
+        Plan::ProcessDenialOverStaticAll => {
+            let mut rows = static_rows(actor_key)?;
+            for (index, slot) in operation_slots(operation).iter().enumerate() {
+                rows.push(row(
+                    format!("case:process-denial:{index}"),
+                    FilesystemAuthoritySourceClass::ProcessDenial,
+                    None,
+                    generated_capability(slot.capability)?.to_string(),
+                    FilesystemAuthorityState::Active,
+                ));
+            }
+            rows
+        }
+        Plan::CrossActionFirst => operation_slots(operation)
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                Ok(row(
+                    if index == 0 {
+                        "case:cross-action:0".to_string()
+                    } else {
+                        format!("case:static:{index}")
+                    },
+                    FilesystemAuthoritySourceClass::StaticFloor,
+                    Some(actor_key),
+                    if index == 0 {
+                        "fs:read".to_string()
+                    } else {
+                        generated_capability(slot.capability)?.to_string()
+                    },
+                    FilesystemAuthorityState::Active,
+                ))
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?,
+        Plan::WrongPrincipalStaticAll => static_rows(other_key.ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem wrong-principal plan has no other principal",
+            )
+        })?)?,
+        Plan::SessionAllDormantRevocationAll | Plan::SessionAllDormantRevocationLast => {
+            let mut rows = Vec::new();
+            for (index, slot) in operation_slots(operation).iter().enumerate() {
+                rows.push(row(
+                    format!("case:session-grant:{index}"),
+                    FilesystemAuthoritySourceClass::SessionGrant,
+                    Some(actor_key),
+                    generated_capability(slot.capability)?.to_string(),
+                    FilesystemAuthorityState::Active,
+                ));
+            }
+            for (index, slot) in operation_slots(operation).iter().enumerate() {
+                rows.push(row(
+                    format!("case:ceiling:{index}"),
+                    FilesystemAuthoritySourceClass::EscalationCeiling,
+                    Some(actor_key),
+                    generated_capability(slot.capability)?.to_string(),
+                    FilesystemAuthorityState::Active,
+                ));
+            }
+            for (index, slot) in operation_slots(operation).iter().enumerate() {
+                rows.push(row(
+                    format!("case:session-revocation:{index}"),
+                    FilesystemAuthoritySourceClass::SessionRevocation,
+                    Some(actor_key),
+                    generated_capability(slot.capability)?.to_string(),
+                    FilesystemAuthorityState::Dormant,
+                ));
+            }
+            rows
+        }
+    };
+    if !filesystem_authority_rows_equal(&projection.authority_rows, &expected)? {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem authority rows differ from the generated case plan",
+        ));
+    }
+    Ok(())
+}
+
+fn logical_root_text(root: FilesystemLogicalRoot) -> &'static str {
+    match root {
+        FilesystemLogicalRoot::Abs => "$ABS",
+        FilesystemLogicalRoot::Home => "$HOME",
+        FilesystemLogicalRoot::Package => "$PACKAGE",
+        FilesystemLogicalRoot::Project => "$PROJECT",
+        FilesystemLogicalRoot::Tmp => "$TMP",
+    }
+}
+
+fn push_resource_lifecycle(
+    rows: &mut Vec<FilesystemResourceLifecycleEntry>,
+    phase: FilesystemTracePhase,
+    resource_id: String,
+    resource_class: FilesystemResourceClass,
+    transition: FilesystemResourceTransition,
+    owner_before: Option<String>,
+    owner_after: Option<String>,
+) {
+    rows.push(FilesystemResourceLifecycleEntry {
+        sequence: rows.len(),
+        phase,
+        resource_id,
+        resource_class,
+        transition,
+        owner_before,
+        owner_after,
+    });
+}
+
+fn expected_resource_lifecycle(
+    projection: &FilesystemExecutionProjection,
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+    plan: &generated::Rev2FilesystemCandidateCasePlanSpec,
+    target: &FilesystemSetupObject,
+    outcome: &generated::Rev2FilesystemCandidateAuthorizedOutcomeSpec,
+) -> Vec<FilesystemResourceLifecycleEntry> {
+    let mut rows = Vec::new();
+    let operation_owner = format!("operation:{}", projection.case_id);
+    let native_owner = format!("native:{}", projection.edge_id);
+    let delivery_owner = format!("delivery:{}", projection.case_id);
+    for root in &projection.setup.logical_roots {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::HarnessAdmitted,
+            format!("inherited-root:{}", root.binding_id),
+            FilesystemResourceClass::InheritedRoot,
+            FilesystemResourceTransition::Acquire,
+            None,
+            Some(operation_owner.clone()),
+        );
+    }
+    push_resource_lifecycle(
+        &mut rows,
+        FilesystemTracePhase::HarnessAdmitted,
+        format!("arena:{}", projection.case_id),
+        FilesystemResourceClass::Arena,
+        FilesystemResourceTransition::Acquire,
+        None,
+        Some(operation_owner.clone()),
+    );
+    if plan.lifecycle_requirement
+        == generated::Rev2FilesystemCandidateLifecycleRequirement::NoneBeforeCore
+    {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::HarnessExited,
+            format!("arena:{}", projection.case_id),
+            FilesystemResourceClass::Arena,
+            FilesystemResourceTransition::Release,
+            Some(operation_owner.clone()),
+            None,
+        );
+        for root in projection.setup.logical_roots.iter().rev() {
+            push_resource_lifecycle(
+                &mut rows,
+                FilesystemTracePhase::HarnessExited,
+                format!("inherited-root:{}", root.binding_id),
+                FilesystemResourceClass::InheritedRoot,
+                FilesystemResourceTransition::Release,
+                Some(operation_owner.clone()),
+                None,
+            );
+        }
+        return rows;
+    }
+    for actor in &projection.execution.actors {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::ActorsCaptured,
+            format!("actor-token:{}", actor.actor_id),
+            FilesystemResourceClass::ActorToken,
+            FilesystemResourceTransition::Acquire,
+            None,
+            Some(actor.actor_id.clone()),
+        );
+    }
+    push_resource_lifecycle(
+        &mut rows,
+        FilesystemTracePhase::NamespaceGateAcquired,
+        format!("namespace-gate:{}", logical_root_text(target.root)),
+        FilesystemResourceClass::NamespaceGate,
+        FilesystemResourceTransition::Acquire,
+        None,
+        Some(operation_owner.clone()),
+    );
+    push_resource_lifecycle(
+        &mut rows,
+        FilesystemTracePhase::DiscoveryComplete,
+        format!("provisional-resource:{}", target.object_id),
+        FilesystemResourceClass::ProvisionalResource,
+        FilesystemResourceTransition::Acquire,
+        None,
+        Some(operation_owner.clone()),
+    );
+    for slot in operation_slots(operation) {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::AuthorizationComplete,
+            format!("authority-handle:{}", slot.effect_slot_id),
+            FilesystemResourceClass::AuthorityHandle,
+            FilesystemResourceTransition::Acquire,
+            None,
+            Some(operation_owner.clone()),
+        );
+    }
+    let creates_child = plan.outcome_disposition
+        == generated::Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation
+        && outcome.permitted_side_effects.len() == 1;
+    if creates_child {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::PreparationComplete,
+            format!("prepared-child:{}", target.object_id),
+            FilesystemResourceClass::PreparedChild,
+            FilesystemResourceTransition::Acquire,
+            None,
+            Some(operation_owner.clone()),
+        );
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::CoreCommitRecorded,
+            format!("prepared-child:{}", target.object_id),
+            FilesystemResourceClass::PreparedChild,
+            FilesystemResourceTransition::Transfer,
+            Some(operation_owner.clone()),
+            Some(native_owner.clone()),
+        );
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::NativeCommitRecorded,
+            format!("prepared-child:{}", target.object_id),
+            FilesystemResourceClass::PreparedChild,
+            FilesystemResourceTransition::Release,
+            Some(native_owner),
+            None,
+        );
+    }
+    if plan.outcome_disposition
+        == generated::Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation
+    {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::OperationCompleted,
+            format!("delivery-lease:{}", target.object_id),
+            FilesystemResourceClass::DeliveryLease,
+            FilesystemResourceTransition::Acquire,
+            None,
+            Some(operation_owner.clone()),
+        );
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::DeliverySerialized,
+            format!("delivery-lease:{}", target.object_id),
+            FilesystemResourceClass::DeliveryLease,
+            FilesystemResourceTransition::Transfer,
+            Some(operation_owner.clone()),
+            Some(delivery_owner.clone()),
+        );
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::DeliverySerialized,
+            format!("delivery-lease:{}", target.object_id),
+            FilesystemResourceClass::DeliveryLease,
+            FilesystemResourceTransition::Release,
+            Some(delivery_owner),
+            None,
+        );
+    }
+    push_resource_lifecycle(
+        &mut rows,
+        FilesystemTracePhase::ProvisionalResourcesReleased,
+        format!("provisional-resource:{}", target.object_id),
+        FilesystemResourceClass::ProvisionalResource,
+        FilesystemResourceTransition::Release,
+        Some(operation_owner.clone()),
+        None,
+    );
+    for slot in operation_slots(operation).iter().rev() {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::ProvisionalResourcesReleased,
+            format!("authority-handle:{}", slot.effect_slot_id),
+            FilesystemResourceClass::AuthorityHandle,
+            FilesystemResourceTransition::Release,
+            Some(operation_owner.clone()),
+            None,
+        );
+    }
+    for actor in projection.execution.actors.iter().rev() {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::ProvisionalResourcesReleased,
+            format!("actor-token:{}", actor.actor_id),
+            FilesystemResourceClass::ActorToken,
+            FilesystemResourceTransition::Release,
+            Some(actor.actor_id.clone()),
+            None,
+        );
+    }
+    push_resource_lifecycle(
+        &mut rows,
+        FilesystemTracePhase::NamespaceGateReleased,
+        format!("namespace-gate:{}", logical_root_text(target.root)),
+        FilesystemResourceClass::NamespaceGate,
+        FilesystemResourceTransition::Release,
+        Some(operation_owner.clone()),
+        None,
+    );
+    push_resource_lifecycle(
+        &mut rows,
+        FilesystemTracePhase::HarnessExited,
+        format!("arena:{}", projection.case_id),
+        FilesystemResourceClass::Arena,
+        FilesystemResourceTransition::Release,
+        Some(operation_owner.clone()),
+        None,
+    );
+    for root in projection.setup.logical_roots.iter().rev() {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::HarnessExited,
+            format!("inherited-root:{}", root.binding_id),
+            FilesystemResourceClass::InheritedRoot,
+            FilesystemResourceTransition::Release,
+            Some(operation_owner.clone()),
+            None,
+        );
+    }
+    rows
+}
+
+fn validate_case_plan_binding(
+    projection: &FilesystemExecutionProjection,
+    operation: &generated::Rev2FilesystemCandidateOperationSpec,
+    plan: &generated::Rev2FilesystemCandidateCasePlanSpec,
+    target_setup: &FilesystemSetupObject,
+    state: generated::Rev2FilesystemCandidateTargetState,
+    outcome: &generated::Rev2FilesystemCandidateAuthorizedOutcomeSpec,
+) -> Result<(), CoreError> {
+    let expected_case_plan_digest = generated_case_plan_digest(&projection.case_kind)?;
+    if projection.case_plan_digest != expected_case_plan_digest
+        || !mode_matches_case_plan(projection.mode, plan.execution_mode)
+        || !mutation_matches_case_plan(projection.input_mutation, plan.input_mutation)
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem projection differs from its generated case plan",
+        ));
+    }
+    let target = plan
+        .target_states
+        .iter()
+        .find(|target| generated_target_edge_id(target.edge_id) == projection.edge_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem case plan has no target row for the operation edge",
+            )
+        })?;
+    let trace_phases: Vec<_> = projection
+        .execution
+        .trace_phases
+        .iter()
+        .copied()
+        .map(generated_trace_phase)
+        .collect();
+    if target.initial_kind != generated_initial_kind(target_setup.kind)
+        || target.target_state != state
+        || target.trace_phases != trace_phases.as_slice()
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem material target or trace phases differ from the generated case plan",
+        ));
+    }
+    let actor_principal = validate_case_principal_plan(projection, operation, plan)?;
+    validate_case_authority_plan(
+        projection,
+        operation,
+        plan,
+        target_setup,
+        actor_principal.as_deref(),
+    )?;
+    validate_fault_plan(projection, operation, plan)?;
+    if projection.execution.resource_lifecycle
+        != expected_resource_lifecycle(projection, operation, plan, target_setup, outcome)
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem resource lifecycle differs from the generated case plan",
+        ));
+    }
+    Ok(())
+}
+
+fn require_platform_identity(
+    identity: &FilesystemObjectIdentity,
+    label: &str,
+) -> Result<(), CoreError> {
+    if identity.kind != FilesystemObjectIdentityKind::PlatformObject
+        || !identity.value.starts_with("unix-dev-ino:")
+        || identity.value.len() != "unix-dev-ino:".len() + 32
+        || !identity.value["unix-dev-ino:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            format!("{label} is not a canonical Unix platform identity"),
+        ));
+    }
+    Ok(())
+}
+
+fn identity_label(identity: &FilesystemObjectIdentity) -> (u8, &str) {
+    let kind = match identity.kind {
+        FilesystemObjectIdentityKind::OpaqueToken => 0,
+        FilesystemObjectIdentityKind::PlatformObject => 1,
+        FilesystemObjectIdentityKind::VerifiedContent => 2,
+    };
+    (kind, identity.value.as_str())
+}
+
+fn validate_fixture_identity(
+    identity: &FilesystemObjectIdentity,
+    label: &str,
+) -> Result<(), CoreError> {
+    if identity.value.is_empty() || identity.value.chars().count() > 4096 {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            format!("{label} is empty or unbounded"),
+        ));
+    }
+    match identity.kind {
+        FilesystemObjectIdentityKind::PlatformObject => require_platform_identity(identity, label),
+        FilesystemObjectIdentityKind::VerifiedContent => validate_digest_string(&identity.value),
+        FilesystemObjectIdentityKind::OpaqueToken => Ok(()),
+    }
+}
+
+fn platform_path_bytes(path: &FilesystemPlatformPath) -> Result<Vec<u8>, CoreError> {
+    let bytes = match path.encoding {
+        FilesystemPlatformPathEncoding::Unicode => path.value.as_bytes().to_vec(),
+        FilesystemPlatformPathEncoding::OpaqueBase64url => {
+            let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(path.value.as_bytes())
+                .map_err(|_| {
+                    CoreError::new(
+                        REASON_SCHEMA_INVALID,
+                        "filesystem opaque path is not canonical base64url",
+                    )
+                })?;
+            if base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&decoded) != path.value {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem opaque path is not canonical base64url",
+                ));
+            }
+            decoded
+        }
+    };
+    let first_component = bytes.split(|byte| *byte == b'/').next().unwrap_or_default();
+    let has_drive_prefix = first_component.len() == 2
+        && first_component[0].is_ascii_alphabetic()
+        && first_component[1] == b':';
+    if path.value.chars().count() > 4096
+        || bytes.is_empty()
+        || bytes[0] == b'/'
+        || bytes.contains(&0)
+        || bytes.contains(&b'\\')
+        || has_drive_prefix
+        || bytes.split(|byte| *byte == b'/').any(|component| {
+            component.is_empty() || component == b"." || component == b".."
+        })
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem path is not a descriptor-relative component sequence",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn canonical_unsigned_decimal(value: &str) -> Result<(), CoreError> {
+    if value.is_empty()
+        || value.len() > 40
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem metadata integer is not canonical unsigned decimal",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_signed_decimal(value: &str) -> Result<(), CoreError> {
+    if value.is_empty() {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem metadata timestamp is not canonical signed decimal",
+        ));
+    }
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    if digits.is_empty()
+        || digits.len() > 40
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || (value.starts_with('-') && digits == "0")
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem metadata timestamp is not canonical signed decimal",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_unsigned_decimal_at_least(value: &str, minimum: usize) -> bool {
+    let minimum = minimum.to_string();
+    value.len() > minimum.len() || (value.len() == minimum.len() && value >= minimum.as_str())
+}
+
+fn validate_platform_metadata_identity(
+    identity: &FilesystemObjectIdentity,
+    metadata: &FilesystemMetadataProjection,
+) -> Result<(), CoreError> {
+    require_platform_identity(identity, "filesystem realized object identity")?;
+    let payload = &identity.value["unix-dev-ino:".len()..];
+    let device = u64::from_str_radix(&payload[..16], 16).map_err(|_| {
+        CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem platform identity device is outside u64",
+        )
+    })?;
+    let inode = u64::from_str_radix(&payload[16..], 16).map_err(|_| {
+        CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem platform identity inode is outside u64",
+        )
+    })?;
+    if metadata.device != device.to_string() || metadata.inode != inode.to_string() {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem platform identity differs from metadata device/inode",
+        ));
+    }
+    Ok(())
+}
+
+fn metadata_kind_bits(kind: FilesystemObjectKind) -> Option<u32> {
+    match kind {
+        FilesystemObjectKind::Fifo => Some(0o010000),
+        FilesystemObjectKind::CharacterDevice => Some(0o020000),
+        FilesystemObjectKind::Directory => Some(0o040000),
+        FilesystemObjectKind::BlockDevice => Some(0o060000),
+        FilesystemObjectKind::RegularFile => Some(0o100000),
+        FilesystemObjectKind::Symlink => Some(0o120000),
+        FilesystemObjectKind::Socket => Some(0o140000),
+        FilesystemObjectKind::Missing => None,
+    }
+}
+
+fn validate_realized_state(
+    setup: &FilesystemSetupObject,
+    state: &FilesystemRealizedObjectState,
+) -> Result<(), CoreError> {
+    if setup.kind != state.kind
+        || setup.content_digest != state.content_digest
+        || setup.alias_target_object_id != state.alias_target_object_id
+        || setup.link_target_object_id != state.link_target_object_id
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem realized object material differs from setup",
+        ));
+    }
+    let setup_missing = setup.kind == FilesystemObjectKind::Missing;
+    let setup_regular = setup.kind == FilesystemObjectKind::RegularFile;
+    let setup_symlink = setup.kind == FilesystemObjectKind::Symlink;
+    if setup_missing != setup.object_identity.is_none()
+        || setup_regular != setup.content.is_some()
+        || setup_regular != setup.content_digest.is_some()
+        || setup_symlink != setup.link_target_object_id.is_some()
+        || (setup.alias_target_object_id.is_some()
+            && matches!(setup.kind, FilesystemObjectKind::Missing | FilesystemObjectKind::Directory))
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem setup identity, content, or link shape differs from its kind",
+        ));
+    }
+    if let Some(fixture_identity) = setup.object_identity.as_ref() {
+        validate_fixture_identity(fixture_identity, "filesystem setup object identity")?;
+    }
+    if state.kind == FilesystemObjectKind::Missing {
+        if state.identity.is_some()
+            || state.metadata.is_some()
+            || state.content_digest.is_some()
+            || state.alias_target_object_id.is_some()
+            || state.link_target_object_id.is_some()
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem missing object carries material state",
+            ));
+        }
+        return Ok(());
+    }
+    let identity = state.identity.as_ref().ok_or_else(|| {
+        CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem present object has no platform identity",
+        )
+    })?;
+    let metadata = state.metadata.as_ref().ok_or_else(|| {
+        CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem present object has no metadata projection",
+        )
+    })?;
+    validate_platform_metadata_identity(identity, metadata)?;
+    if metadata.mode > 0xffff
+        || metadata.mode & 0o170000 != metadata_kind_bits(state.kind).unwrap_or_default()
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem realized kind differs from authenticated S_IFMT bits",
+        ));
+    }
+    for value in [
+        Some(metadata.size.as_str()),
+        Some(metadata.link_count.as_str()),
+        Some(metadata.device.as_str()),
+        Some(metadata.inode.as_str()),
+        metadata.uid.as_deref(),
+        metadata.gid.as_deref(),
+        metadata.rdev.as_deref(),
+        metadata.block_size.as_deref(),
+        metadata.blocks.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        canonical_unsigned_decimal(value)?;
+    }
+    for value in [
+        metadata.accessed_time_ns.as_deref(),
+        metadata.modified_time_ns.as_deref(),
+        metadata.changed_time_ns.as_deref(),
+        metadata.birth_time_ns.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        canonical_signed_decimal(value)?;
+    }
+    match setup.object_identity.as_ref() {
+        Some(identity) if identity.kind == FilesystemObjectIdentityKind::PlatformObject => {
+            if Some(identity) != state.identity.as_ref() {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem fixed platform identity changed during realization",
+                ));
+            }
+        }
+        Some(identity) if identity.kind == FilesystemObjectIdentityKind::VerifiedContent => {
+            if state.content_digest.as_deref() != Some(identity.value.as_str()) {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem verified-content identity differs from realized bytes",
+                ));
+            }
+        }
+        _ => {}
+    }
+    if setup.kind == FilesystemObjectKind::RegularFile {
+        let content = setup.content.as_ref().ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem regular-file setup has no materialization recipe",
+            )
+        })?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(content.bytes.as_bytes())
+            .map_err(|_| {
+                CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem content recipe is not canonical base64url",
+                )
+            })?;
+        if content.bytes.len() > 4096
+            || base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes) != content.bytes
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem content recipe is not canonical base64url",
+            ));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let digest = format!(
+            "sha256-{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+        );
+        if setup.content_digest.as_deref() != Some(digest.as_str()) {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem content recipe digest differs from setup",
+            ));
+        }
+    } else if setup.content.is_some() {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem non-regular object carries an inline content recipe",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_initial_sandbox_completeness(
+    input: &FilesystemCandidateOracleInput,
+) -> Result<(), CoreError> {
+    let setup = &input.case_projection.setup;
+    let inventory = &input.initial_sandbox;
+    if setup.logical_roots.len() != inventory.logical_roots.len()
+        || setup.objects.len() != inventory.objects.len()
+        || setup.logical_roots.is_empty()
+        || setup.logical_roots.len() > 5
+        || setup.objects.len() > 4096
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem initial inventory does not exactly cover setup",
+        ));
+    }
+    let mut roots = BTreeSet::new();
+    let mut binding_ids = BTreeSet::new();
+    let mut fixture_root_ids = BTreeSet::new();
+    let mut platform_root_ids = BTreeSet::new();
+    for (index, setup_root) in setup.logical_roots.iter().enumerate() {
+        if setup_root.descriptor_slot != index
+            || (index > 0 && setup.logical_roots[index - 1].root >= setup_root.root)
+            || !roots.insert(setup_root.root)
+            || !binding_ids.insert(setup_root.binding_id.as_str())
+            || !fixture_root_ids.insert(identity_label(&setup_root.object_identity))
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem logical roots are not dense and unique",
+            ));
+        }
+        validate_fixture_identity(&setup_root.object_identity, "filesystem setup root identity")?;
+        let realized = inventory
+            .logical_roots
+            .iter()
+            .find(|root| root.root == setup_root.root)
+            .ok_or_else(|| {
+                CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem setup root is absent from initial inventory",
+                )
+            })?;
+        if realized.binding_id != setup_root.binding_id
+            || realized.fixture_identity != setup_root.object_identity
+            || (setup_root.object_identity.kind
+                == FilesystemObjectIdentityKind::PlatformObject
+                && realized.platform_identity != setup_root.object_identity)
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem logical-root realization differs from setup",
+            ));
+        }
+        require_platform_identity(&realized.platform_identity, "filesystem root identity")?;
+        if !platform_root_ids.insert(realized.platform_identity.value.as_str()) {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem logical roots share a platform identity",
+            ));
+        }
+    }
+    let mut object_ids = BTreeSet::new();
+    let mut setup_locations = BTreeSet::new();
+    let mut setup_fixture_ids = BTreeSet::new();
+    let mut realized_by_id = BTreeMap::new();
+    let mut realized_locations = BTreeSet::new();
+    for realized in &inventory.objects {
+        let path = platform_path_bytes(&realized.path)?;
+        if realized_by_id
+            .insert(realized.object_id.as_str(), realized)
+            .is_some()
+            || !realized_locations.insert((realized.root, path))
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem initial inventory duplicates an object id or location",
+            ));
+        }
+    }
+    for object in &setup.objects {
+        if !object_ids.insert(object.object_id.as_str()) {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem setup duplicates an object id",
+            ));
+        }
+        let path = platform_path_bytes(&object.path)?;
+        if !setup_locations.insert((object.root, path))
+            || object.object_identity.as_ref().is_some_and(|identity| {
+                fixture_root_ids.contains(&identity_label(identity))
+                    || !setup_fixture_ids.insert(identity_label(identity))
+            })
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem setup duplicates an object location or fixture identity",
+            ));
+        }
+        let realized = realized_by_id.get(object.object_id.as_str()).ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem setup object is absent from initial inventory",
+            )
+        })?;
+        if realized.root != object.root
+            || realized.path != object.path
+            || realized.fixture_identity != object.object_identity
+            || !roots.contains(&object.root)
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem object realization differs from setup root, path, or fixture identity",
+            ));
+        }
+        validate_realized_state(object, &realized.state)?;
+    }
+    for object in &setup.objects {
+        if let Some(link_target) = object.link_target_object_id.as_deref() {
+            if !object_ids.contains(link_target) {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem symlink target is absent",
+                ));
+            }
+        }
+        if let Some(alias_target) = object.alias_target_object_id.as_deref() {
+            let target = setup
+                .objects
+                .iter()
+                .find(|candidate| candidate.object_id == alias_target)
+                .ok_or_else(|| {
+                    CoreError::new(
+                        REASON_SCHEMA_INVALID,
+                        "filesystem hard-link alias target is absent",
+                    )
+                })?;
+            let realized = realized_by_id[object.object_id.as_str()];
+            let target_realized = realized_by_id[target.object_id.as_str()];
+            if alias_target == object.object_id
+                || target.alias_target_object_id.is_some()
+                || object.kind == FilesystemObjectKind::Directory
+                || object.kind == FilesystemObjectKind::Missing
+                || object.kind != target.kind
+                || object.content != target.content
+                || realized.state.identity != target_realized.state.identity
+                || realized.state.metadata != target_realized.state.metadata
+                || realized.state.content_digest != target_realized.state.content_digest
+                || realized.state.link_target_object_id != target_realized.state.link_target_object_id
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem hard-link alias does not realize one material object",
+                ));
+            }
+        }
+    }
+    let mut identity_groups: BTreeMap<&str, Vec<&FilesystemSetupObject>> = BTreeMap::new();
+    for object in &setup.objects {
+        if let Some(identity) = realized_by_id[object.object_id.as_str()].state.identity.as_ref() {
+            if platform_root_ids.contains(identity.value.as_str()) {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem object identity aliases a logical-root platform identity",
+                ));
+            }
+            identity_groups.entry(identity.value.as_str()).or_default().push(object);
+        }
+    }
+    for group in identity_groups.values() {
+        if group.len() == 1 {
+            if group[0].alias_target_object_id.is_some() {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem hard-link alias has no matching identity peer",
+                ));
+            }
+            continue;
+        }
+        let canonical: Vec<_> = group
+            .iter()
+            .filter(|object| object.alias_target_object_id.is_none())
+            .collect();
+        if canonical.len() != 1
+            || group.iter().any(|object| {
+                object.object_id != canonical[0].object_id
+                    && object.alias_target_object_id.as_deref()
+                        != Some(canonical[0].object_id.as_str())
+            })
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem shared identity has no exact hard-link canonical entry",
+            ));
+        }
+        let link_count = &realized_by_id[canonical[0].object_id.as_str()]
+            .state
+            .metadata
+            .as_ref()
+            .ok_or_else(|| CoreError::new(REASON_SCHEMA_INVALID, "alias metadata is absent"))?
+            .link_count;
+        if !canonical_unsigned_decimal_at_least(link_count, group.len()) {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem hard-link count is smaller than the visible alias group",
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct FilesystemOracleMaterial<'a> {
+    operation: &'static generated::Rev2FilesystemCandidateOperationSpec,
+    plan: &'static generated::Rev2FilesystemCandidateCasePlanSpec,
+    target_setup: &'a FilesystemSetupObject,
+    target_initial: &'a FilesystemInitialSandboxObject,
+    parent_identity: FilesystemObjectIdentity,
+    authorized_outcome: &'static generated::Rev2FilesystemCandidateAuthorizedOutcomeSpec,
+    slots: Vec<FilesystemEffectSlot>,
+}
+
+fn filesystem_oracle_material<'a>(
+    input: &'a FilesystemCandidateOracleInput,
+) -> Result<FilesystemOracleMaterial<'a>, CoreError> {
+    let projection = &input.case_projection;
+    let target_candidates_valid = !projection.target_predicate.candidates.is_empty()
+        && projection.target_predicate.candidates.len() <= 16
+        && projection
+            .target_predicate
+            .candidates
+            .iter()
+            .all(|candidate| {
+                !candidate.target.is_empty()
+                    && candidate.target.len() <= 4096
+                    && candidate
+                        .target
+                        .bytes()
+                        .all(|byte| (0x21..=0x7e).contains(&byte))
+                    && !candidate.feature_set.is_empty()
+                    && candidate.feature_set.chars().count() <= 4096
+                    && REV2_TARGET_STATUS.iter().any(|registered| {
+                        registered.target == candidate.target
+                            && registered.feature_set == candidate.feature_set
+                    })
+            })
+        && projection
+            .target_predicate
+            .candidates
+            .windows(2)
+            .all(|pair| pair[0].target < pair[1].target);
+    if !target_candidates_valid {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem target predicate is not an exact registered target tuple set",
+        ));
+    }
+    if input.initial_sandbox.schema != FILESYSTEM_SANDBOX_INVENTORY_SCHEMA
+        || input.initial_sandbox.phase != FilesystemSandboxPhase::Initial
+        || !input.initial_sandbox.unexpected_entries.is_empty()
+        || projection.case_id.trim().is_empty()
+        || projection.requirement_id.trim().is_empty()
+        || projection.effect_owner_key.trim().is_empty()
+        || projection.invocation.kind != FilesystemInvocationKind::NativeHarness
+        || projection.invocation.command != "oden-capsec-filesystem-fixture"
+        || projection.invocation.args != [projection.case_id.clone()]
+        || !projection
+            .setup
+            .logical_roots
+            .iter()
+            .any(|root| root.root == projection.invocation.cwd_root)
+        || projection.invocation.entrypoint.is_some()
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem oracle identity, inventory, or native invocation is invalid",
+        ));
+    }
+    validate_initial_sandbox_completeness(input)?;
+    let operation = generated_operation(&projection.edge_id)?;
+    let requirement_id = format!("fixture-requirement:{}:complete", projection.edge_id);
+    if projection.requirement_id != requirement_id {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem requirement does not match the generated operation edge",
+        ));
+    }
+    validate_generated_operation_model(operation)?;
+    let request_kind_matches = matches!(
+        (operation, &projection.operation_request),
+        (
+            generated::Rev2FilesystemCandidateOperationSpec::LstatSync { .. },
+            FilesystemOperationRequest::LstatSync { .. }
+        ) | (
+            generated::Rev2FilesystemCandidateOperationSpec::MkdirSync { .. },
+            FilesystemOperationRequest::MkdirSync {
+                recursive: false,
+                ..
+            }
+        )
+    );
+    if !request_kind_matches {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem operation request differs from the generated operation",
+        ));
+    }
+    if let FilesystemOperationRequest::MkdirSync { requested_mode, .. } =
+        &projection.operation_request
+    {
+        if *requested_mode > 0o7777 {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem mkdir requested mode is outside 0..4095",
+            ));
+        }
+    }
+    let required_umask = match operation {
+        generated::Rev2FilesystemCandidateOperationSpec::LstatSync { .. } => 0o077,
+        generated::Rev2FilesystemCandidateOperationSpec::MkdirSync {
+            mode_derivation,
+            ..
+        } => mode_derivation.required_captured_umask,
+    };
+    if input.parent_capture_facts.captured_umask != required_umask {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem parent capture did not observe the required 0077 umask",
+        ));
+    }
+    let target_ref = projection.operation_request.target_ref();
+    let target_setup = projection
+        .setup
+        .objects
+        .iter()
+        .find(|object| object.object_id == target_ref.object_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem operation target is absent from setup",
+            )
+        })?;
+    let target_initial = input
+        .initial_sandbox
+        .objects
+        .iter()
+        .find(|object| object.object_id == target_ref.object_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem operation target is absent from initial inventory",
+            )
+        })?;
+    if target_setup.root != target_initial.root
+        || target_setup.path != target_initial.path
+        || target_setup.object_identity != target_initial.fixture_identity
+        || target_setup.kind != target_initial.state.kind
+        || target_setup.content_digest != target_initial.state.content_digest
+        || target_setup.alias_target_object_id != target_initial.state.alias_target_object_id
+        || target_setup.link_target_object_id != target_initial.state.link_target_object_id
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem initial inventory differs from the execution setup",
+        ));
+    }
+    let setup_root = projection
+        .setup
+        .logical_roots
+        .iter()
+        .find(|root| root.root == target_setup.root)
+        .ok_or_else(|| {
+            CoreError::new(REASON_SCHEMA_INVALID, "filesystem target root is unbound")
+        })?;
+    let realized_root = input
+        .initial_sandbox
+        .logical_roots
+        .iter()
+        .find(|root| root.root == target_setup.root)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem target root is absent from initial inventory",
+            )
+        })?;
+    if setup_root.binding_id != realized_root.binding_id
+        || setup_root.object_identity != realized_root.fixture_identity
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem root realization differs from setup",
+        ));
+    }
+    require_platform_identity(&realized_root.platform_identity, "filesystem root identity")?;
+    let target_path_bytes = platform_path_bytes(&target_setup.path)?;
+    let parent_identity = match &target_ref.parent {
+        FilesystemTargetParentRef::LogicalRoot { root, binding_id }
+            if *root == target_setup.root
+                && *binding_id == setup_root.binding_id
+                && !target_path_bytes.contains(&b'/') =>
+        {
+            realized_root.platform_identity.clone()
+        }
+        FilesystemTargetParentRef::DirectoryObject { object_id } => {
+            let parent_setup = projection
+                .setup
+                .objects
+                .iter()
+                .find(|object| object.object_id == *object_id)
+                .ok_or_else(|| {
+                    CoreError::new(
+                        REASON_SCHEMA_INVALID,
+                        "filesystem parent object is absent from setup",
+                    )
+                })?;
+            let parent = input
+                .initial_sandbox
+                .objects
+                .iter()
+                .find(|object| object.object_id == *object_id)
+                .ok_or_else(|| {
+                    CoreError::new(
+                        REASON_SCHEMA_INVALID,
+                        "filesystem parent object is absent from initial inventory",
+                    )
+                })?;
+            let separator = target_path_bytes.iter().rposition(|byte| *byte == b'/');
+            if parent_setup.kind != FilesystemObjectKind::Directory
+                || parent.state.kind != FilesystemObjectKind::Directory
+                || parent.root != target_setup.root
+                || separator.is_none()
+                || platform_path_bytes(&parent_setup.path)?
+                    != target_path_bytes[..separator.unwrap()]
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem target parent is not a same-root directory",
+                ));
+            }
+            parent.state.identity.clone().ok_or_else(|| {
+                CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem target parent has no platform identity",
+                )
+            })?
+        }
+        _ => {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem target parent differs from setup",
+            ));
+        }
+    };
+    require_platform_identity(&parent_identity, "filesystem parent identity")?;
+    if target_initial.state.kind != FilesystemObjectKind::Missing {
+        let identity = target_initial.state.identity.as_ref().ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem present target has no platform identity",
+            )
+        })?;
+        require_platform_identity(identity, "filesystem target identity")?;
+    } else if target_initial.state.identity.is_some() || target_initial.state.metadata.is_some() {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem missing target carries realized identity or metadata",
+        ));
+    }
+    let target_state = target_state(operation, target_setup.kind)?;
+    let plan = generated_case_plan(&projection.case_kind)?;
+    let authorized_outcome = operation_authorized_outcomes(operation)
+        .iter()
+        .find(|outcome| outcome.target_state == target_state)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem target state has no generated authorized outcome",
+            )
+        })?;
+    validate_generated_authorized_outcome(operation, target_state, authorized_outcome)?;
+    validate_case_plan_binding(
+        projection,
+        operation,
+        plan,
+        target_setup,
+        target_state,
+        authorized_outcome,
+    )?;
+    if authorized_outcome.normalized_slot_states.len() != operation_slots(operation).len()
+        || projection.execution.actors.len() != operation_slots(operation).len()
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem operation slot plan is incomplete",
+        ));
+    }
+    let mut slots = Vec::with_capacity(operation_slots(operation).len());
+    for (index, slot_spec) in operation_slots(operation).iter().enumerate() {
+        let state_spec = &authorized_outcome.normalized_slot_states[index];
+        let actor = &projection.execution.actors[index];
+        if state_spec.effect_slot_id != slot_spec.effect_slot_id
+            || actor.slot_id != slot_spec.effect_slot_id
+            || actor.effect_owner != projection.effect_owner_key
+        {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem execution actor or normalized slot differs from generated order",
+            ));
+        }
+        use generated::Rev2FilesystemCandidateFinalObjectState as State;
+        let final_object_state = match state_spec.final_object_state {
+            State::Existing => FilesystemFinalObjectState::Existing {
+                identity: target_initial.state.identity.clone().ok_or_else(|| {
+                    CoreError::new(REASON_SCHEMA_INVALID, "existing target identity is missing")
+                })?,
+            },
+            State::LinkEntry => FilesystemFinalObjectState::LinkEntry {
+                identity: target_initial.state.identity.clone().ok_or_else(|| {
+                    CoreError::new(REASON_SCHEMA_INVALID, "link-entry identity is missing")
+                })?,
+            },
+            State::Missing => FilesystemFinalObjectState::Missing,
+            State::Proposed => FilesystemFinalObjectState::Proposed,
+        };
+        slots.push(FilesystemEffectSlot {
+            slot_id: slot_spec.effect_slot_id.to_string(),
+            capability: generated_capability(slot_spec.capability)?.to_string(),
+            effect_owner: projection.effect_owner_key.clone(),
+            occurrence: FilesystemPathOccurrence {
+                root: target_setup.root,
+                root_binding_id: setup_root.binding_id.clone(),
+                lexical_path: target_setup.path.clone(),
+                follow_mode: FilesystemFollowMode::NoFollowFinal,
+                parent_identity: parent_identity.clone(),
+                final_object_state,
+                effect_owner: projection.effect_owner_key.clone(),
+            },
+        });
+    }
+    Ok(FilesystemOracleMaterial {
+        operation,
+        plan,
+        target_setup,
+        target_initial,
+        parent_identity,
+        authorized_outcome,
+        slots,
+    })
+}
+
+fn projection_principal(
+    projection: &FilesystemExecutionProjection,
+    key: &str,
+) -> Result<PrincipalRef, CoreError> {
+    projection
+        .principals
+        .iter()
+        .find(|principal| principal.key == key)
+        .cloned()
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                format!("filesystem projection names unknown principal {key}"),
+            )
+        })
+}
+
+fn filesystem_stage_request(
+    projection: &FilesystemExecutionProjection,
+    slots: &[FilesystemEffectSlot],
+    phase: FilesystemCoreEvaluationPhase,
+) -> Result<StageRequest, CoreError> {
+    let principals = projection
+        .constrained_principal_keys
+        .iter()
+        .map(|key| projection_principal(projection, key))
+        .collect::<Result<Vec<_>, _>>()?;
+    let effects = slots
+        .iter()
+        .map(|slot| {
+            Ok(EffectInput {
+                identity: EngineIdentity::embedded(),
+                edge_id: projection.edge_id.clone(),
+                effect_slot_id: slot.slot_id.clone(),
+                capability: slot.capability.clone(),
+                effect_owner: slot.effect_owner.clone(),
+                occurrence: serde_json::to_value(&slot.occurrence).map_err(schema_error)?,
+            })
+        })
+        .collect::<Result<Vec<_>, CoreError>>()?;
+    Ok(StageRequest {
+        identity: EngineIdentity::embedded(),
+        stage_id: match phase {
+            FilesystemCoreEvaluationPhase::Initial => "filesystem-oracle:initial",
+            FilesystemCoreEvaluationPhase::PostFault => "filesystem-oracle:post-fault",
+        }
+        .to_string(),
+        principals,
+        effects,
+    })
+}
+
+fn authority_row_active(
+    row: &FilesystemAuthorityRow,
+    fault: Option<&FilesystemFaultAction>,
+) -> bool {
+    match fault {
+        Some(FilesystemFaultAction::AuthorityRevocation {
+            remove_source_ids,
+            activate_source_ids,
+        }) => {
+            if remove_source_ids.contains(&row.source_id) {
+                false
+            } else if activate_source_ids.contains(&row.source_id) {
+                true
+            } else {
+                row.state == FilesystemAuthorityState::Active
+            }
+        }
+        _ => row.state == FilesystemAuthorityState::Active,
+    }
+}
+
+fn validate_authority_row_shape(row: &FilesystemAuthorityRow) -> Result<(), CoreError> {
+    use FilesystemAuthorityChannel as Channel;
+    use FilesystemAuthoritySourceClass as Class;
+    let expected = match row.source_class {
+        Class::ProcessDenial => (Channel::Process, SelectorPolarity::Negative, false),
+        Class::PrincipalDenial => (Channel::Principal, SelectorPolarity::Negative, true),
+        Class::StaticFloor => (Channel::Floor, SelectorPolarity::Positive, true),
+        Class::EscalationCeiling => {
+            (Channel::EscalationCeiling, SelectorPolarity::Positive, true)
+        }
+        Class::SessionRevocation => (Channel::Session, SelectorPolarity::Negative, true),
+        Class::SessionGrant => (Channel::Session, SelectorPolarity::Positive, true),
+    };
+    if row.channel != expected.0
+        || row.polarity != expected.1
+        || row.principal_key.is_some() != expected.2
+        || (row.state == FilesystemAuthorityState::Dormant
+            && row.source_class != Class::SessionRevocation)
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem authority source class, channel, polarity, principal, or state differs",
+        ));
+    }
+    Ok(())
+}
+
+fn filesystem_decision_policy(
+    projection: &FilesystemExecutionProjection,
+    material: &FilesystemOracleMaterial<'_>,
+    phase: FilesystemCoreEvaluationPhase,
+) -> Result<DecisionPolicyInput, CoreError> {
+    let mode = match projection.mode {
+        FilesystemExecutionMode::Audit => Mode::Audit,
+        FilesystemExecutionMode::Enforce => Mode::Enforce,
+    };
+    let quota_owner = projection_principal(projection, &projection.effect_owner_key)?;
+    let fault = match phase {
+        FilesystemCoreEvaluationPhase::Initial => None,
+        FilesystemCoreEvaluationPhase::PostFault => projection
+            .fault_plan
+            .as_ref()
+            .map(|plan| &plan.action),
+    };
+    let mut policy = DecisionPolicyInput {
+        identity: EngineIdentity::embedded(),
+        mode,
+        run_nonce: "filesystem-oracle:run".to_string(),
+        channel_epoch: "filesystem-oracle:channel".to_string(),
+        provenance: OperationProvenanceContext {
+            policy_digest: REV2_VOCAB_DIGEST.to_string(),
+            armed_snapshot_digest: REV2_REGISTRY_DIGEST.to_string(),
+            quota_owner,
+            terminal_evidence_id: "filesystem-oracle:terminal".to_string(),
+        },
+        generations: Generations {
+            negative_overlay: if phase == FilesystemCoreEvaluationPhase::PostFault {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+            policy_snapshot: "1".to_string(),
+            revocation: if phase == FilesystemCoreEvaluationPhase::PostFault {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+            session_overlay: if phase == FilesystemCoreEvaluationPhase::PostFault {
+                "2".to_string()
+            } else {
+                "1".to_string()
+            },
+        },
+        process_denials: Vec::new(),
+        principal_denials: Vec::new(),
+        session_revocations: Vec::new(),
+        escalation_ceiling: Vec::new(),
+        static_floor: Vec::new(),
+        handles: Vec::new(),
+        session_grants: Vec::new(),
+        implicit_self: Vec::new(),
+        protected_exceptions: Vec::new(),
+        compatibility_dispositions: Vec::new(),
+        validated_receipt_row_digests: Vec::new(),
+        path_bindings: Vec::new(),
+    };
+    for row in &projection.authority_rows {
+        validate_authority_row_shape(row)?;
+        if row.resource.root != material.target_setup.root {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem authority row does not select the target logical root",
+            ));
+        }
+        let principal = row
+            .principal_key
+            .as_deref()
+            .map(|key| projection_principal(projection, key))
+            .transpose()?;
+        let named = NamedSelectorInput {
+            source_id: row.source_id.clone(),
+            selector: AuthoritySelectorInput {
+                identity: EngineIdentity::embedded(),
+                principal,
+                capability: row.capability.clone(),
+                resource: serde_json::to_value(&row.resource).map_err(schema_error)?,
+            },
+        };
+        let active = authority_row_active(row, fault);
+        if active {
+            match row.source_class {
+                FilesystemAuthoritySourceClass::ProcessDenial => {
+                    policy.process_denials.push(named)
+                }
+                FilesystemAuthoritySourceClass::PrincipalDenial => {
+                    policy.principal_denials.push(named)
+                }
+                FilesystemAuthoritySourceClass::StaticFloor => policy.static_floor.push(named),
+                FilesystemAuthoritySourceClass::EscalationCeiling => {
+                    policy.escalation_ceiling.push(named)
+                }
+                FilesystemAuthoritySourceClass::SessionRevocation => {
+                    policy.session_revocations.push(named)
+                }
+                FilesystemAuthoritySourceClass::SessionGrant => policy.session_grants.push(named),
+            }
+        }
+        if active {
+            policy.path_bindings.push(PathBindingInput {
+                source_id: row.source_id.clone(),
+                root_binding_id: material.slots[0].occurrence.root_binding_id.clone(),
+                final_object_identities: material
+                    .target_initial
+                    .state
+                    .identity
+                    .as_ref()
+                    .map(|identity| serde_json::to_value(identity).map_err(schema_error))
+                    .transpose()?
+                    .into_iter()
+                    .collect(),
+                parent_identities: vec![
+                    serde_json::to_value(&material.parent_identity).map_err(schema_error)?,
+                ],
+            });
+        }
+    }
+    Ok(policy)
+}
+
+// @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
+// Raw shared-core decisions retain canonical order, while the fixture-facing
+// summary uses generated slot and constrained-principal role order.
+fn summarize_core_decision(
+    decision: &StageDecision,
+    slots: &[FilesystemEffectSlot],
+    constrained_principal_keys: &[String],
+    sequence: usize,
+    phase: FilesystemCoreEvaluationPhase,
+    committed: bool,
+) -> Result<FilesystemCoreEvaluation, CoreError> {
+    let outcome = match decision.outcome {
+        Outcome::Allow => FilesystemCoreOutcome::Allow,
+        Outcome::Deny => FilesystemCoreOutcome::Deny,
+        Outcome::Masked => {
+            return Err(CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem candidate core produced an unsupported masked outcome",
+            ));
+        }
+    };
+    let mut dimensions = Vec::new();
+    for slot in slots {
+        let effect = decision
+            .effects
+            .iter()
+            .find(|effect| effect.effect.effect_slot_id == slot.slot_id)
+            .ok_or_else(|| {
+                CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem core decision omitted a generated slot",
+                )
+            })?;
+        let ordered_dimensions = if constrained_principal_keys.is_empty() {
+            effect.dimensions.iter().collect::<Vec<_>>()
+        } else {
+            if effect.dimensions.len() != constrained_principal_keys.len() {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem core decision differs from the constrained principal set",
+                ));
+            }
+            constrained_principal_keys
+                .iter()
+                .map(|principal_key| {
+                    effect
+                        .dimensions
+                        .iter()
+                        .find(|dimension| dimension.principal.key == *principal_key)
+                        .ok_or_else(|| {
+                            CoreError::new(
+                                REASON_SCHEMA_INVALID,
+                                "filesystem core decision omitted a constrained principal",
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, CoreError>>()?
+        };
+        for dimension in ordered_dimensions {
+            dimensions.push(FilesystemCoreDimension {
+                slot_id: slot.slot_id.clone(),
+                principal_key: dimension.principal.key.clone(),
+                outcome: match dimension.outcome {
+                    Outcome::Allow => FilesystemCoreOutcome::Allow,
+                    Outcome::Deny => FilesystemCoreOutcome::Deny,
+                    Outcome::Masked => {
+                        return Err(CoreError::new(
+                            REASON_SCHEMA_INVALID,
+                            "filesystem core dimension produced an unsupported masked outcome",
+                        ));
+                    }
+                },
+                stratum: dimension.stratum,
+                reason_code: dimension.reason_code.clone(),
+            });
+        }
+    }
+    Ok(FilesystemCoreEvaluation {
+        sequence,
+        phase,
+        outcome,
+        dimensions,
+        committed_slot_ids: if committed {
+            slots.iter().map(|slot| slot.slot_id.clone()).collect()
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+fn expected_case_core_evaluations(
+    projection: &FilesystemExecutionProjection,
+    material: &FilesystemOracleMaterial<'_>,
+) -> Result<Vec<FilesystemCoreEvaluation>, CoreError> {
+    use generated::Rev2FilesystemCandidateCoreExpectation as Expectation;
+    let expectation = material.plan.core_expectation;
+    if expectation == Expectation::NotReached {
+        return Ok(Vec::new());
+    }
+    let principal_key = if expectation == Expectation::UnattributedDenyAll {
+        "no-user".to_string()
+    } else {
+        projection
+            .execution
+            .actors
+            .first()
+            .and_then(|actor| actor.principal_key.clone())
+            .unwrap_or_else(|| projection.effect_owner_key.clone())
+    };
+    let other_key = projection
+        .principals
+        .iter()
+        .find(|principal| principal.key != projection.effect_owner_key)
+        .map(|principal| principal.key.clone());
+    let dimension = |slot: &FilesystemEffectSlot,
+                     index: usize,
+                     expectation: Expectation|
+     -> Result<FilesystemCoreDimension, CoreError> {
+        let last = index + 1 == material.slots.len();
+        let (outcome, stratum, reason) = match expectation {
+            Expectation::StaticAllowAll => (FilesystemCoreOutcome::Allow, 9, REASON_ALLOW),
+            Expectation::PrincipalDenyAll => {
+                (FilesystemCoreOutcome::Deny, 6, REASON_PRINCIPAL_DENIAL)
+            }
+            Expectation::PrincipalDenyLast if last => {
+                (FilesystemCoreOutcome::Deny, 6, REASON_PRINCIPAL_DENIAL)
+            }
+            Expectation::PrincipalDenyLast => (FilesystemCoreOutcome::Allow, 9, REASON_ALLOW),
+            Expectation::ProcessDenyAll => {
+                (FilesystemCoreOutcome::Deny, 5, REASON_PROCESS_CEILING)
+            }
+            Expectation::CrossActionFirstMissing if index == 0 => {
+                (FilesystemCoreOutcome::Deny, 17, REASON_MISSING_AUTHORITY)
+            }
+            Expectation::CrossActionFirstMissing => {
+                (FilesystemCoreOutcome::Allow, 9, REASON_ALLOW)
+            }
+            Expectation::MissingAuthorityAll => {
+                (FilesystemCoreOutcome::Deny, 17, REASON_MISSING_AUTHORITY)
+            }
+            Expectation::UnattributedDenyAll => {
+                (FilesystemCoreOutcome::Deny, 2, REASON_UNATTRIBUTED)
+            }
+            Expectation::QuarantineDenyAll => {
+                (FilesystemCoreOutcome::Deny, 14, REASON_QUARANTINE)
+            }
+            Expectation::SessionRevokedAll => {
+                (FilesystemCoreOutcome::Deny, 7, REASON_REVOKED)
+            }
+            Expectation::SessionRevokedLast if last => {
+                (FilesystemCoreOutcome::Deny, 7, REASON_REVOKED)
+            }
+            Expectation::SessionRevokedLast => (FilesystemCoreOutcome::Allow, 11, REASON_ALLOW),
+            Expectation::NotReached => {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "not-reached core expectation reached dimension derivation",
+                ));
+            }
+        };
+        Ok(FilesystemCoreDimension {
+            slot_id: slot.slot_id.clone(),
+            principal_key: principal_key.clone(),
+            outcome,
+            stratum,
+            reason_code: reason.to_string(),
+        })
+    };
+    let reviewed_dimensions = if expectation == Expectation::MissingAuthorityAll
+        && material.plan.principal_plan
+            == generated::Rev2FilesystemCandidatePrincipalPlan::ActorAndOther
+    {
+        let other = other_key.ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "wrong-principal core expectation has no other identity",
+            )
+        })?;
+        material
+            .slots
+            .iter()
+            .flat_map(|slot| {
+                [
+                    FilesystemCoreDimension {
+                        slot_id: slot.slot_id.clone(),
+                        principal_key: projection.effect_owner_key.clone(),
+                        outcome: FilesystemCoreOutcome::Deny,
+                        stratum: 17,
+                        reason_code: REASON_MISSING_AUTHORITY.to_string(),
+                    },
+                    FilesystemCoreDimension {
+                        slot_id: slot.slot_id.clone(),
+                        principal_key: other.clone(),
+                        outcome: FilesystemCoreOutcome::Allow,
+                        stratum: 9,
+                        reason_code: REASON_ALLOW.to_string(),
+                    },
+                ]
+            })
+            .collect::<Vec<_>>()
+    } else {
+        material
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| dimension(slot, index, expectation))
+            .collect::<Result<Vec<_>, CoreError>>()?
+    };
+    let all_slots = || {
+        material
+            .slots
+            .iter()
+            .map(|slot| slot.slot_id.clone())
+            .collect::<Vec<_>>()
+    };
+    if matches!(
+        expectation,
+        Expectation::SessionRevokedAll | Expectation::SessionRevokedLast
+    ) {
+        let initial_dimensions = material
+            .slots
+            .iter()
+            .map(|slot| FilesystemCoreDimension {
+                slot_id: slot.slot_id.clone(),
+                principal_key: principal_key.clone(),
+                outcome: FilesystemCoreOutcome::Allow,
+                stratum: 11,
+                reason_code: REASON_ALLOW.to_string(),
+            })
+            .collect();
+        return Ok(vec![
+            FilesystemCoreEvaluation {
+                sequence: 0,
+                phase: FilesystemCoreEvaluationPhase::Initial,
+                outcome: FilesystemCoreOutcome::Allow,
+                dimensions: initial_dimensions,
+                committed_slot_ids: all_slots(),
+            },
+            FilesystemCoreEvaluation {
+                sequence: 1,
+                phase: FilesystemCoreEvaluationPhase::PostFault,
+                outcome: FilesystemCoreOutcome::Deny,
+                dimensions: reviewed_dimensions,
+                committed_slot_ids: Vec::new(),
+            },
+        ]);
+    }
+    let outcome = if reviewed_dimensions
+        .iter()
+        .all(|dimension| dimension.outcome == FilesystemCoreOutcome::Allow)
+    {
+        FilesystemCoreOutcome::Allow
+    } else {
+        FilesystemCoreOutcome::Deny
+    };
+    Ok(vec![FilesystemCoreEvaluation {
+        sequence: 0,
+        phase: FilesystemCoreEvaluationPhase::Initial,
+        outcome,
+        dimensions: reviewed_dimensions,
+        committed_slot_ids: if material.plan.committed_slots
+            == generated::Rev2FilesystemCandidateCommittedSlots::All
+        {
+            all_slots()
+        } else {
+            Vec::new()
+        },
+    }])
+}
+
+fn filesystem_core_outcome(outcome: Outcome) -> Result<FilesystemCoreOutcome, CoreError> {
+    match outcome {
+        Outcome::Allow => Ok(FilesystemCoreOutcome::Allow),
+        Outcome::Deny => Ok(FilesystemCoreOutcome::Deny),
+        Outcome::Masked => Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem candidate core produced an unsupported masked outcome",
+        )),
+    }
+}
+
+fn filesystem_canonical_effect(
+    effect: &CanonicalEffect,
+) -> Result<FilesystemSharedCoreCanonicalEffect, CoreError> {
+    Ok(FilesystemSharedCoreCanonicalEffect {
+        edge_id: effect.edge_id.clone(),
+        effect_slot_id: effect.effect_slot_id.clone(),
+        capability: effect.capability.clone(),
+        effect_owner: effect.effect_owner.clone(),
+        projection_id: effect.projection_id.clone(),
+        occurrence: serde_json::from_value(effect.occurrence.clone()).map_err(schema_error)?,
+    })
+}
+
+fn shared_core_evaluation(
+    request: &StageRequest,
+    decision: &StageDecision,
+    sequence: usize,
+    phase: FilesystemCoreEvaluationPhase,
+) -> Result<FilesystemSharedCoreEvaluation, CoreError> {
+    if !decision.omitted_effects.is_empty() {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem candidate core emitted masked omissions",
+        ));
+    }
+    let stage_request = FilesystemSharedCoreStageRequest {
+        identity: request.identity.clone(),
+        stage_id: request.stage_id.clone(),
+        principals: request.principals.clone(),
+        effects: request
+            .effects
+            .iter()
+            .map(|effect| {
+                Ok(FilesystemSharedCoreEffectInput {
+                    identity: effect.identity.clone(),
+                    edge_id: effect.edge_id.clone(),
+                    effect_slot_id: effect.effect_slot_id.clone(),
+                    capability: effect.capability.clone(),
+                    effect_owner: effect.effect_owner.clone(),
+                    occurrence: serde_json::from_value(effect.occurrence.clone())
+                        .map_err(schema_error)?,
+                })
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?,
+    };
+    let stage_decision = FilesystemSharedCoreStageDecision {
+        stage_id: decision.stage_id.clone(),
+        outcome: filesystem_core_outcome(decision.outcome)?,
+        effects: decision
+            .effects
+            .iter()
+            .map(|effect| {
+                Ok(FilesystemSharedCoreEffectDecision {
+                    effect: filesystem_canonical_effect(&effect.effect)?,
+                    outcome: filesystem_core_outcome(effect.outcome)?,
+                    dimensions: effect
+                        .dimensions
+                        .iter()
+                        .map(|dimension| {
+                            Ok(FilesystemSharedCoreDimension {
+                                principal: dimension.principal.clone(),
+                                outcome: filesystem_core_outcome(dimension.outcome)?,
+                                stratum: dimension.stratum,
+                                reason_code: dimension.reason_code.clone(),
+                                positive_source: dimension.positive_source.clone(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, CoreError>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?,
+        committed_effects: decision
+            .committed_effects
+            .iter()
+            .map(filesystem_canonical_effect)
+            .collect::<Result<Vec<_>, CoreError>>()?,
+        omitted_effect_slot_ids: Vec::new(),
+        canonical_effects_json: decision.canonical_effects_json.clone(),
+    };
+    Ok(FilesystemSharedCoreEvaluation {
+        sequence,
+        phase,
+        stage_request,
+        stage_decision,
+    })
+}
+
+fn generated_native_result_class(
+    class: generated::Rev2FilesystemCandidateNativeResultClass,
+) -> &'static str {
+    use generated::Rev2FilesystemCandidateNativeResultClass as Class;
+    match class {
+        Class::LstatComplete => "lstat-complete",
+        Class::LstatNotFound => "lstat-not-found",
+        Class::MkdirAlreadyExists => "mkdir-already-exists",
+        Class::MkdirComplete => "mkdir-complete",
+    }
+}
+
+fn authorized_result(
+    input: &FilesystemCandidateOracleInput,
+    material: &FilesystemOracleMaterial<'_>,
+) -> Result<
+    (
+        FilesystemExpectedResult,
+        FilesystemObservedResult,
+        Vec<FilesystemSideEffect>,
+    ),
+    CoreError,
+> {
+    let model = material.authorized_outcome.native_result;
+    let expected_digest = model.metadata_digest.map(|_| FilesystemExpectedResultDigest {
+        source: FilesystemExpectedDigestSource::InitialTargetMetadata,
+        algorithm: FilesystemExpectedDigestAlgorithm::HjcsSha256Base64url,
+        domain: FILESYSTEM_LSTAT_METADATA_DIGEST_DOMAIN.to_string(),
+        preimage: FilesystemExpectedDigestPreimage::ExactInitialFilesystemMetadataProjectionJcs,
+    });
+    let observed_digest = if model.metadata_digest.is_some() {
+        let metadata = material
+            .target_initial
+            .state
+            .metadata
+            .as_ref()
+            .ok_or_else(|| {
+                CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem lstat result requires initial metadata",
+                )
+            })?;
+        Some(hjcs_digest(
+            FILESYSTEM_LSTAT_METADATA_DIGEST_DOMAIN,
+            &serde_json::to_value(metadata).map_err(schema_error)?,
+        )?)
+    } else {
+        None
+    };
+    let mut side_effects = Vec::new();
+    if !material.authorized_outcome.permitted_side_effects.is_empty() {
+        let (requested_mode, mode_derivation) = match (
+            &input.case_projection.operation_request,
+            material.operation,
+        ) {
+            (
+                FilesystemOperationRequest::MkdirSync { requested_mode, .. },
+                generated::Rev2FilesystemCandidateOperationSpec::MkdirSync {
+                    mode_derivation,
+                    ..
+                },
+            ) => (*requested_mode, *mode_derivation),
+            _ => {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "filesystem generated side effect is not a mkdir operation",
+                ));
+            }
+        };
+        let mode = mode_derivation.directory_type_bits
+            | ((requested_mode & mode_derivation.requested_mode_mask)
+                & !(input.parent_capture_facts.captured_umask
+                    & mode_derivation.captured_umask_mask));
+        side_effects.push(FilesystemSideEffect {
+            kind: FilesystemSideEffectKind::Create,
+            object_id: material.target_setup.object_id.clone(),
+            digest: None,
+            final_kind: Some(FilesystemObjectKind::Directory),
+            mode: Some(mode),
+        });
+    }
+    let class = generated_native_result_class(model.class).to_string();
+    Ok((
+        FilesystemExpectedResult {
+            class: class.clone(),
+            digest: expected_digest,
+        },
+        FilesystemObservedResult {
+            class,
+            digest: observed_digest,
+        },
+        side_effects,
+    ))
+}
+
+fn terminal_outcome(
+    input: &FilesystemCandidateOracleInput,
+    material: &FilesystemOracleMaterial<'_>,
+    evaluations: &[FilesystemCoreEvaluation],
+) -> Result<
+    (
+        FilesystemDecision,
+        FilesystemExpectedResult,
+        FilesystemObservedResult,
+        Vec<FilesystemSideEffect>,
+        FilesystemDelivery,
+        FilesystemCleanup,
+    ),
+    CoreError,
+> {
+    use generated::Rev2FilesystemCandidateOutcomeDisposition as Disposition;
+    match material.plan.outcome_disposition {
+        Disposition::AuthorizedOperation => {
+            if evaluations.last().map(|evaluation| evaluation.outcome)
+                != Some(FilesystemCoreOutcome::Allow)
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "generated authorized filesystem case did not allow in the shared core",
+                ));
+            }
+            let (expected, observed, side_effects) = authorized_result(input, material)?;
+            Ok((
+                FilesystemDecision::Allow,
+                expected,
+                observed,
+                side_effects,
+                FilesystemDelivery::Delivered,
+                FilesystemCleanup::Complete,
+            ))
+        }
+        Disposition::PermissionDenied => {
+            if evaluations.last().map(|evaluation| evaluation.outcome)
+                != Some(FilesystemCoreOutcome::Deny)
+            {
+                return Err(CoreError::new(
+                    REASON_SCHEMA_INVALID,
+                    "generated denied filesystem case did not deny in the shared core",
+                ));
+            }
+            Ok(terminal_result(
+                FilesystemDecision::Deny,
+                "permission-denied",
+                FilesystemCleanup::Complete,
+            ))
+        }
+        Disposition::SchemaRefused => Ok(terminal_result(
+            FilesystemDecision::Refuse,
+            "schema-refused",
+            FilesystemCleanup::NotStarted,
+        )),
+        Disposition::CancellationRefused => Ok(terminal_result(
+            FilesystemDecision::Refuse,
+            "operation-cancelled",
+            FilesystemCleanup::Complete,
+        )),
+        Disposition::ActorSequenceRefused => Ok(terminal_result(
+            FilesystemDecision::Refuse,
+            "actor-sequence-refused",
+            FilesystemCleanup::Complete,
+        )),
+    }
+}
+
+fn terminal_result(
+    decision: FilesystemDecision,
+    class: &str,
+    cleanup: FilesystemCleanup,
+) -> (
+    FilesystemDecision,
+    FilesystemExpectedResult,
+    FilesystemObservedResult,
+    Vec<FilesystemSideEffect>,
+    FilesystemDelivery,
+    FilesystemCleanup,
+) {
+    (
+        decision,
+        FilesystemExpectedResult {
+            class: class.to_string(),
+            digest: None,
+        },
+        FilesystemObservedResult {
+            class: class.to_string(),
+            digest: None,
+        },
+        Vec::new(),
+        FilesystemDelivery::Withheld,
+        cleanup,
+    )
+}
+
+fn evaluate_filesystem_candidate(
+    core: &Rev2Core,
+    input: &FilesystemCandidateOracleInput,
+) -> Result<FilesystemCandidateOracleOutput, CoreError> {
+    let projection_value = serde_json::to_value(&input.case_projection).map_err(schema_error)?;
+    let inventory_value = serde_json::to_value(&input.initial_sandbox).map_err(schema_error)?;
+    let computed_projection_digest = hjcs_digest(
+        FILESYSTEM_EXECUTION_PROJECTION_DIGEST_DOMAIN,
+        &projection_value,
+    )?;
+    let computed_inventory_digest = hjcs_digest(
+        FILESYSTEM_SANDBOX_INVENTORY_DIGEST_DOMAIN,
+        &inventory_value,
+    )?;
+    if input.case_projection_digest != computed_projection_digest
+        || input.initial_inventory_digest != computed_inventory_digest
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem oracle input digest does not bind its complete preimage",
+        ));
+    }
+    let material = filesystem_oracle_material(input)?;
+    let malformed = input.case_projection.input_mutation == FilesystemInputMutation::TargetPathDotDot;
+    let mut evaluations = Vec::new();
+    let mut shared_core_evaluations = Vec::new();
+    if !malformed {
+        let request = filesystem_stage_request(
+            &input.case_projection,
+            &material.slots,
+            FilesystemCoreEvaluationPhase::Initial,
+        )?;
+        let policy = filesystem_decision_policy(
+            &input.case_projection,
+            &material,
+            FilesystemCoreEvaluationPhase::Initial,
+        )?;
+        let decision = core.decide_stage(&request, &policy)?;
+        let revocation_fault = matches!(
+            input.case_projection.fault_plan.as_ref().map(|fault| &fault.action),
+            Some(FilesystemFaultAction::AuthorityRevocation { .. })
+        );
+        let initial_committed = revocation_fault
+            || material.plan.committed_slots
+                == generated::Rev2FilesystemCandidateCommittedSlots::All;
+        shared_core_evaluations.push(shared_core_evaluation(
+            &request,
+            &decision,
+            0,
+            FilesystemCoreEvaluationPhase::Initial,
+        )?);
+        evaluations.push(summarize_core_decision(
+            &decision,
+            &material.slots,
+            &input.case_projection.constrained_principal_keys,
+            0,
+            FilesystemCoreEvaluationPhase::Initial,
+            initial_committed,
+        )?);
+        if revocation_fault {
+            let request = filesystem_stage_request(
+                &input.case_projection,
+                &material.slots,
+                FilesystemCoreEvaluationPhase::PostFault,
+            )?;
+            let policy = filesystem_decision_policy(
+                &input.case_projection,
+                &material,
+                FilesystemCoreEvaluationPhase::PostFault,
+            )?;
+            let decision = core.decide_stage(&request, &policy)?;
+            shared_core_evaluations.push(shared_core_evaluation(
+                &request,
+                &decision,
+                1,
+                FilesystemCoreEvaluationPhase::PostFault,
+            )?);
+            evaluations.push(summarize_core_decision(
+                &decision,
+                &material.slots,
+                &input.case_projection.constrained_principal_keys,
+                1,
+                FilesystemCoreEvaluationPhase::PostFault,
+                false,
+            )?);
+        }
+    }
+    if evaluations != expected_case_core_evaluations(&input.case_projection, &material)? {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "shared-core result differs from the generated filesystem case expectation",
+        ));
+    }
+    let (decision, expected_result, observed_result, side_effects, delivery, cleanup) =
+        terminal_outcome(input, &material, &evaluations)?;
+    let expected_core = FilesystemExpectedCore {
+        disposition: if malformed {
+            FilesystemCoreDisposition::NotReached
+        } else {
+            FilesystemCoreDisposition::Evaluated
+        },
+        evaluations: evaluations.clone(),
+    };
+    let expected_outcome = FilesystemExpectedOutcome {
+        slots: material.slots.clone(),
+        decision,
+        result: expected_result,
+        side_effects: side_effects.clone(),
+        delivery,
+        cleanup,
+        core: expected_core,
+    };
+    let projection = &input.case_projection;
+    let expected_observation = FilesystemExpectedObservation {
+        case_id: projection.case_id.clone(),
+        edge_id: projection.edge_id.clone(),
+        requirement_id: projection.requirement_id.clone(),
+        case_kind: projection.case_kind.clone(),
+        slots: material.slots.clone(),
+        decision,
+        result: observed_result,
+        side_effects,
+        delivery,
+        cleanup,
+    };
+    // A pre-validation mutation has no runtime-normalized slots. The expected
+    // fixture-facing outcome still retains the generated base slots so the
+    // parent can compare the refusal without treating malformed input as a new
+    // operation shape.
+    let runtime_slots = if malformed {
+        Vec::new()
+    } else {
+        material.slots.clone()
+    };
+    let normalized_slots_digest = hjcs_digest(
+        FILESYSTEM_NORMALIZED_SLOTS_DIGEST_DOMAIN,
+        &serde_json::to_value(&runtime_slots).map_err(schema_error)?,
+    )?;
+    let expected_outcome_digest = hjcs_digest(
+        FILESYSTEM_EXPECTED_OUTCOME_DIGEST_DOMAIN,
+        &serde_json::to_value(&expected_outcome).map_err(schema_error)?,
+    )?;
+    let expected_observation_digest = hjcs_digest(
+        FILESYSTEM_EXPECTED_OBSERVATION_DIGEST_DOMAIN,
+        &serde_json::to_value(&expected_observation).map_err(schema_error)?,
+    )?;
+    Ok(FilesystemCandidateOracleOutput {
+        core_identity: core.identity().clone(),
+        normalization: FilesystemOracleNormalization {
+            operation_request: projection.operation_request.clone(),
+            runtime_slots,
+        },
+        normalized_slots_digest,
+        core_evaluations: shared_core_evaluations,
+        expected_outcome,
+        expected_outcome_digest,
+        expected_observation,
+        expected_observation_digest,
+    })
+}
+
 pub fn run_oracle_json(input: &str) -> String {
     let result = (|| -> Result<Value, CoreError> {
         let value = parse_strict_json(input)?;
@@ -4468,6 +8288,10 @@ pub fn run_oracle_json(input: &str) -> String {
             OracleRequest::DecideStage { stage, policy } => {
                 serde_json::to_value(core.decide_stage(&stage, &policy)?).map_err(schema_error)
             }
+            OracleRequest::EvaluateFilesystemCandidate { input } => {
+                serde_json::to_value(evaluate_filesystem_candidate(&core, &input)?)
+                    .map_err(schema_error)
+            }
         }
     })();
     let response = match result {
@@ -4512,6 +8336,7 @@ fn validate_oracle_request_envelope(value: &Value) -> Result<(), CoreError> {
             "pathBindings",
         ],
         "decideStage" => &["operation", "stage", "policy"],
+        "evaluateFilesystemCandidate" => &["operation", "input"],
         _ => {
             return Err(CoreError::new(
                 REASON_SCHEMA_INVALID,
@@ -4834,7 +8659,10 @@ fn path_matches(
     let lexical_path = occurrence.get("lexicalPath").ok_or_else(match_type_error)?;
     let path_match = selector.get("root") == occurrence.get("root")
         && match selector.get("kind").and_then(Value::as_str) {
-            Some("path-exact") => selector_path == lexical_path,
+            Some("path-exact") => {
+                decode_platform_path_bytes(selector_path)?
+                    == decode_platform_path_bytes(lexical_path)?
+            }
             Some("path-tree") => platform_path_contains(selector_path, lexical_path)?,
             _ => false,
         };
@@ -4856,8 +8684,16 @@ fn path_matches(
                 binding.final_object_identities.contains(identity)
             }
             Some("missing" | "proposed") => {
-                let parent = occurrence.get("parentIdentity").ok_or_else(match_type_error)?;
-                binding.parent_identities.contains(parent)
+                if polarity == SelectorPolarity::Negative {
+                    // A parent identity authenticates the positive child
+                    // location, but it is not an identity for every missing
+                    // or proposed sibling. Negative matching remains lexical
+                    // until the child has an object identity of its own.
+                    false
+                } else {
+                    let parent = occurrence.get("parentIdentity").ok_or_else(match_type_error)?;
+                    binding.parent_identities.contains(parent)
+                }
             }
             _ => false,
         }
@@ -4876,32 +8712,8 @@ fn path_matches(
 }
 
 fn platform_path_contains(parent: &Value, child: &Value) -> Result<bool, CoreError> {
-    let parent = parent.as_object().ok_or_else(match_type_error)?;
-    let child = child.as_object().ok_or_else(match_type_error)?;
-    if parent.get("encoding") != child.get("encoding") {
-        return Ok(false);
-    }
-    let encoding = parent
-        .get("encoding")
-        .and_then(Value::as_str)
-        .ok_or_else(match_type_error)?;
-    let parent_payload = parent
-        .get("value")
-        .and_then(Value::as_str)
-        .ok_or_else(match_type_error)?;
-    let child_payload = child
-        .get("value")
-        .and_then(Value::as_str)
-        .ok_or_else(match_type_error)?;
-    let (parent_bytes, child_bytes) = if encoding == "opaque-base64url" {
-        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        (
-            engine.decode(parent_payload).map_err(|_| match_type_error())?,
-            engine.decode(child_payload).map_err(|_| match_type_error())?,
-        )
-    } else {
-        (parent_payload.as_bytes().to_vec(), child_payload.as_bytes().to_vec())
-    };
+    let parent_bytes = decode_platform_path_bytes(parent)?;
+    let child_bytes = decode_platform_path_bytes(child)?;
     if parent_bytes == child_bytes {
         return Ok(true);
     }
@@ -4910,6 +8722,40 @@ fn platform_path_contains(parent: &Value, child: &Value) -> Result<bool, CoreErr
     }
     Ok(child_bytes.starts_with(&parent_bytes)
         && (parent_bytes.ends_with(b"/") || child_bytes[parent_bytes.len()] == b'/'))
+}
+
+fn decode_platform_path_bytes(path: &Value) -> Result<Vec<u8>, CoreError> {
+    let path = path.as_object().ok_or_else(match_type_error)?;
+    let encoding = path
+        .get("encoding")
+        .and_then(Value::as_str)
+        .ok_or_else(match_type_error)?;
+    let payload = path
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(match_type_error)?;
+    decode_platform_path_payload(encoding, payload)
+}
+
+fn decode_platform_path_payload(encoding: &str, payload: &str) -> Result<Vec<u8>, CoreError> {
+    if payload.is_empty() || payload.chars().count() > 4096 {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "platform path payload is empty or unbounded",
+        ));
+    }
+    match encoding {
+        "unicode" => Ok(payload.as_bytes().to_vec()),
+        "opaque-base64url" => {
+            let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            let decoded = engine.decode(payload).map_err(|_| match_type_error())?;
+            if engine.encode(&decoded) != payload {
+                return Err(match_type_error());
+            }
+            Ok(decoded)
+        }
+        _ => Err(match_type_error()),
+    }
 }
 
 fn normalize_principal_set(input: &[PrincipalRef]) -> Vec<PrincipalRef> {
@@ -5094,6 +8940,27 @@ pub fn domain_digest(domain: &str, value: &Value) -> Result<String, CoreError> {
     let canonical = canonical_json(value)?;
     let mut hasher = Sha256::new();
     hasher.update(domain.as_bytes());
+    hasher.update(canonical.as_bytes());
+    let digest = hasher.finalize();
+    Ok(format!(
+        "sha256-{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    ))
+}
+
+/// HJCS is the filesystem evidence framing, distinct from Rev2's historical
+/// direct `domain || JCS` semantic digests: `UTF8(domain) || NUL || JCS(value)`.
+pub fn hjcs_digest(domain: &str, value: &Value) -> Result<String, CoreError> {
+    if domain.is_empty() || domain.as_bytes().contains(&0) {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "HJCS digest domain is empty or contains NUL",
+        ));
+    }
+    let canonical = canonical_json(value)?;
+    let mut hasher = Sha256::new();
+    hasher.update(domain.as_bytes());
+    hasher.update([0]);
     hasher.update(canonical.as_bytes());
     let digest = hasher.finalize();
     Ok(format!(
@@ -7125,6 +10992,742 @@ mod tests {
         }
     }
 
+    fn filesystem_lstat_oracle_input() -> FilesystemCandidateOracleInput {
+        let fixture_root = FilesystemObjectIdentity {
+            kind: FilesystemObjectIdentityKind::OpaqueToken,
+            value: "fixture:root".to_string(),
+        };
+        let fixture_file = FilesystemObjectIdentity {
+            kind: FilesystemObjectIdentityKind::OpaqueToken,
+            value: "fixture:file".to_string(),
+        };
+        let platform_root = FilesystemObjectIdentity {
+            kind: FilesystemObjectIdentityKind::PlatformObject,
+            value: "unix-dev-ino:00000000000000000000000000000001".to_string(),
+        };
+        let platform_file = FilesystemObjectIdentity {
+            kind: FilesystemObjectIdentityKind::PlatformObject,
+            value: "unix-dev-ino:00000000000000010000000000000002".to_string(),
+        };
+        let path = FilesystemPlatformPath {
+            encoding: FilesystemPlatformPathEncoding::Unicode,
+            value: "file.txt".to_string(),
+        };
+        let principal = PrincipalRef {
+            kind: PrincipalKind::Package,
+            key: "package:test".to_string(),
+        };
+        let setup = FilesystemSetup {
+            logical_roots: vec![FilesystemSetupLogicalRoot {
+                root: FilesystemLogicalRoot::Project,
+                binding_id: "root:project".to_string(),
+                descriptor_slot: 0,
+                object_identity: fixture_root.clone(),
+            }],
+            objects: vec![FilesystemSetupObject {
+                object_id: "object:file".to_string(),
+                root: FilesystemLogicalRoot::Project,
+                path: path.clone(),
+                object_identity: Some(fixture_file.clone()),
+                kind: FilesystemObjectKind::RegularFile,
+                content: Some(FilesystemInlineContent {
+                    kind: FilesystemInlineContentKind::InlineBase64url,
+                    bytes: String::new(),
+                }),
+                content_digest: Some(
+                    "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU".to_string(),
+                ),
+                alias_target_object_id: None,
+                link_target_object_id: None,
+            }],
+        };
+        let case_kind = "lstat-existing".to_string();
+        let mut projection = FilesystemExecutionProjection {
+            case_id: "filesystem:lstat-sync:lstat-existing".to_string(),
+            edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync".to_string(),
+            requirement_id:
+                "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete"
+                    .to_string(),
+            case_kind: case_kind.clone(),
+            case_plan_digest: generated_case_plan_digest(&case_kind).unwrap(),
+            mode: FilesystemExecutionMode::Enforce,
+            constrained_principal_keys: vec![principal.key.clone()],
+            effect_owner_key: principal.key.clone(),
+            input_mutation: FilesystemInputMutation::None,
+            target_predicate: FilesystemTargetPredicate {
+                candidates: vec![FilesystemTargetCandidate {
+                    target: "aarch64-apple-darwin".to_string(),
+                    feature_set: REV2_TARGET_STATUS
+                        .iter()
+                        .find(|candidate| candidate.target == "aarch64-apple-darwin")
+                        .unwrap()
+                        .feature_set
+                        .to_string(),
+                }],
+            },
+            invocation: FilesystemInvocation {
+                kind: FilesystemInvocationKind::NativeHarness,
+                command: "oden-capsec-filesystem-fixture".to_string(),
+                args: vec!["filesystem:lstat-sync:lstat-existing".to_string()],
+                cwd_root: FilesystemLogicalRoot::Project,
+                entrypoint: None,
+            },
+            operation_request: FilesystemOperationRequest::LstatSync {
+                target_ref: FilesystemTargetRef {
+                    object_id: "object:file".to_string(),
+                    parent: FilesystemTargetParentRef::LogicalRoot {
+                        root: FilesystemLogicalRoot::Project,
+                        binding_id: "root:project".to_string(),
+                    },
+                },
+            },
+            setup,
+            principals: vec![principal.clone()],
+            authority_rows: vec![FilesystemAuthorityRow {
+                source_id: "case:static:0".to_string(),
+                source_class: FilesystemAuthoritySourceClass::StaticFloor,
+                channel: FilesystemAuthorityChannel::Floor,
+                polarity: SelectorPolarity::Positive,
+                principal_key: Some(principal.key.clone()),
+                capability: "fs:list".to_string(),
+                resource: FilesystemPathResource {
+                    root: FilesystemLogicalRoot::Project,
+                    kind: FilesystemPathResourceKind::PathExact,
+                    path: path.clone(),
+                },
+                state: FilesystemAuthorityState::Active,
+            }],
+            execution: FilesystemExecutionPlan {
+                actors: vec![FilesystemExecutionActor {
+                    actor_id: "actor:lstat".to_string(),
+                    slot_id:
+                        "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0".to_string(),
+                    principal_key: Some(principal.key.clone()),
+                    effect_owner: principal.key,
+                }],
+                trace_phases: vec![
+                    FilesystemTracePhase::HarnessAdmitted,
+                    FilesystemTracePhase::PublicOpEntered,
+                    FilesystemTracePhase::ActorsCaptured,
+                    FilesystemTracePhase::NamespaceGateAcquired,
+                    FilesystemTracePhase::DiscoveryComplete,
+                    FilesystemTracePhase::AuthorizationComplete,
+                    FilesystemTracePhase::SourcesRevalidated,
+                    FilesystemTracePhase::TargetRevalidated,
+                    FilesystemTracePhase::OperationCompleted,
+                    FilesystemTracePhase::DeliverySerialized,
+                    FilesystemTracePhase::ProvisionalResourcesReleased,
+                    FilesystemTracePhase::NamespaceGateReleased,
+                    FilesystemTracePhase::HarnessExited,
+                ],
+                resource_lifecycle: Vec::new(),
+            },
+            fault_plan: None,
+        };
+        let operation = generated_operation(&projection.edge_id).unwrap();
+        let plan = generated_case_plan(&projection.case_kind).unwrap();
+        let target = &projection.setup.objects[0];
+        let state = target_state(operation, target.kind).unwrap();
+        let outcome = operation_authorized_outcomes(operation)
+            .iter()
+            .find(|outcome| outcome.target_state == state)
+            .unwrap();
+        projection.execution.resource_lifecycle =
+            expected_resource_lifecycle(&projection, operation, plan, target, outcome);
+        let initial_sandbox = FilesystemInitialSandboxInventory {
+            schema: FILESYSTEM_SANDBOX_INVENTORY_SCHEMA.to_string(),
+            phase: FilesystemSandboxPhase::Initial,
+            logical_roots: vec![FilesystemRealizedLogicalRoot {
+                root: FilesystemLogicalRoot::Project,
+                binding_id: "root:project".to_string(),
+                fixture_identity: fixture_root,
+                platform_identity: platform_root,
+            }],
+            objects: vec![FilesystemInitialSandboxObject {
+                object_id: "object:file".to_string(),
+                root: FilesystemLogicalRoot::Project,
+                path,
+                fixture_identity: Some(fixture_file),
+                state: FilesystemRealizedObjectState {
+                    kind: FilesystemObjectKind::RegularFile,
+                    identity: Some(platform_file),
+                    metadata: Some(FilesystemMetadataProjection {
+                        mode: 0o100644,
+                        size: "0".to_string(),
+                        link_count: "1".to_string(),
+                        device: "1".to_string(),
+                        inode: "2".to_string(),
+                        uid: Some("501".to_string()),
+                        gid: Some("20".to_string()),
+                        rdev: Some("0".to_string()),
+                        block_size: Some("4096".to_string()),
+                        blocks: Some("0".to_string()),
+                        accessed_time_ns: Some("0".to_string()),
+                        modified_time_ns: Some("0".to_string()),
+                        changed_time_ns: Some("0".to_string()),
+                        birth_time_ns: Some("0".to_string()),
+                    }),
+                    content_digest: Some(
+                        "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU".to_string(),
+                    ),
+                    alias_target_object_id: None,
+                    link_target_object_id: None,
+                },
+            }],
+            unexpected_entries: Vec::new(),
+        };
+        let case_projection_digest = hjcs_digest(
+            FILESYSTEM_EXECUTION_PROJECTION_DIGEST_DOMAIN,
+            &serde_json::to_value(&projection).unwrap(),
+        )
+        .unwrap();
+        let initial_inventory_digest = hjcs_digest(
+            FILESYSTEM_SANDBOX_INVENTORY_DIGEST_DOMAIN,
+            &serde_json::to_value(&initial_sandbox).unwrap(),
+        )
+        .unwrap();
+        FilesystemCandidateOracleInput {
+            case_projection: projection,
+            case_projection_digest,
+            initial_sandbox,
+            initial_inventory_digest,
+            parent_capture_facts: FilesystemParentCaptureFacts {
+                captured_umask: 0o077,
+            },
+        }
+    }
+
+    fn filesystem_malformed_oracle_input() -> FilesystemCandidateOracleInput {
+        let mut input = filesystem_lstat_oracle_input();
+        input.case_projection.case_kind = "malformed-resource-refusal".to_string();
+        input.case_projection.case_plan_digest =
+            generated_case_plan_digest(&input.case_projection.case_kind).unwrap();
+        input.case_projection.input_mutation = FilesystemInputMutation::TargetPathDotDot;
+        input.case_projection.execution.trace_phases = vec![
+            FilesystemTracePhase::HarnessAdmitted,
+            FilesystemTracePhase::PublicOpEntered,
+            FilesystemTracePhase::HarnessExited,
+        ];
+        let operation = generated_operation(&input.case_projection.edge_id).unwrap();
+        let plan = generated_case_plan(&input.case_projection.case_kind).unwrap();
+        let target = &input.case_projection.setup.objects[0];
+        let state = target_state(operation, target.kind).unwrap();
+        let outcome = operation_authorized_outcomes(operation)
+            .iter()
+            .find(|outcome| outcome.target_state == state)
+            .unwrap();
+        input.case_projection.execution.resource_lifecycle = expected_resource_lifecycle(
+            &input.case_projection,
+            operation,
+            plan,
+            target,
+            outcome,
+        );
+        input.case_projection_digest = hjcs_digest(
+            FILESYSTEM_EXECUTION_PROJECTION_DIGEST_DOMAIN,
+            &serde_json::to_value(&input.case_projection).unwrap(),
+        )
+        .unwrap();
+        input
+    }
+
+    fn recompute_filesystem_oracle_input_digests(input: &mut FilesystemCandidateOracleInput) {
+        input.case_projection_digest = hjcs_digest(
+            FILESYSTEM_EXECUTION_PROJECTION_DIGEST_DOMAIN,
+            &serde_json::to_value(&input.case_projection).unwrap(),
+        )
+        .unwrap();
+        input.initial_inventory_digest = hjcs_digest(
+            FILESYSTEM_SANDBOX_INVENTORY_DIGEST_DOMAIN,
+            &serde_json::to_value(&input.initial_sandbox).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn bind_test_case_plan(input: &mut FilesystemCandidateOracleInput, case_kind: &str) {
+        input.case_projection.case_kind = case_kind.to_string();
+        input.case_projection.case_plan_digest = generated_case_plan_digest(case_kind).unwrap();
+        let operation = generated_operation(&input.case_projection.edge_id).unwrap();
+        let plan = generated_case_plan(case_kind).unwrap();
+        let target = &input.case_projection.setup.objects[0];
+        let state = target_state(operation, target.kind).unwrap();
+        let target_plan = plan
+            .target_states
+            .iter()
+            .find(|target| generated_target_edge_id(target.edge_id) == input.case_projection.edge_id)
+            .unwrap();
+        input.case_projection.execution.trace_phases = target_plan
+            .trace_phases
+            .iter()
+            .copied()
+            .map(filesystem_trace_phase)
+            .collect();
+        let outcome = operation_authorized_outcomes(operation)
+            .iter()
+            .find(|outcome| outcome.target_state == state)
+            .unwrap();
+        input.case_projection.execution.resource_lifecycle = expected_resource_lifecycle(
+            &input.case_projection,
+            operation,
+            plan,
+            target,
+            outcome,
+        );
+        recompute_filesystem_oracle_input_digests(input);
+    }
+
+    fn filesystem_denied_oracle_input() -> FilesystemCandidateOracleInput {
+        let mut input = filesystem_lstat_oracle_input();
+        let static_row = input.case_projection.authority_rows[0].clone();
+        input.case_projection.authority_rows = vec![
+            static_row.clone(),
+            case_authority_row(
+                "case:principal-denial:0".to_string(),
+                FilesystemAuthoritySourceClass::PrincipalDenial,
+                static_row.principal_key.clone(),
+                static_row.capability.clone(),
+                &static_row.resource,
+                FilesystemAuthorityState::Active,
+            ),
+        ];
+        bind_test_case_plan(&mut input, "authorable-negative");
+        input
+    }
+
+    fn filesystem_revoked_oracle_input() -> FilesystemCandidateOracleInput {
+        let mut input = filesystem_lstat_oracle_input();
+        let base = input.case_projection.authority_rows[0].clone();
+        let principal = base.principal_key.clone();
+        input.case_projection.authority_rows = vec![
+            case_authority_row(
+                "case:session-grant:0".to_string(),
+                FilesystemAuthoritySourceClass::SessionGrant,
+                principal.clone(),
+                base.capability.clone(),
+                &base.resource,
+                FilesystemAuthorityState::Active,
+            ),
+            case_authority_row(
+                "case:ceiling:0".to_string(),
+                FilesystemAuthoritySourceClass::EscalationCeiling,
+                principal.clone(),
+                base.capability.clone(),
+                &base.resource,
+                FilesystemAuthorityState::Active,
+            ),
+            case_authority_row(
+                "case:session-revocation:0".to_string(),
+                FilesystemAuthoritySourceClass::SessionRevocation,
+                principal,
+                base.capability,
+                &base.resource,
+                FilesystemAuthorityState::Dormant,
+            ),
+        ];
+        input.case_projection.fault_plan = Some(FilesystemFaultPlan {
+            barrier_id: "case-plan:after-authorization".to_string(),
+            phase: FilesystemFaultPhase::AfterAuthorization,
+            action: FilesystemFaultAction::AuthorityRevocation {
+                remove_source_ids: vec!["case:session-grant:0".to_string()],
+                activate_source_ids: vec!["case:session-revocation:0".to_string()],
+            },
+        });
+        bind_test_case_plan(&mut input, "staged-barrier:revocation");
+        input
+    }
+
+    fn filesystem_mkdir_oracle_input() -> FilesystemCandidateOracleInput {
+        let mut input = filesystem_lstat_oracle_input();
+        input.case_projection.case_id = "filesystem:mkdir-sync:mkdir-missing-create".to_string();
+        input.case_projection.edge_id =
+            "native-op:ext/fs/ops.rs#op_fs_mkdir_sync".to_string();
+        input.case_projection.requirement_id =
+            "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_mkdir_sync:complete".to_string();
+        input.case_projection.invocation.args = vec![input.case_projection.case_id.clone()];
+        input.case_projection.operation_request = FilesystemOperationRequest::MkdirSync {
+            target_ref: FilesystemTargetRef {
+                object_id: "object:file".to_string(),
+                parent: FilesystemTargetParentRef::LogicalRoot {
+                    root: FilesystemLogicalRoot::Project,
+                    binding_id: "root:project".to_string(),
+                },
+            },
+            recursive: false,
+            requested_mode: 0o755,
+        };
+        let setup_target = &mut input.case_projection.setup.objects[0];
+        setup_target.object_identity = None;
+        setup_target.kind = FilesystemObjectKind::Missing;
+        setup_target.content = None;
+        setup_target.content_digest = None;
+        input.initial_sandbox.objects[0].fixture_identity = None;
+        input.initial_sandbox.objects[0].state = FilesystemRealizedObjectState {
+            kind: FilesystemObjectKind::Missing,
+            identity: None,
+            metadata: None,
+            content_digest: None,
+            alias_target_object_id: None,
+            link_target_object_id: None,
+        };
+        let principal = input.case_projection.effect_owner_key.clone();
+        let resource = FilesystemPathResource {
+            root: FilesystemLogicalRoot::Project,
+            kind: FilesystemPathResourceKind::PathExact,
+            path: input.case_projection.setup.objects[0].path.clone(),
+        };
+        input.case_projection.authority_rows = vec![
+            case_authority_row(
+                "case:static:0".to_string(),
+                FilesystemAuthoritySourceClass::StaticFloor,
+                Some(principal.clone()),
+                "fs:write".to_string(),
+                &resource,
+                FilesystemAuthorityState::Active,
+            ),
+            case_authority_row(
+                "case:static:1".to_string(),
+                FilesystemAuthoritySourceClass::StaticFloor,
+                Some(principal.clone()),
+                "fs:list".to_string(),
+                &resource,
+                FilesystemAuthorityState::Active,
+            ),
+        ];
+        input.case_projection.execution.actors = vec![
+            FilesystemExecutionActor {
+                actor_id: "actor:mkdir:write".to_string(),
+                slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0".to_string(),
+                principal_key: Some(principal.clone()),
+                effect_owner: principal.clone(),
+            },
+            FilesystemExecutionActor {
+                actor_id: "actor:mkdir:list".to_string(),
+                slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1".to_string(),
+                principal_key: Some(principal.clone()),
+                effect_owner: principal,
+            },
+        ];
+        bind_test_case_plan(&mut input, "mkdir-missing-create");
+        input
+    }
+
+    fn matrix_filesystem_kind(
+        kind: generated::Rev2FilesystemCandidateInitialObjectKind,
+    ) -> FilesystemObjectKind {
+        use generated::Rev2FilesystemCandidateInitialObjectKind as Kind;
+        match kind {
+            Kind::BlockDevice => FilesystemObjectKind::BlockDevice,
+            Kind::CharacterDevice => FilesystemObjectKind::CharacterDevice,
+            Kind::Directory => FilesystemObjectKind::Directory,
+            Kind::Fifo => FilesystemObjectKind::Fifo,
+            Kind::Missing => FilesystemObjectKind::Missing,
+            Kind::RegularFile => FilesystemObjectKind::RegularFile,
+            Kind::Socket => FilesystemObjectKind::Socket,
+            Kind::Symlink => FilesystemObjectKind::Symlink,
+        }
+    }
+
+    fn matrix_case_projection(
+        plan: &generated::Rev2FilesystemCandidateCasePlanSpec,
+    ) -> FilesystemExecutionProjection {
+        use generated::Rev2FilesystemCandidateAuthorityPlan as AuthorityPlan;
+        use generated::Rev2FilesystemCandidateExecutionMode as ExecutionMode;
+        use generated::Rev2FilesystemCandidateFaultPlan as FaultPlan;
+        use generated::Rev2FilesystemCandidateInputMutation as InputMutation;
+        use generated::Rev2FilesystemCandidatePrincipalPlan as PrincipalPlan;
+
+        let target_plan = plan.target_states.first().unwrap();
+        let edge_id = generated_target_edge_id(target_plan.edge_id);
+        let mut projection = if edge_id.ends_with("op_fs_lstat_sync") {
+            filesystem_lstat_oracle_input().case_projection
+        } else {
+            filesystem_mkdir_oracle_input().case_projection
+        };
+        let case_kind = generated_case_kind(plan.case_kind);
+        projection.case_id = format!("filesystem:matrix:{case_kind}");
+        projection.invocation.args = vec![projection.case_id.clone()];
+        projection.case_kind = case_kind.to_string();
+        projection.case_plan_digest = generated_case_plan_digest(case_kind).unwrap();
+        projection.mode = match plan.execution_mode {
+            ExecutionMode::Audit => FilesystemExecutionMode::Audit,
+            ExecutionMode::Enforce => FilesystemExecutionMode::Enforce,
+        };
+        projection.input_mutation = match plan.input_mutation {
+            InputMutation::None => FilesystemInputMutation::None,
+            InputMutation::TargetPathDotDot => FilesystemInputMutation::TargetPathDotDot,
+        };
+        projection.execution.trace_phases = target_plan
+            .trace_phases
+            .iter()
+            .copied()
+            .map(filesystem_trace_phase)
+            .collect();
+
+        let kind = matrix_filesystem_kind(target_plan.initial_kind);
+        let target = &mut projection.setup.objects[0];
+        target.kind = kind;
+        target.alias_target_object_id = None;
+        target.link_target_object_id =
+            (kind == FilesystemObjectKind::Symlink).then(|| target.object_id.clone());
+        if kind == FilesystemObjectKind::Missing {
+            target.object_identity = None;
+            target.content = None;
+            target.content_digest = None;
+        } else {
+            target.object_identity = Some(FilesystemObjectIdentity {
+                kind: FilesystemObjectIdentityKind::OpaqueToken,
+                value: format!("fixture:matrix:{case_kind}"),
+            });
+            if kind == FilesystemObjectKind::RegularFile {
+                target.content = Some(FilesystemInlineContent {
+                    kind: FilesystemInlineContentKind::InlineBase64url,
+                    bytes: String::new(),
+                });
+                target.content_digest = Some(
+                    "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU".to_string(),
+                );
+            } else {
+                target.content = None;
+                target.content_digest = None;
+            }
+        }
+
+        let (owner_kind, owner_key) = match plan.principal_plan {
+            PrincipalPlan::ExplicitNoUser => (PrincipalKind::NoUser, "no-user:matrix"),
+            PrincipalPlan::Quarantine => (PrincipalKind::Quarantine, "quarantine:matrix"),
+            _ => (PrincipalKind::Package, "package:matrix"),
+        };
+        projection.effect_owner_key = owner_key.to_string();
+        projection.principals = vec![PrincipalRef {
+            kind: owner_kind,
+            key: owner_key.to_string(),
+        }];
+        if plan.principal_plan == PrincipalPlan::ActorAndOther {
+            projection.principals.push(PrincipalRef {
+                kind: PrincipalKind::Package,
+                key: "package:other".to_string(),
+            });
+        }
+        projection.constrained_principal_keys = match plan.principal_plan {
+            PrincipalPlan::ActorUnconstrained => Vec::new(),
+            PrincipalPlan::ActorAndOther => {
+                vec![owner_key.to_string(), "package:other".to_string()]
+            }
+            _ => vec![owner_key.to_string()],
+        };
+        for actor in &mut projection.execution.actors {
+            actor.principal_key = (plan.principal_plan != PrincipalPlan::ActorUnconstrained)
+                .then(|| owner_key.to_string());
+            actor.effect_owner = owner_key.to_string();
+        }
+
+        let operation = generated_operation(edge_id).unwrap();
+        let resource = FilesystemPathResource {
+            root: projection.setup.objects[0].root,
+            kind: FilesystemPathResourceKind::PathExact,
+            path: projection.setup.objects[0].path.clone(),
+        };
+        let row = |source_id: String,
+                   source_class: FilesystemAuthoritySourceClass,
+                   principal_key: Option<&str>,
+                   capability: String,
+                   state: FilesystemAuthorityState| {
+            case_authority_row(
+                source_id,
+                source_class,
+                principal_key.map(str::to_string),
+                capability,
+                &resource,
+                state,
+            )
+        };
+        let static_rows = |principal_key: &str| {
+            operation_slots(operation)
+                .iter()
+                .enumerate()
+                .map(|(index, slot)| {
+                    row(
+                        format!("case:static:{index}"),
+                        FilesystemAuthoritySourceClass::StaticFloor,
+                        Some(principal_key),
+                        generated_capability(slot.capability).unwrap().to_string(),
+                        FilesystemAuthorityState::Active,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        projection.authority_rows = match plan.authority_plan {
+            AuthorityPlan::None => Vec::new(),
+            AuthorityPlan::StaticAll | AuthorityPlan::NoUserStaticAll => {
+                static_rows(owner_key)
+            }
+            AuthorityPlan::PrincipalDenialOverStaticAll => {
+                let mut rows = static_rows(owner_key);
+                rows.extend(operation_slots(operation).iter().enumerate().map(
+                    |(index, slot)| {
+                        row(
+                            format!("case:principal-denial:{index}"),
+                            FilesystemAuthoritySourceClass::PrincipalDenial,
+                            Some(owner_key),
+                            generated_capability(slot.capability).unwrap().to_string(),
+                            FilesystemAuthorityState::Active,
+                        )
+                    },
+                ));
+                rows
+            }
+            AuthorityPlan::PrincipalDenialLastOverStaticAll => {
+                let mut rows = static_rows(owner_key);
+                let index = operation_slots(operation).len() - 1;
+                rows.push(row(
+                    format!("case:principal-denial:{index}"),
+                    FilesystemAuthoritySourceClass::PrincipalDenial,
+                    Some(owner_key),
+                    generated_capability(operation_slots(operation)[index].capability)
+                        .unwrap()
+                        .to_string(),
+                    FilesystemAuthorityState::Active,
+                ));
+                rows
+            }
+            AuthorityPlan::ProcessDenialOverStaticAll => {
+                let mut rows = static_rows(owner_key);
+                rows.extend(operation_slots(operation).iter().enumerate().map(
+                    |(index, slot)| {
+                        row(
+                            format!("case:process-denial:{index}"),
+                            FilesystemAuthoritySourceClass::ProcessDenial,
+                            None,
+                            generated_capability(slot.capability).unwrap().to_string(),
+                            FilesystemAuthorityState::Active,
+                        )
+                    },
+                ));
+                rows
+            }
+            AuthorityPlan::CrossActionFirst => operation_slots(operation)
+                .iter()
+                .enumerate()
+                .map(|(index, slot)| {
+                    row(
+                        if index == 0 {
+                            "case:cross-action:0".to_string()
+                        } else {
+                            format!("case:static:{index}")
+                        },
+                        FilesystemAuthoritySourceClass::StaticFloor,
+                        Some(owner_key),
+                        if index == 0 {
+                            "fs:read".to_string()
+                        } else {
+                            generated_capability(slot.capability).unwrap().to_string()
+                        },
+                        FilesystemAuthorityState::Active,
+                    )
+                })
+                .collect(),
+            AuthorityPlan::WrongPrincipalStaticAll => static_rows("package:other"),
+            AuthorityPlan::SessionAllDormantRevocationAll
+            | AuthorityPlan::SessionAllDormantRevocationLast => {
+                let mut rows = Vec::new();
+                for (class, prefix, state) in [
+                    (
+                        FilesystemAuthoritySourceClass::SessionGrant,
+                        "case:session-grant",
+                        FilesystemAuthorityState::Active,
+                    ),
+                    (
+                        FilesystemAuthoritySourceClass::EscalationCeiling,
+                        "case:ceiling",
+                        FilesystemAuthorityState::Active,
+                    ),
+                    (
+                        FilesystemAuthoritySourceClass::SessionRevocation,
+                        "case:session-revocation",
+                        FilesystemAuthorityState::Dormant,
+                    ),
+                ] {
+                    rows.extend(operation_slots(operation).iter().enumerate().map(
+                        |(index, slot)| {
+                            row(
+                                format!("{prefix}:{index}"),
+                                class,
+                                Some(owner_key),
+                                generated_capability(slot.capability).unwrap().to_string(),
+                                state,
+                            )
+                        },
+                    ));
+                }
+                rows
+            }
+        };
+
+        projection.fault_plan = match plan.fault_plan {
+            FaultPlan::None => None,
+            FaultPlan::CancelSafeBoundary => Some(FilesystemFaultPlan {
+                barrier_id: "case-plan:after-authorization".to_string(),
+                phase: FilesystemFaultPhase::AfterAuthorization,
+                action: FilesystemFaultAction::ActorSequence {
+                    operation: FilesystemActorSequenceOperation::Cancel,
+                },
+            }),
+            FaultPlan::OmitRequiredStage => Some(if edge_id.ends_with("op_fs_lstat_sync") {
+                FilesystemFaultPlan {
+                    barrier_id: "case-plan:after-target-revalidation".to_string(),
+                    phase: FilesystemFaultPhase::AfterTargetRevalidation,
+                    action: FilesystemFaultAction::ActorSequence {
+                        operation: FilesystemActorSequenceOperation::OmitObservation,
+                    },
+                }
+            } else {
+                FilesystemFaultPlan {
+                    barrier_id: "case-plan:after-preparation".to_string(),
+                    phase: FilesystemFaultPhase::AfterPreparation,
+                    action: FilesystemFaultAction::ActorSequence {
+                        operation:
+                            FilesystemActorSequenceOperation::OmitPostPrepareRevalidation,
+                    },
+                }
+            }),
+            FaultPlan::RevokeAllAfterAuthorization
+            | FaultPlan::RevokeLastAfterAuthorization => {
+                let indexes: Vec<_> = if plan.fault_plan == FaultPlan::RevokeAllAfterAuthorization {
+                    (0..operation_slots(operation).len()).collect()
+                } else {
+                    vec![operation_slots(operation).len() - 1]
+                };
+                Some(FilesystemFaultPlan {
+                    barrier_id: "case-plan:after-authorization".to_string(),
+                    phase: FilesystemFaultPhase::AfterAuthorization,
+                    action: FilesystemFaultAction::AuthorityRevocation {
+                        remove_source_ids: indexes
+                            .iter()
+                            .map(|index| format!("case:session-grant:{index}"))
+                            .collect(),
+                        activate_source_ids: indexes
+                            .iter()
+                            .map(|index| format!("case:session-revocation:{index}"))
+                            .collect(),
+                    },
+                })
+            }
+        };
+        let state = target_state(operation, kind).unwrap();
+        let outcome = operation_authorized_outcomes(operation)
+            .iter()
+            .find(|outcome| outcome.target_state == state)
+            .unwrap();
+        projection.execution.resource_lifecycle = expected_resource_lifecycle(
+            &projection,
+            operation,
+            plan,
+            &projection.setup.objects[0],
+            outcome,
+        );
+        projection
+    }
+
     fn captured_context(
         actor_id: &str,
         principals: Vec<PrincipalRef>,
@@ -7533,6 +12136,7 @@ mod tests {
             json!({ "operation": "match", "selector": null, "effect": null, "polarity": "positive", "sourceId": "test", "unknown": true }),
             json!({ "operation": "evaluateAlgorithm", "operationId": "match.equal/2", "selector": null, "occurrence": null, "polarity": "positive", "sourceId": "test", "unknown": true }),
             json!({ "operation": "decideStage", "stage": null, "policy": null, "unknown": true }),
+            json!({ "operation": "evaluateFilesystemCandidate", "input": null, "unknown": true }),
         ] {
             let error = validate_oracle_request_envelope(&request).unwrap_err();
             assert!(error.message.contains("unknown oracle request field"));
@@ -7547,6 +12151,527 @@ mod tests {
         let error = validate_oracle_request_envelope(&risk_wire).unwrap_err();
         assert_eq!(error.reason_code, REASON_SCHEMA_INVALID);
         assert_eq!(error.message, "unknown oracle operation evaluateRisk");
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_independently_evaluates_lstat() {
+        let input = filesystem_lstat_oracle_input();
+        let core = Rev2Core::embedded().unwrap();
+        let output = evaluate_filesystem_candidate(&core, &input).unwrap();
+
+        assert_eq!(output.core_identity, EngineIdentity::embedded());
+        assert_eq!(output.normalization.runtime_slots.len(), 1);
+        assert_eq!(output.core_evaluations.len(), 1);
+        assert_eq!(
+            output.core_evaluations[0].stage_decision.outcome,
+            FilesystemCoreOutcome::Allow
+        );
+        assert_eq!(
+            output.core_evaluations[0].stage_decision.effects[0].dimensions[0].stratum,
+            9
+        );
+        assert_eq!(
+            output.core_evaluations[0].stage_decision.effects[0].dimensions[0].reason_code,
+            REASON_ALLOW
+        );
+        assert_eq!(output.expected_outcome.decision, FilesystemDecision::Allow);
+        assert_eq!(output.expected_outcome.result.class, "lstat-complete");
+        assert_eq!(
+            output.expected_observation.result.digest,
+            Some(
+                hjcs_digest(
+                    FILESYSTEM_LSTAT_METADATA_DIGEST_DOMAIN,
+                    &serde_json::to_value(
+                        input.initial_sandbox.objects[0].state.metadata.as_ref().unwrap()
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(
+            output.normalized_slots_digest,
+            hjcs_digest(
+                FILESYSTEM_NORMALIZED_SLOTS_DIGEST_DOMAIN,
+                &serde_json::to_value(&output.expected_outcome.slots).unwrap(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            output.expected_outcome_digest,
+            hjcs_digest(
+                FILESYSTEM_EXPECTED_OUTCOME_DIGEST_DOMAIN,
+                &serde_json::to_value(&output.expected_outcome).unwrap(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            output.expected_observation_digest,
+            hjcs_digest(
+                FILESYSTEM_EXPECTED_OBSERVATION_DIGEST_DOMAIN,
+                &serde_json::to_value(&output.expected_observation).unwrap(),
+            )
+            .unwrap()
+        );
+
+        let wire = serde_json::to_value(&output).unwrap();
+        assert!(wire.get("verdict").is_none());
+        assert!(wire.get("differences").is_none());
+        assert!(wire.get("referenceOracleDigest").is_none());
+        assert!(wire.get("wasmDigest").is_none());
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_recomputes_complete_preimage_digests() {
+        let input = filesystem_lstat_oracle_input();
+        let request = json!({
+            "operation": "evaluateFilesystemCandidate",
+            "input": input,
+        });
+        let response: Value =
+            serde_json::from_str(&run_oracle_json(&canonical_json(&request).unwrap())).unwrap();
+        assert_eq!(response.get("status").and_then(Value::as_str), Some("ok"));
+
+        let mut tampered = filesystem_lstat_oracle_input();
+        tampered.case_projection.effect_owner_key = "package:tampered".to_string();
+        let error = evaluate_filesystem_candidate(&Rev2Core::embedded().unwrap(), &tampered)
+            .unwrap_err();
+        assert_eq!(error.reason_code, REASON_SCHEMA_INVALID);
+        assert!(error.message.contains("complete preimage"));
+
+        let mut wrong_umask = filesystem_lstat_oracle_input();
+        wrong_umask.parent_capture_facts.captured_umask = 0o022;
+        let error = evaluate_filesystem_candidate(&Rev2Core::embedded().unwrap(), &wrong_umask)
+            .unwrap_err();
+        assert_eq!(error.reason_code, REASON_SCHEMA_INVALID);
+        assert!(error.message.contains("0077 umask"));
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_malformed_input_has_no_runtime_slots() {
+        let output = evaluate_filesystem_candidate(
+            &Rev2Core::embedded().unwrap(),
+            &filesystem_malformed_oracle_input(),
+        )
+        .unwrap();
+        assert!(output.normalization.runtime_slots.is_empty());
+        assert!(output.core_evaluations.is_empty());
+        assert_eq!(output.expected_outcome.slots.len(), 1);
+        assert_eq!(output.expected_outcome.decision, FilesystemDecision::Refuse);
+        assert_eq!(
+            output.normalized_slots_digest,
+            hjcs_digest(
+                FILESYSTEM_NORMALIZED_SLOTS_DIGEST_DOMAIN,
+                &json!([]),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_evaluates_denial_and_revocation_through_shared_core() {
+        let core = Rev2Core::embedded().unwrap();
+        let denied = evaluate_filesystem_candidate(&core, &filesystem_denied_oracle_input())
+            .unwrap();
+        assert_eq!(denied.expected_outcome.decision, FilesystemDecision::Deny);
+        assert_eq!(denied.expected_outcome.result.class, "permission-denied");
+        assert_eq!(denied.core_evaluations.len(), 1);
+        assert_eq!(
+            denied.core_evaluations[0].stage_decision.outcome,
+            FilesystemCoreOutcome::Deny
+        );
+        assert_eq!(
+            denied.core_evaluations[0].stage_decision.effects[0].dimensions[0].stratum,
+            6
+        );
+
+        let revoked = evaluate_filesystem_candidate(&core, &filesystem_revoked_oracle_input())
+            .unwrap();
+        assert_eq!(revoked.expected_outcome.decision, FilesystemDecision::Deny);
+        assert_eq!(revoked.core_evaluations.len(), 2);
+        assert_eq!(
+            revoked.core_evaluations[0].phase,
+            FilesystemCoreEvaluationPhase::Initial
+        );
+        assert_eq!(
+            revoked.core_evaluations[0].stage_decision.outcome,
+            FilesystemCoreOutcome::Allow
+        );
+        let initial = &revoked.core_evaluations[0].stage_decision.effects[0].dimensions[0];
+        assert_eq!(initial.stratum, 11);
+        assert_eq!(
+            initial.positive_source.as_ref().map(|source| source.source_id.as_str()),
+            Some("case:session-grant:0")
+        );
+        assert_eq!(
+            revoked.core_evaluations[1].phase,
+            FilesystemCoreEvaluationPhase::PostFault
+        );
+        assert_eq!(
+            revoked.core_evaluations[1].stage_decision.outcome,
+            FilesystemCoreOutcome::Deny
+        );
+        assert_eq!(
+            revoked.core_evaluations[1].stage_decision.effects[0].dimensions[0].stratum,
+            7
+        );
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_evaluates_mkdir_mode_and_both_effects() {
+        let output = evaluate_filesystem_candidate(
+            &Rev2Core::embedded().unwrap(),
+            &filesystem_mkdir_oracle_input(),
+        )
+        .unwrap();
+        assert_eq!(output.expected_outcome.decision, FilesystemDecision::Allow);
+        assert_eq!(output.expected_outcome.result.class, "mkdir-complete");
+        assert_eq!(output.normalization.runtime_slots.len(), 2);
+        assert_eq!(output.normalization.runtime_slots[0].capability, "fs:write");
+        assert_eq!(output.normalization.runtime_slots[1].capability, "fs:list");
+        assert_eq!(output.expected_outcome.side_effects.len(), 1);
+        assert_eq!(
+            output.expected_outcome.side_effects[0].final_kind,
+            Some(FilesystemObjectKind::Directory)
+        );
+        assert_eq!(output.expected_outcome.side_effects[0].mode, Some(0o040700));
+        assert_eq!(
+            output.core_evaluations[0].stage_decision.committed_effects.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_preserves_generated_principal_role_order() {
+        let mut input = filesystem_lstat_oracle_input();
+        let owner_key = "package:z-owner".to_string();
+        let other_key = "package:a-other".to_string();
+        input.case_projection.effect_owner_key = owner_key.clone();
+        input.case_projection.principals = vec![
+            PrincipalRef {
+                kind: PrincipalKind::Package,
+                key: owner_key.clone(),
+            },
+            PrincipalRef {
+                kind: PrincipalKind::Package,
+                key: other_key.clone(),
+            },
+        ];
+        input.case_projection.constrained_principal_keys =
+            vec![owner_key.clone(), other_key.clone()];
+        for actor in &mut input.case_projection.execution.actors {
+            actor.principal_key = Some(owner_key.clone());
+            actor.effect_owner = owner_key.clone();
+        }
+        let resource = input.case_projection.authority_rows[0].resource.clone();
+        input.case_projection.authority_rows = vec![case_authority_row(
+            "case:static:0".to_string(),
+            FilesystemAuthoritySourceClass::StaticFloor,
+            Some(other_key.clone()),
+            "fs:list".to_string(),
+            &resource,
+            FilesystemAuthorityState::Active,
+        )];
+        bind_test_case_plan(&mut input, "authorable-wrong-principal-denial");
+
+        let output =
+            evaluate_filesystem_candidate(&Rev2Core::embedded().unwrap(), &input).unwrap();
+        let shared_dimensions =
+            &output.core_evaluations[0].stage_decision.effects[0].dimensions;
+        assert_eq!(shared_dimensions[0].principal.key, other_key);
+        assert_eq!(shared_dimensions[1].principal.key, owner_key);
+        let summary_dimensions = &output.expected_outcome.core.evaluations[0].dimensions;
+        assert_eq!(summary_dimensions[0].principal_key, owner_key);
+        assert_eq!(summary_dimensions[1].principal_key, other_key);
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_rejects_generated_plan_drift() {
+        let core = Rev2Core::embedded().unwrap();
+
+        let mut requirement = filesystem_lstat_oracle_input();
+        requirement.case_projection.requirement_id = "filesystem-fixture:lstat-sync".to_string();
+        recompute_filesystem_oracle_input_digests(&mut requirement);
+        let error = evaluate_filesystem_candidate(&core, &requirement).unwrap_err();
+        assert!(error.message.contains("requirement"));
+
+        let mut target_tuple = filesystem_lstat_oracle_input();
+        target_tuple.case_projection.target_predicate.candidates[0].feature_set =
+            "invented-feature-set".to_string();
+        recompute_filesystem_oracle_input_digests(&mut target_tuple);
+        let error = evaluate_filesystem_candidate(&core, &target_tuple).unwrap_err();
+        assert!(error.message.contains("target predicate"));
+
+        let mut authority = filesystem_lstat_oracle_input();
+        authority.case_projection.authority_rows[0].source_id = "case:static:wrong".to_string();
+        recompute_filesystem_oracle_input_digests(&mut authority);
+        let error = evaluate_filesystem_candidate(&core, &authority).unwrap_err();
+        assert!(error.message.contains("authority rows"));
+
+        let mut lifecycle = filesystem_lstat_oracle_input();
+        lifecycle.case_projection.execution.resource_lifecycle.pop();
+        recompute_filesystem_oracle_input_digests(&mut lifecycle);
+        let error = evaluate_filesystem_candidate(&core, &lifecycle).unwrap_err();
+        assert!(error.message.contains("resource lifecycle"));
+
+        let mut fault = filesystem_revoked_oracle_input();
+        let Some(FilesystemFaultPlan {
+            action: FilesystemFaultAction::AuthorityRevocation {
+                remove_source_ids, ..
+            },
+            ..
+        }) = fault.case_projection.fault_plan.as_mut()
+        else {
+            panic!("revocation fixture must contain a revocation fault")
+        };
+        remove_source_ids[0] = "case:session-grant:wrong".to_string();
+        recompute_filesystem_oracle_input_digests(&mut fault);
+        let error = evaluate_filesystem_candidate(&core, &fault).unwrap_err();
+        assert!(error.message.contains("fault plan"));
+
+        let mut actor = filesystem_mkdir_oracle_input();
+        actor.case_projection.execution.actors[1].actor_id =
+            actor.case_projection.execution.actors[0].actor_id.clone();
+        recompute_filesystem_oracle_input_digests(&mut actor);
+        let error = evaluate_filesystem_candidate(&core, &actor).unwrap_err();
+        assert!(error.message.contains("actor binding"));
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_validates_every_generated_case_plan_family() {
+        let mut principal_plans = BTreeSet::new();
+        let mut authority_plans = BTreeSet::new();
+        let mut fault_plans = BTreeSet::new();
+        let mut core_expectations = BTreeSet::new();
+        let mut outcome_dispositions = BTreeSet::new();
+        let mut lifecycle_requirements = BTreeSet::new();
+        let mut committed_slots = BTreeSet::new();
+        let mut execution_modes = BTreeSet::new();
+        let mut input_mutations = BTreeSet::new();
+
+        for plan in REV2_FILESYSTEM_CANDIDATE_CASE_PLANS {
+            let projection = matrix_case_projection(plan);
+            let operation = generated_operation(&projection.edge_id).unwrap();
+            let target = &projection.setup.objects[0];
+            let state = target_state(operation, target.kind).unwrap();
+            let outcome = operation_authorized_outcomes(operation)
+                .iter()
+                .find(|outcome| outcome.target_state == state)
+                .unwrap();
+            validate_generated_operation_model(operation).unwrap();
+            validate_generated_authorized_outcome(operation, state, outcome).unwrap();
+            validate_case_plan_binding(
+                &projection,
+                operation,
+                plan,
+                target,
+                state,
+                outcome,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} did not validate: {}",
+                    generated_case_kind(plan.case_kind),
+                    error.message
+                )
+            });
+
+            principal_plans.insert(plan.principal_plan);
+            authority_plans.insert(plan.authority_plan);
+            fault_plans.insert(plan.fault_plan);
+            core_expectations.insert(plan.core_expectation);
+            outcome_dispositions.insert(plan.outcome_disposition);
+            lifecycle_requirements.insert(plan.lifecycle_requirement);
+            committed_slots.insert(plan.committed_slots);
+            execution_modes.insert(plan.execution_mode);
+            input_mutations.insert(plan.input_mutation);
+        }
+
+        assert_eq!(REV2_FILESYSTEM_CANDIDATE_CASE_PLANS.len(), 21);
+        assert_eq!(principal_plans.len(), 5);
+        assert_eq!(authority_plans.len(), 10);
+        assert_eq!(fault_plans.len(), 5);
+        assert_eq!(core_expectations.len(), 11);
+        assert_eq!(outcome_dispositions.len(), 5);
+        assert_eq!(lifecycle_requirements.len(), 2);
+        assert_eq!(committed_slots.len(), 2);
+        assert_eq!(execution_modes.len(), 2);
+        assert_eq!(input_mutations.len(), 2);
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_rejects_incomplete_or_ambiguous_initial_sandbox() {
+        let core = Rev2Core::embedded().unwrap();
+
+        let mut extra_inventory = filesystem_lstat_oracle_input();
+        let mut extra = extra_inventory.initial_sandbox.objects[0].clone();
+        extra.object_id = "object:extra".to_string();
+        extra_inventory.initial_sandbox.objects.push(extra);
+        recompute_filesystem_oracle_input_digests(&mut extra_inventory);
+        let error = evaluate_filesystem_candidate(&core, &extra_inventory).unwrap_err();
+        assert!(error.message.contains("exactly cover setup"));
+
+        let mut duplicate_fixture_label = filesystem_lstat_oracle_input();
+        let root_fixture = duplicate_fixture_label.case_projection.setup.logical_roots[0]
+            .object_identity
+            .clone();
+        duplicate_fixture_label.case_projection.setup.objects[0].object_identity =
+            Some(root_fixture.clone());
+        duplicate_fixture_label.initial_sandbox.objects[0].fixture_identity = Some(root_fixture);
+        recompute_filesystem_oracle_input_digests(&mut duplicate_fixture_label);
+        let error =
+            evaluate_filesystem_candidate(&core, &duplicate_fixture_label).unwrap_err();
+        assert!(error.message.contains("fixture identity"));
+
+        let mut duplicate_location = filesystem_lstat_oracle_input();
+        let mut setup = duplicate_location.case_projection.setup.objects[0].clone();
+        setup.object_id = "object:duplicate-location".to_string();
+        setup.object_identity = Some(FilesystemObjectIdentity {
+            kind: FilesystemObjectIdentityKind::OpaqueToken,
+            value: "fixture:duplicate-location".to_string(),
+        });
+        let mut realized = duplicate_location.initial_sandbox.objects[0].clone();
+        realized.object_id = setup.object_id.clone();
+        realized.fixture_identity = setup.object_identity.clone();
+        realized.state.identity = Some(FilesystemObjectIdentity {
+            kind: FilesystemObjectIdentityKind::PlatformObject,
+            value: "unix-dev-ino:00000000000000010000000000000003".to_string(),
+        });
+        realized.state.metadata.as_mut().unwrap().inode = "3".to_string();
+        duplicate_location.case_projection.setup.objects.push(setup);
+        duplicate_location.initial_sandbox.objects.push(realized);
+        recompute_filesystem_oracle_input_digests(&mut duplicate_location);
+        let error = evaluate_filesystem_candidate(&core, &duplicate_location).unwrap_err();
+        assert!(error.message.contains("location"));
+
+        let mut duplicate_identity = filesystem_lstat_oracle_input();
+        let mut setup = duplicate_identity.case_projection.setup.objects[0].clone();
+        setup.object_id = "object:unexplained-hard-link".to_string();
+        setup.path.value = "alias.txt".to_string();
+        setup.object_identity = Some(FilesystemObjectIdentity {
+            kind: FilesystemObjectIdentityKind::OpaqueToken,
+            value: "fixture:unexplained-hard-link".to_string(),
+        });
+        let mut realized = duplicate_identity.initial_sandbox.objects[0].clone();
+        realized.object_id = setup.object_id.clone();
+        realized.path = setup.path.clone();
+        realized.fixture_identity = setup.object_identity.clone();
+        duplicate_identity.case_projection.setup.objects.push(setup);
+        duplicate_identity.initial_sandbox.objects.push(realized);
+        recompute_filesystem_oracle_input_digests(&mut duplicate_identity);
+        let error = evaluate_filesystem_candidate(&core, &duplicate_identity).unwrap_err();
+        assert!(error.message.contains("hard-link canonical"));
+
+        let mut root_alias = filesystem_lstat_oracle_input();
+        let root_identity = root_alias.initial_sandbox.logical_roots[0]
+            .platform_identity
+            .clone();
+        let state = &mut root_alias.initial_sandbox.objects[0].state;
+        state.identity = Some(root_identity);
+        let metadata = state.metadata.as_mut().unwrap();
+        metadata.device = "0".to_string();
+        metadata.inode = "1".to_string();
+        recompute_filesystem_oracle_input_digests(&mut root_alias);
+        let error = evaluate_filesystem_candidate(&core, &root_alias).unwrap_err();
+        assert!(error.message.contains("logical-root platform identity"));
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_enforces_metadata_and_setup_kind_contracts() {
+        let core = Rev2Core::embedded().unwrap();
+
+        let mut valid_wide_metadata = filesystem_lstat_oracle_input();
+        let metadata = valid_wide_metadata.initial_sandbox.objects[0]
+            .state
+            .metadata
+            .as_mut()
+            .unwrap();
+        metadata.size = "9999999999999999999999999999999999999999".to_string();
+        metadata.accessed_time_ns = Some(format!("-{}", "9".repeat(40)));
+        recompute_filesystem_oracle_input_digests(&mut valid_wide_metadata);
+        evaluate_filesystem_candidate(&core, &valid_wide_metadata).unwrap();
+
+        let mut equivalent_authority_path = filesystem_lstat_oracle_input();
+        equivalent_authority_path.case_projection.authority_rows[0]
+            .resource
+            .path = FilesystemPlatformPath {
+            encoding: FilesystemPlatformPathEncoding::OpaqueBase64url,
+            value: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"file.txt"),
+        };
+        recompute_filesystem_oracle_input_digests(&mut equivalent_authority_path);
+        let output = evaluate_filesystem_candidate(&core, &equivalent_authority_path).unwrap();
+        assert_eq!(output.expected_outcome.decision, FilesystemDecision::Allow);
+
+        let mut identity_mismatch = filesystem_lstat_oracle_input();
+        identity_mismatch.initial_sandbox.objects[0]
+            .state
+            .metadata
+            .as_mut()
+            .unwrap()
+            .device = "2".to_string();
+        recompute_filesystem_oracle_input_digests(&mut identity_mismatch);
+        let error = evaluate_filesystem_candidate(&core, &identity_mismatch).unwrap_err();
+        assert!(error.message.contains("device/inode"));
+
+        let mut oversized_mode = filesystem_lstat_oracle_input();
+        oversized_mode.initial_sandbox.objects[0]
+            .state
+            .metadata
+            .as_mut()
+            .unwrap()
+            .mode = 0o1100644;
+        recompute_filesystem_oracle_input_digests(&mut oversized_mode);
+        let error = evaluate_filesystem_candidate(&core, &oversized_mode).unwrap_err();
+        assert!(error.message.contains("S_IFMT"));
+
+        let mut missing_fixture_identity = filesystem_lstat_oracle_input();
+        missing_fixture_identity.case_projection.setup.objects[0].object_identity = None;
+        missing_fixture_identity.initial_sandbox.objects[0].fixture_identity = None;
+        recompute_filesystem_oracle_input_digests(&mut missing_fixture_identity);
+        let error = evaluate_filesystem_candidate(&core, &missing_fixture_identity).unwrap_err();
+        assert!(error.message.contains("setup identity"));
+
+        let mut missing_content = filesystem_lstat_oracle_input();
+        missing_content.case_projection.setup.objects[0].content = None;
+        recompute_filesystem_oracle_input_digests(&mut missing_content);
+        let error = evaluate_filesystem_candidate(&core, &missing_content).unwrap_err();
+        assert!(error.message.contains("content"));
+    }
+
+    #[test]
+    fn filesystem_candidate_oracle_rejects_non_relative_or_noncanonical_paths() {
+        let core = Rev2Core::embedded().unwrap();
+        let mut drive = filesystem_lstat_oracle_input();
+        drive.case_projection.setup.objects[0].path.value = "C:/file.txt".to_string();
+        drive.initial_sandbox.objects[0].path =
+            drive.case_projection.setup.objects[0].path.clone();
+        recompute_filesystem_oracle_input_digests(&mut drive);
+        let error = evaluate_filesystem_candidate(&core, &drive).unwrap_err();
+        assert!(error.message.contains("descriptor-relative"));
+
+        let noncanonical = FilesystemPlatformPath {
+            encoding: FilesystemPlatformPathEncoding::OpaqueBase64url,
+            value: "Zh".to_string(),
+        };
+        assert!(platform_path_bytes(&noncanonical).is_err());
+    }
+
+    #[test]
+    fn filesystem_hjcs_uses_a_nul_frame() {
+        let value = json!({ "a": 1 });
+        let hjcs = hjcs_digest("domain", &value).unwrap();
+        let direct = domain_digest("domain", &value).unwrap();
+        assert_ne!(hjcs, direct);
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"domain\0{\"a\":1}");
+        assert_eq!(
+            hjcs,
+            format!(
+                "sha256-{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+            )
+        );
     }
 
     #[test]
@@ -8437,6 +13562,76 @@ mod tests {
     }
 
     #[test]
+    fn negative_missing_path_binding_does_not_collapse_siblings_by_parent_identity() {
+        let core = Rev2Core::embedded().unwrap();
+        let principal = package("missing-sibling-reader");
+        let parent_identity = json!({
+            "kind": "platform-object",
+            "value": "dir:shared-parent",
+        });
+        let mut rules = policy(Mode::Enforce);
+        rules.static_floor.push(named(
+            "positive",
+            path_selector(principal.clone(), "/project"),
+        ));
+        rules.process_denials.push(named(
+            "deny-secret",
+            selector(
+                None,
+                "fs:read",
+                json!({
+                    "kind": "path-exact",
+                    "path": {
+                        "encoding": "opaque-base64url",
+                        "value": base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .encode(b"/project/secret"),
+                    },
+                    "root": "$PROJECT",
+                }),
+            ),
+        ));
+        for source_id in ["positive", "deny-secret"] {
+            rules.path_bindings.push(PathBindingInput {
+                source_id: source_id.to_string(),
+                root_binding_id: "root-binding:1".to_string(),
+                final_object_identities: vec![],
+                parent_identities: vec![parent_identity.clone()],
+            });
+        }
+        let proposed_effect = |path: &str| {
+            let mut effect = path_effect(path, "unused-proposed-identity");
+            effect.occurrence["finalObjectState"] = json!({ "kind": "proposed" });
+            effect.occurrence["parentIdentity"] = parent_identity.clone();
+            effect
+        };
+
+        let sibling = core
+            .decide_stage(
+                &stage(
+                    "missing-sibling",
+                    vec![principal.clone()],
+                    vec![proposed_effect("/project/allowed")],
+                ),
+                &rules,
+            )
+            .unwrap();
+        assert_eq!(sibling.outcome, Outcome::Allow);
+
+        let secret = core
+            .decide_stage(
+                &stage(
+                    "missing-secret",
+                    vec![principal],
+                    vec![proposed_effect("/project/secret")],
+                ),
+                &rules,
+            )
+            .unwrap();
+        assert_eq!(secret.outcome, Outcome::Deny);
+        assert_eq!(secret.effects[0].dimensions[0].stratum, 5);
+    }
+
+    #[test]
     fn implicit_package_self_is_exact_verified_loader_payload_only() {
         let core = Rev2Core::embedded().unwrap();
         let principal = package("implicit");
@@ -8574,6 +13769,30 @@ mod tests {
         let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let parent_path = engine.encode(b"/project/data");
         let child_path = engine.encode(b"/project/data/file");
+        let error = core
+            .normalize_schema(
+                "value.platform-path/2",
+                &json!({ "encoding": "opaque-base64url", "value": "Zh" }),
+            )
+            .unwrap_err();
+        assert_eq!(error.reason_code, REASON_SCHEMA_INVALID);
+        assert!(core
+            .exact_match_clause(
+                "path-exact-or-tree",
+                &json!({
+                    "kind": "path-exact",
+                    "path": { "encoding": "unicode", "value": "/project/data/file" },
+                    "root": "$PROJECT",
+                }),
+                &json!({
+                    "lexicalPath": {
+                        "encoding": "opaque-base64url",
+                        "value": child_path.clone(),
+                    },
+                    "root": "$PROJECT",
+                }),
+            )
+            .unwrap());
         let principal = package("opaque-path");
         let authority = selector(
             Some(principal),
@@ -8594,23 +13813,25 @@ mod tests {
             final_object_identities: vec![],
             parent_identities: vec![parent_identity.clone()],
         };
-        for state_kind in ["missing", "proposed"] {
-            let mut effect = path_effect("/unused", "unused");
-            effect.occurrence["lexicalPath"] = json!({
-                "encoding": "opaque-base64url",
-                "value": child_path,
-            });
-            effect.occurrence["finalObjectState"] = json!({ "kind": state_kind });
-            effect.occurrence["parentIdentity"] = parent_identity.clone();
-            assert!(core
-                .selector_matches_effect(
-                    &authority,
-                    &effect,
-                    SelectorPolarity::Positive,
-                    "source:opaque-parent",
-                    std::slice::from_ref(&binding),
-                )
-                .unwrap());
+        for lexical_path in [
+            json!({ "encoding": "opaque-base64url", "value": child_path }),
+            json!({ "encoding": "unicode", "value": "/project/data/file" }),
+        ] {
+            for state_kind in ["missing", "proposed"] {
+                let mut effect = path_effect("/unused", "unused");
+                effect.occurrence["lexicalPath"] = lexical_path.clone();
+                effect.occurrence["finalObjectState"] = json!({ "kind": state_kind });
+                effect.occurrence["parentIdentity"] = parent_identity.clone();
+                assert!(core
+                    .selector_matches_effect(
+                        &authority,
+                        &effect,
+                        SelectorPolarity::Positive,
+                        "source:opaque-parent",
+                        std::slice::from_ref(&binding),
+                    )
+                    .unwrap());
+            }
         }
 
         for port in [
