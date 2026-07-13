@@ -50,6 +50,7 @@ mod oden_protected;
 mod oden_rev2_authority;
 mod oden_rev2_context;
 mod oden_rev2_executable;
+pub(crate) mod oden_rev2_fs;
 mod oden_rev2_permission;
 mod oden_rev2_policy;
 mod oden_rev2_protocol;
