@@ -494,13 +494,13 @@ impl OdenRev2FsAuthenticatedRoot {
       directories: vec![Arc::clone(&self.state.named)],
       symlink_count: 0,
       authorized_hop_facts: Vec::new(),
-      retained_hops: Vec::new(),
+      retained_edges: Vec::new(),
     })
   }
 
   /// Authenticate a root transition by exact directory identity, never by a
   /// lexical prefix. `checked` may itself be the result of authorized staged
-  /// symlink hops; those retained hop objects are revalidated first.
+  /// symlink hops; every retained path edge is revalidated first.
   pub(crate) fn authenticate_transition(
     &self,
     checked: &OdenRev2FsCheckedPath,
@@ -513,7 +513,7 @@ impl OdenRev2FsAuthenticatedRoot {
     {
       return Err(OdenRev2FsError::RootTransitionMismatch);
     }
-    checked.revalidate_retained_hops()?;
+    checked.revalidate_retained_edges()?;
     let Some(existing) = checked.existing() else {
       return Err(OdenRev2FsError::RootTransitionMismatch);
     };
@@ -669,12 +669,29 @@ impl OdenRev2FsRootTransitionAuthorization {
   }
 }
 
+/// Retained proof that one exact parent name still resolves to the exact
+/// non-consuming child handle opened during resolution. Keeping every edge,
+/// rather than only the final parent and object, lets consumption detect a
+/// replacement anywhere in the root-to-leaf chain.
 #[derive(Debug)]
-struct OdenRev2FsRetainedLinkHop {
+struct OdenRev2FsRetainedEdge {
   metadata: OdenRev2FsObservedMetadata,
   parent: Arc<File>,
   leaf: OsString,
-  handle: Arc<File>,
+  child: Arc<File>,
+}
+
+impl OdenRev2FsRetainedEdge {
+  fn revalidate(&self) -> Result<(), OdenRev2FsError> {
+    let named = lstat_component(&self.parent, &self.leaf)?
+      .ok_or(OdenRev2FsError::ReplacementDuringResolution)?;
+    let retained =
+      metadata_from_file(&self.child, "revalidate retained path edge")?;
+    if named != self.metadata || retained != self.metadata {
+      return Err(OdenRev2FsError::ReplacementDuringResolution);
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug)]
@@ -687,7 +704,7 @@ pub(crate) struct OdenRev2FsResolution {
   directories: Vec<Arc<File>>,
   symlink_count: usize,
   authorized_hop_facts: Vec<OdenRev2FsAuthorizedLinkHopFact>,
-  retained_hops: Vec<OdenRev2FsRetainedLinkHop>,
+  retained_edges: Vec<OdenRev2FsRetainedEdge>,
 }
 
 #[derive(Debug)]
@@ -736,7 +753,7 @@ impl OdenRev2FsResolution {
             handle: Arc::new(root),
           }),
           authorized_hop_facts: self.authorized_hop_facts,
-          retained_hops: self.retained_hops,
+          retained_edges: self.retained_edges,
         }));
       }
 
@@ -776,7 +793,7 @@ impl OdenRev2FsResolution {
                 },
               ),
               authorized_hop_facts: self.authorized_hop_facts,
-              retained_hops: self.retained_hops,
+              retained_edges: self.retained_edges,
             },
           ));
         };
@@ -790,7 +807,8 @@ impl OdenRev2FsResolution {
           if after != observed {
             return Err(OdenRev2FsError::ReplacementDuringResolution);
           }
-          let link_handle = open_symlink_non_consuming(&parent, &component)?;
+          let link_handle =
+            Arc::new(open_symlink_non_consuming(&parent, &component)?);
           if metadata_from_file(&link_handle, "stat retained symlink")?
             != observed
           {
@@ -801,6 +819,12 @@ impl OdenRev2FsResolution {
             && self.lexical_fact.follow_mode
               == OdenRev2FsFollowMode::NoFollowFinal
           {
+            self.retained_edges.push(OdenRev2FsRetainedEdge {
+              metadata: observed.clone(),
+              parent: Arc::clone(&parent),
+              leaf: component.clone(),
+              child: Arc::clone(&link_handle),
+            });
             self.resolved.push(component);
             revalidate_root(&self.root)?;
             return Ok(OdenRev2FsResolutionStep::Complete(
@@ -814,11 +838,11 @@ impl OdenRev2FsResolution {
                     metadata: observed,
                     parent: verified_parent(parent)?,
                     target,
-                    handle: Arc::new(link_handle),
+                    handle: link_handle,
                   },
                 ),
                 authorized_hop_facts: self.authorized_hop_facts,
-                retained_hops: self.retained_hops,
+                retained_edges: self.retained_edges,
               },
             ));
           }
@@ -849,7 +873,7 @@ impl OdenRev2FsResolution {
               parent,
               leaf: component,
               target,
-              handle: Arc::new(link_handle),
+              handle: link_handle,
             },
           ));
         }
@@ -871,6 +895,13 @@ impl OdenRev2FsResolution {
             "non-final component is not a directory",
           ));
         }
+        let opened = Arc::new(opened);
+        self.retained_edges.push(OdenRev2FsRetainedEdge {
+          metadata: observed.clone(),
+          parent: Arc::clone(&parent),
+          leaf: component.clone(),
+          child: Arc::clone(&opened),
+        });
         self.resolved.push(component);
         if final_component {
           revalidate_root(&self.root)?;
@@ -884,15 +915,15 @@ impl OdenRev2FsResolution {
                 OdenRev2FsExistingObject {
                   metadata: observed,
                   parent: Some(verified_parent(parent)?),
-                  handle: Arc::new(opened),
+                  handle: opened,
                 },
               ),
               authorized_hop_facts: self.authorized_hop_facts,
-              retained_hops: self.retained_hops,
+              retained_edges: self.retained_edges,
             },
           ));
         }
-        self.directories.push(Arc::new(opened));
+        self.directories.push(opened);
       }
     }
   }
@@ -1024,12 +1055,12 @@ impl OdenRev2FsPendingSymlink {
     );
     self
       .continuation
-      .retained_hops
-      .push(OdenRev2FsRetainedLinkHop {
+      .retained_edges
+      .push(OdenRev2FsRetainedEdge {
         metadata: self.metadata.clone(),
         parent: Arc::clone(&self.parent),
         leaf: self.leaf.clone(),
-        handle: Arc::clone(&self.handle),
+        child: Arc::clone(&self.handle),
       });
   }
 }
@@ -1038,6 +1069,19 @@ impl OdenRev2FsPendingSymlink {
 struct OdenRev2FsVerifiedParent {
   metadata: OdenRev2FsObservedMetadata,
   handle: Arc<File>,
+}
+
+impl OdenRev2FsVerifiedParent {
+  fn revalidate(&self) -> Result<(), OdenRev2FsError> {
+    let retained =
+      metadata_from_file(&self.handle, "revalidate verified parent")?;
+    if retained != self.metadata
+      || retained.kind != OdenRev2FsObjectKind::Directory
+    {
+      return Err(OdenRev2FsError::ReplacementDuringResolution);
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug)]
@@ -1096,6 +1140,18 @@ impl OdenRev2FsMissingChild {
 
   pub(crate) fn leaf(&self) -> &OsStr {
     &self.leaf
+  }
+
+  fn revalidate_absent_with_hook(
+    &self,
+    hook: &mut dyn FnMut(OdenRev2FsUseCheckpoint, &OsStr),
+  ) -> Result<(), OdenRev2FsError> {
+    self.parent.revalidate()?;
+    hook(OdenRev2FsUseCheckpoint::BeforeMissingLeaf, &self.leaf);
+    if lstat_component(&self.parent.handle, &self.leaf)?.is_some() {
+      return Err(OdenRev2FsError::ReplacementDuringResolution);
+    }
+    Ok(())
   }
 }
 
@@ -1191,7 +1247,7 @@ pub(crate) struct OdenRev2FsCheckedPath {
   resolver_trace_path: PathBuf,
   target: OdenRev2FsCheckedTarget,
   authorized_hop_facts: Vec<OdenRev2FsAuthorizedLinkHopFact>,
-  retained_hops: Vec<OdenRev2FsRetainedLinkHop>,
+  retained_edges: Vec<OdenRev2FsRetainedEdge>,
 }
 
 impl OdenRev2FsCheckedPath {
@@ -1288,15 +1344,30 @@ impl OdenRev2FsCheckedPath {
   }
 
   pub(crate) fn propose_child(
-    mut self,
+    self,
     operation_session: &OdenRev2FsOperationSession,
     kind: OdenRev2FsProposedKind,
   ) -> Result<Self, OdenRev2FsError> {
+    self.propose_child_with_hook(operation_session, kind, &mut |_, _| {})
+  }
+
+  fn propose_child_with_hook(
+    mut self,
+    operation_session: &OdenRev2FsOperationSession,
+    kind: OdenRev2FsProposedKind,
+    hook: &mut dyn FnMut(OdenRev2FsUseCheckpoint, &OsStr),
+  ) -> Result<Self, OdenRev2FsError> {
     self.require_operation_session(operation_session)?;
-    let OdenRev2FsCheckedTarget::Missing(missing) = self.target else {
+    let OdenRev2FsCheckedTarget::Missing(missing) = &self.target else {
       return Err(OdenRev2FsError::InvalidPath(
         "only a missing child may become proposed",
       ));
+    };
+    revalidate_root(&self.root)?;
+    self.revalidate_retained_edges_with_hook(hook)?;
+    missing.revalidate_absent_with_hook(hook)?;
+    let OdenRev2FsCheckedTarget::Missing(missing) = self.target else {
+      unreachable!("missing target validated above")
     };
     self.target = OdenRev2FsCheckedTarget::Proposed(OdenRev2FsProposedChild {
       parent: missing.parent,
@@ -1340,9 +1411,17 @@ impl OdenRev2FsCheckedPath {
     self,
     operation_session: &OdenRev2FsOperationSession,
   ) -> Result<OdenRev2FsMetadataObservation, OdenRev2FsError> {
+    self.consume_for_metadata_with_hook(operation_session, &mut |_, _| {})
+  }
+
+  fn consume_for_metadata_with_hook(
+    self,
+    operation_session: &OdenRev2FsOperationSession,
+    hook: &mut dyn FnMut(OdenRev2FsUseCheckpoint, &OsStr),
+  ) -> Result<OdenRev2FsMetadataObservation, OdenRev2FsError> {
     self.require_operation_session(operation_session)?;
     revalidate_root(&self.root)?;
-    self.revalidate_retained_hops()?;
+    self.revalidate_retained_edges_with_hook(hook)?;
     let metadata = match &self.target {
       OdenRev2FsCheckedTarget::Existing(object) => {
         let current =
@@ -1392,15 +1471,17 @@ impl OdenRev2FsCheckedPath {
     })
   }
 
-  fn revalidate_retained_hops(&self) -> Result<(), OdenRev2FsError> {
-    for hop in &self.retained_hops {
-      let named = lstat_component(&hop.parent, &hop.leaf)?
-        .ok_or(OdenRev2FsError::ReplacementDuringResolution)?;
-      let retained =
-        metadata_from_file(&hop.handle, "revalidate retained hop")?;
-      if named != hop.metadata || retained != hop.metadata {
-        return Err(OdenRev2FsError::ReplacementDuringResolution);
-      }
+  fn revalidate_retained_edges(&self) -> Result<(), OdenRev2FsError> {
+    self.revalidate_retained_edges_with_hook(&mut |_, _| {})
+  }
+
+  fn revalidate_retained_edges_with_hook(
+    &self,
+    hook: &mut dyn FnMut(OdenRev2FsUseCheckpoint, &OsStr),
+  ) -> Result<(), OdenRev2FsError> {
+    for edge in &self.retained_edges {
+      hook(OdenRev2FsUseCheckpoint::BeforeRetainedEdge, &edge.leaf);
+      edge.revalidate()?;
     }
     Ok(())
   }
@@ -1489,6 +1570,12 @@ enum OdenRev2FsResolveCheckpoint {
   AfterMetadata,
   AfterReadlink,
   AfterMissing,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OdenRev2FsUseCheckpoint {
+  BeforeRetainedEdge,
+  BeforeMissingLeaf,
 }
 
 fn checked_relative_components(
@@ -2107,6 +2194,192 @@ mod tests {
       checked.consume_for_metadata(&session).unwrap().kind(),
       OdenRev2FsObjectKind::RegularFile
     );
+  }
+
+  #[test]
+  fn metadata_race_hook_detects_replaced_normal_ancestor() {
+    let root = TempRoot::new("consume-ancestor-replacement");
+    std::fs::create_dir_all(root.0.join("ancestor/child")).unwrap();
+    std::fs::write(root.0.join("ancestor/child/file"), b"old").unwrap();
+    let authenticated =
+      test_root(&root.0, "floor:path-list", "$PROJECT", "binding:project");
+    let session = test_session("consume-ancestor-replacement");
+    let checked = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("ancestor/child/file"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let mut replaced = false;
+    let result = checked.consume_for_metadata_with_hook(
+      &session,
+      &mut |checkpoint, leaf| {
+        if !replaced
+          && checkpoint == OdenRev2FsUseCheckpoint::BeforeRetainedEdge
+          && leaf == OsStr::new("ancestor")
+        {
+          std::fs::rename(
+            root.0.join("ancestor"),
+            root.0.join("displaced-ancestor"),
+          )
+          .unwrap();
+          std::fs::create_dir(root.0.join("ancestor")).unwrap();
+          replaced = true;
+        }
+      },
+    );
+    assert!(replaced);
+    assert!(matches!(
+      result,
+      Err(OdenRev2FsError::ReplacementDuringResolution)
+    ));
+  }
+
+  #[test]
+  fn metadata_race_hook_detects_replaced_final_regular_file() {
+    let root = TempRoot::new("consume-final-replacement");
+    std::fs::write(root.0.join("file"), b"old").unwrap();
+    let authenticated =
+      test_root(&root.0, "floor:path-list", "$PROJECT", "binding:project");
+    let session = test_session("consume-final-replacement");
+    let checked = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("file"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let mut replaced = false;
+    let result = checked.consume_for_metadata_with_hook(
+      &session,
+      &mut |checkpoint, leaf| {
+        if !replaced
+          && checkpoint == OdenRev2FsUseCheckpoint::BeforeRetainedEdge
+          && leaf == OsStr::new("file")
+        {
+          std::fs::rename(root.0.join("file"), root.0.join("old-file"))
+            .unwrap();
+          std::fs::write(root.0.join("file"), b"new").unwrap();
+          replaced = true;
+        }
+      },
+    );
+    assert!(replaced);
+    assert!(matches!(
+      result,
+      Err(OdenRev2FsError::ReplacementDuringResolution)
+    ));
+  }
+
+  #[test]
+  fn proposal_race_hook_detects_missing_leaf_becoming_present() {
+    let root = TempRoot::new("propose-missing-present");
+    std::fs::create_dir(root.0.join("parent")).unwrap();
+    let authenticated =
+      test_root(&root.0, "floor:path-write", "$PROJECT", "binding:project");
+    let session = test_session("propose-missing-present");
+    let checked = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/new"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let mut created = false;
+    let result = checked.propose_child_with_hook(
+      &session,
+      OdenRev2FsProposedKind::RegularFile,
+      &mut |checkpoint, leaf| {
+        if !created
+          && checkpoint == OdenRev2FsUseCheckpoint::BeforeMissingLeaf
+          && leaf == OsStr::new("new")
+        {
+          std::fs::write(root.0.join("parent/new"), b"new").unwrap();
+          created = true;
+        }
+      },
+    );
+    assert!(created);
+    assert!(matches!(
+      result,
+      Err(OdenRev2FsError::ReplacementDuringResolution)
+    ));
+  }
+
+  #[test]
+  fn missing_child_proposal_revalidates_its_complete_ancestor_chain() {
+    let root = TempRoot::new("propose-ancestor-replacement");
+    std::fs::create_dir_all(root.0.join("ancestor/parent")).unwrap();
+    let authenticated =
+      test_root(&root.0, "floor:path-write", "$PROJECT", "binding:project");
+    let session = test_session("propose-ancestor-replacement");
+    let checked = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("ancestor/parent/new"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let mut replaced = false;
+    let result = checked.propose_child_with_hook(
+      &session,
+      OdenRev2FsProposedKind::RegularFile,
+      &mut |checkpoint, leaf| {
+        if !replaced
+          && checkpoint == OdenRev2FsUseCheckpoint::BeforeRetainedEdge
+          && leaf == OsStr::new("ancestor")
+        {
+          std::fs::rename(
+            root.0.join("ancestor"),
+            root.0.join("displaced-ancestor"),
+          )
+          .unwrap();
+          std::fs::create_dir(root.0.join("ancestor")).unwrap();
+          replaced = true;
+        }
+      },
+    );
+    assert!(replaced);
+    assert!(matches!(
+      result,
+      Err(OdenRev2FsError::ReplacementDuringResolution)
+    ));
+  }
+
+  #[test]
+  fn metadata_race_hook_detects_swapped_final_link() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempRoot::new("consume-link-swap");
+    std::fs::write(root.0.join("first"), b"first").unwrap();
+    std::fs::write(root.0.join("second"), b"second").unwrap();
+    symlink("first", root.0.join("alias")).unwrap();
+    let authenticated =
+      test_root(&root.0, "floor:path-list", "$PROJECT", "binding:project");
+    let session = test_session("consume-link-swap");
+    let checked = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("alias"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let mut replaced = false;
+    let result = checked.consume_for_metadata_with_hook(
+      &session,
+      &mut |checkpoint, leaf| {
+        if !replaced
+          && checkpoint == OdenRev2FsUseCheckpoint::BeforeRetainedEdge
+          && leaf == OsStr::new("alias")
+        {
+          std::fs::rename(root.0.join("alias"), root.0.join("old-alias"))
+            .unwrap();
+          symlink("second", root.0.join("alias")).unwrap();
+          replaced = true;
+        }
+      },
+    );
+    assert!(replaced);
+    assert!(matches!(
+      result,
+      Err(OdenRev2FsError::ReplacementDuringResolution)
+    ));
   }
 
   #[test]

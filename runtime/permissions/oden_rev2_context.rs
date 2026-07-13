@@ -18,17 +18,22 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 #[cfg(test)]
 use serde_json::Value;
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use crate::oden_rev2_authority::AuthorityRow;
 use crate::oden_rev2_authority::AuthorityRowKind;
+use crate::oden_rev2_authority::RuntimeAuthorityPublicationGuard;
 use crate::oden_rev2_authority::RuntimeAuthorityReadView;
 use crate::oden_rev2_authority::RuntimeAuthorityState;
+use crate::oden_rev2_authority::RuntimeGenerationVector;
 use crate::oden_rev2_authority::RuntimeIdentityBinding;
 use crate::oden_rev2_executable::OdenRev2InstalledExecutableContext;
 use crate::oden_rev2_policy::OdenRev2LoadedPolicyContext;
@@ -56,11 +61,20 @@ use crate::rev2_registry_generated::REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN;
 use crate::rev2_registry_generated::REV2_VOCAB_DIGEST;
 
 const CONTEXT_ERROR: &str = "OD-CAP-REV2-RUNTIME-CONTEXT";
+const NAMESPACE_ERROR: &str = "OD-CAP-REV2-NAMESPACE-GATE";
 const SNAPSHOT_SCHEMA: &str = "oden/capsec-armed-snapshot/2";
 const POLICY_SCHEMA: &str = "oden/capsec-policy/2";
 
 static RUNTIME_AUTHORITY_INSTALLER: RuntimeAuthorityInstaller =
   RuntimeAuthorityInstaller::new();
+
+thread_local! {
+  static ODEN_REV2_NAMESPACE_GATE_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn namespace_gate_held_on_current_thread() -> bool {
+  ODEN_REV2_NAMESPACE_GATE_HELD.get()
+}
 
 struct RuntimeAuthorityInstaller {
   claimed: AtomicBool,
@@ -493,6 +507,107 @@ impl OdenRev2StaticBindings {
   }
 }
 
+#[derive(Debug)]
+struct OdenRev2NamespaceGateState {
+  next_operation_session: u64,
+  fail_closed: bool,
+}
+
+/// Unforgeable proof, within this crate, that the namespace mutex was acquired
+/// before authority publication pinning. The private field prevents sibling
+/// modules from using the authority pin as an independent operation gate.
+pub(crate) struct OdenRev2NamespacePinWitness {
+  _private: (),
+}
+
+impl OdenRev2NamespacePinWitness {
+  fn new() -> Self {
+    Self { _private: () }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn for_test() -> Self {
+    Self::new()
+  }
+}
+
+impl OdenRev2NamespaceGateState {
+  fn new() -> Self {
+    Self {
+      next_operation_session: 1,
+      fail_closed: false,
+    }
+  }
+}
+
+/// One context-minted gate sequence token.
+///
+/// The sequence and authority snapshot are captured only while the sealed
+/// context's namespace and publication locks are both held. This is not an
+/// operation session or actor fact: production filesystem wiring must combine
+/// it with host-captured principals and effect-owner provenance before any
+/// authorization. There is no constructor outside this module and the token is
+/// deliberately not cloneable.
+#[derive(Debug)]
+struct OdenRev2NamespaceGateToken {
+  sequence: u64,
+  identity: RuntimeIdentityBinding,
+  generations: RuntimeGenerationVector,
+}
+
+impl OdenRev2NamespaceGateToken {
+  fn sequence(&self) -> u64 {
+    self.sequence
+  }
+
+  fn identity(&self) -> &RuntimeIdentityBinding {
+    &self.identity
+  }
+
+  fn generations(&self) -> RuntimeGenerationVector {
+    self.generations
+  }
+}
+
+/// The process-context namespace gate paired with one pinned authority
+/// publication. Its fields are private so extension ops cannot retain either
+/// raw lock or use one without the other.
+///
+/// This checkpoint deliberately exposes no policy, permit, or kernel-commit
+/// method. A later operation-specific adapter must own this guard and use a
+/// default-fail-closed uncertainty typestate around every irreversible syscall;
+/// post-hoc caller cleanup is not an admitted API.
+///
+/// @ref LLP 0019#paths [implements] -- The singleton runtime context supplies
+/// one namespace-commit serialization point shared by every isolate, and the
+/// same guard pins authority generations through synchronous native work.
+struct OdenRev2NamespaceOperationGuard<'a> {
+  context: &'a OdenRev2RuntimeAuthorityContext,
+  authority: Option<RuntimeAuthorityPublicationGuard<'a>>,
+  namespace: Option<MutexGuard<'a, OdenRev2NamespaceGateState>>,
+  stable_view: RuntimeAuthorityReadView,
+  gate_token: OdenRev2NamespaceGateToken,
+}
+
+impl OdenRev2NamespaceOperationGuard<'_> {
+  fn belongs_to(&self, context: &OdenRev2RuntimeAuthorityContext) -> bool {
+    std::ptr::eq(self.context, context)
+      && self
+        .authority
+        .as_ref()
+        .is_some_and(|guard| guard.belongs_to(&context.authority_state))
+  }
+}
+
+impl Drop for OdenRev2NamespaceOperationGuard<'_> {
+  fn drop(&mut self) {
+    // Preserve the only admitted lock order in reverse on release.
+    drop(self.authority.take());
+    drop(self.namespace.take());
+    ODEN_REV2_NAMESPACE_GATE_HELD.set(false);
+  }
+}
+
 pub struct OdenRev2RuntimeAuthorityContext {
   identity: RuntimeIdentityBinding,
   engine_identity: EngineIdentity,
@@ -505,6 +620,7 @@ pub struct OdenRev2RuntimeAuthorityContext {
   retained_objects: Arc<[OdenRev2RetainedObject]>,
   installed_executables: OdenRev2InstalledExecutableContext,
   authority_state: RuntimeAuthorityState,
+  namespace_gate: Mutex<OdenRev2NamespaceGateState>,
   permission_batch_sequence: AtomicU64,
 }
 
@@ -619,6 +735,7 @@ impl OdenRev2RuntimeAuthorityContext {
       retained_objects: parts.retained_objects,
       installed_executables: parts.installed_executables,
       authority_state,
+      namespace_gate: Mutex::new(OdenRev2NamespaceGateState::new()),
       permission_batch_sequence: AtomicU64::new(1),
     })
   }
@@ -653,6 +770,50 @@ impl OdenRev2RuntimeAuthorityContext {
 
   pub fn authority_state(&self) -> &RuntimeAuthorityState {
     &self.authority_state
+  }
+
+  /// Acquire namespace then authority, minting one operation identity only
+  /// after both exact locks are held. The returned guard must remain inside a
+  /// synchronous callback-free host path; no method exposes either raw lock.
+  fn begin_namespace_operation(
+    &self,
+  ) -> Result<OdenRev2NamespaceOperationGuard<'_>, String> {
+    if ODEN_REV2_NAMESPACE_GATE_HELD.get() {
+      return Err(format!("{NAMESPACE_ERROR}-REENTRANT"));
+    }
+    let mut namespace = self
+      .namespace_gate
+      .lock()
+      .map_err(|_| format!("{NAMESPACE_ERROR}-POISONED"))?;
+    if namespace.fail_closed {
+      return Err(format!("{NAMESPACE_ERROR}-FAIL-CLOSED"));
+    }
+    let namespace_witness = OdenRev2NamespacePinWitness::new();
+    let authority = self
+      .authority_state
+      .pin_publication(&namespace_witness)
+      .map_err(|_| format!("{NAMESPACE_ERROR}-AUTHORITY"))?;
+    if namespace.next_operation_session == u64::MAX {
+      namespace.fail_closed = true;
+      return Err(format!("{NAMESPACE_ERROR}-SESSION-EXHAUSTED"));
+    }
+    let sequence = namespace.next_operation_session;
+    namespace.next_operation_session += 1;
+    let stable_view = authority.read_view();
+    let gate_token = OdenRev2NamespaceGateToken {
+      sequence,
+      identity: stable_view.identity().clone(),
+      generations: stable_view.generations(),
+    };
+    let guard = OdenRev2NamespaceOperationGuard {
+      context: self,
+      authority: Some(authority),
+      namespace: Some(namespace),
+      stable_view,
+      gate_token,
+    };
+    ODEN_REV2_NAMESPACE_GATE_HELD.set(true);
+    Ok(guard)
   }
 
   pub(crate) fn next_permission_batch_sequence(
@@ -1602,6 +1763,7 @@ struct ProtectedReceiptWire {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::oden_rev2_authority::AuthorityStateError;
   use crate::oden_rev2_policy::tests as policy_fixtures;
   use crate::rev2::EffectInput;
   use crate::rev2::Outcome;
@@ -1610,7 +1772,6 @@ mod tests {
   #[cfg(unix)]
   use std::os::unix::fs::PermissionsExt;
   use std::path::Path;
-  use std::sync::Mutex;
   use std::thread;
 
   fn digest(byte: u8) -> String {
@@ -1765,6 +1926,16 @@ mod tests {
     )
   }
 
+  fn namespace_context(key_byte: u8) -> OdenRev2RuntimeAuthorityContext {
+    install_for_test(armable_loaded(
+      policy_fixtures::candidate_snapshot(
+        policy_fixtures::hermetic_target(),
+        None,
+      ),
+      &[key_byte; 32],
+    ))
+  }
+
   fn env_effect(name: &str) -> EffectInput {
     EffectInput {
       identity: EngineIdentity::embedded(),
@@ -1862,6 +2033,110 @@ mod tests {
       )
       .unwrap();
     assert_eq!(decision.outcome, Outcome::Deny);
+  }
+
+  #[test]
+  fn arc_clones_share_one_namespace_gate_and_monotonic_sessions() {
+    let context = Arc::new(namespace_context(81));
+    let contender = Arc::clone(&context);
+    let first = context.begin_namespace_operation().unwrap();
+    assert_eq!(first.gate_token.sequence(), 1);
+    assert_eq!(first.gate_token.identity(), context.identity());
+    assert_eq!(
+      first.gate_token.generations(),
+      first.stable_view.generations()
+    );
+    assert!(first.belongs_to(&context));
+    assert!(matches!(
+      context.namespace_gate.try_lock(),
+      Err(std::sync::TryLockError::WouldBlock)
+    ));
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+      started_tx.send(()).unwrap();
+      let second = contender.begin_namespace_operation().unwrap();
+      entered_tx.send(second.gate_token.sequence()).unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(matches!(
+      entered_rx.recv_timeout(std::time::Duration::from_millis(50)),
+      Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+
+    drop(first);
+    assert_eq!(
+      entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap(),
+      2
+    );
+    worker.join().unwrap();
+  }
+
+  #[test]
+  fn namespace_gate_reentry_refuses_before_locking() {
+    let context = namespace_context(82);
+    let first = context.begin_namespace_operation().unwrap();
+    assert_eq!(
+      context.begin_namespace_operation().err().unwrap(),
+      "OD-CAP-REV2-NAMESPACE-GATE-REENTRANT"
+    );
+    assert!(matches!(
+      context.authority_state().read_view(),
+      Err(AuthorityStateError::NamespaceGateReentry)
+    ));
+    drop(first);
+    assert!(context.authority_state().read_view().is_ok());
+    assert_eq!(
+      context
+        .begin_namespace_operation()
+        .unwrap()
+        .gate_token
+        .sequence(),
+      2
+    );
+  }
+
+  #[test]
+  fn namespace_session_exhaustion_is_permanently_fail_closed() {
+    let exhausted = namespace_context(83);
+    exhausted
+      .namespace_gate
+      .lock()
+      .unwrap()
+      .next_operation_session = u64::MAX;
+    assert_eq!(
+      exhausted.begin_namespace_operation().err().unwrap(),
+      "OD-CAP-REV2-NAMESPACE-GATE-SESSION-EXHAUSTED"
+    );
+    assert_eq!(
+      exhausted.begin_namespace_operation().err().unwrap(),
+      "OD-CAP-REV2-NAMESPACE-GATE-FAIL-CLOSED"
+    );
+  }
+
+  #[test]
+  fn poisoned_namespace_gate_refuses_without_recovery() {
+    let context = Arc::new(namespace_context(85));
+    let poisoning_context = Arc::clone(&context);
+    assert!(
+      thread::spawn(move || {
+        let _guard = poisoning_context.begin_namespace_operation().unwrap();
+        panic!("poison namespace gate");
+      })
+      .join()
+      .is_err()
+    );
+    assert_eq!(
+      context.begin_namespace_operation().err().unwrap(),
+      "OD-CAP-REV2-NAMESPACE-GATE-POISONED"
+    );
+    assert!(matches!(
+      context.authority_state().read_view(),
+      Err(AuthorityStateError::LockPoisoned)
+    ));
   }
 
   #[test]

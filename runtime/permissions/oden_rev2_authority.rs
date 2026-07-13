@@ -95,6 +95,7 @@ pub enum AuthorityStateError {
   Serialization(String),
   SessionRowIdentity(String),
   UntypedSessionMutation,
+  NamespaceGateReentry,
   LockPoisoned,
 }
 
@@ -152,6 +153,9 @@ impl fmt::Display for AuthorityStateError {
       }
       Self::UntypedSessionMutation => formatter.write_str(
         "session rows require a stable-ID typed authority transaction",
+      ),
+      Self::NamespaceGateReentry => formatter.write_str(
+        "runtime authority state cannot be re-locked by its namespace operation thread",
       ),
       Self::LockPoisoned => {
         formatter.write_str("runtime authority state lock is poisoned")
@@ -2167,6 +2171,32 @@ pub struct RuntimeAuthorityState {
   inner: Mutex<RuntimeAuthorityStateInner>,
 }
 
+/// One pinned authority publication for a synchronous native operation.
+///
+/// The private mutex guard prevents row/generation publication and cache
+/// mutation until the operation drops this value. Callers receive only an
+/// immutable read view; exposing the guarded state would let an operation
+/// manufacture a mixed publication or mutate authority while its filesystem
+/// commit gate is held.
+///
+/// @ref LLP 0019#generations-and-atomic-invalidation [implements] -- Native
+/// operation validation, commit, and delivery can retain one exact rows/vector
+/// publication rather than repeatedly sampling independently current views.
+pub(crate) struct RuntimeAuthorityPublicationGuard<'a> {
+  state: &'a RuntimeAuthorityState,
+  inner: MutexGuard<'a, RuntimeAuthorityStateInner>,
+}
+
+impl RuntimeAuthorityPublicationGuard<'_> {
+  pub(crate) fn read_view(&self) -> RuntimeAuthorityReadView {
+    self.state.view_for(self.inner.publication.clone())
+  }
+
+  pub(crate) fn belongs_to(&self, state: &RuntimeAuthorityState) -> bool {
+    std::ptr::eq(self.state, state)
+  }
+}
+
 impl RuntimeAuthorityState {
   pub fn new(identity: RuntimeIdentityBinding) -> Self {
     Self::with_configuration(
@@ -2223,6 +2253,9 @@ impl RuntimeAuthorityState {
     &self,
   ) -> Result<MutexGuard<'_, RuntimeAuthorityStateInner>, AuthorityStateError>
   {
+    if crate::oden_rev2_context::namespace_gate_held_on_current_thread() {
+      return Err(AuthorityStateError::NamespaceGateReentry);
+    }
     self
       .inner
       .lock()
@@ -2244,6 +2277,20 @@ impl RuntimeAuthorityState {
   ) -> Result<RuntimeAuthorityReadView, AuthorityStateError> {
     let inner = self.lock()?;
     Ok(self.view_for(inner.publication.clone()))
+  }
+
+  /// Pin the exact current publication for a callback-free synchronous native
+  /// operation. Methods that acquire `inner` again must not be called until
+  /// this guard is dropped.
+  pub(crate) fn pin_publication(
+    &self,
+    _namespace_witness: &crate::oden_rev2_context::OdenRev2NamespacePinWitness,
+  ) -> Result<RuntimeAuthorityPublicationGuard<'_>, AuthorityStateError> {
+    let inner = self.lock()?;
+    if inner.publication.fail_closed {
+      return Err(AuthorityStateError::StateFailClosed);
+    }
+    Ok(RuntimeAuthorityPublicationGuard { state: self, inner })
   }
 
   pub fn is_current(
@@ -2720,6 +2767,80 @@ mod tests {
     assert!(matches!(
       invalid,
       Err(AuthorityStateError::InvalidDigest("vocabDigest"))
+    ));
+  }
+
+  #[test]
+  fn publication_guard_blocks_generation_publish_until_drop() {
+    let state = Arc::new(RuntimeAuthorityState::new(identity()));
+    let witness =
+      crate::oden_rev2_context::OdenRev2NamespacePinWitness::for_test();
+    let mut transaction = state.begin_transaction().unwrap();
+    transaction
+      .upsert(
+        AuthorityRowKind::NegativeOverlay,
+        "guarded-row".to_string(),
+        &selector("guarded", 0),
+      )
+      .unwrap();
+
+    let pinned = state.pin_publication(&witness).unwrap();
+    assert_eq!(pinned.read_view().generations().negative_overlay(), 0);
+    assert!(pinned.belongs_to(&state));
+    assert!(matches!(
+      state.inner.try_lock(),
+      Err(std::sync::TryLockError::WouldBlock)
+    ));
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (published_tx, published_rx) = std::sync::mpsc::channel();
+    let writer_state = Arc::clone(&state);
+    let writer = std::thread::spawn(move || {
+      started_tx.send(()).unwrap();
+      let view = writer_state.commit(transaction).unwrap();
+      published_tx
+        .send(view.generations().negative_overlay())
+        .unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(matches!(
+      published_rx.recv_timeout(std::time::Duration::from_millis(50)),
+      Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+
+    drop(pinned);
+    assert_eq!(
+      published_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap(),
+      1
+    );
+    writer.join().unwrap();
+  }
+
+  #[test]
+  fn publication_guard_poison_refuses_without_recovery() {
+    let state = Arc::new(RuntimeAuthorityState::new(identity()));
+    let poisoning_state = Arc::clone(&state);
+    assert!(
+      std::thread::spawn(move || {
+        let witness =
+          crate::oden_rev2_context::OdenRev2NamespacePinWitness::for_test();
+        let _pinned = poisoning_state.pin_publication(&witness).unwrap();
+        panic!("poison pinned publication");
+      })
+      .join()
+      .is_err()
+    );
+    assert!(matches!(
+      state.pin_publication(
+        &crate::oden_rev2_context::OdenRev2NamespacePinWitness::for_test()
+      ),
+      Err(AuthorityStateError::LockPoisoned)
+    ));
+    assert!(matches!(
+      state.read_view(),
+      Err(AuthorityStateError::LockPoisoned)
     ));
   }
 
