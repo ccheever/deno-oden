@@ -15,6 +15,8 @@ mod node;
 mod node_compat_shim;
 mod npm;
 mod oden_capsec_filesystem_candidate;
+mod oden_capsec_filesystem_protocol;
+mod oden_capsec_filesystem_supervisor;
 mod ops;
 mod registry;
 mod resolver;
@@ -81,6 +83,7 @@ use crate::util::v8::get_v8_flags_from_env;
 use crate::util::v8::init_v8_flags;
 
 pub use oden_capsec_filesystem_candidate::maybe_run_oden_capsec_filesystem_candidate;
+pub use oden_capsec_filesystem_supervisor::maybe_run_oden_capsec_filesystem_supervisor;
 
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
