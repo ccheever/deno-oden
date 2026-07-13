@@ -36,6 +36,10 @@ pub struct RealFs;
 
 #[async_trait::async_trait(?Send)]
 impl FileSystem for RealFs {
+  fn oden_capsec_rev2_host_path_backend(&self) -> bool {
+    true
+  }
+
   fn cwd(&self) -> FsResult<PathBuf> {
     std::env::current_dir().map_err(Into::into)
   }

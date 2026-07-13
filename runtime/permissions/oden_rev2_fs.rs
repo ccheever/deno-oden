@@ -44,6 +44,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use serde_json::json;
+
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
@@ -55,15 +57,36 @@ use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
+use crate::oden_rev2_context::OdenRev2NamespaceGateToken;
 use crate::oden_rev2_context::OdenRev2PlatformPath;
 use crate::oden_rev2_context::OdenRev2RootBinding;
 use crate::oden_rev2_policy::OdenRev2RetainedObject;
+use crate::rev2::domain_digest;
 
 const MAX_SYMLINK_TRAVERSALS: usize = 40;
 const MAX_SYMLINK_BYTES: usize = 64 * 1024;
 static NEXT_HOP_CHALLENGE: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 static NEXT_OPERATION_SESSION: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OdenRev2FsMkdirCommitFaultForTest {
+  RaceExisting,
+  UncertainAfterSyscall,
+}
+
+#[cfg(test)]
+thread_local! {
+  static ODEN_REV2_FS_MKDIR_COMMIT_FAULT_FOR_TEST: std::cell::Cell<Option<OdenRev2FsMkdirCommitFaultForTest>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn oden_rev2_fs_set_mkdir_commit_fault_for_test(
+  fault: Option<OdenRev2FsMkdirCommitFaultForTest>,
+) {
+  ODEN_REV2_FS_MKDIR_COMMIT_FAULT_FOR_TEST.with(|current| current.set(fault));
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OdenRev2FsError {
@@ -235,6 +258,39 @@ pub(crate) struct OdenRev2FsOperationSessionFact {
 }
 
 impl OdenRev2FsOperationSession {
+  /// Seal one filesystem operation to the context-minted namespace token and
+  /// the host-captured actor digest. Neither input can be supplied by JS, and
+  /// the namespace token has no public constructor.
+  pub(crate) fn capture_host(
+    gate_token: &OdenRev2NamespaceGateToken,
+    actor_identity: String,
+  ) -> Result<Self, OdenRev2FsError> {
+    if actor_identity.trim().is_empty() || actor_identity.len() > 1024 {
+      return Err(OdenRev2FsError::InvalidBinding(
+        "invalid operation actor identity",
+      ));
+    }
+    let generation_vector_token = domain_digest(
+      "oden:capsec:filesystem-operation-session:2",
+      &json!({
+        "actorIdentity": actor_identity,
+        "generations": gate_token.generations(),
+        "identity": gate_token.identity(),
+        "sessionId": gate_token.sequence().to_string(),
+      }),
+    )
+    .map_err(|_| {
+      OdenRev2FsError::InvalidBinding("filesystem operation session digest")
+    })?;
+    Ok(Self {
+      fact: OdenRev2FsOperationSessionFact {
+        session_id: gate_token.sequence(),
+        actor_identity,
+        generation_vector_token,
+      },
+    })
+  }
+
   pub(crate) fn fact(&self) -> &OdenRev2FsOperationSessionFact {
     &self.fact
   }
@@ -692,6 +748,21 @@ impl OdenRev2FsRetainedEdge {
     }
     Ok(())
   }
+
+  fn revalidate_identity(&self) -> Result<(), OdenRev2FsError> {
+    let named = lstat_component(&self.parent, &self.leaf)?
+      .ok_or(OdenRev2FsError::ReplacementDuringResolution)?;
+    let retained =
+      metadata_from_file(&self.child, "revalidate retained path identity")?;
+    if named.identity != self.metadata.identity
+      || retained.identity != self.metadata.identity
+      || named.kind != self.metadata.kind
+      || retained.kind != self.metadata.kind
+    {
+      return Err(OdenRev2FsError::ReplacementDuringResolution);
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug)]
@@ -1082,6 +1153,17 @@ impl OdenRev2FsVerifiedParent {
     }
     Ok(())
   }
+
+  fn revalidate_identity(&self) -> Result<(), OdenRev2FsError> {
+    let retained =
+      metadata_from_file(&self.handle, "revalidate verified parent identity")?;
+    if retained.identity != self.metadata.identity
+      || retained.kind != OdenRev2FsObjectKind::Directory
+    {
+      return Err(OdenRev2FsError::ReplacementDuringResolution);
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug)]
@@ -1200,6 +1282,154 @@ pub(crate) enum OdenRev2FsCheckedTargetKind {
   Proposed,
 }
 
+#[derive(Debug)]
+pub(crate) enum OdenRev2FsMkdirCommitOutcome {
+  Committed,
+  NotCommitted(OdenRev2FsError),
+  Uncertain(OdenRev2FsError),
+}
+
+/// A proposed directory creation reduced to the retained parent and one leaf.
+/// Construction performs the final checked-path validation; `commit` repeats
+/// it immediately before `mkdirat` and never accepts an absolute pathname.
+#[derive(Debug)]
+pub(crate) struct OdenRev2FsPreparedMkdir {
+  root: Arc<OdenRev2FsRootState>,
+  operation_session: OdenRev2FsOperationSessionFact,
+  parent: OdenRev2FsVerifiedParent,
+  leaf: OsString,
+  retained_edges: Vec<OdenRev2FsRetainedEdge>,
+}
+
+impl OdenRev2FsPreparedMkdir {
+  pub(crate) fn revalidate_before_commit(
+    &self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2FsError> {
+    if self.operation_session != operation_session.fact {
+      return Err(OdenRev2FsError::OperationSessionMismatch);
+    }
+    revalidate_root(&self.root)?;
+    for edge in &self.retained_edges {
+      edge.revalidate()?;
+    }
+    self.parent.revalidate()?;
+    if lstat_component(&self.parent.handle, &self.leaf)?.is_some() {
+      return Err(OdenRev2FsError::ReplacementDuringResolution);
+    }
+    Ok(())
+  }
+
+  pub(crate) fn commit(
+    self,
+    operation_session: &OdenRev2FsOperationSession,
+    mode: u32,
+  ) -> OdenRev2FsMkdirCommitOutcome {
+    if let Err(error) = self.revalidate_before_commit(operation_session) {
+      return OdenRev2FsMkdirCommitOutcome::NotCommitted(error);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+      let _ = mode;
+      return OdenRev2FsMkdirCommitOutcome::NotCommitted(
+        OdenRev2FsError::UnsupportedPlatform,
+      );
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+      let leaf = match cstring(&self.leaf) {
+        Ok(leaf) => leaf,
+        Err(error) => {
+          return OdenRev2FsMkdirCommitOutcome::NotCommitted(
+            OdenRev2FsError::io("encode mkdir leaf", error),
+          );
+        }
+      };
+      #[cfg(test)]
+      let fault =
+        ODEN_REV2_FS_MKDIR_COMMIT_FAULT_FOR_TEST.with(|current| current.take());
+      #[cfg(test)]
+      if fault == Some(OdenRev2FsMkdirCommitFaultForTest::RaceExisting) {
+        // Test-only external-writer simulation after final validation and
+        // before the operation's own no-replace syscall.
+        let injected = unsafe {
+          libc::mkdirat(
+            self.parent.handle.as_raw_fd(),
+            leaf.as_ptr(),
+            (mode & 0o777) as libc::mode_t,
+          )
+        };
+        if injected != 0 {
+          return OdenRev2FsMkdirCommitOutcome::Uncertain(OdenRev2FsError::io(
+            "inject mkdir race",
+            io::Error::last_os_error(),
+          ));
+        }
+      }
+      // SAFETY: the retained parent descriptor and NUL-terminated single leaf
+      // remain live. `mkdirat` is atomic and refuses an existing destination.
+      let result = unsafe {
+        libc::mkdirat(
+          self.parent.handle.as_raw_fd(),
+          leaf.as_ptr(),
+          (mode & 0o777) as libc::mode_t,
+        )
+      };
+      if result != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EEXIST) {
+          return OdenRev2FsMkdirCommitOutcome::NotCommitted(
+            OdenRev2FsError::ReplacementDuringResolution,
+          );
+        }
+        return OdenRev2FsMkdirCommitOutcome::Uncertain(OdenRev2FsError::io(
+          "mkdirat proposed child",
+          error,
+        ));
+      }
+      #[cfg(test)]
+      if fault == Some(OdenRev2FsMkdirCommitFaultForTest::UncertainAfterSyscall)
+      {
+        return OdenRev2FsMkdirCommitOutcome::Uncertain(OdenRev2FsError::io(
+          "injected ambiguous mkdir postcheck",
+          io::Error::other("injected ambiguous mkdir postcheck"),
+        ));
+      }
+      let postcheck = (|| {
+        revalidate_root(&self.root)?;
+        for edge in &self.retained_edges {
+          // Creating a directory changes the immediate parent's link count.
+          // After successful mkdir, retain identity/type coupling without
+          // requiring pre-commit metadata bytes to remain identical.
+          edge.revalidate_identity()?;
+        }
+        self.parent.revalidate_identity()?;
+        let observed = lstat_component(&self.parent.handle, &self.leaf)?
+          .ok_or(OdenRev2FsError::ReplacementDuringResolution)?;
+        if observed.kind != OdenRev2FsObjectKind::Directory {
+          return Err(OdenRev2FsError::ReplacementDuringResolution);
+        }
+        let retained = open_component_non_consuming(
+          &self.parent.handle,
+          &self.leaf,
+          true,
+          OdenRev2FsObjectKind::Directory,
+        )?;
+        if metadata_from_file(&retained, "postcheck mkdir child")? != observed
+          || lstat_component(&self.parent.handle, &self.leaf)? != Some(observed)
+        {
+          return Err(OdenRev2FsError::ReplacementDuringResolution);
+        }
+        Ok(())
+      })();
+      match postcheck {
+        Ok(()) => OdenRev2FsMkdirCommitOutcome::Committed,
+        Err(error) => OdenRev2FsMkdirCommitOutcome::Uncertain(error),
+      }
+    }
+  }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OdenRev2FsOperation {
   ObserveMetadata,
@@ -1217,12 +1447,13 @@ pub(crate) enum OdenRev2FsOperationSupport {
   Unsupported(&'static str),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct OdenRev2FsMetadataObservation {
   identity_fact: OdenRev2FsIdentityFact,
   kind: OdenRev2FsObjectKind,
   link_count: u64,
   device_id: u64,
+  metadata: std::fs::Metadata,
 }
 
 impl OdenRev2FsMetadataObservation {
@@ -1232,6 +1463,10 @@ impl OdenRev2FsMetadataObservation {
 
   pub(crate) fn kind(&self) -> OdenRev2FsObjectKind {
     self.kind
+  }
+
+  pub(crate) fn into_metadata(self) -> std::fs::Metadata {
+    self.metadata
   }
 }
 
@@ -1287,6 +1522,24 @@ impl OdenRev2FsCheckedPath {
     OdenRev2FsIdentityFact {
       source_root: source_root_fact(&self.root),
       state,
+    }
+  }
+
+  pub(crate) fn parent_identity(&self) -> Option<&OdenRev2FsPlatformIdentity> {
+    match &self.target {
+      OdenRev2FsCheckedTarget::Existing(object) => object
+        .parent
+        .as_ref()
+        .map(|parent| &parent.metadata.identity),
+      OdenRev2FsCheckedTarget::Link(link) => {
+        Some(&link.parent.metadata.identity)
+      }
+      OdenRev2FsCheckedTarget::Missing(child) => {
+        Some(&child.parent.metadata.identity)
+      }
+      OdenRev2FsCheckedTarget::Proposed(child) => {
+        Some(&child.parent.metadata.identity)
+      }
     }
   }
 
@@ -1377,6 +1630,74 @@ impl OdenRev2FsCheckedPath {
     Ok(self)
   }
 
+  pub(crate) fn prepare_mkdir(
+    self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<OdenRev2FsPreparedMkdir, OdenRev2FsError> {
+    self.require_operation_session(operation_session)?;
+    revalidate_root(&self.root)?;
+    self.revalidate_retained_edges()?;
+    let OdenRev2FsCheckedTarget::Proposed(child) = self.target else {
+      return Err(OdenRev2FsError::OperationUnsupported(
+        "mkdir-proposed-directory",
+      ));
+    };
+    if child.kind != OdenRev2FsProposedKind::Directory {
+      return Err(OdenRev2FsError::OperationUnsupported(
+        "mkdir-proposed-directory",
+      ));
+    }
+    child.parent.revalidate()?;
+    if lstat_component(&child.parent.handle, &child.leaf)?.is_some() {
+      return Err(OdenRev2FsError::ReplacementDuringResolution);
+    }
+    Ok(OdenRev2FsPreparedMkdir {
+      root: self.root,
+      operation_session: self.operation_session,
+      parent: child.parent,
+      leaf: child.leaf,
+      retained_edges: self.retained_edges,
+    })
+  }
+
+  pub(crate) fn revalidate_binding(
+    &self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2FsError> {
+    self.require_operation_session(operation_session)?;
+    revalidate_root(&self.root)?;
+    self.revalidate_retained_edges()?;
+    match &self.target {
+      OdenRev2FsCheckedTarget::Existing(object) => {
+        if metadata_from_file(&object.handle, "revalidate bound object")?
+          != object.metadata
+        {
+          return Err(OdenRev2FsError::ReplacementDuringResolution);
+        }
+      }
+      OdenRev2FsCheckedTarget::Link(link) => {
+        let current = lstat_component(&link.parent.handle, &link_leaf(self)?)?
+          .ok_or(OdenRev2FsError::ReplacementDuringResolution)?;
+        if current != link.metadata
+          || metadata_from_file(&link.handle, "revalidate bound link")?
+            != link.metadata
+        {
+          return Err(OdenRev2FsError::ReplacementDuringResolution);
+        }
+      }
+      OdenRev2FsCheckedTarget::Missing(child) => {
+        child.revalidate_absent_with_hook(&mut |_, _| {})?;
+      }
+      OdenRev2FsCheckedTarget::Proposed(child) => {
+        child.parent.revalidate()?;
+        if lstat_component(&child.parent.handle, &child.leaf)?.is_some() {
+          return Err(OdenRev2FsError::ReplacementDuringResolution);
+        }
+      }
+    }
+    Ok(())
+  }
+
   pub(crate) fn operation_support(
     &self,
     operation: OdenRev2FsOperation,
@@ -1407,6 +1728,7 @@ impl OdenRev2FsCheckedPath {
     }
   }
 
+  #[cfg(unix)]
   pub(crate) fn consume_for_metadata(
     self,
     operation_session: &OdenRev2FsOperationSession,
@@ -1414,6 +1736,7 @@ impl OdenRev2FsCheckedPath {
     self.consume_for_metadata_with_hook(operation_session, &mut |_, _| {})
   }
 
+  #[cfg(unix)]
   fn consume_for_metadata_with_hook(
     self,
     operation_session: &OdenRev2FsOperationSession,
@@ -1422,24 +1745,28 @@ impl OdenRev2FsCheckedPath {
     self.require_operation_session(operation_session)?;
     revalidate_root(&self.root)?;
     self.revalidate_retained_edges_with_hook(hook)?;
-    let metadata = match &self.target {
+    let (metadata, output) = match &self.target {
       OdenRev2FsCheckedTarget::Existing(object) => {
-        let current =
-          metadata_from_file(&object.handle, "revalidate object metadata")?;
+        let output = object.handle.metadata().map_err(|error| {
+          OdenRev2FsError::io("read retained object metadata", error)
+        })?;
+        let current = OdenRev2FsObservedMetadata::from_metadata(&output);
         if current != object.metadata {
           return Err(OdenRev2FsError::ReplacementDuringResolution);
         }
-        current
+        (current, output)
       }
       OdenRev2FsCheckedTarget::Link(link) => {
         let current = lstat_component(&link.parent.handle, &link_leaf(&self)?)?
           .ok_or(OdenRev2FsError::ReplacementDuringResolution)?;
-        let retained =
-          metadata_from_file(&link.handle, "revalidate link metadata")?;
+        let output = link.handle.metadata().map_err(|error| {
+          OdenRev2FsError::io("read retained link metadata", error)
+        })?;
+        let retained = OdenRev2FsObservedMetadata::from_metadata(&output);
         if current != link.metadata || retained != link.metadata {
           return Err(OdenRev2FsError::ReplacementDuringResolution);
         }
-        retained
+        (retained, output)
       }
       OdenRev2FsCheckedTarget::Missing(_)
       | OdenRev2FsCheckedTarget::Proposed(_) => {
@@ -1453,7 +1780,42 @@ impl OdenRev2FsCheckedPath {
       kind: metadata.kind,
       link_count: metadata.link_count,
       device_id: metadata.device_id,
+      metadata: output,
     })
+  }
+
+  #[cfg(not(unix))]
+  pub(crate) fn consume_for_metadata(
+    self,
+    _operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<OdenRev2FsMetadataObservation, OdenRev2FsError> {
+    Err(OdenRev2FsError::UnsupportedPlatform)
+  }
+
+  /// Consume an authorized final-missing observation without converting a
+  /// missing ancestor or a raced replacement into caller-visible `ENOENT`.
+  #[cfg(unix)]
+  pub(crate) fn consume_missing(
+    self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2FsError> {
+    self.require_operation_session(operation_session)?;
+    revalidate_root(&self.root)?;
+    self.revalidate_retained_edges()?;
+    let OdenRev2FsCheckedTarget::Missing(missing) = &self.target else {
+      return Err(OdenRev2FsError::OperationUnsupported(
+        "final-missing-observation",
+      ));
+    };
+    missing.revalidate_absent_with_hook(&mut |_, _| {})
+  }
+
+  #[cfg(not(unix))]
+  pub(crate) fn consume_missing(
+    self,
+    _operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2FsError> {
+    Err(OdenRev2FsError::UnsupportedPlatform)
   }
 
   pub(crate) fn object_alias_fact(

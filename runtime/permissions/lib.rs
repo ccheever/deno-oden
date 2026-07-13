@@ -66,7 +66,12 @@ pub mod rev2;
 #[path = "oden_rev2_registry_generated.rs"]
 mod rev2_registry_generated;
 
+pub use oden_rev2_context::OdenRev2FilesystemError;
+pub use oden_rev2_context::OdenRev2LstatDelivery;
+pub use oden_rev2_context::OdenRev2MkdirDelivery;
 pub use oden_rev2_context::OdenRev2RuntimeAuthorityContext;
+pub use oden_rev2_context::oden_capsec_rev2_lstat_sync;
+pub use oden_rev2_context::oden_capsec_rev2_mkdir_sync;
 pub use oden_rev2_permission::OdenRev2PermissionError;
 pub use oden_rev2_permission::OdenRev2PermissionOperation;
 pub use oden_rev2_permission::oden_capsec_rev2_permission_operation;
@@ -1730,6 +1735,68 @@ pub fn oden_capsec_rev2_runtime_authority_context()
     .get()
     .and_then(|result| result.as_ref().ok())
     .cloned()
+}
+
+/// Resolve one op's process-global and `OpState` Rev2 bindings as an exact
+/// pair. Callers pass only host-stored state; the process publication is read
+/// here so extension crates cannot accidentally accept a detached clone or
+/// fall through from a refused process to Revision 1.
+///
+/// @ref LLP 0019#stage-c-runtime-authority-and-typed-permission-checkpoint-c04--eng-24017 [implements]
+pub fn oden_capsec_rev2_resolve_op_state_context(
+  state_mode: Option<OdenRev2ProcessMode>,
+  state_context: Option<Arc<OdenRev2RuntimeAuthorityContext>>,
+) -> Result<Option<Arc<OdenRev2RuntimeAuthorityContext>>, &'static str> {
+  let process_mode = oden_capsec_rev2_process_mode();
+  let global = oden_capsec_rev2_runtime_authority_context();
+  let ptr_equal = match (&global, &state_context) {
+    (Some(global), Some(state_context)) => Arc::ptr_eq(global, state_context),
+    _ => false,
+  };
+  let rev2 = oden_capsec_rev2_validate_op_state_binding(
+    process_mode,
+    state_mode,
+    global.is_some(),
+    state_context.is_some(),
+    ptr_equal,
+  )?;
+  if rev2 { Ok(state_context) } else { Ok(None) }
+}
+
+/// Pure closed-state validator shared by permission and filesystem ops.
+pub fn oden_capsec_rev2_validate_op_state_binding(
+  process_mode: OdenRev2ProcessMode,
+  state_mode: Option<OdenRev2ProcessMode>,
+  global_present: bool,
+  state_present: bool,
+  ptr_equal: bool,
+) -> Result<bool, &'static str> {
+  match process_mode {
+    OdenRev2ProcessMode::Rev1 => {
+      if state_mode.is_some_and(|mode| mode != OdenRev2ProcessMode::Rev1)
+        || global_present
+        || state_present
+      {
+        Err("OD-CAP-REV2-OPSTATE-MODE-MISMATCH")
+      } else {
+        Ok(false)
+      }
+    }
+    OdenRev2ProcessMode::Rev2Refused => Err("OD-CAP-REV2-PROCESS-REFUSED"),
+    OdenRev2ProcessMode::Rev2Installed => {
+      if !global_present {
+        Err("OD-CAP-REV2-GLOBAL-CONTEXT-MISSING")
+      } else if state_mode != Some(OdenRev2ProcessMode::Rev2Installed) {
+        Err("OD-CAP-REV2-OPSTATE-MODE-MISMATCH")
+      } else if !state_present {
+        Err("OD-CAP-REV2-OPSTATE-CONTEXT-MISSING")
+      } else if !ptr_equal {
+        Err("OD-CAP-REV2-OPSTATE-CONTEXT-MISMATCH")
+      } else {
+        Ok(true)
+      }
+    }
+  }
 }
 
 pub fn oden_capsec_rev2_bootstrap_exit_code() -> Option<i32> {
@@ -5251,6 +5318,7 @@ pub fn oden_rev2_capture_live_principals() -> Vec<rev2::PrincipalRef> {
 #[cfg(test)]
 thread_local! {
   static ODEN_REV2_PERMISSION_ACTORS_FOR_TEST: std::cell::RefCell<Option<(Vec<rev2::PrincipalRef>, rev2::PrincipalRef)>> = const { std::cell::RefCell::new(None) };
+  static ODEN_REV2_PERMISSION_ACTOR_CAPTURE_COUNT_FOR_TEST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -5262,11 +5330,24 @@ pub(crate) fn oden_rev2_set_permission_actors_for_test(
   });
 }
 
+#[cfg(test)]
+pub(crate) fn oden_rev2_reset_permission_actor_capture_count_for_test() {
+  ODEN_REV2_PERMISSION_ACTOR_CAPTURE_COUNT_FOR_TEST.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn oden_rev2_permission_actor_capture_count_for_test() -> u64 {
+  ODEN_REV2_PERMISSION_ACTOR_CAPTURE_COUNT_FOR_TEST.with(std::cell::Cell::get)
+}
+
 /// Capture the constrained principal set and the nearest live effect owner in
 /// one synchronous host observation. The tuple is crate-private so callers
 /// cannot substitute JavaScript-provided attribution between the two fields.
 pub(crate) fn oden_rev2_capture_live_permission_actors()
 -> (Vec<rev2::PrincipalRef>, rev2::PrincipalRef) {
+  #[cfg(test)]
+  ODEN_REV2_PERMISSION_ACTOR_CAPTURE_COUNT_FOR_TEST
+    .with(|count| count.set(count.get().saturating_add(1)));
   #[cfg(test)]
   if let Some(actors) = ODEN_REV2_PERMISSION_ACTORS_FOR_TEST
     .with(|current| current.borrow().clone())

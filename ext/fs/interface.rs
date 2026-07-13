@@ -153,6 +153,14 @@ pub type FsReadDirRc = deno_maybe_sync::MaybeArc<dyn FsReadDir>;
 
 #[async_trait::async_trait(?Send)]
 pub trait FileSystem: std::fmt::Debug + MaybeSend + MaybeSync {
+  /// Opt in only when this backend's paths name the same host namespace as
+  /// retained Unix descriptors captured by CapSec Rev2. Virtual/custom
+  /// backends stay closed by default.
+  /// @ref LLP 0019#paths [constrained-by]
+  fn oden_capsec_rev2_host_path_backend(&self) -> bool {
+    false
+  }
+
   fn cwd(&self) -> FsResult<PathBuf>;
   fn tmp_dir(&self) -> FsResult<PathBuf>;
   fn chdir(&self, path: &CheckedPath) -> FsResult<()>;

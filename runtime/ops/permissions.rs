@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use ::deno_permissions::OdenRev2ProcessMode;
 use ::deno_permissions::PermissionState;
 use ::deno_permissions::PermissionsContainer;
 use deno_core::OpState;
@@ -186,66 +187,17 @@ fn resolve_rev2_context(
   Option<std::sync::Arc<::deno_permissions::OdenRev2RuntimeAuthorityContext>>,
   PermissionError,
 > {
-  use ::deno_permissions::OdenRev2ProcessMode;
-  let process_mode = ::deno_permissions::oden_capsec_rev2_process_mode();
   let state_mode = state.try_borrow::<OdenRev2ProcessMode>().copied();
   let state_context = state
     .try_borrow::<std::sync::Arc<
       ::deno_permissions::OdenRev2RuntimeAuthorityContext,
     >>()
     .cloned();
-  let global = ::deno_permissions::oden_capsec_rev2_runtime_authority_context();
-  let ptr_equal = match (&global, &state_context) {
-    (Some(global), Some(state_context)) => {
-      std::sync::Arc::ptr_eq(global, state_context)
-    }
-    _ => false,
-  };
-  let rev2 = validate_rev2_opstate_binding(
-    process_mode,
+  ::deno_permissions::oden_capsec_rev2_resolve_op_state_context(
     state_mode,
-    global.is_some(),
-    state_context.is_some(),
-    ptr_equal,
+    state_context,
   )
-  .map_err(|reason| PermissionError::Rev2(reason.to_string()))?;
-  if rev2 { Ok(state_context) } else { Ok(None) }
-}
-
-fn validate_rev2_opstate_binding(
-  process_mode: ::deno_permissions::OdenRev2ProcessMode,
-  state_mode: Option<::deno_permissions::OdenRev2ProcessMode>,
-  global_present: bool,
-  state_present: bool,
-  ptr_equal: bool,
-) -> Result<bool, &'static str> {
-  use ::deno_permissions::OdenRev2ProcessMode;
-  match process_mode {
-    OdenRev2ProcessMode::Rev1 => {
-      if state_mode.is_some_and(|mode| mode != OdenRev2ProcessMode::Rev1)
-        || global_present
-        || state_present
-      {
-        Err("OD-CAP-REV2-OPSTATE-MODE-MISMATCH")
-      } else {
-        Ok(false)
-      }
-    }
-    OdenRev2ProcessMode::Rev2Refused => Err("OD-CAP-REV2-PROCESS-REFUSED"),
-    OdenRev2ProcessMode::Rev2Installed => {
-      if !global_present {
-        Err("OD-CAP-REV2-GLOBAL-CONTEXT-MISSING")
-      } else if state_mode != Some(OdenRev2ProcessMode::Rev2Installed) {
-        Err("OD-CAP-REV2-OPSTATE-MODE-MISMATCH")
-      } else if !state_present {
-        Err("OD-CAP-REV2-OPSTATE-CONTEXT-MISSING")
-      } else if !ptr_equal {
-        Err("OD-CAP-REV2-OPSTATE-CONTEXT-MISMATCH")
-      } else {
-        Ok(true)
-      }
-    }
-  }
+  .map_err(|reason| PermissionError::Rev2(reason.to_string()))
 }
 
 #[op2(stack_trace)]
@@ -415,7 +367,7 @@ mod tests {
   fn installed_rev2_opstate_requires_the_exact_global_arc_and_marker() {
     use ::deno_permissions::OdenRev2ProcessMode;
     let validate = |state_mode, global, state, same| {
-      validate_rev2_opstate_binding(
+      ::deno_permissions::oden_capsec_rev2_validate_op_state_binding(
         OdenRev2ProcessMode::Rev2Installed,
         state_mode,
         global,

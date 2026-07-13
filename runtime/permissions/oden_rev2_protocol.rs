@@ -699,11 +699,11 @@ impl VerifiedPermissionActorSet {
     })
   }
 
-  fn constrained_principals(&self) -> &[PrincipalRef] {
+  pub(crate) fn constrained_principals(&self) -> &[PrincipalRef] {
     &self.constrained_principals
   }
 
-  fn overlay_owner(&self) -> &PrincipalRef {
+  pub(crate) fn overlay_owner(&self) -> &PrincipalRef {
     &self.overlay_owner
   }
 }

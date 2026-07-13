@@ -599,7 +599,7 @@ fn system_information_effect(
 }
 
 #[cfg(unix)]
-fn bound_platform_path(
+pub(crate) fn bound_platform_path(
   path: &crate::oden_rev2_context::OdenRev2PlatformPath,
 ) -> PathBuf {
   match path {
@@ -615,7 +615,7 @@ fn bound_platform_path(
 }
 
 #[cfg(unix)]
-fn platform_path_value(path: &Path) -> Value {
+pub(crate) fn platform_path_value(path: &Path) -> Value {
   use std::os::unix::ffi::OsStrExt;
   match path.to_str() {
     Some(path) => json!({ "encoding": "unicode", "value": path }),
@@ -640,22 +640,22 @@ fn platform_identity(metadata: &std::fs::Metadata) -> Value {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StaticPathSourceClass {
+pub(crate) enum StaticPathSourceClass {
   Negative,
   Floor,
   Ceiling,
 }
 
 #[cfg(unix)]
-struct StaticPathRoot<'a> {
-  binding: &'a crate::oden_rev2_context::OdenRev2RootBinding,
-  retained: &'a crate::oden_rev2_policy::OdenRev2RetainedObject,
-  row: &'a crate::oden_rev2_context::OdenRev2StaticAuthorityRow,
-  class: StaticPathSourceClass,
+pub(crate) struct StaticPathRoot<'a> {
+  pub(crate) binding: &'a crate::oden_rev2_context::OdenRev2RootBinding,
+  pub(crate) retained: &'a crate::oden_rev2_policy::OdenRev2RetainedObject,
+  pub(crate) row: &'a crate::oden_rev2_context::OdenRev2StaticAuthorityRow,
+  pub(crate) class: StaticPathSourceClass,
 }
 
 #[cfg(unix)]
-fn collect_static_path_roots<'a>(
+pub(crate) fn collect_static_path_roots<'a>(
   context: &'a OdenRev2RuntimeAuthorityContext,
   constrained_principals: &[crate::rev2::PrincipalRef],
   capability: &str,
@@ -753,7 +753,7 @@ fn collect_static_path_roots<'a>(
 }
 
 #[cfg(unix)]
-fn select_primary_path_root<'a>(
+pub(crate) fn select_primary_path_root<'a>(
   roots: &'a [StaticPathRoot<'a>],
   owner: &crate::rev2::PrincipalRef,
   requested: &Path,
@@ -868,7 +868,7 @@ fn reopen_bound_root(path: &Path) -> std::io::Result<File> {
 }
 
 #[cfg(unix)]
-fn relative_platform_path(
+pub(crate) fn relative_platform_path(
   value: &Value,
 ) -> Result<PathBuf, OdenRev2PermissionError> {
   use std::ffi::OsString;

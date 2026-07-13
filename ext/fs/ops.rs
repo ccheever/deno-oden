@@ -103,6 +103,65 @@ impl From<FsError> for FsOpsError {
   }
 }
 
+fn rev2_filesystem_refusal(
+  _reason: impl Into<String>,
+  path: &Path,
+  api_name: &'static str,
+) -> FsOpsError {
+  FsOpsErrorKind::Permission(PermissionCheckError::PermissionDenied(
+    deno_permissions::PermissionDeniedError {
+      access: format!("{api_name} Rev2 access to {path:?}"),
+      name: "capsec",
+      custom_message: Some(
+        "oden capsec Rev2 filesystem guard refused the operation".to_string(),
+      ),
+      state: deno_permissions::PermissionState::Denied,
+    },
+  ))
+  .into_box()
+}
+
+fn resolve_rev2_filesystem_context(
+  state: &OpState,
+  path: &Path,
+  api_name: &'static str,
+) -> Result<
+  Option<std::sync::Arc<deno_permissions::OdenRev2RuntimeAuthorityContext>>,
+  FsOpsError,
+> {
+  let state_mode = state
+    .try_borrow::<deno_permissions::OdenRev2ProcessMode>()
+    .copied();
+  let state_context = state
+    .try_borrow::<std::sync::Arc<
+      deno_permissions::OdenRev2RuntimeAuthorityContext,
+    >>()
+    .cloned();
+  deno_permissions::oden_capsec_rev2_resolve_op_state_context(
+    state_mode,
+    state_context,
+  )
+  .map_err(|reason| rev2_filesystem_refusal(reason, path, api_name))
+}
+
+fn map_rev2_filesystem_result<T>(
+  result: Result<T, deno_permissions::OdenRev2FilesystemError>,
+  operation: &'static str,
+  path: &Path,
+  api_name: &'static str,
+) -> Result<T, FsOpsError> {
+  match result {
+    Ok(value) => Ok(value),
+    Err(deno_permissions::OdenRev2FilesystemError::Io(error)) => {
+      let path = PathWithRequested::only_path(Cow::Borrowed(path));
+      Err::<T, FsError>(FsError::Io(error)).context_path(operation, path)
+    }
+    Err(deno_permissions::OdenRev2FilesystemError::Refused(reason)) => {
+      Err(rev2_filesystem_refusal(reason, path, api_name))
+    }
+  }
+}
+
 #[derive(Debug)]
 struct ReadDirResource(FsReadDirRc);
 
@@ -291,6 +350,47 @@ pub fn op_fs_mkdir_sync(
   mode: Option<u32>,
 ) -> Result<(), FsOpsError> {
   let mode = mode.unwrap_or(0o777) & 0o777;
+
+  let requested_path = Path::new(path);
+  if let Some(context) =
+    resolve_rev2_filesystem_context(state, requested_path, "Deno.mkdirSync()")?
+  {
+    if !state
+      .borrow::<FileSystemRc>()
+      .oden_capsec_rev2_host_path_backend()
+    {
+      return Err(rev2_filesystem_refusal(
+        "backend",
+        requested_path,
+        "Deno.mkdirSync()",
+      ));
+    }
+    let delivery = map_rev2_filesystem_result(
+      deno_permissions::oden_capsec_rev2_mkdir_sync(
+        &context,
+        requested_path,
+        recursive,
+        mode,
+      ),
+      "mkdir",
+      requested_path,
+      "Deno.mkdirSync()",
+    )?;
+    let result = if delivery.already_exists() {
+      map_rev2_filesystem_result(
+        Err(deno_permissions::OdenRev2FilesystemError::Io(
+          io::Error::from_raw_os_error(libc::EEXIST),
+        )),
+        "mkdir",
+        requested_path,
+        "Deno.mkdirSync()",
+      )
+    } else {
+      Ok(())
+    };
+    delivery.finish();
+    return result;
+  }
 
   let path = state
     .borrow_mut::<deno_permissions::PermissionsContainer>()
@@ -680,6 +780,45 @@ pub fn op_fs_lstat_sync(
   #[string] path: &str,
   #[buffer] stat_out_buf: &mut [u32],
 ) -> Result<(), FsOpsError> {
+  let requested_path = Path::new(path);
+  if let Some(context) =
+    resolve_rev2_filesystem_context(state, requested_path, "Deno.lstatSync()")?
+  {
+    if !state
+      .borrow::<FileSystemRc>()
+      .oden_capsec_rev2_host_path_backend()
+    {
+      return Err(rev2_filesystem_refusal(
+        "backend",
+        requested_path,
+        "Deno.lstatSync()",
+      ));
+    }
+    let delivery = map_rev2_filesystem_result(
+      deno_permissions::oden_capsec_rev2_lstat_sync(&context, requested_path),
+      "lstat",
+      requested_path,
+      "Deno.lstatSync()",
+    )?;
+    let result = if let Some(metadata) = delivery.metadata() {
+      SerializableStat::from(FsStat::from_std(metadata.clone()))
+        .write(stat_out_buf);
+      Ok(())
+    } else {
+      debug_assert!(delivery.is_not_found());
+      map_rev2_filesystem_result(
+        Err(deno_permissions::OdenRev2FilesystemError::Io(
+          io::Error::from_raw_os_error(libc::ENOENT),
+        )),
+        "lstat",
+        requested_path,
+        "Deno.lstatSync()",
+      )
+    };
+    delivery.finish();
+    return result;
+  }
+
   let path = state
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(

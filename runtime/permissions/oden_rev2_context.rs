@@ -13,6 +13,14 @@
   reason = "the sealed C04 context precedes its later bootstrap and operation-adapter consumers"
 )]
 
+mod fs_runtime;
+
+pub use fs_runtime::OdenRev2FilesystemError;
+pub use fs_runtime::OdenRev2LstatDelivery;
+pub use fs_runtime::OdenRev2MkdirDelivery;
+pub use fs_runtime::oden_capsec_rev2_lstat_sync;
+pub use fs_runtime::oden_capsec_rev2_mkdir_sync;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
@@ -549,22 +557,22 @@ impl OdenRev2NamespaceGateState {
 /// authorization. There is no constructor outside this module and the token is
 /// deliberately not cloneable.
 #[derive(Debug)]
-struct OdenRev2NamespaceGateToken {
+pub(crate) struct OdenRev2NamespaceGateToken {
   sequence: u64,
   identity: RuntimeIdentityBinding,
   generations: RuntimeGenerationVector,
 }
 
 impl OdenRev2NamespaceGateToken {
-  fn sequence(&self) -> u64 {
+  pub(crate) fn sequence(&self) -> u64 {
     self.sequence
   }
 
-  fn identity(&self) -> &RuntimeIdentityBinding {
+  pub(crate) fn identity(&self) -> &RuntimeIdentityBinding {
     &self.identity
   }
 
-  fn generations(&self) -> RuntimeGenerationVector {
+  pub(crate) fn generations(&self) -> RuntimeGenerationVector {
     self.generations
   }
 }
@@ -854,6 +862,23 @@ impl OdenRev2RuntimeAuthorityContext {
     facts: OdenRev2OperationAuthorityFacts,
   ) -> Result<DecisionPolicyInput, String> {
     self.decision_policy_for_view(view, facts, true)
+  }
+
+  /// Project policy from the publication already pinned by this context's
+  /// namespace guard. Re-entering `RuntimeAuthorityState` while that guard is
+  /// held would violate the one admitted namespace/authority lock order.
+  fn decision_policy_for_namespace_operation(
+    &self,
+    guard: &OdenRev2NamespaceOperationGuard<'_>,
+    facts: OdenRev2OperationAuthorityFacts,
+  ) -> Result<DecisionPolicyInput, String> {
+    if !guard.belongs_to(self)
+      || guard.gate_token.identity() != &self.identity
+      || guard.gate_token.generations() != guard.stable_view.generations()
+    {
+      return Err(format!("{NAMESPACE_ERROR}-CONTEXT-MISMATCH"));
+    }
+    self.decision_policy_for_view(&guard.stable_view, facts, false)
   }
 
   /// Project a policy from the immutable proposed view supplied by
