@@ -15,6 +15,7 @@ use std::path::Path;
 
 use super::OdenRev2NamespaceOperationGuard;
 use super::OdenRev2RuntimeAuthorityContext;
+use crate::oden_rev2_runtime::OdenRev2HostFilesystemCompletion;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OdenRev2FilesystemError {
@@ -29,13 +30,105 @@ enum LstatDeliveryValue {
   NotFound,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OdenRev2FilesystemActorSequenceFaultForTest {
+  SubstituteRequest,
+  SkipObservation,
+  SkipPostPrepareRevalidation,
+  SkipNativeCommit,
+  MismatchedNativeCommitWitness,
+  PanicAfterMutationBegin,
+  CompleteAfterNotCommitted,
+  RepeatNativeCommit,
+}
+
+#[cfg(test)]
+thread_local! {
+  static ODEN_REV2_FILESYSTEM_ACTOR_SEQUENCE_FAULT_FOR_TEST: std::cell::Cell<Option<OdenRev2FilesystemActorSequenceFaultForTest>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn set_actor_sequence_fault_for_test(
+  fault: Option<OdenRev2FilesystemActorSequenceFaultForTest>,
+) {
+  ODEN_REV2_FILESYSTEM_ACTOR_SEQUENCE_FAULT_FOR_TEST
+    .with(|current| current.set(fault));
+}
+
+#[cfg(test)]
+fn take_actor_sequence_fault_for_test()
+-> Option<OdenRev2FilesystemActorSequenceFaultForTest> {
+  ODEN_REV2_FILESYSTEM_ACTOR_SEQUENCE_FAULT_FOR_TEST
+    .with(|current| current.take())
+}
+
+pub(crate) struct OdenRev2FilesystemDeliveryWitness {
+  _private: (),
+}
+
+impl OdenRev2FilesystemDeliveryWitness {
+  fn new() -> Self {
+    Self { _private: () }
+  }
+}
+
+pub(crate) struct OdenRev2FilesystemNativeCommitWitness<'guard> {
+  gate_token: &'guard super::OdenRev2NamespaceGateToken,
+  _not_send_sync: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl<'guard> OdenRev2FilesystemNativeCommitWitness<'guard> {
+  fn new(gate_token: &'guard super::OdenRev2NamespaceGateToken) -> Self {
+    Self {
+      gate_token,
+      _not_send_sync: std::marker::PhantomData,
+    }
+  }
+
+  pub(crate) fn gate_token(&self) -> &super::OdenRev2NamespaceGateToken {
+    self.gate_token
+  }
+}
+
+/// @ref LLP 0019#filesystem-actor-resource-ownership-checkpoint-eng-24019
+/// [implements] -- Filesystem resources close before authority publication and
+/// the namespace gate are released.
+struct OdenRev2FilesystemDeliveryLease<'context> {
+  resources: Option<OdenRev2HostFilesystemCompletion>,
+  guard: Option<OdenRev2NamespaceOperationGuard<'context>>,
+}
+
+impl<'context> OdenRev2FilesystemDeliveryLease<'context> {
+  fn new(
+    resources: OdenRev2HostFilesystemCompletion,
+    guard: OdenRev2NamespaceOperationGuard<'context>,
+  ) -> Self {
+    Self {
+      resources: Some(resources),
+      guard: Some(guard),
+    }
+  }
+}
+
+impl Drop for OdenRev2FilesystemDeliveryLease<'_> {
+  fn drop(&mut self) {
+    // Close every operation-local descriptor while authority publication and
+    // the process-global namespace gate are still pinned.
+    debug_assert!(super::namespace_gate_held_on_current_thread());
+    drop(self.resources.take());
+    debug_assert!(super::namespace_gate_held_on_current_thread());
+    drop(self.guard.take());
+  }
+}
+
 /// Opaque result whose lifetime keeps the namespace gate and authority
 /// publication pinned through the extension's stat serialization or ENOENT
 /// construction. Call `finish` only at the synchronous op return boundary.
 #[must_use = "the Rev2 delivery token must be finished at the op return boundary"]
 pub struct OdenRev2LstatDelivery<'context> {
   value: LstatDeliveryValue,
-  _guard: OdenRev2NamespaceOperationGuard<'context>,
+  _lease: OdenRev2FilesystemDeliveryLease<'context>,
 }
 
 impl OdenRev2LstatDelivery<'_> {
@@ -58,7 +151,7 @@ impl OdenRev2LstatDelivery<'_> {
 #[must_use = "the Rev2 delivery token must be finished at the op return boundary"]
 pub struct OdenRev2MkdirDelivery<'context> {
   already_exists: bool,
-  _guard: OdenRev2NamespaceOperationGuard<'context>,
+  _lease: OdenRev2FilesystemDeliveryLease<'context>,
 }
 
 impl OdenRev2MkdirDelivery<'_> {
@@ -125,7 +218,6 @@ pub fn oden_capsec_rev2_mkdir_sync<'context>(
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod supported {
-  use std::collections::BTreeMap;
   use std::collections::BTreeSet;
   use std::path::Component;
   use std::path::Path;
@@ -148,6 +240,9 @@ mod supported {
   use crate::oden_rev2_authority::AuthorityRowKind;
   use crate::oden_rev2_context::OdenRev2NamespaceOperationGuard;
   use crate::oden_rev2_context::OdenRev2OperationAuthorityFacts;
+  use crate::oden_rev2_fs::OdenRev2FsActorInventory;
+  use crate::oden_rev2_fs::OdenRev2FsActorSourceClass;
+  use crate::oden_rev2_fs::OdenRev2FsActorSourceEvidence;
   use crate::oden_rev2_fs::OdenRev2FsAuthenticatedRoot;
   use crate::oden_rev2_fs::OdenRev2FsCheckedPath;
   use crate::oden_rev2_fs::OdenRev2FsCheckedTargetKind;
@@ -157,7 +252,6 @@ mod supported {
   use crate::oden_rev2_fs::OdenRev2FsMkdirCommitOutcome;
   use crate::oden_rev2_fs::OdenRev2FsOperationSession;
   use crate::oden_rev2_fs::OdenRev2FsPlatformIdentity;
-  use crate::oden_rev2_fs::OdenRev2FsProposedKind;
   use crate::oden_rev2_fs::OdenRev2FsResolutionStep;
   use crate::oden_rev2_permission::StaticPathRoot;
   use crate::oden_rev2_permission::StaticPathSourceClass;
@@ -167,9 +261,10 @@ mod supported {
   use crate::oden_rev2_permission::relative_platform_path;
   use crate::oden_rev2_permission::select_primary_path_root;
   use crate::oden_rev2_protocol::VerifiedPermissionActorSet;
-  use crate::oden_rev2_runtime::OdenRev2HostActor;
+  use crate::oden_rev2_runtime::OdenRev2FilesystemHostActor;
   use crate::oden_rev2_runtime::OdenRev2HostAuthorization;
   use crate::oden_rev2_runtime::OdenRev2HostCommit;
+  use crate::oden_rev2_runtime::OdenRev2HostFilesystemCompletion;
   use crate::oden_rev2_runtime::OdenRev2HostInteraction;
   use crate::rev2::EffectInput;
   use crate::rev2::EngineIdentity;
@@ -182,13 +277,7 @@ mod supported {
   use crate::rev2::domain_digest;
 
   struct SourceEvidence {
-    // These typed checked objects own their retained descriptors directly and
-    // are synchronously revalidated before actor commit. They are deliberately
-    // not callback-backed HostActor provisional resources: callbacks are
-    // forbidden while the namespace gate is held. Backend cells remain
-    // unsupported until that generic inventory contract is resolved.
-    bindings: Vec<PathBindingInput>,
-    checked: Vec<OdenRev2FsCheckedPath>,
+    entries: Vec<OdenRev2FsActorSourceEvidence>,
   }
 
   struct OperationIds {
@@ -199,7 +288,7 @@ mod supported {
   }
 
   struct AuthorizedOperation {
-    actor: OdenRev2HostActor,
+    actor: OdenRev2FilesystemHostActor,
     actor_digest: String,
   }
 
@@ -228,6 +317,19 @@ mod supported {
       if let Some(namespace) = self.guard.namespace.as_mut() {
         namespace.fail_closed = false;
       }
+    }
+
+    fn native_commit_witness(
+      &self,
+    ) -> super::OdenRev2FilesystemNativeCommitWitness<'_> {
+      super::OdenRev2FilesystemNativeCommitWitness::new(&self.guard.gate_token)
+    }
+  }
+
+  impl Drop for NamespaceMutation<'_, '_> {
+    fn drop(&mut self) {
+      // An unresolved token deliberately leaves `fail_closed` set. The
+      // explicit Drop type makes that lifetime boundary part of the API.
     }
   }
 
@@ -387,8 +489,7 @@ mod supported {
     occurrence_root_binding_id: &str,
     session: &OdenRev2FsOperationSession,
   ) -> Result<SourceEvidence, OdenRev2FilesystemError> {
-    let mut bindings = Vec::with_capacity(roots.len());
-    let mut checked = Vec::with_capacity(roots.len());
+    let mut entries = Vec::with_capacity(roots.len());
     for source in roots {
       if source
         .row
@@ -422,46 +523,28 @@ mod supported {
         continue;
       };
       let source_checked = resolve_checked(source, session, &relative)?;
-      bindings.push(path_binding(
-        source.binding.source_id(),
-        occurrence_root_binding_id,
-        &source_checked,
+      let class = match source.class {
+        StaticPathSourceClass::Negative => OdenRev2FsActorSourceClass::Negative,
+        StaticPathSourceClass::Floor => OdenRev2FsActorSourceClass::Floor,
+        StaticPathSourceClass::Ceiling => OdenRev2FsActorSourceClass::Ceiling,
+      };
+      entries.push(OdenRev2FsActorSourceEvidence::new(
+        path_binding(
+          source.binding.source_id(),
+          occurrence_root_binding_id,
+          &source_checked,
+        ),
+        source_checked,
+        class,
+        crate::rev2::AuthoritySelectorInput {
+          identity: EngineIdentity::embedded(),
+          principal: source.row.selector().principal.clone(),
+          capability: source.row.selector().capability.clone(),
+          resource: source.row.selector().resource.clone(),
+        },
       ));
-      checked.push(source_checked);
     }
-    Ok(SourceEvidence { bindings, checked })
-  }
-
-  fn merge_bindings(
-    evidence: &[&SourceEvidence],
-  ) -> Result<Vec<PathBindingInput>, OdenRev2FilesystemError> {
-    let mut merged = BTreeMap::<(String, String), PathBindingInput>::new();
-    for binding in evidence
-      .iter()
-      .flat_map(|evidence| evidence.bindings.iter())
-    {
-      let key = (binding.source_id.clone(), binding.root_binding_id.clone());
-      if merged
-        .insert(key, binding.clone())
-        .is_some_and(|prior| prior != *binding)
-      {
-        return Err(refused("AMBIGUOUS-PATH-SOURCE"));
-      }
-    }
-    Ok(merged.into_values().collect())
-  }
-
-  fn revalidate_sources(
-    evidence: &[&SourceEvidence],
-    session: &OdenRev2FsOperationSession,
-  ) -> Result<(), OdenRev2FilesystemError> {
-    for checked in evidence.iter().flat_map(|evidence| evidence.checked.iter())
-    {
-      checked
-        .revalidate_binding(session)
-        .map_err(|_| refused("SOURCE-RACE"))?;
-    }
-    Ok(())
+    Ok(SourceEvidence { entries })
   }
 
   fn final_state(
@@ -599,6 +682,7 @@ mod supported {
     ids: &OperationIds,
     request: &StageRequest,
     path_bindings: Vec<PathBindingInput>,
+    filesystem_inventory: OdenRev2FsActorInventory,
   ) -> Result<
     (AuthorizedOperation, crate::rev2::DecisionPolicyInput),
     OdenRev2FilesystemError,
@@ -613,7 +697,7 @@ mod supported {
         .with_path_bindings(path_bindings),
       )
       .map_err(|_| refused("POLICY-PROJECTION"))?;
-    let mut actor = OdenRev2HostActor::capture_host(
+    let mut actor = OdenRev2FilesystemHostActor::capture_host(
       ids.operation_id.clone(),
       ids.actor_id.clone(),
       actors.constrained_principals().to_vec(),
@@ -623,8 +707,8 @@ mod supported {
       // existing native-actor sentinel; authority generations remain bound in
       // the pinned policy and filesystem operation session.
       "0",
-      None,
       &policy,
+      filesystem_inventory,
     )
     .map_err(|_| refused("OPERATION-ACTOR"))?;
     let authorization = actor
@@ -683,13 +767,10 @@ mod supported {
 
   fn complete_actor(
     operation: AuthorizedOperation,
-  ) -> Result<(), OdenRev2FilesystemError> {
+  ) -> Result<OdenRev2HostFilesystemCompletion, OdenRev2FilesystemError> {
     operation
       .actor
-      .complete()
-      .map(|resources| {
-        debug_assert!(resources.is_empty());
-      })
+      .complete(&super::OdenRev2FilesystemDeliveryWitness::new())
       .map_err(|_| refused("ACTOR-COMPLETE"))
   }
 
@@ -726,6 +807,7 @@ mod supported {
     let checked = resolve_checked(primary, &session, &relative)?;
     let evidence =
       source_evidence(&roots, path, occurrence_root_binding_id, &session)?;
+    let target_kind = checked.target_kind();
     let occurrence = occurrence(
       &checked,
       occurrence_root_binding_id,
@@ -744,27 +826,74 @@ mod supported {
         occurrence,
       )],
     };
-    let bindings = merge_bindings(&[&evidence])?;
-    let (mut operation, policy) =
-      authorize(context, &guard, &actors, &ids, &request, bindings)?;
-    revalidate_sources(&[&evidence], &session)?;
-    checked
-      .revalidate_binding(&session)
+    #[cfg(test)]
+    let actor_sequence_fault = super::take_actor_sequence_fault_for_test();
+    let filesystem_inventory = OdenRev2FsActorInventory::seal(
+      ids.operation_id.clone(),
+      &request,
+      &session,
+      checked,
+      evidence.entries,
+    )
+    .map_err(|_| refused("PROVISIONAL-INVENTORY"))?;
+    let bindings = filesystem_inventory.path_bindings().to_vec();
+    #[cfg(test)]
+    let request_for_authorization = {
+      let mut candidate = request.clone();
+      if actor_sequence_fault
+        == Some(
+          super::OdenRev2FilesystemActorSequenceFaultForTest::SubstituteRequest,
+        )
+      {
+        candidate.stage_id.push_str(":substituted");
+      }
+      candidate
+    };
+    #[cfg(test)]
+    let request_for_authorization = &request_for_authorization;
+    #[cfg(not(test))]
+    let request_for_authorization = &request;
+    let (mut operation, policy) = authorize(
+      context,
+      &guard,
+      &actors,
+      &ids,
+      request_for_authorization,
+      bindings,
+      filesystem_inventory,
+    )?;
+    operation
+      .actor
+      .revalidate_sources(&session)
+      .map_err(|_| refused("SOURCE-RACE"))?;
+    operation
+      .actor
+      .revalidate_target(&session)
       .map_err(|_| refused("TARGET-RACE"))?;
-    let target_kind = checked.target_kind();
+    #[cfg(test)]
+    if actor_sequence_fault
+      == Some(
+        super::OdenRev2FilesystemActorSequenceFaultForTest::SkipObservation,
+      )
+    {
+      commit_actor(&mut operation, &policy, &ids.stage_id)?;
+      return Err(refused("TEST-SEQUENCE-FAULT-SURVIVED"));
+    }
     let value = match target_kind {
       OdenRev2FsCheckedTargetKind::Existing
       | OdenRev2FsCheckedTargetKind::NoFollowLink => {
         LstatDeliveryValue::Metadata(
-          checked
-            .consume_for_metadata(&session)
+          operation
+            .actor
+            .observe_metadata(&session)
             .map_err(|_| refused("TARGET-RACE"))?
             .into_metadata(),
         )
       }
       OdenRev2FsCheckedTargetKind::Missing => {
-        checked
-          .consume_missing(&session)
+        operation
+          .actor
+          .observe_missing(&session)
           .map_err(|_| refused("TARGET-RACE"))?;
         LstatDeliveryValue::NotFound
       }
@@ -773,10 +902,13 @@ mod supported {
       }
     };
     commit_actor(&mut operation, &policy, &ids.stage_id)?;
-    complete_actor(operation)?;
+    let filesystem_completion = complete_actor(operation)?;
     Ok(OdenRev2LstatDelivery {
       value,
-      _guard: guard,
+      _lease: super::OdenRev2FilesystemDeliveryLease::new(
+        filesystem_completion,
+        guard,
+      ),
     })
   }
 
@@ -848,6 +980,7 @@ mod supported {
     }
     let occurrence_root_binding_id = write_primary.binding.binding_id();
     let checked = resolve_checked(write_primary, &session, &write_relative)?;
+    let target_kind = checked.target_kind();
     let list_evidence =
       source_evidence(&list_roots, path, occurrence_root_binding_id, &session)?;
     let write_evidence = source_evidence(
@@ -889,45 +1022,144 @@ mod supported {
         ),
       ],
     };
-    let bindings = merge_bindings(&[&list_evidence, &write_evidence])?;
-    let (mut operation, policy) =
-      authorize(context, &guard, &actors, &ids, &request, bindings)?;
-    revalidate_sources(&[&list_evidence, &write_evidence], &session)?;
-    checked
-      .revalidate_binding(&session)
+    #[cfg(test)]
+    let actor_sequence_fault = super::take_actor_sequence_fault_for_test();
+    let mut source_evidence = list_evidence.entries;
+    source_evidence.extend(write_evidence.entries);
+    let filesystem_inventory = OdenRev2FsActorInventory::seal(
+      ids.operation_id.clone(),
+      &request,
+      &session,
+      checked,
+      source_evidence,
+    )
+    .map_err(|_| refused("PROVISIONAL-INVENTORY"))?;
+    let bindings = filesystem_inventory.path_bindings().to_vec();
+    let (mut operation, policy) = authorize(
+      context,
+      &guard,
+      &actors,
+      &ids,
+      &request,
+      bindings,
+      filesystem_inventory,
+    )?;
+    operation
+      .actor
+      .revalidate_sources(&session)
+      .map_err(|_| refused("SOURCE-RACE"))?;
+    operation
+      .actor
+      .revalidate_target(&session)
       .map_err(|_| refused("TARGET-RACE"))?;
-    match checked.target_kind() {
+    match target_kind {
       OdenRev2FsCheckedTargetKind::Existing
       | OdenRev2FsCheckedTargetKind::NoFollowLink => {
         commit_actor(&mut operation, &policy, &ids.stage_id)?;
-        complete_actor(operation)?;
+        let filesystem_completion = complete_actor(operation)?;
         Ok(OdenRev2MkdirDelivery {
           already_exists: true,
-          _guard: guard,
+          _lease: super::OdenRev2FilesystemDeliveryLease::new(
+            filesystem_completion,
+            guard,
+          ),
         })
       }
       OdenRev2FsCheckedTargetKind::Missing => {
-        let proposed = checked
-          .propose_child(&session, OdenRev2FsProposedKind::Directory)
-          .map_err(|_| refused("TARGET-RACE"))?;
-        let prepared = proposed
+        operation
+          .actor
           .prepare_mkdir(&session)
           .map_err(|_| refused("TARGET-RACE"))?;
-        prepared
-          .revalidate_before_commit(&session)
-          .map_err(|_| refused("TARGET-RACE"))?;
+        #[cfg(test)]
+        let skip_post_prepare_revalidation = actor_sequence_fault
+          == Some(
+            super::OdenRev2FilesystemActorSequenceFaultForTest::SkipPostPrepareRevalidation,
+          );
+        #[cfg(not(test))]
+        let skip_post_prepare_revalidation = false;
+        if !skip_post_prepare_revalidation {
+          operation
+            .actor
+            .revalidate_target(&session)
+            .map_err(|_| refused("TARGET-RACE"))?;
+        }
         commit_actor(&mut operation, &policy, &ids.stage_id)?;
+        #[cfg(test)]
+        if actor_sequence_fault
+          == Some(
+            super::OdenRev2FilesystemActorSequenceFaultForTest::SkipNativeCommit,
+          )
+        {
+          complete_actor(operation)?;
+          return Err(refused("TEST-SEQUENCE-FAULT-SURVIVED"));
+        }
         let mutation = NamespaceMutation::begin(&mut guard)?;
-        match prepared.commit(&session, mode) {
+        #[cfg(test)]
+        if actor_sequence_fault
+          == Some(
+            super::OdenRev2FilesystemActorSequenceFaultForTest::PanicAfterMutationBegin,
+          )
+        {
+          panic!("injected panic after namespace mutation begin");
+        }
+        #[cfg(test)]
+        let mismatched_gate_token = (actor_sequence_fault
+          == Some(
+            super::OdenRev2FilesystemActorSequenceFaultForTest::MismatchedNativeCommitWitness,
+          ))
+        .then(|| mutation.guard.gate_token.mismatched_for_test());
+        #[cfg(test)]
+        let native_commit_witness = mismatched_gate_token
+          .as_ref()
+          .map(super::OdenRev2FilesystemNativeCommitWitness::new)
+          .unwrap_or_else(|| mutation.native_commit_witness());
+        #[cfg(not(test))]
+        let native_commit_witness = mutation.native_commit_witness();
+        let outcome = operation
+          .actor
+          .commit_mkdir(&session, mode, &native_commit_witness)
+          .map_err(|_| refused("PROVISIONAL-INVENTORY"))?;
+        match outcome {
           OdenRev2FsMkdirCommitOutcome::Committed => {
-            complete_actor(operation)?;
+            #[cfg(test)]
+            if actor_sequence_fault
+              == Some(
+                super::OdenRev2FilesystemActorSequenceFaultForTest::RepeatNativeCommit,
+              )
+            {
+              let repeated = operation.actor.commit_mkdir(
+                &session,
+                mode,
+                &native_commit_witness,
+              );
+              mutation.resolve();
+              if repeated.is_err() {
+                return Err(refused("PROVISIONAL-INVENTORY"));
+              }
+              return Err(refused("TEST-SEQUENCE-FAULT-SURVIVED"));
+            }
+            let filesystem_completion = complete_actor(operation)?;
             mutation.resolve();
             Ok(OdenRev2MkdirDelivery {
               already_exists: false,
-              _guard: guard,
+              _lease: super::OdenRev2FilesystemDeliveryLease::new(
+                filesystem_completion,
+                guard,
+              ),
             })
           }
           OdenRev2FsMkdirCommitOutcome::NotCommitted(_) => {
+            #[cfg(test)]
+            if actor_sequence_fault
+              == Some(
+                super::OdenRev2FilesystemActorSequenceFaultForTest::CompleteAfterNotCommitted,
+              )
+            {
+              let completion = complete_actor(operation);
+              mutation.resolve();
+              completion?;
+              return Err(refused("TEST-SEQUENCE-FAULT-SURVIVED"));
+            }
             let _ = operation.actor.cancel();
             mutation.resolve();
             Err(refused("TARGET-RACE"))
@@ -964,6 +1196,7 @@ mod tests {
   use super::*;
   use crate::oden_rev2_fs::OdenRev2FsMkdirCommitFaultForTest;
   use crate::oden_rev2_fs::oden_rev2_fs_set_mkdir_commit_fault_for_test;
+  use crate::oden_rev2_fs::oden_rev2_fs_take_last_released_handles_for_test;
   use crate::oden_rev2_policy::tests as policy_fixtures;
   use crate::rev2::AuthoritySelectorInput;
   use crate::rev2::EngineIdentity;
@@ -1014,6 +1247,7 @@ mod tests {
     fn drop(&mut self) {
       crate::oden_rev2_set_permission_actors_for_test(None);
       oden_rev2_fs_set_mkdir_commit_fault_for_test(None);
+      set_actor_sequence_fault_for_test(None);
     }
   }
 
@@ -1295,6 +1529,7 @@ mod tests {
     std::fs::write(root.0.join("data/public"), b"public").unwrap();
     let context = context_with_exact_list_deny(&root.0);
     let _actors = ActorCapture::install(principal());
+    let _ = oden_rev2_fs_take_last_released_handles_for_test();
 
     assert!(
       refusal(
@@ -1303,8 +1538,46 @@ mod tests {
       )
       .contains("AUTHORIZATION")
     );
+    let released = oden_rev2_fs_take_last_released_handles_for_test();
+    assert!(!released.is_empty());
+    assert!(released.iter().all(|handle| handle.upgrade().is_none()));
     assert!(
       oden_capsec_rev2_lstat_sync(&context, &root.0.join("data/public"))
+        .unwrap()
+        .is_file()
+    );
+  }
+
+  #[test]
+  fn actor_request_and_observation_steps_cannot_be_substituted_or_skipped() {
+    let root = TempRoot::new("actor-sequence-lstat");
+    std::fs::write(root.0.join("data/file"), b"data").unwrap();
+    let context = context(&root.0, true, false);
+    let _actors = ActorCapture::install(principal());
+
+    for (fault, expected) in [
+      (
+        OdenRev2FilesystemActorSequenceFaultForTest::SubstituteRequest,
+        "AUTHORIZATION",
+      ),
+      (
+        OdenRev2FilesystemActorSequenceFaultForTest::SkipObservation,
+        "ACTOR-COMMIT",
+      ),
+    ] {
+      let _ = oden_rev2_fs_take_last_released_handles_for_test();
+      set_actor_sequence_fault_for_test(Some(fault));
+      let error =
+        oden_capsec_rev2_lstat_sync(&context, &root.0.join("data/file"))
+          .unwrap_err();
+      assert!(refusal(error).contains(expected));
+      let released = oden_rev2_fs_take_last_released_handles_for_test();
+      assert!(!released.is_empty());
+      assert!(released.iter().all(|handle| handle.upgrade().is_none()));
+    }
+
+    assert!(
+      oden_capsec_rev2_lstat_sync(&context, &root.0.join("data/file"))
         .unwrap()
         .is_file()
     );
@@ -1321,13 +1594,65 @@ mod tests {
       super::oden_capsec_rev2_lstat_sync(&context, &root.0.join("data/file"))
         .unwrap();
     assert!(delivery.metadata().unwrap().is_file());
+    let provisional_handles = delivery
+      ._lease
+      .resources
+      .as_ref()
+      .unwrap()
+      .provisional_weak_handles();
+    assert!(!provisional_handles.is_empty());
+    assert!(
+      provisional_handles
+        .iter()
+        .all(|handle| handle.upgrade().is_some())
+    );
     assert!(context.begin_namespace_operation().is_err());
     delivery.finish();
+    assert!(
+      provisional_handles
+        .iter()
+        .all(|handle| handle.upgrade().is_none())
+    );
     assert!(
       oden_capsec_rev2_lstat_sync(&context, &root.0.join("data/file"))
         .unwrap()
         .is_file()
     );
+  }
+
+  #[test]
+  fn mkdir_delivery_retains_prepared_inventory_until_finish() {
+    let root = TempRoot::new("mkdir-delivery-pin");
+    let context = context(&root.0, true, true);
+    let _actors = ActorCapture::install(principal());
+    let destination = root.0.join("data/created");
+
+    let delivery =
+      super::oden_capsec_rev2_mkdir_sync(&context, &destination, false, 0o700)
+        .unwrap();
+    assert!(!delivery.already_exists());
+    assert!(destination.is_dir());
+    let provisional_handles = delivery
+      ._lease
+      .resources
+      .as_ref()
+      .unwrap()
+      .provisional_weak_handles();
+    assert!(!provisional_handles.is_empty());
+    assert!(
+      provisional_handles
+        .iter()
+        .all(|handle| handle.upgrade().is_some())
+    );
+    assert!(context.begin_namespace_operation().is_err());
+
+    delivery.finish();
+    assert!(
+      provisional_handles
+        .iter()
+        .all(|handle| handle.upgrade().is_none())
+    );
+    assert!(context.begin_namespace_operation().is_ok());
   }
 
   #[test]
@@ -1405,6 +1730,7 @@ mod tests {
     let context = context(&root.0, true, true);
     let _actors = ActorCapture::install(principal());
     let destination = root.0.join("data/raced");
+    let _ = oden_rev2_fs_take_last_released_handles_for_test();
     oden_rev2_fs_set_mkdir_commit_fault_for_test(Some(
       OdenRev2FsMkdirCommitFaultForTest::RaceExisting,
     ));
@@ -1412,9 +1738,99 @@ mod tests {
       oden_capsec_rev2_mkdir_sync(&context, &destination, false, 0o700)
         .unwrap_err();
     assert!(refusal(error).contains("TARGET-RACE"));
+    let released = oden_rev2_fs_take_last_released_handles_for_test();
+    assert!(!released.is_empty());
+    assert!(released.iter().all(|handle| handle.upgrade().is_none()));
     assert!(destination.is_dir());
     assert!(
       oden_capsec_rev2_lstat_sync(&context, &destination)
+        .unwrap()
+        .is_dir()
+    );
+  }
+
+  #[test]
+  fn mkdir_cannot_complete_before_or_after_a_failed_native_commit() {
+    let root = TempRoot::new("actor-sequence-mkdir");
+    let context = context(&root.0, true, true);
+    let _actors = ActorCapture::install(principal());
+
+    let postcheck_skipped = root.0.join("data/postcheck-skipped");
+    let _ = oden_rev2_fs_take_last_released_handles_for_test();
+    set_actor_sequence_fault_for_test(Some(
+      OdenRev2FilesystemActorSequenceFaultForTest::SkipPostPrepareRevalidation,
+    ));
+    let error =
+      oden_capsec_rev2_mkdir_sync(&context, &postcheck_skipped, false, 0o700)
+        .unwrap_err();
+    assert!(refusal(error).contains("ACTOR-COMMIT"));
+    assert!(!postcheck_skipped.exists());
+    let released = oden_rev2_fs_take_last_released_handles_for_test();
+    assert!(!released.is_empty());
+    assert!(released.iter().all(|handle| handle.upgrade().is_none()));
+
+    let mismatched_witness = root.0.join("data/mismatched-witness");
+    let _ = oden_rev2_fs_take_last_released_handles_for_test();
+    set_actor_sequence_fault_for_test(Some(
+      OdenRev2FilesystemActorSequenceFaultForTest::MismatchedNativeCommitWitness,
+    ));
+    let error =
+      oden_capsec_rev2_mkdir_sync(&context, &mismatched_witness, false, 0o700)
+        .unwrap_err();
+    assert!(refusal(error).contains("TARGET-RACE"));
+    assert!(!mismatched_witness.exists());
+    let released = oden_rev2_fs_take_last_released_handles_for_test();
+    assert!(!released.is_empty());
+    assert!(released.iter().all(|handle| handle.upgrade().is_none()));
+
+    let skipped = root.0.join("data/skipped");
+    let _ = oden_rev2_fs_take_last_released_handles_for_test();
+    set_actor_sequence_fault_for_test(Some(
+      OdenRev2FilesystemActorSequenceFaultForTest::SkipNativeCommit,
+    ));
+    let error = oden_capsec_rev2_mkdir_sync(&context, &skipped, false, 0o700)
+      .unwrap_err();
+    assert!(refusal(error).contains("ACTOR-COMPLETE"));
+    assert!(!skipped.exists());
+    let released = oden_rev2_fs_take_last_released_handles_for_test();
+    assert!(!released.is_empty());
+    assert!(released.iter().all(|handle| handle.upgrade().is_none()));
+
+    let raced = root.0.join("data/raced-completion");
+    let _ = oden_rev2_fs_take_last_released_handles_for_test();
+    oden_rev2_fs_set_mkdir_commit_fault_for_test(Some(
+      OdenRev2FsMkdirCommitFaultForTest::RaceExisting,
+    ));
+    set_actor_sequence_fault_for_test(Some(
+      OdenRev2FilesystemActorSequenceFaultForTest::CompleteAfterNotCommitted,
+    ));
+    let error =
+      oden_capsec_rev2_mkdir_sync(&context, &raced, false, 0o700).unwrap_err();
+    assert!(refusal(error).contains("ACTOR-COMPLETE"));
+    assert!(raced.is_dir());
+    let released = oden_rev2_fs_take_last_released_handles_for_test();
+    assert!(!released.is_empty());
+    assert!(released.iter().all(|handle| handle.upgrade().is_none()));
+    assert!(
+      oden_capsec_rev2_lstat_sync(&context, &raced)
+        .unwrap()
+        .is_dir()
+    );
+
+    let repeated = root.0.join("data/repeated");
+    let _ = oden_rev2_fs_take_last_released_handles_for_test();
+    set_actor_sequence_fault_for_test(Some(
+      OdenRev2FilesystemActorSequenceFaultForTest::RepeatNativeCommit,
+    ));
+    let error = oden_capsec_rev2_mkdir_sync(&context, &repeated, false, 0o700)
+      .unwrap_err();
+    assert!(refusal(error).contains("PROVISIONAL-INVENTORY"));
+    assert!(repeated.is_dir());
+    let released = oden_rev2_fs_take_last_released_handles_for_test();
+    assert!(!released.is_empty());
+    assert!(released.iter().all(|handle| handle.upgrade().is_none()));
+    assert!(
+      oden_capsec_rev2_lstat_sync(&context, &repeated)
         .unwrap()
         .is_dir()
     );
@@ -1434,6 +1850,32 @@ mod tests {
         .unwrap_err();
     assert!(refusal(error).contains("COMMIT-UNCERTAIN"));
     assert!(destination.is_dir());
+    assert!(matches!(
+      oden_capsec_rev2_lstat_sync(&context, &destination),
+      Err(OdenRev2FilesystemError::Refused(_))
+    ));
+  }
+
+  #[test]
+  fn panic_after_namespace_mutation_begin_releases_inventory_and_latches_closed()
+   {
+    let root = TempRoot::new("mkdir-mutation-panic");
+    let context = context(&root.0, true, true);
+    let _actors = ActorCapture::install(principal());
+    let destination = root.0.join("data/panic");
+    let _ = oden_rev2_fs_take_last_released_handles_for_test();
+    set_actor_sequence_fault_for_test(Some(
+      OdenRev2FilesystemActorSequenceFaultForTest::PanicAfterMutationBegin,
+    ));
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _ = oden_capsec_rev2_mkdir_sync(&context, &destination, false, 0o700);
+    }));
+    assert!(panic.is_err());
+    assert!(!destination.exists());
+    let released = oden_rev2_fs_take_last_released_handles_for_test();
+    assert!(!released.is_empty());
+    assert!(released.iter().all(|handle| handle.upgrade().is_none()));
     assert!(matches!(
       oden_capsec_rev2_lstat_sync(&context, &destination),
       Err(OdenRev2FilesystemError::Refused(_))

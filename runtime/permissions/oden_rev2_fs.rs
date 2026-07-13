@@ -31,6 +31,8 @@
   reason = "ENG-24019 lands a dormant checked-object foundation before reviewed operation wiring"
 )]
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::ffi::OsStr;
@@ -44,6 +46,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use serde_json::Value;
 use serde_json::json;
 
 #[cfg(unix)]
@@ -57,14 +60,24 @@ use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
+use crate::oden_rev2_context::OdenRev2FilesystemNativeCommitWitness;
 use crate::oden_rev2_context::OdenRev2NamespaceGateToken;
 use crate::oden_rev2_context::OdenRev2PlatformPath;
 use crate::oden_rev2_context::OdenRev2RootBinding;
+use crate::oden_rev2_permission::platform_path_value;
+use crate::oden_rev2_permission::relative_platform_path;
 use crate::oden_rev2_policy::OdenRev2RetainedObject;
+use crate::oden_rev2_runtime::OdenRev2FilesystemCommittedWitness;
+use crate::oden_rev2_runtime::OdenRev2FilesystemPendingWitness;
+use crate::rev2::DecisionPolicyInput;
+use crate::rev2::PathBindingInput;
+use crate::rev2::ProvisionalResources;
+use crate::rev2::StageRequest;
 use crate::rev2::domain_digest;
 
 const MAX_SYMLINK_TRAVERSALS: usize = 40;
 const MAX_SYMLINK_BYTES: usize = 64 * 1024;
+const MAX_ACTOR_PROVISIONAL_HANDLES: usize = 1024;
 static NEXT_HOP_CHALLENGE: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 static NEXT_OPERATION_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -79,6 +92,7 @@ pub(crate) enum OdenRev2FsMkdirCommitFaultForTest {
 #[cfg(test)]
 thread_local! {
   static ODEN_REV2_FS_MKDIR_COMMIT_FAULT_FOR_TEST: std::cell::Cell<Option<OdenRev2FsMkdirCommitFaultForTest>> = const { std::cell::Cell::new(None) };
+  static ODEN_REV2_FS_LAST_RELEASED_HANDLES_FOR_TEST: std::cell::RefCell<Vec<std::sync::Weak<File>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -86,6 +100,13 @@ pub(crate) fn oden_rev2_fs_set_mkdir_commit_fault_for_test(
   fault: Option<OdenRev2FsMkdirCommitFaultForTest>,
 ) {
   ODEN_REV2_FS_MKDIR_COMMIT_FAULT_FOR_TEST.with(|current| current.set(fault));
+}
+
+#[cfg(test)]
+pub(crate) fn oden_rev2_fs_take_last_released_handles_for_test()
+-> Vec<std::sync::Weak<File>> {
+  ODEN_REV2_FS_LAST_RELEASED_HANDLES_FOR_TEST
+    .with(|handles| std::mem::take(&mut *handles.borrow_mut()))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -293,6 +314,25 @@ impl OdenRev2FsOperationSession {
 
   pub(crate) fn fact(&self) -> &OdenRev2FsOperationSessionFact {
     &self.fact
+  }
+
+  fn matches_gate_token(
+    &self,
+    gate_token: &OdenRev2NamespaceGateToken,
+  ) -> bool {
+    if self.fact.session_id != gate_token.sequence() {
+      return false;
+    }
+    domain_digest(
+      "oden:capsec:filesystem-operation-session:2",
+      &json!({
+        "actorIdentity": self.fact.actor_identity,
+        "generations": gate_token.generations(),
+        "identity": gate_token.identity(),
+        "sessionId": gate_token.sequence().to_string(),
+      }),
+    )
+    .is_ok_and(|digest| digest == self.fact.generation_vector_token)
   }
 }
 
@@ -1289,6 +1329,14 @@ pub(crate) enum OdenRev2FsMkdirCommitOutcome {
   Uncertain(OdenRev2FsError),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OdenRev2FsMkdirCommitState {
+  NotAttempted,
+  Committed,
+  NotCommitted,
+  Uncertain,
+}
+
 /// A proposed directory creation reduced to the retained parent and one leaf.
 /// Construction performs the final checked-path validation; `commit` repeats
 /// it immediately before `mkdirat` and never accepts an absolute pathname.
@@ -1299,6 +1347,7 @@ pub(crate) struct OdenRev2FsPreparedMkdir {
   parent: OdenRev2FsVerifiedParent,
   leaf: OsString,
   retained_edges: Vec<OdenRev2FsRetainedEdge>,
+  commit_state: OdenRev2FsMkdirCommitState,
 }
 
 impl OdenRev2FsPreparedMkdir {
@@ -1320,113 +1369,137 @@ impl OdenRev2FsPreparedMkdir {
     Ok(())
   }
 
-  pub(crate) fn commit(
-    self,
+  fn commit(
+    &mut self,
     operation_session: &OdenRev2FsOperationSession,
     mode: u32,
   ) -> OdenRev2FsMkdirCommitOutcome {
-    if let Err(error) = self.revalidate_before_commit(operation_session) {
-      return OdenRev2FsMkdirCommitOutcome::NotCommitted(error);
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-      let _ = mode;
-      return OdenRev2FsMkdirCommitOutcome::NotCommitted(
-        OdenRev2FsError::UnsupportedPlatform,
+    if self.commit_state != OdenRev2FsMkdirCommitState::NotAttempted {
+      self.commit_state = OdenRev2FsMkdirCommitState::Uncertain;
+      return OdenRev2FsMkdirCommitOutcome::Uncertain(
+        OdenRev2FsError::OperationUnsupported("mkdir-commit-already-attempted"),
       );
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-      let leaf = match cstring(&self.leaf) {
-        Ok(leaf) => leaf,
-        Err(error) => {
-          return OdenRev2FsMkdirCommitOutcome::NotCommitted(
-            OdenRev2FsError::io("encode mkdir leaf", error),
-          );
+    let outcome = (|| {
+      if let Err(error) = self.revalidate_before_commit(operation_session) {
+        return OdenRev2FsMkdirCommitOutcome::NotCommitted(error);
+      }
+      #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+      {
+        let _ = mode;
+        return OdenRev2FsMkdirCommitOutcome::NotCommitted(
+          OdenRev2FsError::UnsupportedPlatform,
+        );
+      }
+      #[cfg(any(target_os = "linux", target_os = "macos"))]
+      {
+        let leaf = match cstring(&self.leaf) {
+          Ok(leaf) => leaf,
+          Err(error) => {
+            return OdenRev2FsMkdirCommitOutcome::NotCommitted(
+              OdenRev2FsError::io("encode mkdir leaf", error),
+            );
+          }
+        };
+        #[cfg(test)]
+        let fault = ODEN_REV2_FS_MKDIR_COMMIT_FAULT_FOR_TEST
+          .with(|current| current.take());
+        #[cfg(test)]
+        if fault == Some(OdenRev2FsMkdirCommitFaultForTest::RaceExisting) {
+          // Test-only external-writer simulation after final validation and
+          // before the operation's own no-replace syscall.
+          let injected = unsafe {
+            libc::mkdirat(
+              self.parent.handle.as_raw_fd(),
+              leaf.as_ptr(),
+              (mode & 0o777) as libc::mode_t,
+            )
+          };
+          if injected != 0 {
+            return OdenRev2FsMkdirCommitOutcome::Uncertain(
+              OdenRev2FsError::io(
+                "inject mkdir race",
+                io::Error::last_os_error(),
+              ),
+            );
+          }
         }
-      };
-      #[cfg(test)]
-      let fault =
-        ODEN_REV2_FS_MKDIR_COMMIT_FAULT_FOR_TEST.with(|current| current.take());
-      #[cfg(test)]
-      if fault == Some(OdenRev2FsMkdirCommitFaultForTest::RaceExisting) {
-        // Test-only external-writer simulation after final validation and
-        // before the operation's own no-replace syscall.
-        let injected = unsafe {
+        // SAFETY: the retained parent descriptor and NUL-terminated single leaf
+        // remain live. `mkdirat` is atomic and refuses an existing destination.
+        let result = unsafe {
           libc::mkdirat(
             self.parent.handle.as_raw_fd(),
             leaf.as_ptr(),
             (mode & 0o777) as libc::mode_t,
           )
         };
-        if injected != 0 {
+        if result != 0 {
+          let error = io::Error::last_os_error();
+          if error.raw_os_error() == Some(libc::EEXIST) {
+            return OdenRev2FsMkdirCommitOutcome::NotCommitted(
+              OdenRev2FsError::ReplacementDuringResolution,
+            );
+          }
           return OdenRev2FsMkdirCommitOutcome::Uncertain(OdenRev2FsError::io(
-            "inject mkdir race",
-            io::Error::last_os_error(),
+            "mkdirat proposed child",
+            error,
           ));
         }
-      }
-      // SAFETY: the retained parent descriptor and NUL-terminated single leaf
-      // remain live. `mkdirat` is atomic and refuses an existing destination.
-      let result = unsafe {
-        libc::mkdirat(
-          self.parent.handle.as_raw_fd(),
-          leaf.as_ptr(),
-          (mode & 0o777) as libc::mode_t,
-        )
-      };
-      if result != 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::EEXIST) {
-          return OdenRev2FsMkdirCommitOutcome::NotCommitted(
-            OdenRev2FsError::ReplacementDuringResolution,
-          );
-        }
-        return OdenRev2FsMkdirCommitOutcome::Uncertain(OdenRev2FsError::io(
-          "mkdirat proposed child",
-          error,
-        ));
-      }
-      #[cfg(test)]
-      if fault == Some(OdenRev2FsMkdirCommitFaultForTest::UncertainAfterSyscall)
-      {
-        return OdenRev2FsMkdirCommitOutcome::Uncertain(OdenRev2FsError::io(
-          "injected ambiguous mkdir postcheck",
-          io::Error::other("injected ambiguous mkdir postcheck"),
-        ));
-      }
-      let postcheck = (|| {
-        revalidate_root(&self.root)?;
-        for edge in &self.retained_edges {
-          // Creating a directory changes the immediate parent's link count.
-          // After successful mkdir, retain identity/type coupling without
-          // requiring pre-commit metadata bytes to remain identical.
-          edge.revalidate_identity()?;
-        }
-        self.parent.revalidate_identity()?;
-        let observed = lstat_component(&self.parent.handle, &self.leaf)?
-          .ok_or(OdenRev2FsError::ReplacementDuringResolution)?;
-        if observed.kind != OdenRev2FsObjectKind::Directory {
-          return Err(OdenRev2FsError::ReplacementDuringResolution);
-        }
-        let retained = open_component_non_consuming(
-          &self.parent.handle,
-          &self.leaf,
-          true,
-          OdenRev2FsObjectKind::Directory,
-        )?;
-        if metadata_from_file(&retained, "postcheck mkdir child")? != observed
-          || lstat_component(&self.parent.handle, &self.leaf)? != Some(observed)
+        #[cfg(test)]
+        if fault
+          == Some(OdenRev2FsMkdirCommitFaultForTest::UncertainAfterSyscall)
         {
-          return Err(OdenRev2FsError::ReplacementDuringResolution);
+          return OdenRev2FsMkdirCommitOutcome::Uncertain(OdenRev2FsError::io(
+            "injected ambiguous mkdir postcheck",
+            io::Error::other("injected ambiguous mkdir postcheck"),
+          ));
         }
-        Ok(())
-      })();
-      match postcheck {
-        Ok(()) => OdenRev2FsMkdirCommitOutcome::Committed,
-        Err(error) => OdenRev2FsMkdirCommitOutcome::Uncertain(error),
+        let postcheck = (|| {
+          revalidate_root(&self.root)?;
+          for edge in &self.retained_edges {
+            // Creating a directory changes the immediate parent's link count.
+            // After successful mkdir, retain identity/type coupling without
+            // requiring pre-commit metadata bytes to remain identical.
+            edge.revalidate_identity()?;
+          }
+          self.parent.revalidate_identity()?;
+          let observed = lstat_component(&self.parent.handle, &self.leaf)?
+            .ok_or(OdenRev2FsError::ReplacementDuringResolution)?;
+          if observed.kind != OdenRev2FsObjectKind::Directory {
+            return Err(OdenRev2FsError::ReplacementDuringResolution);
+          }
+          let retained = open_component_non_consuming(
+            &self.parent.handle,
+            &self.leaf,
+            true,
+            OdenRev2FsObjectKind::Directory,
+          )?;
+          if metadata_from_file(&retained, "postcheck mkdir child")? != observed
+            || lstat_component(&self.parent.handle, &self.leaf)?
+              != Some(observed)
+          {
+            return Err(OdenRev2FsError::ReplacementDuringResolution);
+          }
+          Ok(())
+        })();
+        match postcheck {
+          Ok(()) => OdenRev2FsMkdirCommitOutcome::Committed,
+          Err(error) => OdenRev2FsMkdirCommitOutcome::Uncertain(error),
+        }
       }
-    }
+    })();
+    self.commit_state = match &outcome {
+      OdenRev2FsMkdirCommitOutcome::Committed => {
+        OdenRev2FsMkdirCommitState::Committed
+      }
+      OdenRev2FsMkdirCommitOutcome::NotCommitted(_) => {
+        OdenRev2FsMkdirCommitState::NotCommitted
+      }
+      OdenRev2FsMkdirCommitOutcome::Uncertain(_) => {
+        OdenRev2FsMkdirCommitState::Uncertain
+      }
+    };
+    outcome
   }
 }
 
@@ -1657,6 +1730,7 @@ impl OdenRev2FsCheckedPath {
       parent: child.parent,
       leaf: child.leaf,
       retained_edges: self.retained_edges,
+      commit_state: OdenRev2FsMkdirCommitState::NotAttempted,
     })
   }
 
@@ -1729,16 +1803,16 @@ impl OdenRev2FsCheckedPath {
   }
 
   #[cfg(unix)]
-  pub(crate) fn consume_for_metadata(
-    self,
+  fn observe_metadata(
+    &self,
     operation_session: &OdenRev2FsOperationSession,
   ) -> Result<OdenRev2FsMetadataObservation, OdenRev2FsError> {
-    self.consume_for_metadata_with_hook(operation_session, &mut |_, _| {})
+    self.observe_metadata_with_hook(operation_session, &mut |_, _| {})
   }
 
   #[cfg(unix)]
-  fn consume_for_metadata_with_hook(
-    self,
+  fn observe_metadata_with_hook(
+    &self,
     operation_session: &OdenRev2FsOperationSession,
     hook: &mut dyn FnMut(OdenRev2FsUseCheckpoint, &OsStr),
   ) -> Result<OdenRev2FsMetadataObservation, OdenRev2FsError> {
@@ -1757,7 +1831,7 @@ impl OdenRev2FsCheckedPath {
         (current, output)
       }
       OdenRev2FsCheckedTarget::Link(link) => {
-        let current = lstat_component(&link.parent.handle, &link_leaf(&self)?)?
+        let current = lstat_component(&link.parent.handle, &link_leaf(self)?)?
           .ok_or(OdenRev2FsError::ReplacementDuringResolution)?;
         let output = link.handle.metadata().map_err(|error| {
           OdenRev2FsError::io("read retained link metadata", error)
@@ -1785,7 +1859,32 @@ impl OdenRev2FsCheckedPath {
   }
 
   #[cfg(not(unix))]
-  pub(crate) fn consume_for_metadata(
+  fn observe_metadata(
+    &self,
+    _operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<OdenRev2FsMetadataObservation, OdenRev2FsError> {
+    Err(OdenRev2FsError::UnsupportedPlatform)
+  }
+
+  #[cfg(unix)]
+  fn consume_for_metadata(
+    self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<OdenRev2FsMetadataObservation, OdenRev2FsError> {
+    self.observe_metadata(operation_session)
+  }
+
+  #[cfg(unix)]
+  fn consume_for_metadata_with_hook(
+    self,
+    operation_session: &OdenRev2FsOperationSession,
+    hook: &mut dyn FnMut(OdenRev2FsUseCheckpoint, &OsStr),
+  ) -> Result<OdenRev2FsMetadataObservation, OdenRev2FsError> {
+    self.observe_metadata_with_hook(operation_session, hook)
+  }
+
+  #[cfg(not(unix))]
+  fn consume_for_metadata(
     self,
     _operation_session: &OdenRev2FsOperationSession,
   ) -> Result<OdenRev2FsMetadataObservation, OdenRev2FsError> {
@@ -1795,8 +1894,8 @@ impl OdenRev2FsCheckedPath {
   /// Consume an authorized final-missing observation without converting a
   /// missing ancestor or a raced replacement into caller-visible `ENOENT`.
   #[cfg(unix)]
-  pub(crate) fn consume_missing(
-    self,
+  fn observe_missing(
+    &self,
     operation_session: &OdenRev2FsOperationSession,
   ) -> Result<(), OdenRev2FsError> {
     self.require_operation_session(operation_session)?;
@@ -1811,7 +1910,25 @@ impl OdenRev2FsCheckedPath {
   }
 
   #[cfg(not(unix))]
-  pub(crate) fn consume_missing(
+  fn observe_missing(
+    &self,
+    _operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2FsError> {
+    Err(OdenRev2FsError::UnsupportedPlatform)
+  }
+
+  /// Consume an authorized final-missing observation without converting a
+  /// missing ancestor or a raced replacement into caller-visible `ENOENT`.
+  #[cfg(unix)]
+  fn consume_missing(
+    self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2FsError> {
+    self.observe_missing(operation_session)
+  }
+
+  #[cfg(not(unix))]
+  fn consume_missing(
     self,
     _operation_session: &OdenRev2FsOperationSession,
   ) -> Result<(), OdenRev2FsError> {
@@ -1857,6 +1974,878 @@ impl OdenRev2FsCheckedPath {
     }
     Ok(())
   }
+}
+
+enum OdenRev2FsActorTarget {
+  Checked(Box<OdenRev2FsCheckedPath>),
+  PreparedMkdir(Box<OdenRev2FsPreparedMkdir>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OdenRev2FsActorOperation {
+  ObserveMetadata,
+  Mkdir,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum OdenRev2FsActorSourceClass {
+  Negative,
+  Floor,
+  Ceiling,
+}
+
+pub(crate) struct OdenRev2FsActorSourceEvidence {
+  binding: PathBindingInput,
+  checked: OdenRev2FsCheckedPath,
+  class: OdenRev2FsActorSourceClass,
+  selector: crate::rev2::AuthoritySelectorInput,
+}
+
+impl OdenRev2FsActorSourceEvidence {
+  pub(crate) fn new(
+    binding: PathBindingInput,
+    checked: OdenRev2FsCheckedPath,
+    class: OdenRev2FsActorSourceClass,
+    selector: crate::rev2::AuthoritySelectorInput,
+  ) -> Self {
+    Self {
+      binding,
+      checked,
+      class,
+      selector,
+    }
+  }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OdenRev2FsActorSourceProvenance {
+  class: OdenRev2FsActorSourceClass,
+  selector: crate::rev2::AuthoritySelectorInput,
+}
+
+impl OdenRev2FsActorOperation {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::ObserveMetadata => "observe-metadata",
+      Self::Mkdir => "mkdir",
+    }
+  }
+}
+
+fn actor_effect_matches(
+  request: &StageRequest,
+  index: usize,
+  edge_id: &str,
+  effect_slot_id: &str,
+  capability: &str,
+) -> bool {
+  request.effects.get(index).is_some_and(|effect| {
+    effect.edge_id == edge_id
+      && effect.effect_slot_id == effect_slot_id
+      && effect.capability == capability
+  })
+}
+
+fn classify_actor_request(
+  request: &StageRequest,
+) -> Result<OdenRev2FsActorOperation, OdenRev2FsError> {
+  if request.effects.len() == 1
+    && actor_effect_matches(
+      request,
+      0,
+      "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+      "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0",
+      "fs:list",
+    )
+  {
+    return Ok(OdenRev2FsActorOperation::ObserveMetadata);
+  }
+  if request.effects.len() == 2
+    && actor_effect_matches(
+      request,
+      0,
+      "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+      "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0",
+      "fs:write",
+    )
+    && actor_effect_matches(
+      request,
+      1,
+      "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+      "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1",
+      "fs:list",
+    )
+  {
+    return Ok(OdenRev2FsActorOperation::Mkdir);
+  }
+  Err(OdenRev2FsError::InvalidBinding(
+    "filesystem actor request does not match a closed adapter operation",
+  ))
+}
+
+fn actor_platform_identity(identity: &OdenRev2FsPlatformIdentity) -> Value {
+  json!({
+    "kind": "platform-object",
+    "value": identity.canonical_value(),
+  })
+}
+
+fn actor_final_state(checked: &OdenRev2FsCheckedPath, proposed: bool) -> Value {
+  match &checked.target {
+    OdenRev2FsCheckedTarget::Existing(object) => json!({
+      "kind": "existing",
+      "identity": actor_platform_identity(&object.metadata.identity),
+    }),
+    OdenRev2FsCheckedTarget::Link(link) => json!({
+      "kind": "link-entry",
+      "identity": actor_platform_identity(&link.metadata.identity),
+    }),
+    OdenRev2FsCheckedTarget::Missing(_) => json!({
+      "kind": if proposed { "proposed" } else { "missing" },
+    }),
+    OdenRev2FsCheckedTarget::Proposed(_) => json!({ "kind": "proposed" }),
+  }
+}
+
+fn actor_occurrence(
+  checked: &OdenRev2FsCheckedPath,
+  effect_owner: &str,
+  proposed: bool,
+) -> Result<Value, OdenRev2FsError> {
+  let lexical = checked.lexical_fact.relative_path();
+  let parent =
+    checked
+      .parent_identity()
+      .ok_or(OdenRev2FsError::InvalidBinding(
+        "filesystem actor target has no verified parent",
+      ))?;
+  if lexical.as_os_str().is_empty() {
+    return Err(OdenRev2FsError::InvalidBinding(
+      "filesystem actor target has an empty occurrence",
+    ));
+  }
+  Ok(json!({
+    "effectOwner": effect_owner,
+    "finalObjectState": actor_final_state(checked, proposed),
+    "followMode": "no-follow-final",
+    "lexicalPath": platform_path_value(lexical),
+    "parentIdentity": actor_platform_identity(parent),
+    "root": checked.lexical_fact.source_root.logical_root(),
+    "rootBindingId": checked.lexical_fact.source_root.root_binding_id(),
+  }))
+}
+
+fn validate_actor_request_target(
+  operation: OdenRev2FsActorOperation,
+  request: &StageRequest,
+  checked: &OdenRev2FsCheckedPath,
+) -> Result<(), OdenRev2FsError> {
+  let valid = match operation {
+    OdenRev2FsActorOperation::ObserveMetadata => {
+      request.effects[0].occurrence
+        == actor_occurrence(checked, &request.effects[0].effect_owner, false)?
+    }
+    OdenRev2FsActorOperation::Mkdir => {
+      request.effects[0].occurrence
+        == actor_occurrence(
+          checked,
+          &request.effects[0].effect_owner,
+          checked.target_kind() == OdenRev2FsCheckedTargetKind::Missing,
+        )?
+        && request.effects[1].occurrence
+          == actor_occurrence(checked, &request.effects[1].effect_owner, false)?
+    }
+  };
+  if valid {
+    Ok(())
+  } else {
+    Err(OdenRev2FsError::InvalidBinding(
+      "filesystem actor request occurrence does not match its checked target",
+    ))
+  }
+}
+
+fn expected_actor_path_binding(
+  checked: &OdenRev2FsCheckedPath,
+  occurrence_root_binding_id: &str,
+) -> PathBindingInput {
+  let state = checked.identity_fact();
+  match state.state() {
+    OdenRev2FsIdentityState::Existing { identity, .. }
+    | OdenRev2FsIdentityState::NoFollowLink { identity } => PathBindingInput {
+      source_id: checked.lexical_fact.source_root.source_id().to_string(),
+      root_binding_id: occurrence_root_binding_id.to_string(),
+      final_object_identities: vec![actor_platform_identity(identity)],
+      parent_identities: Vec::new(),
+    },
+    OdenRev2FsIdentityState::MissingParent { parent_identity }
+    | OdenRev2FsIdentityState::ProposedParent {
+      parent_identity, ..
+    } => PathBindingInput {
+      source_id: checked.lexical_fact.source_root.source_id().to_string(),
+      root_binding_id: occurrence_root_binding_id.to_string(),
+      final_object_identities: Vec::new(),
+      parent_identities: vec![actor_platform_identity(parent_identity)],
+    },
+  }
+}
+
+fn validate_actor_source_evidence(
+  target: &OdenRev2FsCheckedPath,
+  evidence: &OdenRev2FsActorSourceEvidence,
+) -> Result<(), OdenRev2FsError> {
+  if evidence
+    .selector
+    .resource
+    .get("root")
+    .and_then(Value::as_str)
+    != Some(evidence.checked.lexical_fact.source_root.logical_root())
+  {
+    return Err(OdenRev2FsError::InvalidBinding(
+      "filesystem source selector root does not match its checked graph",
+    ));
+  }
+  let selector_relative =
+    relative_platform_path(evidence.selector.resource.get("path").ok_or(
+      OdenRev2FsError::InvalidBinding("filesystem source selector has no path"),
+    )?)
+    .map_err(|_| {
+      OdenRev2FsError::InvalidBinding(
+        "filesystem source selector path is invalid",
+      )
+    })?;
+  let valid_path = match evidence.class {
+    OdenRev2FsActorSourceClass::Negative => {
+      evidence.checked.lexical_fact.relative_path() == selector_relative
+    }
+    OdenRev2FsActorSourceClass::Floor | OdenRev2FsActorSourceClass::Ceiling => {
+      evidence
+        .checked
+        .root
+        .canonical_path
+        .join(evidence.checked.lexical_fact.relative_path())
+        == target
+          .root
+          .canonical_path
+          .join(target.lexical_fact.relative_path())
+    }
+  };
+  if valid_path {
+    Ok(())
+  } else {
+    Err(OdenRev2FsError::InvalidBinding(
+      "filesystem source checked path does not match its selector provenance",
+    ))
+  }
+}
+
+/// Callback-free, single-owner filesystem inventory sealed before the first
+/// HostActor authorization. The inventory owns every operation-local checked
+/// graph; `Arc<File>` aliases may exist only inside this aggregate and are
+/// represented by one opaque provisional ID per unique allocation.
+///
+/// @ref LLP 0019#filesystem-actor-resource-ownership-checkpoint-eng-24019
+/// [implements]
+pub(crate) struct OdenRev2FsActorInventory {
+  operation_id: String,
+  operation: OdenRev2FsActorOperation,
+  bound_request: StageRequest,
+  bound_path_bindings: Vec<PathBindingInput>,
+  bound_source_provenance: BTreeMap<String, OdenRev2FsActorSourceProvenance>,
+  operation_session: OdenRev2FsOperationSessionFact,
+  target: Option<OdenRev2FsActorTarget>,
+  sources: Vec<OdenRev2FsCheckedPath>,
+  sealed_handles: BTreeMap<usize, String>,
+  released: bool,
+}
+
+impl OdenRev2FsActorInventory {
+  pub(crate) fn seal(
+    operation_id: impl Into<String>,
+    request: &StageRequest,
+    operation_session: &OdenRev2FsOperationSession,
+    target: OdenRev2FsCheckedPath,
+    sources: Vec<OdenRev2FsActorSourceEvidence>,
+  ) -> Result<Self, OdenRev2FsError> {
+    let operation_id = operation_id.into();
+    let operation = classify_actor_request(request)?;
+    if operation_id.trim().is_empty() || operation_id.len() > 1024 {
+      return Err(OdenRev2FsError::InvalidBinding(
+        "invalid filesystem actor inventory identity",
+      ));
+    }
+    if target.operation_session() != operation_session.fact()
+      || sources.iter().any(|evidence| {
+        evidence.checked.operation_session() != operation_session.fact()
+      })
+    {
+      return Err(OdenRev2FsError::OperationSessionMismatch);
+    }
+    validate_actor_request_target(operation, request, &target)?;
+    if sources.is_empty() {
+      return Err(OdenRev2FsError::InvalidBinding(
+        "filesystem actor inventory has no checked source evidence",
+      ));
+    }
+    let occurrence_root_binding_id = target
+      .lexical_fact
+      .source_root
+      .root_binding_id()
+      .to_string();
+    let mut bound_path_bindings =
+      BTreeMap::<(String, String), PathBindingInput>::new();
+    let mut bound_source_provenance = BTreeMap::new();
+    for evidence in &sources {
+      validate_actor_source_evidence(&target, evidence)?;
+      if evidence.binding
+        != expected_actor_path_binding(
+          &evidence.checked,
+          &occurrence_root_binding_id,
+        )
+      {
+        return Err(OdenRev2FsError::InvalidBinding(
+          "filesystem source binding does not match its checked graph",
+        ));
+      }
+      let key = (
+        evidence.binding.source_id.clone(),
+        evidence.binding.root_binding_id.clone(),
+      );
+      if bound_path_bindings
+        .insert(key, evidence.binding.clone())
+        .is_some_and(|prior| prior != evidence.binding)
+      {
+        return Err(OdenRev2FsError::InvalidBinding(
+          "filesystem source bindings are ambiguous",
+        ));
+      }
+      let provenance = OdenRev2FsActorSourceProvenance {
+        class: evidence.class,
+        selector: evidence.selector.clone(),
+      };
+      if bound_source_provenance
+        .insert(evidence.binding.source_id.clone(), provenance.clone())
+        .is_some_and(|prior| prior != provenance)
+      {
+        return Err(OdenRev2FsError::InvalidBinding(
+          "filesystem source provenance is ambiguous",
+        ));
+      }
+    }
+    let mut inventory = Self {
+      operation_id,
+      operation,
+      bound_request: request.clone(),
+      bound_path_bindings: bound_path_bindings.into_values().collect(),
+      bound_source_provenance,
+      operation_session: operation_session.fact().clone(),
+      target: Some(OdenRev2FsActorTarget::Checked(Box::new(target))),
+      sources: sources
+        .into_iter()
+        .map(|evidence| evidence.checked)
+        .collect(),
+      sealed_handles: BTreeMap::new(),
+      released: false,
+    };
+    if !inventory.owns_all_graphs_exclusively() {
+      return Err(OdenRev2FsError::InvalidBinding(
+        "filesystem actor inventory has an external strong owner",
+      ));
+    }
+    let handles = inventory.current_handle_keys();
+    if handles.is_empty() || handles.len() > MAX_ACTOR_PROVISIONAL_HANDLES {
+      return Err(OdenRev2FsError::InvalidBinding(
+        "filesystem actor inventory is empty or exceeds its bound",
+      ));
+    }
+    for (slot, handle) in handles.into_iter().enumerate() {
+      let id = domain_digest(
+        "oden:capsec:filesystem-provisional-resource:2",
+        &json!({
+          "actorIdentity": inventory.operation_session.actor_identity,
+          "generationVectorToken": inventory.operation_session.generation_vector_token,
+          "operationKind": inventory.operation.as_str(),
+          "operationId": inventory.operation_id,
+          "sessionId": inventory.operation_session.session_id.to_string(),
+          "slot": slot.to_string(),
+        }),
+      )
+      .map_err(|_| {
+        OdenRev2FsError::InvalidBinding(
+          "filesystem provisional resource identity",
+        )
+      })?;
+      inventory.sealed_handles.insert(handle, id);
+    }
+    Ok(inventory)
+  }
+
+  pub(crate) fn binds(&self, operation_id: &str, actor_id: &str) -> bool {
+    self.operation_id == operation_id
+      && self.operation_session.actor_identity == actor_id
+  }
+
+  pub(crate) fn operation(&self) -> OdenRev2FsActorOperation {
+    self.operation
+  }
+
+  pub(crate) fn bound_request(&self) -> &StageRequest {
+    &self.bound_request
+  }
+
+  pub(crate) fn path_bindings(&self) -> &[PathBindingInput] {
+    &self.bound_path_bindings
+  }
+
+  pub(crate) fn binds_policy(&self, policy: &DecisionPolicyInput) -> bool {
+    if policy.path_bindings != self.bound_path_bindings {
+      return false;
+    }
+    let capabilities = self
+      .bound_request
+      .effects
+      .iter()
+      .map(|effect| effect.capability.as_str())
+      .collect::<BTreeSet<_>>();
+    let is_relevant_path = |selector: &crate::rev2::AuthoritySelectorInput| {
+      capabilities.contains(selector.capability.as_str())
+        && selector.resource.get("root").is_some()
+        && selector.resource.get("path").is_some()
+    };
+    let mut expected = BTreeMap::new();
+    let mut unambiguous = true;
+    {
+      let mut add = |named: &crate::rev2::NamedSelectorInput,
+                     class: OdenRev2FsActorSourceClass| {
+        if is_relevant_path(&named.selector)
+          && expected
+            .insert(named.source_id.clone(), (class, named.selector.clone()))
+            .is_some()
+        {
+          unambiguous = false;
+        }
+      };
+      for named in policy
+        .process_denials
+        .iter()
+        .chain(&policy.principal_denials)
+      {
+        add(named, OdenRev2FsActorSourceClass::Negative);
+      }
+      for named in &policy.escalation_ceiling {
+        add(named, OdenRev2FsActorSourceClass::Ceiling);
+      }
+      for named in &policy.static_floor {
+        add(named, OdenRev2FsActorSourceClass::Floor);
+      }
+    }
+    if !unambiguous
+      || policy
+        .session_revocations
+        .iter()
+        .chain(&policy.session_grants)
+        .chain(&policy.implicit_self)
+        .any(|named| is_relevant_path(&named.selector))
+      || policy
+        .handles
+        .iter()
+        .any(|handle| is_relevant_path(&handle.selector))
+      || policy
+        .protected_exceptions
+        .iter()
+        .any(|protected| is_relevant_path(&protected.selector))
+      || policy
+        .compatibility_dispositions
+        .iter()
+        .any(|disposition| is_relevant_path(&disposition.selector))
+      || expected.len() != self.bound_source_provenance.len()
+    {
+      return false;
+    }
+    expected.into_iter().all(|(source_id, (class, selector))| {
+      self
+        .bound_source_provenance
+        .get(&source_id)
+        .is_some_and(|provenance| {
+          provenance.class == class && provenance.selector == selector
+        })
+    })
+  }
+
+  pub(crate) fn target_kind(
+    &self,
+  ) -> Result<OdenRev2FsCheckedTargetKind, OdenRev2FsError> {
+    match self.target.as_ref() {
+      Some(OdenRev2FsActorTarget::Checked(checked)) => {
+        Ok(checked.target_kind())
+      }
+      Some(OdenRev2FsActorTarget::PreparedMkdir(_)) => {
+        Ok(OdenRev2FsCheckedTargetKind::Proposed)
+      }
+      None => Err(OdenRev2FsError::OperationUnsupported(
+        "filesystem actor inventory released",
+      )),
+    }
+  }
+
+  pub(crate) fn revalidate_sources(
+    &self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2FsError> {
+    self.require_session(operation_session)?;
+    for checked in &self.sources {
+      checked.revalidate_binding(operation_session)?;
+    }
+    Ok(())
+  }
+
+  pub(crate) fn revalidate_target(
+    &self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2FsError> {
+    self.require_session(operation_session)?;
+    match self.target.as_ref() {
+      Some(OdenRev2FsActorTarget::Checked(checked)) => {
+        checked.revalidate_binding(operation_session)
+      }
+      Some(OdenRev2FsActorTarget::PreparedMkdir(prepared)) => {
+        prepared.revalidate_before_commit(operation_session)
+      }
+      None => Err(OdenRev2FsError::OperationUnsupported(
+        "filesystem actor inventory released",
+      )),
+    }
+  }
+
+  pub(crate) fn observe_metadata(
+    &self,
+    operation_session: &OdenRev2FsOperationSession,
+    _witness: &OdenRev2FilesystemPendingWitness,
+  ) -> Result<OdenRev2FsMetadataObservation, OdenRev2FsError> {
+    self.require_session(operation_session)?;
+    if self.operation != OdenRev2FsActorOperation::ObserveMetadata {
+      return Err(OdenRev2FsError::OperationUnsupported(
+        "filesystem actor operation does not observe metadata",
+      ));
+    }
+    let Some(OdenRev2FsActorTarget::Checked(checked)) = self.target.as_ref()
+    else {
+      return Err(OdenRev2FsError::OperationUnsupported(
+        "filesystem metadata target is unavailable",
+      ));
+    };
+    checked.observe_metadata(operation_session)
+  }
+
+  pub(crate) fn observe_missing(
+    &self,
+    operation_session: &OdenRev2FsOperationSession,
+    _witness: &OdenRev2FilesystemPendingWitness,
+  ) -> Result<(), OdenRev2FsError> {
+    self.require_session(operation_session)?;
+    if self.operation != OdenRev2FsActorOperation::ObserveMetadata {
+      return Err(OdenRev2FsError::OperationUnsupported(
+        "filesystem actor operation does not observe missing entries",
+      ));
+    }
+    let Some(OdenRev2FsActorTarget::Checked(checked)) = self.target.as_ref()
+    else {
+      return Err(OdenRev2FsError::OperationUnsupported(
+        "filesystem missing target is unavailable",
+      ));
+    };
+    checked.observe_missing(operation_session)
+  }
+
+  pub(crate) fn prepare_mkdir(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+    _witness: &OdenRev2FilesystemPendingWitness,
+  ) -> Result<(), OdenRev2FsError> {
+    self.require_session(operation_session)?;
+    if self.operation != OdenRev2FsActorOperation::Mkdir {
+      return Err(OdenRev2FsError::OperationUnsupported(
+        "filesystem actor operation does not prepare mkdir",
+      ));
+    }
+    let Some(OdenRev2FsActorTarget::Checked(checked)) = self.target.take()
+    else {
+      return Err(OdenRev2FsError::OperationUnsupported(
+        "filesystem mkdir target is unavailable",
+      ));
+    };
+    let proposed = (*checked)
+      .propose_child(operation_session, OdenRev2FsProposedKind::Directory)?;
+    let prepared = proposed.prepare_mkdir(operation_session)?;
+    self.target =
+      Some(OdenRev2FsActorTarget::PreparedMkdir(Box::new(prepared)));
+    if !self.is_intact() {
+      return Err(OdenRev2FsError::InvalidBinding(
+        "filesystem inventory changed during mkdir preparation",
+      ));
+    }
+    Ok(())
+  }
+
+  pub(crate) fn commit_mkdir(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+    mode: u32,
+    _witness: &OdenRev2FilesystemCommittedWitness,
+    native_commit_witness: &OdenRev2FilesystemNativeCommitWitness<'_>,
+  ) -> OdenRev2FsMkdirCommitOutcome {
+    if let Err(error) = self.require_session(operation_session) {
+      return OdenRev2FsMkdirCommitOutcome::NotCommitted(error);
+    }
+    if self.operation != OdenRev2FsActorOperation::Mkdir {
+      return OdenRev2FsMkdirCommitOutcome::NotCommitted(
+        OdenRev2FsError::OperationUnsupported(
+          "filesystem actor operation does not commit mkdir",
+        ),
+      );
+    }
+    if !operation_session.matches_gate_token(native_commit_witness.gate_token())
+    {
+      return OdenRev2FsMkdirCommitOutcome::NotCommitted(
+        OdenRev2FsError::OperationSessionMismatch,
+      );
+    }
+    let Some(OdenRev2FsActorTarget::PreparedMkdir(prepared)) =
+      self.target.as_mut()
+    else {
+      return OdenRev2FsMkdirCommitOutcome::NotCommitted(
+        OdenRev2FsError::OperationUnsupported(
+          "filesystem mkdir target is not prepared",
+        ),
+      );
+    };
+    prepared.commit(operation_session, mode)
+  }
+
+  pub(crate) fn is_intact(&self) -> bool {
+    !self.released
+      && self.target.is_some()
+      && self.owns_all_graphs_exclusively()
+      && self.current_handle_keys()
+        == self.sealed_handles.keys().copied().collect()
+  }
+
+  pub(crate) fn completion_ready(&self) -> bool {
+    match (self.operation, self.target.as_ref()) {
+      (
+        OdenRev2FsActorOperation::ObserveMetadata,
+        Some(OdenRev2FsActorTarget::Checked(_)),
+      ) => true,
+      (
+        OdenRev2FsActorOperation::Mkdir,
+        Some(OdenRev2FsActorTarget::Checked(checked)),
+      ) => matches!(
+        checked.target_kind(),
+        OdenRev2FsCheckedTargetKind::Existing
+          | OdenRev2FsCheckedTargetKind::NoFollowLink
+      ),
+      (
+        OdenRev2FsActorOperation::Mkdir,
+        Some(OdenRev2FsActorTarget::PreparedMkdir(prepared)),
+      ) => prepared.commit_state == OdenRev2FsMkdirCommitState::Committed,
+      _ => false,
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn provisional_handle_count(&self) -> usize {
+    self.sealed_handles.len()
+  }
+
+  #[cfg(test)]
+  pub(crate) fn provisional_weak_handles(&self) -> Vec<std::sync::Weak<File>> {
+    let mut handles = BTreeMap::new();
+    self.visit_handles(&mut |handle| {
+      handles
+        .entry(Arc::as_ptr(handle) as usize)
+        .or_insert_with(|| Arc::downgrade(handle));
+    });
+    handles.into_values().collect()
+  }
+
+  #[cfg(test)]
+  fn visited_handle_reference_count(&self) -> usize {
+    let mut count = 0;
+    self.visit_handles(&mut |_| count += 1);
+    count
+  }
+
+  fn require_session(
+    &self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2FsError> {
+    if self.released || self.operation_session != *operation_session.fact() {
+      return Err(OdenRev2FsError::OperationSessionMismatch);
+    }
+    Ok(())
+  }
+
+  fn current_handle_keys(&self) -> BTreeSet<usize> {
+    let mut handles = BTreeSet::new();
+    self.visit_handles(&mut |handle| {
+      handles.insert(Arc::as_ptr(handle) as usize);
+    });
+    handles
+  }
+
+  fn owns_all_graphs_exclusively(&self) -> bool {
+    let mut roots =
+      BTreeMap::<usize, (usize, std::sync::Weak<OdenRev2FsRootState>)>::new();
+    self.visit_root_states(&mut |root| {
+      let entry = roots
+        .entry(Arc::as_ptr(root) as usize)
+        .or_insert_with(|| (0, Arc::downgrade(root)));
+      entry.0 += 1;
+    });
+    if roots
+      .values()
+      .any(|(owners, root)| root.strong_count() != *owners)
+    {
+      return false;
+    }
+
+    let mut handles = BTreeMap::<usize, (usize, std::sync::Weak<File>)>::new();
+    self.visit_handles(&mut |handle| {
+      let entry = handles
+        .entry(Arc::as_ptr(handle) as usize)
+        .or_insert_with(|| (0, Arc::downgrade(handle)));
+      entry.0 += 1;
+    });
+    handles
+      .values()
+      .all(|(owners, handle)| handle.strong_count() == *owners)
+  }
+
+  fn visit_root_states(
+    &self,
+    visitor: &mut dyn FnMut(&Arc<OdenRev2FsRootState>),
+  ) {
+    if let Some(target) = self.target.as_ref() {
+      match target {
+        OdenRev2FsActorTarget::Checked(checked) => visitor(&checked.root),
+        OdenRev2FsActorTarget::PreparedMkdir(prepared) => {
+          visitor(&prepared.root)
+        }
+      }
+    }
+    for checked in &self.sources {
+      visitor(&checked.root);
+    }
+  }
+
+  fn visit_handles(&self, visitor: &mut dyn FnMut(&Arc<File>)) {
+    let mut visited_roots = BTreeSet::new();
+    if let Some(target) = self.target.as_ref() {
+      match target {
+        OdenRev2FsActorTarget::Checked(checked) => {
+          visit_checked_handles(checked, &mut visited_roots, visitor)
+        }
+        OdenRev2FsActorTarget::PreparedMkdir(prepared) => {
+          visit_prepared_mkdir_handles(prepared, &mut visited_roots, visitor)
+        }
+      }
+    }
+    for checked in &self.sources {
+      visit_checked_handles(checked, &mut visited_roots, visitor);
+    }
+  }
+}
+
+impl ProvisionalResources for OdenRev2FsActorInventory {
+  fn held_ids(&self) -> Vec<String> {
+    if self.released {
+      return Vec::new();
+    }
+    if !self.is_intact() {
+      return vec![String::new()];
+    }
+    self.sealed_handles.values().cloned().collect()
+  }
+
+  fn release_all(&mut self) -> Vec<String> {
+    if self.released {
+      return Vec::new();
+    }
+    #[cfg(test)]
+    let weak_handles = self.provisional_weak_handles();
+    let released = self.sealed_handles.values().cloned().collect();
+    self.target = None;
+    self.sources.clear();
+    self.released = true;
+    #[cfg(test)]
+    ODEN_REV2_FS_LAST_RELEASED_HANDLES_FOR_TEST.with(|handles| {
+      *handles.borrow_mut() = weak_handles;
+    });
+    released
+  }
+}
+
+impl Drop for OdenRev2FsActorInventory {
+  fn drop(&mut self) {
+    // This aggregate is callback-free, so unwind and abandoned-actor cleanup
+    // can close the exact sealed inventory synchronously and idempotently.
+    let _ = self.release_all();
+  }
+}
+
+fn visit_root_handles(
+  root: &OdenRev2FsRootState,
+  visitor: &mut dyn FnMut(&Arc<File>),
+) {
+  visitor(&root.retained);
+  visitor(&root.named);
+}
+
+fn visit_edge_handles(
+  edges: &[OdenRev2FsRetainedEdge],
+  visitor: &mut dyn FnMut(&Arc<File>),
+) {
+  for edge in edges {
+    visitor(&edge.parent);
+    visitor(&edge.child);
+  }
+}
+
+fn visit_checked_handles(
+  checked: &OdenRev2FsCheckedPath,
+  visited_roots: &mut BTreeSet<usize>,
+  visitor: &mut dyn FnMut(&Arc<File>),
+) {
+  if visited_roots.insert(Arc::as_ptr(&checked.root) as usize) {
+    visit_root_handles(&checked.root, visitor);
+  }
+  visit_edge_handles(&checked.retained_edges, visitor);
+  match &checked.target {
+    OdenRev2FsCheckedTarget::Existing(object) => {
+      if let Some(parent) = object.parent.as_ref() {
+        visitor(&parent.handle);
+      }
+      visitor(&object.handle);
+    }
+    OdenRev2FsCheckedTarget::Link(link) => {
+      visitor(&link.parent.handle);
+      visitor(&link.handle);
+    }
+    OdenRev2FsCheckedTarget::Missing(child) => visitor(&child.parent.handle),
+    OdenRev2FsCheckedTarget::Proposed(child) => visitor(&child.parent.handle),
+  }
+}
+
+fn visit_prepared_mkdir_handles(
+  prepared: &OdenRev2FsPreparedMkdir,
+  visited_roots: &mut BTreeSet<usize>,
+  visitor: &mut dyn FnMut(&Arc<File>),
+) {
+  if visited_roots.insert(Arc::as_ptr(&prepared.root) as usize) {
+    visit_root_handles(&prepared.root, visitor);
+  }
+  visit_edge_handles(&prepared.retained_edges, visitor);
+  visitor(&prepared.parent.handle);
 }
 
 fn link_leaf(
@@ -2358,6 +3347,113 @@ mod tests {
         actor_identity,
         generation_vector_token,
       },
+    }
+  }
+
+  fn test_mkdir_request(
+    stage_id: &str,
+    checked: &OdenRev2FsCheckedPath,
+  ) -> StageRequest {
+    let effect_owner = "owner:test";
+    StageRequest {
+      identity: crate::rev2::EngineIdentity::embedded(),
+      stage_id: stage_id.to_string(),
+      principals: Vec::new(),
+      effects: vec![
+        crate::rev2::EffectInput {
+          identity: crate::rev2::EngineIdentity::embedded(),
+          edge_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync".to_string(),
+          effect_slot_id:
+            "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0".to_string(),
+          capability: "fs:write".to_string(),
+          effect_owner: effect_owner.to_string(),
+          occurrence: actor_occurrence(
+            checked,
+            effect_owner,
+            checked.target_kind() == OdenRev2FsCheckedTargetKind::Missing,
+          )
+          .unwrap(),
+        },
+        crate::rev2::EffectInput {
+          identity: crate::rev2::EngineIdentity::embedded(),
+          edge_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync".to_string(),
+          effect_slot_id:
+            "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1".to_string(),
+          capability: "fs:list".to_string(),
+          effect_owner: effect_owner.to_string(),
+          occurrence: actor_occurrence(checked, effect_owner, false).unwrap(),
+        },
+      ],
+    }
+  }
+
+  fn test_actor_source_evidence(
+    binding: PathBindingInput,
+    checked: OdenRev2FsCheckedPath,
+    class: OdenRev2FsActorSourceClass,
+    capability: &str,
+    selector_path: &Path,
+  ) -> OdenRev2FsActorSourceEvidence {
+    let selector = test_actor_source_selector(
+      checked.lexical_fact().source_root().logical_root(),
+      capability,
+      selector_path,
+    );
+    OdenRev2FsActorSourceEvidence::new(binding, checked, class, selector)
+  }
+
+  fn test_actor_source_selector(
+    logical_root: &str,
+    capability: &str,
+    selector_path: &Path,
+  ) -> crate::rev2::AuthoritySelectorInput {
+    crate::rev2::AuthoritySelectorInput {
+      identity: crate::rev2::EngineIdentity::embedded(),
+      principal: None,
+      capability: capability.to_string(),
+      resource: json!({
+        "kind": "path-tree",
+        "path": platform_path_value(selector_path),
+        "root": logical_root,
+      }),
+    }
+  }
+
+  fn test_negative_policy(
+    source_id: &str,
+    selector: crate::rev2::AuthoritySelectorInput,
+    path_bindings: Vec<PathBindingInput>,
+  ) -> DecisionPolicyInput {
+    DecisionPolicyInput {
+      identity: crate::rev2::EngineIdentity::embedded(),
+      mode: crate::rev2::Mode::Enforce,
+      run_nonce: "run:filesystem-actor-test".to_string(),
+      channel_epoch: "channel:filesystem-actor-test".to_string(),
+      provenance: crate::rev2::OperationProvenanceContext {
+        policy_digest: "policy:filesystem-actor-test".to_string(),
+        armed_snapshot_digest: "snapshot:filesystem-actor-test".to_string(),
+        quota_owner: crate::rev2::PrincipalRef {
+          kind: crate::rev2::PrincipalKind::Runtime,
+          key: "runtime:filesystem-actor-test".to_string(),
+        },
+        terminal_evidence_id: "terminal:filesystem-actor-test".to_string(),
+      },
+      generations: crate::rev2::Generations::default(),
+      process_denials: vec![crate::rev2::NamedSelectorInput {
+        source_id: source_id.to_string(),
+        selector,
+      }],
+      principal_denials: Vec::new(),
+      session_revocations: Vec::new(),
+      escalation_ceiling: Vec::new(),
+      static_floor: Vec::new(),
+      handles: Vec::new(),
+      session_grants: Vec::new(),
+      implicit_self: Vec::new(),
+      protected_exceptions: Vec::new(),
+      compatibility_dispositions: Vec::new(),
+      validated_receipt_row_digests: Vec::new(),
+      path_bindings,
     }
   }
 
@@ -3360,6 +4456,349 @@ mod tests {
       proposed.operation_support(OdenRev2FsOperation::FollowedDataAccess),
       OdenRev2FsOperationSupport::Unsupported(_)
     ));
+  }
+
+  #[test]
+  fn actor_inventory_rejects_request_target_and_source_substitution() {
+    let root = TempRoot::new("actor-inventory-substitution");
+    std::fs::create_dir(root.0.join("parent")).unwrap();
+    let authenticated =
+      test_root(&root.0, "floor:path-write", "$PROJECT", "binding:project");
+    let session = test_session("actor-inventory-substitution");
+
+    let omitted_target = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/omitted"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let omitted_request = test_mkdir_request("stage:omitted", &omitted_target);
+    assert!(matches!(
+      OdenRev2FsActorInventory::seal(
+        "operation:omitted",
+        &omitted_request,
+        &session,
+        omitted_target,
+        vec![],
+      ),
+      Err(OdenRev2FsError::InvalidBinding(
+        "filesystem actor inventory has no checked source evidence"
+      ))
+    ));
+
+    let request_target = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/request-a"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let request = test_mkdir_request("stage:request-a", &request_target);
+    let substituted_target = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/target-b"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let substituted_source = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/target-b"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let substituted_binding = expected_actor_path_binding(
+      &substituted_source,
+      substituted_target
+        .lexical_fact()
+        .source_root()
+        .root_binding_id(),
+    );
+    let substituted_evidence = test_actor_source_evidence(
+      substituted_binding,
+      substituted_source,
+      OdenRev2FsActorSourceClass::Floor,
+      "fs:write",
+      Path::new("parent/target-b"),
+    );
+    assert!(matches!(
+      OdenRev2FsActorInventory::seal(
+        "operation:target-substitution",
+        &request,
+        &session,
+        substituted_target,
+        vec![substituted_evidence],
+      ),
+      Err(OdenRev2FsError::InvalidBinding(
+        "filesystem actor request occurrence does not match its checked target"
+      ))
+    ));
+    drop(request_target);
+
+    let binding_target = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/binding"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let binding_source = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/binding"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let binding_request = test_mkdir_request("stage:binding", &binding_target);
+    let mut wrong_binding = expected_actor_path_binding(
+      &binding_source,
+      binding_target
+        .lexical_fact()
+        .source_root()
+        .root_binding_id(),
+    );
+    wrong_binding.source_id = "source:substituted".to_string();
+    let wrong_evidence = test_actor_source_evidence(
+      wrong_binding,
+      binding_source,
+      OdenRev2FsActorSourceClass::Floor,
+      "fs:write",
+      Path::new("parent/binding"),
+    );
+    assert!(matches!(
+      OdenRev2FsActorInventory::seal(
+        "operation:binding-substitution",
+        &binding_request,
+        &session,
+        binding_target,
+        vec![wrong_evidence],
+      ),
+      Err(OdenRev2FsError::InvalidBinding(
+        "filesystem source binding does not match its checked graph"
+      ))
+    ));
+
+    let negative_target = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/requested"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let negative_request =
+      test_mkdir_request("stage:negative-substitution", &negative_target);
+    let benign_source = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/benign"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let benign_binding = expected_actor_path_binding(
+      &benign_source,
+      negative_target
+        .lexical_fact()
+        .source_root()
+        .root_binding_id(),
+    );
+    let substituted_negative = test_actor_source_evidence(
+      benign_binding,
+      benign_source,
+      OdenRev2FsActorSourceClass::Negative,
+      "fs:write",
+      Path::new("parent/denied"),
+    );
+    assert!(matches!(
+      OdenRev2FsActorInventory::seal(
+        "operation:negative-path-substitution",
+        &negative_request,
+        &session,
+        negative_target,
+        vec![substituted_negative],
+      ),
+      Err(OdenRev2FsError::InvalidBinding(
+        "filesystem source checked path does not match its selector provenance"
+      ))
+    ));
+
+    // A self-consistent fake source graph can pass sealing only with its own
+    // fake provenance. The later exact policy projection must still reject a
+    // same-source selector substitution from the real policy.
+    let policy_authenticated = test_root(
+      &root.0,
+      "deny:policy-source",
+      "$PROJECT",
+      "binding:policy-project",
+    );
+    let policy_target = checked_without_hops_for_session(
+      &policy_authenticated,
+      &session,
+      Path::new("parent/policy-requested"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let fake_source = checked_without_hops_for_session(
+      &policy_authenticated,
+      &session,
+      Path::new("parent/policy-benign"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    drop(policy_authenticated);
+    let policy_request =
+      test_mkdir_request("stage:policy-provenance", &policy_target);
+    let fake_binding = expected_actor_path_binding(
+      &fake_source,
+      policy_target.lexical_fact().source_root().root_binding_id(),
+    );
+    let fake_evidence = test_actor_source_evidence(
+      fake_binding,
+      fake_source,
+      OdenRev2FsActorSourceClass::Negative,
+      "fs:write",
+      Path::new("parent/policy-benign"),
+    );
+    let inventory = OdenRev2FsActorInventory::seal(
+      "operation:policy-provenance",
+      &policy_request,
+      &session,
+      policy_target,
+      vec![fake_evidence],
+    )
+    .unwrap();
+    let fake_policy = test_negative_policy(
+      "deny:policy-source",
+      test_actor_source_selector(
+        "$PROJECT",
+        "fs:write",
+        Path::new("parent/policy-benign"),
+      ),
+      inventory.path_bindings().to_vec(),
+    );
+    assert!(inventory.binds_policy(&fake_policy));
+    let real_policy = test_negative_policy(
+      "deny:policy-source",
+      test_actor_source_selector(
+        "$PROJECT",
+        "fs:write",
+        Path::new("parent/policy-requested"),
+      ),
+      inventory.path_bindings().to_vec(),
+    );
+    assert!(!inventory.binds_policy(&real_policy));
+  }
+
+  #[test]
+  fn actor_inventory_is_exact_stable_and_releasable_after_mkdir_prepare() {
+    let root = TempRoot::new("actor-inventory-mkdir");
+    std::fs::create_dir(root.0.join("parent")).unwrap();
+    let externally_owned =
+      test_root(&root.0, "floor:external", "$PROJECT", "binding:external");
+    let external_session = test_session("actor-inventory-external");
+    let external_target = checked_without_hops_for_session(
+      &externally_owned,
+      &external_session,
+      Path::new("parent/new"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let external_source = checked_without_hops_for_session(
+      &externally_owned,
+      &external_session,
+      Path::new("parent/new"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let external_request =
+      test_mkdir_request("stage:external", &external_target);
+    let external_binding = expected_actor_path_binding(
+      &external_source,
+      external_target
+        .lexical_fact()
+        .source_root()
+        .root_binding_id(),
+    );
+    let external_evidence = test_actor_source_evidence(
+      external_binding,
+      external_source,
+      OdenRev2FsActorSourceClass::Floor,
+      "fs:write",
+      Path::new("parent/new"),
+    );
+    assert!(matches!(
+      OdenRev2FsActorInventory::seal(
+        "operation:actor-inventory-external",
+        &external_request,
+        &external_session,
+        external_target,
+        vec![external_evidence],
+      ),
+      Err(OdenRev2FsError::InvalidBinding(
+        "filesystem actor inventory has an external strong owner"
+      ))
+    ));
+    drop(externally_owned);
+
+    let authenticated =
+      test_root(&root.0, "floor:path-write", "$PROJECT", "binding:project");
+    let session = test_session("actor-inventory-mkdir");
+    let target = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/new"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    let source = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("parent/new"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    drop(authenticated);
+    let request = test_mkdir_request("stage:actor-inventory-mkdir", &target);
+    let source_binding = expected_actor_path_binding(
+      &source,
+      target.lexical_fact().source_root().root_binding_id(),
+    );
+    let source_evidence = test_actor_source_evidence(
+      source_binding,
+      source,
+      OdenRev2FsActorSourceClass::Floor,
+      "fs:write",
+      Path::new("parent/new"),
+    );
+    let mut inventory = OdenRev2FsActorInventory::seal(
+      "operation:actor-inventory-mkdir",
+      &request,
+      &session,
+      target,
+      vec![source_evidence],
+    )
+    .unwrap();
+    assert!(inventory.binds(
+      "operation:actor-inventory-mkdir",
+      "actor:actor-inventory-mkdir"
+    ));
+    assert!(!inventory.binds("operation:wrong", "actor:actor-inventory-mkdir"));
+    assert!(!inventory.binds("operation:actor-inventory-mkdir", "actor:wrong"));
+
+    let sealed_ids = inventory.held_ids();
+    let weak_handles = inventory.provisional_weak_handles();
+    assert_eq!(
+      sealed_ids.iter().collect::<BTreeSet<_>>().len(),
+      sealed_ids.len()
+    );
+    assert_eq!(inventory.provisional_handle_count(), weak_handles.len());
+    assert!(
+      inventory.visited_handle_reference_count()
+        > inventory.provisional_handle_count()
+    );
+    assert!(weak_handles.iter().all(|handle| handle.upgrade().is_some()));
+    assert!(!inventory.completion_ready());
+
+    let pending_witness = OdenRev2FilesystemPendingWitness::for_test();
+    inventory.prepare_mkdir(&session, &pending_witness).unwrap();
+    assert!(inventory.is_intact());
+    assert!(!inventory.completion_ready());
+    assert_eq!(inventory.held_ids(), sealed_ids);
+    assert_eq!(
+      inventory.target_kind().unwrap(),
+      OdenRev2FsCheckedTargetKind::Proposed
+    );
+
+    assert_eq!(inventory.release_all(), sealed_ids);
+    assert!(inventory.release_all().is_empty());
+    assert!(weak_handles.iter().all(|handle| handle.upgrade().is_none()));
   }
 
   #[test]

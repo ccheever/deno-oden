@@ -15,7 +15,9 @@
 
 mod fs_runtime;
 
+pub(crate) use fs_runtime::OdenRev2FilesystemDeliveryWitness;
 pub use fs_runtime::OdenRev2FilesystemError;
+pub(crate) use fs_runtime::OdenRev2FilesystemNativeCommitWitness;
 pub use fs_runtime::OdenRev2LstatDelivery;
 pub use fs_runtime::OdenRev2MkdirDelivery;
 pub use fs_runtime::oden_capsec_rev2_lstat_sync;
@@ -574,6 +576,19 @@ impl OdenRev2NamespaceGateToken {
 
   pub(crate) fn generations(&self) -> RuntimeGenerationVector {
     self.generations
+  }
+
+  #[cfg(test)]
+  pub(crate) fn mismatched_for_test(&self) -> Self {
+    Self {
+      sequence: if self.sequence == u64::MAX {
+        0
+      } else {
+        self.sequence + 1
+      },
+      identity: self.identity.clone(),
+      generations: self.generations,
+    }
   }
 }
 

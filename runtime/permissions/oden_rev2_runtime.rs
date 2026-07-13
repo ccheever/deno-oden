@@ -18,6 +18,14 @@ use serde_json::Value;
 use crate::PermissionCheckError;
 use crate::PermissionDeniedError;
 use crate::PermissionState;
+use crate::oden_rev2_context::OdenRev2FilesystemDeliveryWitness;
+use crate::oden_rev2_context::OdenRev2FilesystemNativeCommitWitness;
+use crate::oden_rev2_fs::OdenRev2FsActorInventory;
+use crate::oden_rev2_fs::OdenRev2FsActorOperation;
+use crate::oden_rev2_fs::OdenRev2FsCheckedTargetKind;
+use crate::oden_rev2_fs::OdenRev2FsMetadataObservation;
+use crate::oden_rev2_fs::OdenRev2FsMkdirCommitOutcome;
+use crate::oden_rev2_fs::OdenRev2FsOperationSession;
 use crate::rev2::CapturedOperationContext;
 use crate::rev2::CommitPermit;
 use crate::rev2::CommitResult;
@@ -726,6 +734,10 @@ pub enum OdenRev2HostError {
   InvalidLaunchDecision,
   #[error("provisional resource identity is empty, oversized, or duplicated")]
   InvalidProvisionalResource,
+  #[error(
+    "filesystem provisional inventory is missing, invalid, or used by the wrong actor kind"
+  )]
+  InvalidFilesystemInventory,
   #[error("the operation has no host-retained commit permit")]
   NoPendingPermit,
   #[error("operation stages were invoked out of order")]
@@ -751,12 +763,12 @@ pub enum OdenRev2HostError {
 type ReleaseHook = Box<dyn FnOnce() + 'static>;
 
 #[derive(Default)]
-struct OdenRev2HostResources {
+struct OdenRev2CallbackResources {
   held: BTreeMap<String, ReleaseHook>,
   released: Vec<String>,
 }
 
-impl OdenRev2HostResources {
+impl OdenRev2CallbackResources {
   fn hold(
     &mut self,
     id: impl Into<String>,
@@ -775,7 +787,7 @@ impl OdenRev2HostResources {
   }
 }
 
-impl ProvisionalResources for OdenRev2HostResources {
+impl ProvisionalResources for OdenRev2CallbackResources {
   fn held_ids(&self) -> Vec<String> {
     self.held.keys().cloned().collect()
   }
@@ -792,9 +804,150 @@ impl ProvisionalResources for OdenRev2HostResources {
   }
 }
 
-impl Drop for OdenRev2HostResources {
+impl Drop for OdenRev2CallbackResources {
   fn drop(&mut self) {
     let _ = self.release_all();
+  }
+}
+
+enum OdenRev2HostResources {
+  Callbacks(OdenRev2CallbackResources),
+  Filesystem(Box<OdenRev2FsActorInventory>),
+}
+
+impl Default for OdenRev2HostResources {
+  fn default() -> Self {
+    Self::Callbacks(OdenRev2CallbackResources::default())
+  }
+}
+
+impl OdenRev2HostResources {
+  fn hold(
+    &mut self,
+    id: impl Into<String>,
+    release: impl FnOnce() + 'static,
+  ) -> Result<(), OdenRev2HostError> {
+    match self {
+      Self::Callbacks(resources) => resources.hold(id, release),
+      Self::Filesystem(_) => Err(OdenRev2HostError::InvalidFilesystemInventory),
+    }
+  }
+
+  fn disarm_callbacks(&mut self) -> Result<Vec<String>, OdenRev2HostError> {
+    match self {
+      Self::Callbacks(resources) => Ok(resources.disarm_all()),
+      Self::Filesystem(_) => Err(OdenRev2HostError::InvalidFilesystemInventory),
+    }
+  }
+
+  fn filesystem(&self) -> Result<&OdenRev2FsActorInventory, OdenRev2HostError> {
+    match self {
+      Self::Filesystem(resources) if resources.is_intact() => Ok(resources),
+      Self::Callbacks(_) | Self::Filesystem(_) => {
+        Err(OdenRev2HostError::InvalidFilesystemInventory)
+      }
+    }
+  }
+
+  fn filesystem_mut(
+    &mut self,
+  ) -> Result<&mut OdenRev2FsActorInventory, OdenRev2HostError> {
+    match self {
+      Self::Filesystem(resources) if resources.is_intact() => Ok(resources),
+      Self::Callbacks(_) | Self::Filesystem(_) => {
+        Err(OdenRev2HostError::InvalidFilesystemInventory)
+      }
+    }
+  }
+
+  fn take_filesystem(
+    &mut self,
+  ) -> Result<OdenRev2FsActorInventory, OdenRev2HostError> {
+    let resources = std::mem::take(self);
+    match resources {
+      Self::Filesystem(resources) if resources.is_intact() => Ok(*resources),
+      Self::Callbacks(_) | Self::Filesystem(_) => {
+        Err(OdenRev2HostError::InvalidFilesystemInventory)
+      }
+    }
+  }
+}
+
+impl ProvisionalResources for OdenRev2HostResources {
+  fn held_ids(&self) -> Vec<String> {
+    match self {
+      Self::Callbacks(resources) => resources.held_ids(),
+      Self::Filesystem(resources) => resources.held_ids(),
+    }
+  }
+
+  fn release_all(&mut self) -> Vec<String> {
+    match self {
+      Self::Callbacks(resources) => resources.release_all(),
+      Self::Filesystem(resources) => resources.release_all(),
+    }
+  }
+}
+
+/// Opaque owner transferred out of a successfully completed filesystem actor.
+/// Dropping this value closes every operation-local checked/source handle.
+///
+/// @ref LLP 0019#filesystem-actor-resource-ownership-checkpoint-eng-24019
+/// [implements]
+pub(crate) struct OdenRev2HostFilesystemCompletion {
+  _resources: OdenRev2FsActorInventory,
+  _not_send_sync: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+pub(crate) struct OdenRev2FilesystemPendingWitness {
+  _private: (),
+}
+
+pub(crate) struct OdenRev2FilesystemCommittedWitness {
+  _private: (),
+}
+
+#[cfg(test)]
+impl OdenRev2FilesystemPendingWitness {
+  pub(crate) fn for_test() -> Self {
+    Self { _private: () }
+  }
+}
+
+/// Filesystem-only HostActor facade. Its closed method set deliberately omits
+/// callback registration and nonterminal cleanup, so neither can run while a
+/// namespace operation owns checked filesystem resources.
+///
+/// @ref LLP 0019#filesystem-actor-resource-ownership-checkpoint-eng-24019
+/// [implements]
+pub(crate) struct OdenRev2FilesystemHostActor {
+  inner: OdenRev2HostActor,
+  operation: OdenRev2FsActorOperation,
+  initial_target: OdenRev2FsCheckedTargetKind,
+  bound_request: StageRequest,
+  phase: OdenRev2FilesystemActorPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OdenRev2FilesystemActorPhase {
+  AwaitingAuthorization,
+  Pending {
+    sources_validated: bool,
+    target_validated: bool,
+    prepared: bool,
+    observed: bool,
+  },
+  CoreCommitted,
+  NativeCommitted,
+  Terminal,
+}
+
+#[cfg(all(test, unix))]
+impl OdenRev2HostFilesystemCompletion {
+  pub(crate) fn provisional_weak_handles(
+    &self,
+  ) -> Vec<std::sync::Weak<std::fs::File>> {
+    self._resources.provisional_weak_handles()
   }
 }
 
@@ -916,6 +1069,40 @@ impl OdenRev2HostActor {
     })
   }
 
+  #[allow(clippy::too_many_arguments)]
+  fn capture_filesystem_host(
+    operation_id: impl Into<String>,
+    actor_id: impl Into<String>,
+    principals: Vec<PrincipalRef>,
+    effect_owner_id: impl Into<String>,
+    effect_owner_principal: PrincipalRef,
+    effect_owner_generation: impl Into<String>,
+    policy: &DecisionPolicyInput,
+    filesystem_inventory: OdenRev2FsActorInventory,
+  ) -> Result<Self, OdenRev2HostError> {
+    let operation_id = operation_id.into();
+    let actor_id = actor_id.into();
+    if !filesystem_inventory.is_intact()
+      || !filesystem_inventory.binds(&operation_id, &actor_id)
+      || !filesystem_inventory.binds_policy(policy)
+    {
+      return Err(OdenRev2HostError::InvalidFilesystemInventory);
+    }
+    let mut actor = Self::capture_host(
+      operation_id,
+      actor_id,
+      principals,
+      effect_owner_id,
+      effect_owner_principal,
+      effect_owner_generation,
+      None,
+      policy,
+    )?;
+    actor.resources =
+      OdenRev2HostResources::Filesystem(Box::new(filesystem_inventory));
+    Ok(actor)
+  }
+
   pub fn hold_provisional(
     &mut self,
     id: impl Into<String>,
@@ -923,6 +1110,145 @@ impl OdenRev2HostActor {
   ) -> Result<(), OdenRev2HostError> {
     self.completion_inventory = None;
     self.resources.hold(id, release)
+  }
+
+  fn require_pending_filesystem_stage(
+    &mut self,
+  ) -> Result<(), OdenRev2HostError> {
+    if self.pending.is_some()
+      && self.phase != OdenRev2ActorPhase::Terminal
+      && self.completion_inventory.is_none()
+      && self.sealed_launch.is_none()
+      && self.resources.filesystem().is_ok()
+    {
+      Ok(())
+    } else {
+      self.terminalize();
+      Err(OdenRev2HostError::InvalidStageOrder)
+    }
+  }
+
+  fn require_committed_filesystem_stage(
+    &mut self,
+  ) -> Result<Vec<String>, OdenRev2HostError> {
+    let current_inventory = self.resources.held_ids();
+    if self.pending.is_none()
+      && self.phase == OdenRev2ActorPhase::Discovery
+      && self.completion_inventory.as_ref() == Some(&current_inventory)
+      && self.sealed_launch.is_none()
+      && self.resources.filesystem().is_ok()
+    {
+      Ok(current_inventory)
+    } else {
+      self.terminalize();
+      Err(OdenRev2HostError::InvalidStageOrder)
+    }
+  }
+
+  fn revalidate_filesystem_sources(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2HostError> {
+    self.require_pending_filesystem_stage()?;
+    let result = self.resources.filesystem().and_then(|inventory| {
+      inventory
+        .revalidate_sources(operation_session)
+        .map_err(|_| OdenRev2HostError::InvalidFilesystemInventory)
+    });
+    if result.is_err() {
+      self.terminalize();
+    }
+    result
+  }
+
+  fn revalidate_filesystem_target(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2HostError> {
+    self.require_pending_filesystem_stage()?;
+    let result = self.resources.filesystem().and_then(|inventory| {
+      inventory
+        .revalidate_target(operation_session)
+        .map_err(|_| OdenRev2HostError::InvalidFilesystemInventory)
+    });
+    if result.is_err() {
+      self.terminalize();
+    }
+    result
+  }
+
+  fn observe_filesystem_metadata(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<OdenRev2FsMetadataObservation, OdenRev2HostError> {
+    self.require_pending_filesystem_stage()?;
+    let witness = OdenRev2FilesystemPendingWitness { _private: () };
+    let result = self.resources.filesystem().and_then(|inventory| {
+      inventory
+        .observe_metadata(operation_session, &witness)
+        .map_err(|_| OdenRev2HostError::InvalidFilesystemInventory)
+    });
+    if result.is_err() {
+      self.terminalize();
+    }
+    result
+  }
+
+  fn observe_filesystem_missing(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2HostError> {
+    self.require_pending_filesystem_stage()?;
+    let witness = OdenRev2FilesystemPendingWitness { _private: () };
+    let result = self.resources.filesystem().and_then(|inventory| {
+      inventory
+        .observe_missing(operation_session, &witness)
+        .map_err(|_| OdenRev2HostError::InvalidFilesystemInventory)
+    });
+    if result.is_err() {
+      self.terminalize();
+    }
+    result
+  }
+
+  fn prepare_filesystem_mkdir(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2HostError> {
+    self.require_pending_filesystem_stage()?;
+    let before = self.resources.held_ids();
+    let witness = OdenRev2FilesystemPendingWitness { _private: () };
+    let result = self.resources.filesystem_mut().and_then(|inventory| {
+      inventory
+        .prepare_mkdir(operation_session, &witness)
+        .map_err(|_| OdenRev2HostError::InvalidFilesystemInventory)
+    });
+    if result.is_err() || self.resources.held_ids() != before {
+      self.terminalize();
+      return Err(OdenRev2HostError::InvalidFilesystemInventory);
+    }
+    Ok(())
+  }
+
+  fn commit_filesystem_mkdir(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+    mode: u32,
+    native_commit_witness: &OdenRev2FilesystemNativeCommitWitness<'_>,
+  ) -> Result<OdenRev2FsMkdirCommitOutcome, OdenRev2HostError> {
+    let before = self.require_committed_filesystem_stage()?;
+    let witness = OdenRev2FilesystemCommittedWitness { _private: () };
+    let outcome = self.resources.filesystem_mut()?.commit_mkdir(
+      operation_session,
+      mode,
+      &witness,
+      native_commit_witness,
+    );
+    if self.resources.held_ids() != before {
+      self.terminalize();
+      return Err(OdenRev2HostError::InvalidFilesystemInventory);
+    }
+    Ok(outcome)
   }
 
   pub fn authorize_initial(
@@ -1226,7 +1552,34 @@ impl OdenRev2HostActor {
       return Err(OdenRev2HostError::IncompleteOperation);
     }
     self.completion_inventory = None;
-    Ok(self.resources.disarm_all())
+    self.resources.disarm_callbacks()
+  }
+
+  /// Transfer the exact callback-free filesystem inventory to the delivery
+  /// lease. The inventory IDs must still byte-match the immediately preceding
+  /// commit; no callback-backed resource may coexist with this actor kind.
+  fn complete_filesystem(
+    mut self,
+  ) -> Result<OdenRev2HostFilesystemCompletion, OdenRev2HostError> {
+    let current_inventory = self.resources.held_ids();
+    let native_completion_ready = self
+      .resources
+      .filesystem()
+      .is_ok_and(OdenRev2FsActorInventory::completion_ready);
+    if self.pending.is_some()
+      || self.phase != OdenRev2ActorPhase::Discovery
+      || self.completion_inventory.as_ref() != Some(&current_inventory)
+      || self.sealed_launch.is_some()
+      || !native_completion_ready
+    {
+      self.terminalize();
+      return Err(OdenRev2HostError::IncompleteOperation);
+    }
+    self.completion_inventory = None;
+    Ok(OdenRev2HostFilesystemCompletion {
+      _resources: self.resources.take_filesystem()?,
+      _not_send_sync: std::marker::PhantomData,
+    })
   }
 
   fn terminalize(&mut self) {
@@ -1235,6 +1588,345 @@ impl OdenRev2HostActor {
     self.completion_inventory = None;
     self.sealed_launch = None;
     let _ = self.operation.cancel(&mut self.resources);
+  }
+}
+
+impl OdenRev2FilesystemHostActor {
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) fn capture_host(
+    operation_id: impl Into<String>,
+    actor_id: impl Into<String>,
+    principals: Vec<PrincipalRef>,
+    effect_owner_id: impl Into<String>,
+    effect_owner_principal: PrincipalRef,
+    effect_owner_generation: impl Into<String>,
+    policy: &DecisionPolicyInput,
+    filesystem_inventory: OdenRev2FsActorInventory,
+  ) -> Result<Self, OdenRev2HostError> {
+    let operation = filesystem_inventory.operation();
+    let initial_target = filesystem_inventory
+      .target_kind()
+      .map_err(|_| OdenRev2HostError::InvalidFilesystemInventory)?;
+    let bound_request = filesystem_inventory.bound_request().clone();
+    Ok(Self {
+      inner: OdenRev2HostActor::capture_filesystem_host(
+        operation_id,
+        actor_id,
+        principals,
+        effect_owner_id,
+        effect_owner_principal,
+        effect_owner_generation,
+        policy,
+        filesystem_inventory,
+      )?,
+      operation,
+      initial_target,
+      bound_request,
+      phase: OdenRev2FilesystemActorPhase::AwaitingAuthorization,
+    })
+  }
+
+  fn terminal_error<T>(&mut self) -> Result<T, OdenRev2HostError> {
+    self.inner.terminalize();
+    self.phase = OdenRev2FilesystemActorPhase::Terminal;
+    Err(OdenRev2HostError::InvalidStageOrder)
+  }
+
+  pub(crate) fn authorize_initial(
+    &mut self,
+    request: &StageRequest,
+    policy: &DecisionPolicyInput,
+    interaction: OdenRev2HostInteraction,
+  ) -> Result<OdenRev2HostAuthorization, OdenRev2HostError> {
+    if self.phase != OdenRev2FilesystemActorPhase::AwaitingAuthorization
+      || self.bound_request != *request
+    {
+      return self.terminal_error();
+    }
+    let result = self.inner.authorize_initial(request, policy, interaction);
+    self.phase = match &result {
+      Ok(OdenRev2HostAuthorization::Authorized { .. }) => {
+        OdenRev2FilesystemActorPhase::Pending {
+          sources_validated: false,
+          target_validated: false,
+          prepared: false,
+          observed: false,
+        }
+      }
+      _ => OdenRev2FilesystemActorPhase::Terminal,
+    };
+    result
+  }
+
+  pub(crate) fn revalidate_sources(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2HostError> {
+    if !matches!(
+      self.phase,
+      OdenRev2FilesystemActorPhase::Pending {
+        sources_validated: false,
+        target_validated: false,
+        prepared: false,
+        observed: false,
+      }
+    ) {
+      return self.terminal_error();
+    }
+    if let Err(error) =
+      self.inner.revalidate_filesystem_sources(operation_session)
+    {
+      self.phase = OdenRev2FilesystemActorPhase::Terminal;
+      return Err(error);
+    }
+    let OdenRev2FilesystemActorPhase::Pending {
+      sources_validated, ..
+    } = &mut self.phase
+    else {
+      unreachable!();
+    };
+    *sources_validated = true;
+    Ok(())
+  }
+
+  pub(crate) fn revalidate_target(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2HostError> {
+    if !matches!(
+      self.phase,
+      OdenRev2FilesystemActorPhase::Pending {
+        sources_validated: true,
+        target_validated: false,
+        observed: false,
+        ..
+      }
+    ) {
+      return self.terminal_error();
+    }
+    if let Err(error) =
+      self.inner.revalidate_filesystem_target(operation_session)
+    {
+      self.phase = OdenRev2FilesystemActorPhase::Terminal;
+      return Err(error);
+    }
+    let OdenRev2FilesystemActorPhase::Pending {
+      target_validated, ..
+    } = &mut self.phase
+    else {
+      unreachable!();
+    };
+    *target_validated = true;
+    Ok(())
+  }
+
+  pub(crate) fn observe_metadata(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<OdenRev2FsMetadataObservation, OdenRev2HostError> {
+    if self.operation != OdenRev2FsActorOperation::ObserveMetadata
+      || !matches!(
+        self.phase,
+        OdenRev2FilesystemActorPhase::Pending {
+          sources_validated: true,
+          target_validated: true,
+          prepared: false,
+          observed: false,
+        }
+      )
+    {
+      return self.terminal_error();
+    }
+    let observation =
+      match self.inner.observe_filesystem_metadata(operation_session) {
+        Ok(observation) => observation,
+        Err(error) => {
+          self.phase = OdenRev2FilesystemActorPhase::Terminal;
+          return Err(error);
+        }
+      };
+    let OdenRev2FilesystemActorPhase::Pending { observed, .. } =
+      &mut self.phase
+    else {
+      unreachable!();
+    };
+    *observed = true;
+    Ok(observation)
+  }
+
+  pub(crate) fn observe_missing(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2HostError> {
+    if self.operation != OdenRev2FsActorOperation::ObserveMetadata
+      || !matches!(
+        self.phase,
+        OdenRev2FilesystemActorPhase::Pending {
+          sources_validated: true,
+          target_validated: true,
+          prepared: false,
+          observed: false,
+        }
+      )
+    {
+      return self.terminal_error();
+    }
+    if let Err(error) = self.inner.observe_filesystem_missing(operation_session)
+    {
+      self.phase = OdenRev2FilesystemActorPhase::Terminal;
+      return Err(error);
+    }
+    let OdenRev2FilesystemActorPhase::Pending { observed, .. } =
+      &mut self.phase
+    else {
+      unreachable!();
+    };
+    *observed = true;
+    Ok(())
+  }
+
+  pub(crate) fn prepare_mkdir(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+  ) -> Result<(), OdenRev2HostError> {
+    if self.operation != OdenRev2FsActorOperation::Mkdir
+      || self.initial_target != OdenRev2FsCheckedTargetKind::Missing
+      || !matches!(
+        self.phase,
+        OdenRev2FilesystemActorPhase::Pending {
+          sources_validated: true,
+          target_validated: true,
+          prepared: false,
+          observed: false,
+        }
+      )
+    {
+      return self.terminal_error();
+    }
+    if let Err(error) = self.inner.prepare_filesystem_mkdir(operation_session) {
+      self.phase = OdenRev2FilesystemActorPhase::Terminal;
+      return Err(error);
+    }
+    self.phase = OdenRev2FilesystemActorPhase::Pending {
+      sources_validated: true,
+      target_validated: false,
+      prepared: true,
+      observed: false,
+    };
+    Ok(())
+  }
+
+  pub(crate) fn commit_authorized(
+    &mut self,
+    policy: &DecisionPolicyInput,
+  ) -> Result<OdenRev2HostCommit, OdenRev2HostError> {
+    let ready = matches!(
+      (self.operation, self.initial_target, self.phase),
+      (
+        OdenRev2FsActorOperation::ObserveMetadata,
+        _,
+        OdenRev2FilesystemActorPhase::Pending {
+          sources_validated: true,
+          target_validated: true,
+          prepared: false,
+          observed: true,
+        },
+      ) | (
+        OdenRev2FsActorOperation::Mkdir,
+        OdenRev2FsCheckedTargetKind::Existing
+          | OdenRev2FsCheckedTargetKind::NoFollowLink,
+        OdenRev2FilesystemActorPhase::Pending {
+          sources_validated: true,
+          target_validated: true,
+          prepared: false,
+          observed: false,
+        },
+      ) | (
+        OdenRev2FsActorOperation::Mkdir,
+        OdenRev2FsCheckedTargetKind::Missing,
+        OdenRev2FilesystemActorPhase::Pending {
+          sources_validated: true,
+          target_validated: true,
+          prepared: true,
+          observed: false,
+        },
+      )
+    );
+    if !ready {
+      return self.terminal_error();
+    }
+    let result = self.inner.commit_authorized(policy);
+    self.phase = match &result {
+      Ok(OdenRev2HostCommit::Committed { .. }) => {
+        OdenRev2FilesystemActorPhase::CoreCommitted
+      }
+      _ => OdenRev2FilesystemActorPhase::Terminal,
+    };
+    result
+  }
+
+  pub(crate) fn commit_mkdir(
+    &mut self,
+    operation_session: &OdenRev2FsOperationSession,
+    mode: u32,
+    native_commit_witness: &OdenRev2FilesystemNativeCommitWitness<'_>,
+  ) -> Result<OdenRev2FsMkdirCommitOutcome, OdenRev2HostError> {
+    if self.operation != OdenRev2FsActorOperation::Mkdir
+      || self.initial_target != OdenRev2FsCheckedTargetKind::Missing
+      || self.phase != OdenRev2FilesystemActorPhase::CoreCommitted
+    {
+      return self.terminal_error();
+    }
+    let outcome = match self.inner.commit_filesystem_mkdir(
+      operation_session,
+      mode,
+      native_commit_witness,
+    ) {
+      Ok(outcome) => outcome,
+      Err(error) => {
+        self.phase = OdenRev2FilesystemActorPhase::Terminal;
+        return Err(error);
+      }
+    };
+    if matches!(outcome, OdenRev2FsMkdirCommitOutcome::Committed) {
+      self.phase = OdenRev2FilesystemActorPhase::NativeCommitted;
+    } else {
+      let _ = self.inner.cancel();
+      self.phase = OdenRev2FilesystemActorPhase::Terminal;
+    }
+    Ok(outcome)
+  }
+
+  pub(crate) fn cancel(&mut self) -> OperationReleaseEvidence {
+    self.phase = OdenRev2FilesystemActorPhase::Terminal;
+    self.inner.cancel()
+  }
+
+  pub(crate) fn complete(
+    mut self,
+    _witness: &OdenRev2FilesystemDeliveryWitness,
+  ) -> Result<OdenRev2HostFilesystemCompletion, OdenRev2HostError> {
+    let ready = matches!(
+      (self.operation, self.initial_target, self.phase),
+      (
+        OdenRev2FsActorOperation::ObserveMetadata,
+        _,
+        OdenRev2FilesystemActorPhase::CoreCommitted,
+      ) | (
+        OdenRev2FsActorOperation::Mkdir,
+        OdenRev2FsCheckedTargetKind::Existing
+          | OdenRev2FsCheckedTargetKind::NoFollowLink,
+        OdenRev2FilesystemActorPhase::CoreCommitted,
+      ) | (
+        OdenRev2FsActorOperation::Mkdir,
+        OdenRev2FsCheckedTargetKind::Missing,
+        OdenRev2FilesystemActorPhase::NativeCommitted,
+      )
+    );
+    if !ready {
+      return self.terminal_error();
+    }
+    self.inner.complete_filesystem()
   }
 }
 
