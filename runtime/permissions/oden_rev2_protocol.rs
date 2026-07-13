@@ -32,19 +32,33 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::compiler_fence;
 
+use crate::oden_rev2_authority::AuthorityPathFact;
 use crate::oden_rev2_authority::AuthorityStateError;
 use crate::oden_rev2_authority::AuthorityTransaction;
-#[cfg(test)]
+use crate::oden_rev2_authority::CachedDecision;
 use crate::oden_rev2_authority::CommittedAuthorityTransaction;
+use crate::oden_rev2_authority::DecisionCacheKey;
+use crate::oden_rev2_authority::DecisionCacheValue;
+use crate::oden_rev2_authority::RuntimeAuthorityMode;
 use crate::oden_rev2_authority::RuntimeAuthorityReadView;
 use crate::oden_rev2_authority::RuntimeAuthorityState;
 use crate::oden_rev2_authority::RuntimeGenerationVector;
 use crate::oden_rev2_authority::RuntimeIdentityBinding;
+use crate::oden_rev2_context::OdenRev2OperationAuthorityFacts;
 use crate::oden_rev2_context::OdenRev2PermissionBatchSequence;
+use crate::oden_rev2_context::OdenRev2RuntimeAuthorityContext;
 use crate::rev2::CanonicalAuthoritySelector;
 use crate::rev2::CanonicalEffect;
+use crate::rev2::DecisionPolicyInput;
+use crate::rev2::EffectInput;
+use crate::rev2::Outcome;
+use crate::rev2::PathBindingInput;
 use crate::rev2::PositiveSource;
 use crate::rev2::PrincipalRef;
+use crate::rev2::Rev2Core;
+use crate::rev2::SelectorPolarity;
+use crate::rev2::StageDecision;
+use crate::rev2::StageRequest;
 use crate::rev2_registry_generated::{
   REV2_RUNTIME_EXTERNAL_RESPONSE_MAC_DOMAIN,
   REV2_RUNTIME_EXTERNAL_RESPONSE_SCHEMA, REV2_RUNTIME_MAX_BATCH_EFFECTS,
@@ -54,6 +68,7 @@ use crate::rev2_registry_generated::{
   REV2_RUNTIME_MAX_CANONICAL_RESULT_BYTES,
   REV2_RUNTIME_MAX_CONSTRAINED_PRINCIPALS,
   REV2_RUNTIME_MAX_PRINCIPAL_EFFECT_DIMENSIONS,
+  REV2_RUNTIME_NEGATIVE_REENTRY_PHASES,
   REV2_RUNTIME_PERMISSION_BATCH_DIGEST_DOMAIN,
   REV2_RUNTIME_PERMISSION_BATCH_SCHEMA, REV2_RUNTIME_PERMISSION_BRANCHES,
   REV2_RUNTIME_PERMISSION_RESULT_SCHEMA,
@@ -105,7 +120,11 @@ pub(crate) enum PermissionProtocolError {
   IncompleteResult,
   InvalidPositiveSource,
   AuthenticationFailed,
+  CacheCandidateMismatch,
+  DeadlineExpired,
   ExternalMutationRefused,
+  NegativeInventoryMismatch,
+  NegativeReentryRefused,
   StaleAuthorityView,
   AuthorityState(AuthorityStateError),
   IdentityMismatch,
@@ -174,8 +193,20 @@ impl fmt::Display for PermissionProtocolError {
       Self::AuthenticationFailed => {
         formatter.write_str("external permission response is unauthenticated")
       }
+      Self::CacheCandidateMismatch => formatter.write_str(
+        "decision-cache candidate differs from the sealed shared-core decision",
+      ),
+      Self::DeadlineExpired => {
+        formatter.write_str("negative re-entry deadline has expired")
+      }
       Self::ExternalMutationRefused => formatter.write_str(
         "external decision cannot authorize a runtime authority mutation",
+      ),
+      Self::NegativeInventoryMismatch => formatter.write_str(
+        "negative inventory differs between sealed permission phases",
+      ),
+      Self::NegativeReentryRefused => formatter.write_str(
+        "current shared-core negative strata refuse this permission phase",
       ),
       Self::StaleAuthorityView => {
         formatter.write_str("runtime authority view is not current")
@@ -267,6 +298,72 @@ impl Serialize for CanonicalU64 {
   {
     serializer.serialize_str(&self.0.to_string())
   }
+}
+
+/// The generated C04 negative re-entry phases. A caller cannot substitute a
+/// stack label or omit a generated phase by passing a string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PermissionNegativeReentryPhase {
+  InitialQueryOrRequest,
+  AlreadyGrantedCheck,
+  BeforeExternalDecider,
+  AfterExternalResponse,
+  BeforeOverlayPublication,
+  ResultProduction,
+  CacheHit,
+}
+
+impl PermissionNegativeReentryPhase {
+  const ALL: [Self; 7] = [
+    Self::InitialQueryOrRequest,
+    Self::AlreadyGrantedCheck,
+    Self::BeforeExternalDecider,
+    Self::AfterExternalResponse,
+    Self::BeforeOverlayPublication,
+    Self::ResultProduction,
+    Self::CacheHit,
+  ];
+
+  pub(crate) fn id(self) -> &'static str {
+    match self {
+      Self::InitialQueryOrRequest => "initial-query-or-request",
+      Self::AlreadyGrantedCheck => "already-granted-check",
+      Self::BeforeExternalDecider => "before-external-decider",
+      Self::AfterExternalResponse => "after-external-response",
+      Self::BeforeOverlayPublication => "before-overlay-publication",
+      Self::ResultProduction => "result-production",
+      Self::CacheHit => "cache-hit",
+    }
+  }
+
+  fn validate_generated(self) -> Result<(), PermissionProtocolError> {
+    let expected_order = Self::ALL
+      .iter()
+      .position(|candidate| *candidate == self)
+      .expect("closed phase enum")
+      + 1;
+    let row = REV2_RUNTIME_NEGATIVE_REENTRY_PHASES
+      .iter()
+      .find(|row| row.id == self.id())
+      .ok_or(PermissionProtocolError::InvalidField(
+        "negativeReentryPhase",
+      ))?;
+    if row.order != expected_order
+      || row.strata != [1, 2, 3, 4, 5, 6, 7]
+      || row.stale_disposition != "discard-batch-and-restart-with-new-sequence"
+    {
+      return Err(PermissionProtocolError::InvalidField(
+        "negativeReentryPhase",
+      ));
+    }
+    Ok(())
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PermissionEvaluationView {
+  Current,
+  Proposed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
@@ -759,6 +856,8 @@ pub(crate) struct NormalizedPermissionBatch {
   effects: Box<[NormalizedPermissionEffect]>,
   batch_digest: String,
   #[serde(skip)]
+  path_facts: Box<[Option<AuthorityPathFact>]>,
+  #[serde(skip)]
   authority_view: RuntimeAuthorityReadView,
   #[serde(skip)]
   external_response_consumed: AtomicBool,
@@ -774,9 +873,34 @@ impl NormalizedPermissionBatch {
     actors: &VerifiedPermissionActorSet,
     effects: &[NormalizedPermissionEffect],
   ) -> Result<Self, PermissionProtocolError> {
+    Self::capture_host_with_path_bindings(
+      state,
+      read_view,
+      batch_sequence,
+      operation,
+      generated,
+      actors,
+      effects,
+      &[],
+    )
+  }
+
+  pub(crate) fn capture_host_with_path_bindings(
+    state: &RuntimeAuthorityState,
+    read_view: &RuntimeAuthorityReadView,
+    batch_sequence: OdenRev2PermissionBatchSequence,
+    operation: PermissionOperation,
+    generated: &SelectedGeneratedPermissionBranch,
+    actors: &VerifiedPermissionActorSet,
+    effects: &[NormalizedPermissionEffect],
+    path_bindings: &[Option<&PathBindingInput>],
+  ) -> Result<Self, PermissionProtocolError> {
     require_current_view(state, read_view)?;
     generated.ensure_transition(operation)?;
     if effects.len() != generated.slot_order.len() {
+      return Err(PermissionProtocolError::IncompleteGeneratedSlotSet);
+    }
+    if !path_bindings.is_empty() && path_bindings.len() != effects.len() {
       return Err(PermissionProtocolError::IncompleteGeneratedSlotSet);
     }
     let constrained_principals = actors.constrained_principals();
@@ -857,6 +981,25 @@ impl NormalizedPermissionBatch {
     let expected_generations = read_view.generations();
     let constrained_principals: Box<[PrincipalRef]> =
       constrained_principals.to_vec().into();
+    let path_facts = effects
+      .iter()
+      .enumerate()
+      .map(|(index, effect)| {
+        path_bindings
+          .get(index)
+          .copied()
+          .flatten()
+          .map(|binding| {
+            AuthorityPathFact::capture_verified(
+              binding,
+              effect.selector(),
+              &effect.canonical_effect().occurrence,
+            )
+          })
+          .transpose()
+      })
+      .collect::<Result<Vec<_>, _>>()?
+      .into_boxed_slice();
     let effects: Box<[NormalizedPermissionEffect]> = effects.to_vec().into();
     let batch_sequence = batch_sequence.into_value();
     let digest_payload = PermissionBatchDigestPayload {
@@ -895,6 +1038,7 @@ impl NormalizedPermissionBatch {
       overlay_owner: overlay_owner.clone(),
       effects,
       batch_digest,
+      path_facts,
       authority_view: read_view.clone(),
       external_response_consumed: AtomicBool::new(false),
     })
@@ -932,6 +1076,10 @@ impl NormalizedPermissionBatch {
     &self.effects
   }
 
+  fn path_fact(&self, index: usize) -> Option<&AuthorityPathFact> {
+    self.path_facts.get(index).and_then(Option::as_ref)
+  }
+
   pub(crate) fn batch_digest(&self) -> &str {
     &self.batch_digest
   }
@@ -960,7 +1108,12 @@ impl NormalizedPermissionBatch {
       return Err(PermissionProtocolError::ExternalMutationRefused);
     }
     let mut transaction = state.begin_transaction_from(&self.authority_view)?;
-    for (effect, result) in self.effects.iter().zip(current_result.effects()) {
+    for (index, (effect, result)) in self
+      .effects
+      .iter()
+      .zip(current_result.effects())
+      .enumerate()
+    {
       if effect.slot_id() != result.slot_id() {
         return Err(PermissionProtocolError::IncompleteResult);
       }
@@ -973,12 +1126,393 @@ impl NormalizedPermissionBatch {
           self.overlay_owner(),
           dimension.principal(),
           &revocation_selector,
+          self.path_fact(index),
         )?;
       }
     }
     require_current_view(state, &self.authority_view)?;
     Ok(transaction)
   }
+}
+
+fn permission_effect_input(
+  policy: &DecisionPolicyInput,
+  effect: &NormalizedPermissionEffect,
+) -> EffectInput {
+  let canonical = effect.canonical_effect();
+  EffectInput {
+    identity: policy.identity.clone(),
+    edge_id: canonical.edge_id.clone(),
+    effect_slot_id: canonical.effect_slot_id.clone(),
+    capability: canonical.capability.clone(),
+    effect_owner: canonical.effect_owner.clone(),
+    occurrence: canonical.occurrence.clone(),
+  }
+}
+
+fn validate_negative_reentry_decision(
+  batch: &NormalizedPermissionBatch,
+  phase: PermissionNegativeReentryPhase,
+  decision: &StageDecision,
+) -> Result<bool, PermissionProtocolError> {
+  if decision.stage_id != phase.id()
+    || decision.effects.len() != batch.effects.len()
+  {
+    return Err(PermissionProtocolError::IncompleteResult);
+  }
+  let expected_principals = batch
+    .constrained_principals
+    .iter()
+    .map(|principal| {
+      canonical_serialization(
+        principal,
+        MAX_CANONICAL_EFFECT_BYTES,
+        "negativeReentryPrincipal",
+      )
+    })
+    .collect::<Result<BTreeSet<_>, _>>()?;
+  let mut terminal_negative = false;
+  for (effect, observed) in batch.effects.iter().zip(&decision.effects) {
+    if observed.effect != *effect.canonical_effect()
+      || observed.dimensions.len() != batch.constrained_principals.len()
+    {
+      return Err(PermissionProtocolError::IncompleteResult);
+    }
+    let observed_principals = observed
+      .dimensions
+      .iter()
+      .map(|dimension| {
+        canonical_serialization(
+          &dimension.principal,
+          MAX_CANONICAL_EFFECT_BYTES,
+          "negativeReentryPrincipal",
+        )
+      })
+      .collect::<Result<BTreeSet<_>, _>>()?;
+    if observed_principals != expected_principals {
+      return Err(PermissionProtocolError::IncompleteResult);
+    }
+    terminal_negative |= observed.dimensions.iter().any(|dimension| {
+      dimension.outcome != Outcome::Allow && dimension.stratum <= 7
+    });
+  }
+  Ok(terminal_negative)
+}
+
+/// A phase result minted only by the installed context's embedded shared core.
+/// It binds one batch, immutable read view, generated phase, negative inventory
+/// digest, and optional monotonic deadline. Fields are private and it is not
+/// cloneable, so it cannot be substituted for another phase or publication.
+#[derive(Debug)]
+pub(crate) struct SealedPermissionNegativeReentry<'batch> {
+  batch: &'batch NormalizedPermissionBatch,
+  phase: PermissionNegativeReentryPhase,
+  evaluation_view: PermissionEvaluationView,
+  read_view: RuntimeAuthorityReadView,
+  policy: DecisionPolicyInput,
+  decision: StageDecision,
+  terminal_negative: bool,
+  negative_inventory_digest: String,
+  valid_until_monotonic: Option<u64>,
+}
+
+impl SealedPermissionNegativeReentry<'_> {
+  pub(crate) fn policy(&self) -> &DecisionPolicyInput {
+    &self.policy
+  }
+
+  pub(crate) fn decision(&self) -> &StageDecision {
+    &self.decision
+  }
+
+  pub(crate) fn negative_inventory_digest(&self) -> &str {
+    &self.negative_inventory_digest
+  }
+
+  pub(crate) fn phase(&self) -> PermissionNegativeReentryPhase {
+    self.phase
+  }
+
+  pub(crate) fn has_terminal_negative(&self) -> bool {
+    self.terminal_negative
+  }
+
+  fn require_no_terminal_negative(
+    &self,
+  ) -> Result<(), PermissionProtocolError> {
+    if self.terminal_negative {
+      Err(PermissionProtocolError::NegativeReentryRefused)
+    } else {
+      Ok(())
+    }
+  }
+
+  fn require_unexpired(
+    &self,
+    now_monotonic: u64,
+  ) -> Result<(), PermissionProtocolError> {
+    if self
+      .valid_until_monotonic
+      .is_some_and(|deadline| now_monotonic >= deadline)
+    {
+      Err(PermissionProtocolError::DeadlineExpired)
+    } else {
+      Ok(())
+    }
+  }
+
+  pub(crate) fn require_current(
+    &self,
+    context: &OdenRev2RuntimeAuthorityContext,
+    now_monotonic: u64,
+  ) -> Result<(), PermissionProtocolError> {
+    self.require_unexpired(now_monotonic)?;
+    if self.evaluation_view != PermissionEvaluationView::Current
+      || self.read_view.identity() != self.batch.identity()
+      || self.read_view.generations() != self.batch.expected_generations()
+      || !context.authority_state().is_current(&self.read_view)?
+      || !context
+        .authority_state()
+        .is_current(&self.batch.authority_view)?
+    {
+      return Err(PermissionProtocolError::StaleAuthorityView);
+    }
+    Ok(())
+  }
+}
+
+impl OdenRev2RuntimeAuthorityContext {
+  #[allow(
+    clippy::too_many_arguments,
+    reason = "the closed C04 phase binding carries one batch, read view, trusted facts, phase, view kind, clock observation, and deadline together"
+  )]
+  pub(crate) fn evaluate_permission_negative_reentry<'batch>(
+    &self,
+    batch: &'batch NormalizedPermissionBatch,
+    read_view: &RuntimeAuthorityReadView,
+    facts: OdenRev2OperationAuthorityFacts,
+    phase: PermissionNegativeReentryPhase,
+    evaluation_view: PermissionEvaluationView,
+    now_monotonic: u64,
+    valid_until_monotonic: Option<u64>,
+  ) -> Result<SealedPermissionNegativeReentry<'batch>, PermissionProtocolError>
+  {
+    phase.validate_generated()?;
+    if valid_until_monotonic.is_some_and(|deadline| now_monotonic >= deadline) {
+      return Err(PermissionProtocolError::DeadlineExpired);
+    }
+    if (evaluation_view == PermissionEvaluationView::Proposed
+      && !matches!(
+        phase,
+        PermissionNegativeReentryPhase::BeforeOverlayPublication
+          | PermissionNegativeReentryPhase::ResultProduction
+      ))
+      || (evaluation_view == PermissionEvaluationView::Current
+        && phase == PermissionNegativeReentryPhase::BeforeOverlayPublication)
+    {
+      return Err(PermissionProtocolError::InvalidField(
+        "negativeReentryPhaseView",
+      ));
+    }
+    if batch.identity() != self.identity()
+      || read_view.identity() != self.identity()
+      || !self.authority_state().is_current(&batch.authority_view)?
+    {
+      return Err(PermissionProtocolError::StaleAuthorityView);
+    }
+    match evaluation_view {
+      PermissionEvaluationView::Current => {
+        if read_view.generations() != batch.expected_generations()
+          || !self.authority_state().is_current(read_view)?
+        {
+          return Err(PermissionProtocolError::StaleAuthorityView);
+        }
+      }
+      PermissionEvaluationView::Proposed => read_view
+        .generations()
+        .ensure_monotonic_from(&batch.expected_generations())?,
+    }
+
+    let policy = match evaluation_view {
+      PermissionEvaluationView::Current => {
+        self.decision_policy_for_operation(read_view, facts)
+      }
+      PermissionEvaluationView::Proposed => {
+        self.decision_policy_for_proposed_operation(read_view, facts)
+      }
+    }
+    .map_err(PermissionProtocolError::Serialization)?;
+    if policy.provenance.quota_owner != *batch.overlay_owner() {
+      return Err(PermissionProtocolError::IdentityMismatch);
+    }
+    let core = Rev2Core::embedded().map_err(|error| {
+      PermissionProtocolError::Serialization(error.to_string())
+    })?;
+    let request = StageRequest {
+      identity: policy.identity.clone(),
+      stage_id: phase.id().to_string(),
+      principals: batch.constrained_principals().to_vec(),
+      effects: batch
+        .effects()
+        .iter()
+        .map(|effect| permission_effect_input(&policy, effect))
+        .collect(),
+    };
+    let decision = core.decide_stage(&request, &policy).map_err(|error| {
+      PermissionProtocolError::Serialization(error.to_string())
+    })?;
+    let terminal_negative =
+      validate_negative_reentry_decision(batch, phase, &decision)?;
+    let negative_inventory_digest =
+      core.negative_inventory_digest(&policy).map_err(|error| {
+        PermissionProtocolError::Serialization(error.to_string())
+      })?;
+    if !self.authority_state().is_current(&batch.authority_view)?
+      || (evaluation_view == PermissionEvaluationView::Current
+        && !self.authority_state().is_current(read_view)?)
+    {
+      return Err(PermissionProtocolError::StaleAuthorityView);
+    }
+    Ok(SealedPermissionNegativeReentry {
+      batch,
+      phase,
+      evaluation_view,
+      read_view: read_view.clone(),
+      policy,
+      decision,
+      terminal_negative,
+      negative_inventory_digest,
+      valid_until_monotonic,
+    })
+  }
+
+  /// Consume a cache candidate only after the exact generated cache-hit phase
+  /// runs through the embedded shared core. A cache insertion API cannot mint
+  /// authority: the cached dimensions and positive sources must byte-for-byte
+  /// match the fresh decision, and freshness is checked again immediately
+  /// before the value is exposed.
+  pub(crate) fn consume_permission_cache_hit(
+    &self,
+    batch: &NormalizedPermissionBatch,
+    key: &DecisionCacheKey,
+    facts: OdenRev2OperationAuthorityFacts,
+    now_monotonic: u64,
+  ) -> Result<Option<DecisionCacheValue>, PermissionProtocolError> {
+    if !cache_key_matches_batch(self, batch, key) {
+      return Err(PermissionProtocolError::CacheCandidateMismatch);
+    }
+    let Some(candidate) =
+      self.authority_state().cache_candidate(key, now_monotonic)?
+    else {
+      return Ok(None);
+    };
+    let (value, read_view) = candidate.into_parts();
+    let seal = self.evaluate_permission_negative_reentry(
+      batch,
+      &read_view,
+      facts,
+      PermissionNegativeReentryPhase::CacheHit,
+      PermissionEvaluationView::Current,
+      now_monotonic,
+      value.valid_until_monotonic(),
+    )?;
+    seal.require_no_terminal_negative()?;
+    if value.negative_inventory_digest() != seal.negative_inventory_digest
+      || !cache_value_matches_fresh_allow(batch, &value, &seal.decision)
+    {
+      return Err(PermissionProtocolError::CacheCandidateMismatch);
+    }
+    seal.require_current(self, now_monotonic)?;
+    Ok(Some(value))
+  }
+}
+
+fn runtime_authority_mode(
+  context: &OdenRev2RuntimeAuthorityContext,
+) -> RuntimeAuthorityMode {
+  match context.mode() {
+    crate::rev2::Mode::Permissive => RuntimeAuthorityMode::Permissive,
+    crate::rev2::Mode::Audit => RuntimeAuthorityMode::Audit,
+    crate::rev2::Mode::Enforce => RuntimeAuthorityMode::Enforce,
+  }
+}
+
+fn operation_class(operation: PermissionOperation) -> &'static str {
+  match operation {
+    PermissionOperation::Query => "query",
+    PermissionOperation::Request => "request",
+    PermissionOperation::Revoke => "revoke",
+  }
+}
+
+fn cache_key_matches_batch(
+  context: &OdenRev2RuntimeAuthorityContext,
+  batch: &NormalizedPermissionBatch,
+  key: &DecisionCacheKey,
+) -> bool {
+  key.operation_class() == operation_class(batch.operation())
+    && key.coverage_edge_id() == batch.coverage_edge_id()
+    && key.stage_id() == PermissionNegativeReentryPhase::CacheHit.id()
+    && key.mode() == runtime_authority_mode(context)
+    && key.identity() == batch.identity()
+    && key.generations() == batch.expected_generations()
+    && key.constrained_principals() == batch.constrained_principals()
+    && key.overlay_owner() == batch.overlay_owner()
+    && key.effects().len() == batch.effects().len()
+    && key
+      .effects()
+      .iter()
+      .zip(batch.effects())
+      .all(|(cached, expected)| {
+        cached.slot_id() == expected.slot_id()
+          && cached.effect_owner() == expected.effect_owner()
+          && cached.selector() == expected.selector()
+          && cached.occurrence() == &expected.canonical_effect().occurrence
+      })
+}
+
+fn cache_value_matches_fresh_allow(
+  batch: &NormalizedPermissionBatch,
+  value: &DecisionCacheValue,
+  decision: &StageDecision,
+) -> bool {
+  if value.decision() != CachedDecision::Allow
+    || decision.outcome != Outcome::Allow
+    || decision.effects.len() != batch.effects.len()
+  {
+    return false;
+  }
+  let expected_dimensions = batch
+    .effects()
+    .iter()
+    .zip(&decision.effects)
+    .flat_map(|(batch_effect, effect)| {
+      effect.dimensions.iter().map(move |dimension| {
+        (
+          batch_effect.slot_id(),
+          &dimension.principal,
+          dimension.outcome,
+          dimension.positive_source.as_ref(),
+        )
+      })
+    })
+    .collect::<Vec<_>>();
+  value.dimensions().len() == expected_dimensions.len()
+    && value.dimensions().iter().all(|cached| {
+      expected_dimensions.iter().any(
+        |(slot_id, principal, outcome, positive_source)| {
+          cached.slot_id() == *slot_id
+            && cached.principal() == *principal
+            && cached.decision()
+              == match outcome {
+                Outcome::Allow => CachedDecision::Allow,
+                Outcome::Masked => CachedDecision::Masked,
+                Outcome::Deny => CachedDecision::Deny,
+              }
+            && cached.positive_source() == *positive_source
+        },
+      )
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -1292,6 +1826,77 @@ fn commit_mutation_result_for_test(
   }
 }
 
+fn permission_results_from_decision(
+  policy: &DecisionPolicyInput,
+  batch: &NormalizedPermissionBatch,
+  decision: &StageDecision,
+  dynamically_authorable: bool,
+) -> Result<Vec<PermissionEffectResult>, PermissionProtocolError> {
+  if decision.effects.len() != batch.effects.len() {
+    return Err(PermissionProtocolError::IncompleteResult);
+  }
+  let core = Rev2Core::embedded().map_err(|error| {
+    PermissionProtocolError::Serialization(error.to_string())
+  })?;
+  batch
+    .effects()
+    .iter()
+    .zip(&decision.effects)
+    .map(|(batch_effect, effect_decision)| {
+      if effect_decision.effect != *batch_effect.canonical_effect() {
+        return Err(PermissionProtocolError::IncompleteResult);
+      }
+      let effect_input = permission_effect_input(policy, batch_effect);
+      let dimensions = effect_decision
+        .dimensions
+        .iter()
+        .map(|dimension| {
+          let mut inside_escalation_ceiling = false;
+          if dynamically_authorable
+            && dimension.outcome != Outcome::Allow
+            && matches!(dimension.stratum, 7 | 17)
+          {
+            for row in &policy.escalation_ceiling {
+              if row.selector.principal.as_ref() == Some(&dimension.principal)
+                && core
+                  .selector_matches_effect(
+                    &row.selector,
+                    &effect_input,
+                    SelectorPolarity::Positive,
+                    &row.source_id,
+                    &policy.path_bindings,
+                  )
+                  .map_err(|error| {
+                    PermissionProtocolError::Serialization(error.to_string())
+                  })?
+              {
+                inside_escalation_ceiling = true;
+                break;
+              }
+            }
+          }
+          let state = match dimension.outcome {
+            Outcome::Allow => PermissionState::Granted,
+            Outcome::Masked | Outcome::Deny if inside_escalation_ceiling => {
+              PermissionState::Prompt
+            }
+            Outcome::Masked | Outcome::Deny => PermissionState::Denied,
+          };
+          PermissionDimensionResult::capture_host(
+            dimension.principal.clone(),
+            state,
+            dimension.positive_source.clone(),
+          )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+      PermissionEffectResult::capture_host(
+        batch_effect.slot_id().to_string(),
+        &dimensions,
+      )
+    })
+    .collect()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ExternalPermissionDecision {
@@ -1403,39 +2008,181 @@ pub(crate) struct AuthenticatedExternalPermissionDecision<'batch> {
   authority_view: RuntimeAuthorityReadView,
 }
 
-/// An inert, exact-scope proof that an external broker granted one Request.
-///
-/// The whole closed batch remains borrowed, preserving its digest, ordered
-/// effects, typed owners, actor set, and base publication. No transaction
-/// builder exists yet: stable session-row identity and the exact missing-row
-/// projection must come from the future generated semantic registry batch.
-#[cfg(test)]
+/// The exact before-decider phase for one promptable Request. No broker can
+/// authenticate a response without consuming this non-cloneable attempt.
 #[derive(Debug)]
-pub(crate) struct AuthenticatedExternalRequestGrant<'batch> {
-  batch: &'batch NormalizedPermissionBatch,
-  authority_view: RuntimeAuthorityReadView,
+struct SealedExternalPermissionAttempt<'batch> {
+  seal: SealedPermissionNegativeReentry<'batch>,
+  pre_result: PermissionBatchResult,
+  facts: OdenRev2OperationAuthorityFacts,
 }
 
-#[cfg(test)]
+impl OdenRev2RuntimeAuthorityContext {
+  fn prepare_external_permission_decider<'batch>(
+    &self,
+    batch: &'batch NormalizedPermissionBatch,
+    facts: OdenRev2OperationAuthorityFacts,
+    now_monotonic: u64,
+  ) -> Result<SealedExternalPermissionAttempt<'batch>, PermissionProtocolError>
+  {
+    if batch.operation() != PermissionOperation::Request {
+      return Err(PermissionProtocolError::ExternalMutationRefused);
+    }
+    let initial_seal = self.evaluate_permission_negative_reentry(
+      batch,
+      &batch.authority_view,
+      facts.clone(),
+      PermissionNegativeReentryPhase::InitialQueryOrRequest,
+      PermissionEvaluationView::Current,
+      now_monotonic,
+      None,
+    )?;
+    let initial_effects = permission_results_from_decision(
+      initial_seal.policy(),
+      batch,
+      initial_seal.decision(),
+      true,
+    )?;
+    let initial_result = PermissionBatchResult::capture_complete(
+      batch,
+      &initial_seal.read_view,
+      &initial_effects,
+    )?;
+    if initial_result.state() != PermissionState::Prompt {
+      return Err(PermissionProtocolError::ExternalMutationRefused);
+    }
+    let already_seal = self.evaluate_permission_negative_reentry(
+      batch,
+      &batch.authority_view,
+      facts.clone(),
+      PermissionNegativeReentryPhase::AlreadyGrantedCheck,
+      PermissionEvaluationView::Current,
+      now_monotonic,
+      None,
+    )?;
+    let already_effects = permission_results_from_decision(
+      already_seal.policy(),
+      batch,
+      already_seal.decision(),
+      true,
+    )?;
+    let already_result = PermissionBatchResult::capture_complete(
+      batch,
+      &already_seal.read_view,
+      &already_effects,
+    )?;
+    if already_result != initial_result
+      || already_seal.negative_inventory_digest
+        != initial_seal.negative_inventory_digest
+    {
+      return Err(PermissionProtocolError::NegativeInventoryMismatch);
+    }
+    let seal = self.evaluate_permission_negative_reentry(
+      batch,
+      &batch.authority_view,
+      facts.clone(),
+      PermissionNegativeReentryPhase::BeforeExternalDecider,
+      PermissionEvaluationView::Current,
+      now_monotonic,
+      None,
+    )?;
+    let effects = permission_results_from_decision(
+      seal.policy(),
+      batch,
+      seal.decision(),
+      true,
+    )?;
+    let pre_result = PermissionBatchResult::capture_complete(
+      batch,
+      &seal.read_view,
+      &effects,
+    )?;
+    if pre_result.state() != PermissionState::Prompt {
+      return Err(PermissionProtocolError::ExternalMutationRefused);
+    }
+    if pre_result != already_result
+      || seal.negative_inventory_digest
+        != already_seal.negative_inventory_digest
+    {
+      return Err(PermissionProtocolError::NegativeInventoryMismatch);
+    }
+    seal.require_current(self, now_monotonic)?;
+    Ok(SealedExternalPermissionAttempt {
+      seal,
+      pre_result,
+      facts,
+    })
+  }
+}
+
+impl<'batch> SealedExternalPermissionAttempt<'batch> {
+  fn authenticate_response(
+    self,
+    context: &OdenRev2RuntimeAuthorityContext,
+    authenticator: &PermissionResponseAuthenticator,
+    response: &AuthenticatedExternalPermissionResponse,
+    now_monotonic: u64,
+  ) -> Result<NegativeReentryProof<'batch>, PermissionProtocolError> {
+    let SealedExternalPermissionAttempt {
+      seal,
+      pre_result,
+      facts,
+    } = self;
+    let negative_inventory_digest = seal.negative_inventory_digest.clone();
+    seal.require_current(context, now_monotonic)?;
+    let authenticated = authenticator.authenticate(
+      context.authority_state(),
+      seal.batch,
+      response,
+    )?;
+    let proof = authenticated.revalidate_after_external_response(
+      context,
+      pre_result,
+      facts,
+      now_monotonic,
+    )?;
+    if proof.seal.negative_inventory_digest != negative_inventory_digest {
+      return Err(PermissionProtocolError::NegativeInventoryMismatch);
+    }
+    Ok(proof)
+  }
+}
+
+/// An inert, exact-scope proof that an external broker granted one Request and
+/// the installed context's shared core accepted the exact after-response
+/// negative re-entry phase.
+#[derive(Debug)]
+pub(crate) struct AuthenticatedExternalRequestGrant<'batch> {
+  seal: SealedPermissionNegativeReentry<'batch>,
+  pre_result: PermissionBatchResult,
+  facts: OdenRev2OperationAuthorityFacts,
+}
+
 impl<'batch> AuthenticatedExternalRequestGrant<'batch> {
   fn into_session_transaction(
     self,
-    state: &RuntimeAuthorityState,
-    pre_result: &PermissionBatchResult,
+    context: &OdenRev2RuntimeAuthorityContext,
+    now_monotonic: u64,
   ) -> Result<AuthorityTransaction, PermissionProtocolError> {
-    require_current_view(state, &self.authority_view)?;
-    if pre_result.batch_sequence != self.batch.batch_sequence
+    self.seal.require_current(context, now_monotonic)?;
+    let batch = self.seal.batch;
+    let pre_result = &self.pre_result;
+    if self.seal.phase != PermissionNegativeReentryPhase::AfterExternalResponse
+      || pre_result.batch_sequence != batch.batch_sequence
       || pre_result.operation != PermissionOperation::Request
-      || pre_result.batch_digest != self.batch.batch_digest
-      || pre_result.identity != self.batch.identity
-      || pre_result.observed_generations != self.authority_view.generations()
-      || pre_result.effects.len() != self.batch.effects.len()
+      || pre_result.batch_digest != batch.batch_digest
+      || pre_result.identity != batch.identity
+      || pre_result.observed_generations != self.seal.read_view.generations()
+      || pre_result.effects.len() != batch.effects.len()
       || pre_result.state == PermissionState::Denied
     {
       return Err(PermissionProtocolError::ExternalMutationRefused);
     }
-    let mut transaction = state.begin_transaction_from(&self.authority_view)?;
-    for (effect, result) in self.batch.effects.iter().zip(pre_result.effects())
+    let mut transaction = context
+      .authority_state()
+      .begin_transaction_from(&self.seal.read_view)?;
+    for (index, (effect, result)) in
+      batch.effects.iter().zip(pre_result.effects()).enumerate()
     {
       if effect.slot_id() != result.slot_id() {
         return Err(PermissionProtocolError::IncompleteResult);
@@ -1454,76 +2201,168 @@ impl<'batch> AuthenticatedExternalRequestGrant<'batch> {
         revocation_selector.projection_id =
           effect.canonical_effect().projection_id.clone();
         transaction.reconcile_session_grant(
-          self.batch.overlay_owner(),
+          batch.overlay_owner(),
           dimension.principal(),
           &positive_selector,
           &revocation_selector,
+          batch.path_fact(index),
         )?;
       }
     }
-    require_current_view(state, &self.authority_view)?;
+    self.seal.require_current(context, now_monotonic)?;
     Ok(transaction)
+  }
+
+  /// Execute the only production external-grant mutation path. The complete
+  /// proposed state runs the generated publication and result phases through
+  /// the same context-owned shared core; compare-and-commit then checks the
+  /// exact base publication before rows and result become visible together.
+  fn commit_session_grant(
+    self,
+    context: &OdenRev2RuntimeAuthorityContext,
+    now_monotonic: u64,
+  ) -> Result<
+    CommittedAuthorityTransaction<PermissionBatchResult>,
+    PermissionProtocolError,
+  > {
+    let batch = self.seal.batch;
+    let facts = self.facts.clone();
+    let transaction = self.into_session_transaction(context, now_monotonic)?;
+    let mut protocol_error = None;
+    let committed = context.authority_state().compare_propose_validate_commit(
+      transaction,
+      |proposed_view| {
+        let validate = || {
+          let publication_seal = context.evaluate_permission_negative_reentry(
+            batch,
+            proposed_view,
+            facts.clone(),
+            PermissionNegativeReentryPhase::BeforeOverlayPublication,
+            PermissionEvaluationView::Proposed,
+            now_monotonic,
+            None,
+          )?;
+          publication_seal.require_no_terminal_negative()?;
+          let proposed_negative_inventory_digest =
+            publication_seal.negative_inventory_digest.clone();
+          let result_seal = context.evaluate_permission_negative_reentry(
+            batch,
+            proposed_view,
+            facts,
+            PermissionNegativeReentryPhase::ResultProduction,
+            PermissionEvaluationView::Proposed,
+            now_monotonic,
+            None,
+          )?;
+          if result_seal.negative_inventory_digest
+            != proposed_negative_inventory_digest
+          {
+            return Err(PermissionProtocolError::NegativeInventoryMismatch);
+          }
+          let effects = permission_results_from_decision(
+            &result_seal.policy,
+            batch,
+            &result_seal.decision,
+            true,
+          )?;
+          let result = PermissionBatchResult::capture_proposed_mutation(
+            batch,
+            proposed_view,
+            &effects,
+          )?;
+          if result.state() != PermissionState::Granted {
+            return Err(PermissionProtocolError::ExternalMutationRefused);
+          }
+          Ok(result)
+        };
+        match validate() {
+          Ok(result) => Ok(result),
+          Err(error) => {
+            protocol_error = Some(error);
+            Err(AuthorityStateError::InvalidField("permissionResult"))
+          }
+        }
+      },
+    );
+    match committed {
+      Ok(committed) => Ok(committed),
+      Err(_) if protocol_error.is_some() => {
+        Err(protocol_error.expect("checked above"))
+      }
+      Err(error) => Err(error.into()),
+    }
   }
 }
 
 /// Authentication is necessary but insufficient: all seven generated
 /// negative strata must be re-evaluated against the exact current view before
 /// an external answer can become a result or mutation permit.
-#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct NegativeReentryProof<'batch> {
   decision: ExternalPermissionDecision,
-  batch: &'batch NormalizedPermissionBatch,
-  authority_view: RuntimeAuthorityReadView,
+  seal: SealedPermissionNegativeReentry<'batch>,
+  pre_result: PermissionBatchResult,
+  facts: OdenRev2OperationAuthorityFacts,
 }
 
 impl<'batch> AuthenticatedExternalPermissionDecision<'batch> {
-  #[cfg(test)]
-  fn revalidate_current_negatives<F>(
+  fn revalidate_after_external_response(
     self,
-    state: &RuntimeAuthorityState,
-    evaluate: F,
-  ) -> Result<NegativeReentryProof<'batch>, PermissionProtocolError>
-  where
-    F: FnOnce(
-      &RuntimeAuthorityReadView,
-      &NormalizedPermissionBatch,
-      &[crate::rev2_registry_generated::Rev2RuntimeNegativeReentryPhase],
-    ) -> Result<(), PermissionProtocolError>,
-  {
-    if !state.is_current(&self.authority_view)? {
-      return Err(PermissionProtocolError::StaleAuthorityView);
-    }
-    evaluate(
-      &self.authority_view,
+    context: &OdenRev2RuntimeAuthorityContext,
+    pre_result: PermissionBatchResult,
+    facts: OdenRev2OperationAuthorityFacts,
+    now_monotonic: u64,
+  ) -> Result<NegativeReentryProof<'batch>, PermissionProtocolError> {
+    let seal = context.evaluate_permission_negative_reentry(
       self.batch,
-      crate::rev2_registry_generated::REV2_RUNTIME_NEGATIVE_REENTRY_PHASES,
+      &self.authority_view,
+      facts.clone(),
+      PermissionNegativeReentryPhase::AfterExternalResponse,
+      PermissionEvaluationView::Current,
+      now_monotonic,
+      None,
     )?;
-    if !state.is_current(&self.authority_view)? {
-      return Err(PermissionProtocolError::StaleAuthorityView);
+    let effects = permission_results_from_decision(
+      seal.policy(),
+      self.batch,
+      seal.decision(),
+      true,
+    )?;
+    let after_response_result = PermissionBatchResult::capture_complete(
+      self.batch,
+      &seal.read_view,
+      &effects,
+    )?;
+    if after_response_result != pre_result
+      || after_response_result.state() != PermissionState::Prompt
+    {
+      return Err(PermissionProtocolError::ExternalMutationRefused);
     }
     Ok(NegativeReentryProof {
       decision: self.decision,
-      batch: self.batch,
-      authority_view: self.authority_view,
+      seal,
+      pre_result,
+      facts,
     })
   }
 }
 
-#[cfg(test)]
 impl<'batch> NegativeReentryProof<'batch> {
   fn into_request_grant(
     self,
   ) -> Result<AuthenticatedExternalRequestGrant<'batch>, PermissionProtocolError>
   {
     if self.decision != ExternalPermissionDecision::Granted
-      || self.batch.operation() != PermissionOperation::Request
+      || self.seal.batch.operation() != PermissionOperation::Request
+      || self.seal.phase
+        != PermissionNegativeReentryPhase::AfterExternalResponse
     {
       return Err(PermissionProtocolError::ExternalMutationRefused);
     }
     Ok(AuthenticatedExternalRequestGrant {
-      batch: self.batch,
-      authority_view: self.authority_view,
+      seal: self.seal,
+      pre_result: self.pre_result,
+      facts: self.facts,
     })
   }
 }
@@ -1536,7 +2375,7 @@ impl PermissionResponseAuthenticator {
     Ok(Self { key: key.into() })
   }
 
-  pub(crate) fn authenticate<'batch>(
+  fn authenticate<'batch>(
     &self,
     state: &RuntimeAuthorityState,
     batch: &'batch NormalizedPermissionBatch,
@@ -1628,8 +2467,12 @@ impl Drop for PermissionResponseAuthenticator {
 mod tests {
   use super::*;
   use crate::oden_rev2_authority::AuthorityRowKind;
+  use crate::oden_rev2_authority::DecisionCacheEffect;
+  use crate::oden_rev2_authority::DecisionDimension;
   use crate::oden_rev2_authority::RuntimeAuthorityState;
+  use crate::oden_rev2_policy::tests as policy_fixtures;
   use crate::rev2::PrincipalKind;
+  use std::path::Path;
 
   fn digest(character: char) -> String {
     format!(
@@ -1844,6 +2687,167 @@ mod tests {
     response: &mut AuthenticatedExternalPermissionResponse,
   ) {
     response.authentication_tag = authenticator.sign_for_test(response);
+  }
+
+  fn sealed_principal() -> PrincipalRef {
+    PrincipalRef {
+      kind: PrincipalKind::Package,
+      key: "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+    }
+  }
+
+  fn sealed_context() -> OdenRev2RuntimeAuthorityContext {
+    let key = [0x39; 32];
+    let principal = sealed_principal();
+    let core = Rev2Core::embedded().unwrap();
+    let floor = core
+      .normalize_selector(
+        &crate::rev2::AuthoritySelectorInput {
+          identity: crate::rev2::EngineIdentity::embedded(),
+          principal: Some(principal.clone()),
+          capability: "sys:read".to_string(),
+          resource: serde_json::json!({ "kind": "cpus" }),
+        },
+        SelectorPolarity::Positive,
+      )
+      .unwrap();
+    let ceiling = core
+      .normalize_selector(
+        &crate::rev2::AuthoritySelectorInput {
+          identity: crate::rev2::EngineIdentity::embedded(),
+          principal: Some(principal),
+          capability: "sys:read".to_string(),
+          resource: serde_json::json!({ "kind": "hostname" }),
+        },
+        SelectorPolarity::Positive,
+      )
+      .unwrap();
+    let mut snapshot = policy_fixtures::candidate_with_env_policy(
+      policy_fixtures::hermetic_target(),
+    );
+    snapshot["canonicalPolicy"]["principals"][0]["floor"] = serde_json::json!([{
+      "sourceId": "floor:sys:cpus",
+      "selector": floor,
+    }]);
+    snapshot["canonicalPolicy"]["principals"][0]["escalationCeiling"] = serde_json::json!([{
+      "sourceId": "ceiling:sys:hostname",
+      "selector": ceiling,
+    }]);
+    policy_fixtures::refresh_digests(&mut snapshot);
+    let mut loaded =
+      policy_fixtures::verify_armable_snapshot(snapshot, &key).unwrap();
+    loaded
+      .install_immutable_executables(Path::new("."))
+      .unwrap();
+    OdenRev2RuntimeAuthorityContext::install_for_test(loaded).unwrap()
+  }
+
+  fn sealed_facts() -> OdenRev2OperationAuthorityFacts {
+    OdenRev2OperationAuthorityFacts::new(
+      sealed_principal(),
+      "terminal:permission-test".to_string(),
+    )
+  }
+
+  fn sealed_env_batch(
+    context: &OdenRev2RuntimeAuthorityContext,
+    sequence_value: u64,
+    operation: PermissionOperation,
+    name: &str,
+  ) -> NormalizedPermissionBatch {
+    let owner = sealed_principal();
+    let core = Rev2Core::embedded().unwrap();
+    let operation_slot = "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:2";
+    let effect_input = EffectInput {
+      identity: crate::rev2::EngineIdentity::embedded(),
+      edge_id: "native-op:runtime/ops/permissions.rs#op_request_permission"
+        .to_string(),
+      effect_slot_id: operation_slot.to_string(),
+      capability: "sys:read".to_string(),
+      effect_owner: owner.key.clone(),
+      occurrence: serde_json::json!({
+        "effectOwner": owner.key,
+        "kind": name,
+      }),
+    };
+    let canonical_effect = core.normalize_effect(&effect_input).unwrap();
+    let selector = core
+      .normalize_selector(
+        &crate::rev2::AuthoritySelectorInput {
+          identity: crate::rev2::EngineIdentity::embedded(),
+          principal: Some(owner.clone()),
+          capability: "sys:read".to_string(),
+          resource: serde_json::json!({ "kind": name }),
+        },
+        SelectorPolarity::Positive,
+      )
+      .unwrap();
+    let effect = NormalizedPermissionEffect::capture_generated_slot(
+      "permission.sys:slot:0".to_string(),
+      owner.clone(),
+      selector,
+      canonical_effect,
+    )
+    .unwrap();
+    let generated = SelectedGeneratedPermissionBranch::capture_generated(
+      "permission.sys.test/2".to_string(),
+      "native-op:runtime/ops/permissions.rs#op_request_permission".to_string(),
+      vec![
+        GeneratedPermissionSlotSpec::capture_generated(
+          "permission.sys:slot:0".to_string(),
+          operation_slot.to_string(),
+          "sys:read".to_string(),
+          "projection.sys:read.positive/2".to_string(),
+          "projection.sys:read.negative/2".to_string(),
+          PermissionTransitionDispositions::dynamic(),
+        )
+        .unwrap(),
+      ],
+      1,
+    )
+    .unwrap();
+    let actors = VerifiedPermissionActorSet::capture_host(
+      std::slice::from_ref(&owner),
+      owner.clone(),
+    )
+    .unwrap();
+    let view = context.authority_state().read_view().unwrap();
+    NormalizedPermissionBatch::capture_host(
+      context.authority_state(),
+      &view,
+      sequence(sequence_value),
+      operation,
+      &generated,
+      &actors,
+      &[effect],
+    )
+    .unwrap()
+  }
+
+  fn initial_result(
+    context: &OdenRev2RuntimeAuthorityContext,
+    batch: &NormalizedPermissionBatch,
+  ) -> PermissionBatchResult {
+    let view = context.authority_state().read_view().unwrap();
+    let seal = context
+      .evaluate_permission_negative_reentry(
+        batch,
+        &view,
+        sealed_facts(),
+        PermissionNegativeReentryPhase::InitialQueryOrRequest,
+        PermissionEvaluationView::Current,
+        1,
+        None,
+      )
+      .unwrap();
+    let effects = permission_results_from_decision(
+      &seal.policy,
+      batch,
+      &seal.decision,
+      true,
+    )
+    .unwrap();
+    PermissionBatchResult::capture_complete(batch, &view, &effects).unwrap()
   }
 
   #[test]
@@ -2728,122 +3732,332 @@ mod tests {
   }
 
   #[test]
-  fn external_grant_proof_is_request_only_exact_scope_and_inert() {
+  fn sealed_external_grant_commits_only_after_shared_core_reentry() {
     let authenticator = authenticator();
-    let state = RuntimeAuthorityState::new(identity("run-proof"));
-    let view = state.read_view().unwrap();
-    let owner = principal("pkg:owner");
-    let effects = [effect("slot:0", &owner, "HOME")];
+    let context = sealed_context();
     let request_batch =
-      batch(&state, &view, 50, PermissionOperation::Request, &effects);
+      sealed_env_batch(&context, 50, PermissionOperation::Request, "hostname");
+    let pre_result = initial_result(&context, &request_batch);
+    assert_eq!(pre_result.state(), PermissionState::Prompt);
     let response = signed_response(&authenticator, &request_batch);
-    let authenticated = authenticator
-      .authenticate(&state, &request_batch, &response)
+    let attempt = context
+      .prepare_external_permission_decider(&request_batch, sealed_facts(), 2)
       .unwrap();
-    let proof = authenticated
-      .revalidate_current_negatives(
-        &state,
-        |proof_view, proof_batch, phases| {
-          assert_eq!(proof_view.generations(), view.generations());
-          assert_eq!(proof_batch.batch_digest(), request_batch.batch_digest());
-          assert_eq!(phases.len(), 7);
-          assert!(
-            phases
-              .iter()
-              .all(|phase| phase.strata == [1, 2, 3, 4, 5, 6, 7])
-          );
-          Ok(())
-        },
-      )
+    let proof = attempt
+      .authenticate_response(&context, &authenticator, &response, 2)
       .unwrap();
     let grant = proof.into_request_grant().unwrap();
-    assert_eq!(grant.batch.batch_digest(), request_batch.batch_digest());
-    assert_eq!(grant.batch.effects(), request_batch.effects());
-    assert_eq!(grant.batch.overlay_owner(), &owner);
-    assert!(state.is_current(&grant.authority_view).unwrap());
-    let prompt = PermissionEffectResult::capture_host(
-      "slot:0".to_string(),
-      &[dimension(&owner, PermissionState::Prompt, "slot:0")],
-    )
-    .unwrap();
-    let pre_result =
-      PermissionBatchResult::capture_complete(&request_batch, &view, &[prompt])
-        .unwrap();
-    let transaction =
-      grant.into_session_transaction(&state, &pre_result).unwrap();
-    let proposed = state.propose_transaction(transaction).unwrap();
-    assert_eq!(proposed.read_view().row_count(), 1);
-    drop(proposed);
-    assert_eq!(state.read_view().unwrap().row_count(), 0);
+    let committed = grant.commit_session_grant(&context, 3).unwrap();
+    assert_eq!(committed.output().state(), PermissionState::Granted);
+    assert_eq!(committed.read_view().row_count(), 1);
+    assert_eq!(committed.read_view().generations().session_overlay(), 1);
 
-    let denied_batch =
-      batch(&state, &view, 51, PermissionOperation::Request, &effects);
+    let denied_context = sealed_context();
+    let denied_batch = sealed_env_batch(
+      &denied_context,
+      51,
+      PermissionOperation::Request,
+      "hostname",
+    );
     let denied_response = signed_response_with_decision(
       &authenticator,
       &denied_batch,
       ExternalPermissionDecision::Denied,
     );
     assert_eq!(
-      authenticator
-        .authenticate(&state, &denied_batch, &denied_response)
+      denied_context
+        .prepare_external_permission_decider(&denied_batch, sealed_facts(), 4,)
         .unwrap()
-        .revalidate_current_negatives(&state, |_, _, _| Ok(()))
+        .authenticate_response(
+          &denied_context,
+          &authenticator,
+          &denied_response,
+          4,
+        )
         .unwrap()
         .into_request_grant()
         .unwrap_err(),
       PermissionProtocolError::ExternalMutationRefused
     );
+  }
 
-    for (sequence, operation) in [
-      (52, PermissionOperation::Query),
-      (53, PermissionOperation::Revoke),
-    ] {
-      let non_request = batch(&state, &view, sequence, operation, &effects);
-      let response = signed_response(&authenticator, &non_request);
-      assert_eq!(
-        authenticator
-          .authenticate(&state, &non_request, &response)
-          .unwrap()
-          .revalidate_current_negatives(&state, |_, _, _| Ok(()))
-          .unwrap()
-          .into_request_grant()
-          .unwrap_err(),
-        PermissionProtocolError::ExternalMutationRefused
-      );
-    }
+  #[test]
+  fn sealed_external_grant_atomically_replaces_exact_session_revocation() {
+    let context = sealed_context();
+    let seed =
+      sealed_env_batch(&context, 70, PermissionOperation::Request, "hostname");
+    let principal = sealed_principal();
+    let mut revocation_selector = seed.effects()[0].selector().clone();
+    revocation_selector.projection_id =
+      seed.effects()[0].canonical_effect().projection_id.clone();
+    let mut revoke = context.authority_state().begin_transaction().unwrap();
+    revoke
+      .upsert_session_revocation(
+        seed.overlay_owner(),
+        &principal,
+        &revocation_selector,
+        None,
+      )
+      .unwrap();
+    context.authority_state().commit(revoke).unwrap();
 
-    // A grant proof exposes neither an authority transaction nor caller-chosen
-    // row IDs. The separate generated session adapter owns stable identity and
-    // transaction reconciliation.
-    assert_eq!(state.read_view().unwrap().row_count(), 0);
-
-    let race_batch = batch(
-      &state,
-      &state.read_view().unwrap(),
-      54,
-      PermissionOperation::Request,
-      &effects,
+    let batch =
+      sealed_env_batch(&context, 71, PermissionOperation::Request, "hostname");
+    assert_eq!(
+      initial_result(&context, &batch).state(),
+      PermissionState::Prompt
     );
-    let race_response = signed_response(&authenticator, &race_batch);
-    let race = authenticator
-      .authenticate(&state, &race_batch, &race_response)
+    let authenticator = authenticator();
+    let response = signed_response(&authenticator, &batch);
+    let grant = context
+      .prepare_external_permission_decider(&batch, sealed_facts(), 1)
+      .unwrap()
+      .authenticate_response(&context, &authenticator, &response, 2)
+      .unwrap()
+      .into_request_grant()
+      .unwrap();
+    let committed = grant.commit_session_grant(&context, 3).unwrap();
+    assert_eq!(committed.output().state(), PermissionState::Granted);
+    assert_eq!(
+      committed
+        .read_view()
+        .rows(AuthorityRowKind::SessionRevocation)
+        .count(),
+      0
+    );
+    assert_eq!(
+      committed
+        .read_view()
+        .rows(AuthorityRowKind::SessionPositive)
+        .count(),
+      1
+    );
+  }
+
+  #[test]
+  fn every_generated_negative_reentry_phase_refuses_a_publication_race() {
+    for (index, phase) in
+      PermissionNegativeReentryPhase::ALL.into_iter().enumerate()
+    {
+      let context = sealed_context();
+      let batch = sealed_env_batch(
+        &context,
+        100 + index as u64,
+        PermissionOperation::Request,
+        "cpus",
+      );
+      if phase == PermissionNegativeReentryPhase::BeforeOverlayPublication {
+        let transaction =
+          context.authority_state().begin_transaction().unwrap();
+        let proposed = context
+          .authority_state()
+          .propose_transaction(transaction)
+          .unwrap();
+        let seal = context
+          .evaluate_permission_negative_reentry(
+            &batch,
+            proposed.read_view(),
+            sealed_facts(),
+            phase,
+            PermissionEvaluationView::Proposed,
+            1,
+            None,
+          )
+          .unwrap();
+        let validated = proposed
+          .validate::<_, AuthorityStateError, _>(|_| Ok(seal))
+          .unwrap();
+        let mut race = context.authority_state().begin_transaction().unwrap();
+        race
+          .upsert(
+            AuthorityRowKind::NegativeOverlay,
+            format!("negative:phase:{index}"),
+            batch.effects()[0].selector(),
+          )
+          .unwrap();
+        context.authority_state().commit(race).unwrap();
+        assert!(matches!(
+          context.authority_state().commit_validated(validated),
+          Err(AuthorityStateError::GenerationChanged)
+        ));
+      } else {
+        let view = context.authority_state().read_view().unwrap();
+        let seal = context
+          .evaluate_permission_negative_reentry(
+            &batch,
+            &view,
+            sealed_facts(),
+            phase,
+            PermissionEvaluationView::Current,
+            1,
+            None,
+          )
+          .unwrap();
+        assert_eq!(seal.phase(), phase);
+        let mut race = context.authority_state().begin_transaction().unwrap();
+        race
+          .upsert(
+            AuthorityRowKind::NegativeOverlay,
+            format!("negative:phase:{index}"),
+            batch.effects()[0].selector(),
+          )
+          .unwrap();
+        context.authority_state().commit(race).unwrap();
+        assert_eq!(
+          seal.require_current(&context, 1).unwrap_err(),
+          PermissionProtocolError::StaleAuthorityView
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn terminal_negative_is_a_denied_initial_result_but_never_a_reuse_proof() {
+    let context = sealed_context();
+    let seed =
+      sealed_env_batch(&context, 180, PermissionOperation::Request, "cpus");
+    let mut negative = context.authority_state().begin_transaction().unwrap();
+    negative
+      .upsert(
+        AuthorityRowKind::NegativeOverlay,
+        "negative:terminal".to_string(),
+        seed.effects()[0].selector(),
+      )
+      .unwrap();
+    context.authority_state().commit(negative).unwrap();
+    let batch =
+      sealed_env_batch(&context, 181, PermissionOperation::Request, "cpus");
+    let view = context.authority_state().read_view().unwrap();
+    let seal = context
+      .evaluate_permission_negative_reentry(
+        &batch,
+        &view,
+        sealed_facts(),
+        PermissionNegativeReentryPhase::InitialQueryOrRequest,
+        PermissionEvaluationView::Current,
+        1,
+        None,
+      )
+      .unwrap();
+    assert!(seal.has_terminal_negative());
+    let effects = permission_results_from_decision(
+      seal.policy(),
+      &batch,
+      seal.decision(),
+      true,
+    )
+    .unwrap();
+    assert_eq!(
+      PermissionBatchResult::capture_complete(&batch, &view, &effects)
+        .unwrap()
+        .state(),
+      PermissionState::Denied
+    );
+    assert_eq!(
+      context
+        .prepare_external_permission_decider(&batch, sealed_facts(), 1)
+        .unwrap_err(),
+      PermissionProtocolError::ExternalMutationRefused
+    );
+  }
+
+  #[test]
+  fn cache_hit_is_fresh_shared_core_decision_not_a_stored_allow_bit() {
+    let context = sealed_context();
+    let batch =
+      sealed_env_batch(&context, 200, PermissionOperation::Request, "cpus");
+    let view = context.authority_state().read_view().unwrap();
+    let seal = context
+      .evaluate_permission_negative_reentry(
+        &batch,
+        &view,
+        sealed_facts(),
+        PermissionNegativeReentryPhase::CacheHit,
+        PermissionEvaluationView::Current,
+        5,
+        Some(10),
+      )
+      .unwrap();
+    let effects = batch
+      .effects()
+      .iter()
+      .map(|effect| {
+        DecisionCacheEffect::from_normalized_permission(
+          effect.slot_id().to_string(),
+          effect.selector(),
+          effect.canonical_effect(),
+        )
+        .unwrap()
+      })
+      .collect();
+    let key = DecisionCacheKey::new(
+      "request".to_string(),
+      batch.coverage_edge_id().to_string(),
+      "cache-hit".to_string(),
+      RuntimeAuthorityMode::Enforce,
+      batch.identity().clone(),
+      batch.expected_generations(),
+      batch.constrained_principals().to_vec(),
+      batch.overlay_owner().clone(),
+      effects,
+      Vec::new(),
+    )
+    .unwrap();
+    let dimensions = batch
+      .effects()
+      .iter()
+      .zip(&seal.decision().effects)
+      .flat_map(|(effect, decided)| {
+        decided.dimensions.iter().map(|dimension| {
+          DecisionDimension::new(
+            effect.slot_id().to_string(),
+            dimension.principal.clone(),
+            CachedDecision::Allow,
+            dimension.positive_source.clone(),
+          )
+          .unwrap()
+        })
+      })
+      .collect();
+    let value = DecisionCacheValue::new(
+      CachedDecision::Allow,
+      dimensions,
+      seal.negative_inventory_digest().to_string(),
+      Some(10),
+    )
+    .unwrap();
+    context
+      .authority_state()
+      .cache_insert(key.clone(), value)
+      .unwrap();
+    let consumed = context
+      .consume_permission_cache_hit(&batch, &key, sealed_facts(), 5)
+      .unwrap()
+      .unwrap();
+    assert_eq!(consumed.decision(), CachedDecision::Allow);
+    assert!(
+      context
+        .consume_permission_cache_hit(&batch, &key, sealed_facts(), 10)
+        .unwrap()
+        .is_none()
+    );
+
+    let wrong_inventory = DecisionCacheValue::new(
+      CachedDecision::Allow,
+      consumed.dimensions().to_vec(),
+      digest('Z'),
+      None,
+    )
+    .unwrap();
+    context
+      .authority_state()
+      .cache_insert(key.clone(), wrong_inventory)
       .unwrap();
     assert_eq!(
-      race
-        .revalidate_current_negatives(&state, |_, _, _| {
-          let mut negative = state.begin_transaction().unwrap();
-          negative
-            .upsert(
-              AuthorityRowKind::NegativeOverlay,
-              "negative:race".to_string(),
-              &selector(&owner, "HOME"),
-            )
-            .unwrap();
-          state.commit(negative).unwrap();
-          Ok(())
-        })
+      context
+        .consume_permission_cache_hit(&batch, &key, sealed_facts(), 11)
         .unwrap_err(),
-      PermissionProtocolError::StaleAuthorityView
+      PermissionProtocolError::CacheCandidateMismatch
     );
   }
 

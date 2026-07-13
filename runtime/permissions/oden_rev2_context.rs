@@ -25,6 +25,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use crate::oden_rev2_authority::AuthorityRow;
 use crate::oden_rev2_authority::AuthorityRowKind;
 use crate::oden_rev2_authority::RuntimeAuthorityReadView;
 use crate::oden_rev2_authority::RuntimeAuthorityState;
@@ -514,6 +515,13 @@ impl OdenRev2RuntimeAuthorityContext {
     Self::install_with(&RUNTIME_AUTHORITY_INSTALLER, loaded)
   }
 
+  #[cfg(test)]
+  pub(crate) fn install_for_test(
+    loaded: OdenRev2LoadedPolicyContext,
+  ) -> Result<Self, String> {
+    Self::install_with(&RuntimeAuthorityInstaller::new(), loaded)
+  }
+
   fn install_with(
     installer: &RuntimeAuthorityInstaller,
     loaded: OdenRev2LoadedPolicyContext,
@@ -782,6 +790,19 @@ impl OdenRev2RuntimeAuthorityContext {
         selector: selector_input(&self.engine_identity, row.selector()),
       })
       .collect();
+    let mut path_bindings = facts.path_bindings;
+    for kind in [
+      AuthorityRowKind::SessionPositive,
+      AuthorityRowKind::SessionRevocation,
+    ] {
+      path_bindings
+        .extend(view.rows(kind).filter_map(AuthorityRow::path_binding));
+    }
+    path_bindings.sort_by(|left, right| {
+      (&left.source_id, &left.root_binding_id)
+        .cmp(&(&right.source_id, &right.root_binding_id))
+    });
+    path_bindings.dedup_by(|left, right| left == right);
     let generations = view.generations();
     Ok(DecisionPolicyInput {
       identity: self.engine_identity.clone(),
@@ -821,11 +842,12 @@ impl OdenRev2RuntimeAuthorityContext {
         .static_policy
         .validated_receipt_row_digests
         .to_vec(),
-      path_bindings: facts.path_bindings,
+      path_bindings,
     })
   }
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct OdenRev2OperationAuthorityFacts {
   quota_owner: PrincipalRef,
   terminal_evidence_id: String,
@@ -849,6 +871,19 @@ impl OdenRev2OperationAuthorityFacts {
       path_bindings: Vec::new(),
       handles: Vec::new(),
     }
+  }
+
+  pub(crate) fn with_path_binding(mut self, binding: PathBindingInput) -> Self {
+    self.path_bindings.push(binding);
+    self
+  }
+
+  pub(crate) fn with_path_bindings(
+    mut self,
+    bindings: impl IntoIterator<Item = PathBindingInput>,
+  ) -> Self {
+    self.path_bindings.extend(bindings);
+    self
   }
 }
 
@@ -880,10 +915,7 @@ fn validate_operation_facts(
 ) -> Result<(), String> {
   if facts.terminal_evidence_id.trim().is_empty()
     || facts.quota_owner.key.trim().is_empty()
-    || matches!(
-      facts.quota_owner.kind,
-      PrincipalKind::Runtime | PrincipalKind::NoUser
-    )
+    || matches!(facts.quota_owner.kind, PrincipalKind::Runtime)
   {
     return Err(format!("{CONTEXT_ERROR}-OPERATION-FACTS"));
   }
@@ -901,16 +933,27 @@ fn validate_operation_facts(
       return Err(format!("{CONTEXT_ERROR}-IMPLICIT-SELF"));
     }
   }
-  let root_keys = context
-    .bindings
-    .roots
-    .iter()
-    .map(|binding| (binding.source_id.as_str(), binding.binding_id.as_str()))
-    .collect::<BTreeSet<_>>();
   let mut path_keys = BTreeSet::new();
   for binding in &facts.path_bindings {
-    if !root_keys
-      .contains(&(binding.source_id.as_str(), binding.root_binding_id.as_str()))
+    let source_root = context
+      .bindings
+      .roots
+      .iter()
+      .find(|root| root.source_id == binding.source_id);
+    let occurrence_root = context
+      .bindings
+      .roots
+      .iter()
+      .find(|root| root.binding_id == binding.root_binding_id);
+    let equivalent =
+      source_root
+        .zip(occurrence_root)
+        .is_some_and(|(source, occurrence)| {
+          source.logical_root == occurrence.logical_root
+            && source.canonical_path == occurrence.canonical_path
+            && source.object_identity == occurrence.object_identity
+        });
+    if !equivalent
       || !path_keys
         .insert((binding.source_id.clone(), binding.root_binding_id.clone()))
     {
@@ -1898,7 +1941,7 @@ mod tests {
       .begin_transaction_from(&base)
       .unwrap();
     transaction
-      .upsert_session_revocation(&owner, &owner, &revocation)
+      .upsert_session_revocation(&owner, &owner, &revocation, None)
       .unwrap();
     let proposal = context
       .authority_state()
@@ -2186,6 +2229,7 @@ mod tests {
         SelectorPolarity::Positive,
       )
       .unwrap();
+    let session_selector = selector.clone();
     let mut snapshot = policy_fixtures::candidate_snapshot(
       policy_fixtures::hermetic_target(),
       None,
@@ -2229,6 +2273,42 @@ mod tests {
     );
     assert_eq!(binding.binding_provenance_digest(), REV2_REGISTRY_DIGEST);
     assert_eq!(context.retained_objects().len(), 1);
+
+    let mut transaction =
+      context.authority_state().begin_transaction().unwrap();
+    transaction
+      .upsert_session_row_for_test(
+        AuthorityRowKind::SessionPositive,
+        "session:path".to_string(),
+        &session_selector,
+      )
+      .unwrap();
+    let view = context.authority_state().commit(transaction).unwrap();
+    let policy = context
+      .decision_policy_for_operation(
+        &view,
+        OdenRev2OperationAuthorityFacts::new(
+          principal(),
+          "terminal:path-session-isolation".to_string(),
+        )
+        .with_path_binding(PathBindingInput {
+          source_id: "floor:path".to_string(),
+          root_binding_id: "root-binding:project".to_string(),
+          final_object_identities: Vec::new(),
+          parent_identities: Vec::new(),
+        }),
+      )
+      .unwrap();
+    assert!(policy.path_bindings.iter().any(|binding| {
+      binding.source_id == "floor:path"
+        && binding.root_binding_id == "root-binding:project"
+    }));
+    assert!(
+      policy
+        .path_bindings
+        .iter()
+        .all(|binding| binding.source_id != "session:path")
+    );
     drop(context);
     std::fs::remove_dir_all(raw).unwrap();
   }

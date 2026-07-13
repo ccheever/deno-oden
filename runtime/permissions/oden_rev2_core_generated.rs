@@ -49,7 +49,8 @@ use std::sync::{Arc, OnceLock};
 
 use crate::rev2_registry_generated::{
     REV2_PROFILE, REV2_REGISTRY_DIGEST, REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON,
-    REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN, REV2_VOCAB_DIGEST,
+    REV2_RUNTIME_NEGATIVE_INVENTORY_DOMAIN, REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN,
+    REV2_VOCAB_DIGEST,
 };
 
 pub const REASON_SCHEMA_INVALID: &str = "OD-CAP-SCHEMA-INVALID";
@@ -1353,6 +1354,24 @@ impl Rev2Core {
             ));
         }
         Ok(())
+    }
+
+    /// Recompute the cache's complete normalized negative-inventory digest.
+    /// Keeping normalization and row preimages inside the shared core prevents
+    /// runtime protocol consumers from drifting into a second evaluator.
+    ///
+    /// @ref LLP 0019#bounded-decision-cache [implements] — Cached positive
+    /// candidates bind the exact current strata 1–7 inventory and are accepted
+    /// only after the same shared core re-evaluates it.
+    pub fn negative_inventory_digest(
+        &self,
+        input: &DecisionPolicyInput,
+    ) -> Result<String, CoreError> {
+        let normalized = self.normalize_policy(input)?;
+        inventory_digest(
+            REV2_RUNTIME_NEGATIVE_INVENTORY_DOMAIN,
+            &negative_inventory(&normalized)?,
+        )
     }
 
     /// Evaluate generated review risk without consulting or mutating any
@@ -6218,6 +6237,15 @@ fn schema_error(error: serde_json::Error) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rev2_registry_generated::{
+        REV2_RUNTIME_EXTERNAL_RESPONSE_MAC_DOMAIN,
+        REV2_RUNTIME_PERMISSION_BATCH_DIGEST_DOMAIN, REV2_RUNTIME_PERMISSION_BRANCHES,
+        REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST,
+        REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_JSON,
+        REV2_RUNTIME_PROTOCOL_SPEC_JSON,
+        REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN, REV2_RUNTIME_SESSION_POSITIVE_ROW_ID_DOMAIN,
+        REV2_RUNTIME_SESSION_REVOCATION_ROW_ID_DOMAIN,
+    };
     use proptest::prelude::*;
     use serde_json::json;
 
@@ -6266,6 +6294,408 @@ mod tests {
         "native-op:ext/process/lib.rs#op_spawn_child:effect-slot:1";
     const SPAWN_ENV_WRITE_SLOT: &str =
         "native-op:ext/process/lib.rs#op_spawn_child:effect-slot:2";
+
+    fn fixture_hmac_sha256(key: &[u8], input: &[u8]) -> Vec<u8> {
+        assert!(key.len() <= 64);
+        let mut padded = [0_u8; 64];
+        padded[..key.len()].copy_from_slice(key);
+        let mut inner_pad = [0x36_u8; 64];
+        let mut outer_pad = [0x5c_u8; 64];
+        for index in 0..64 {
+            inner_pad[index] ^= padded[index];
+            outer_pad[index] ^= padded[index];
+        }
+        let mut inner = Sha256::new();
+        inner.update(inner_pad);
+        inner.update(input);
+        let inner_digest = inner.finalize();
+        let mut outer = Sha256::new();
+        outer.update(outer_pad);
+        outer.update(inner_digest);
+        outer.finalize().to_vec()
+    }
+
+    fn fixture_base64url(value: &str) -> Vec<u8> {
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let decoded = engine.decode(value).unwrap();
+        assert_eq!(engine.encode(&decoded), value);
+        decoded
+    }
+
+    #[test]
+    fn generated_runtime_protocol_corpus_recomputes_in_the_shared_rust_core() {
+        let corpus = parse_strict_json(REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_JSON).unwrap();
+        let mut source_bytes = REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_JSON.as_bytes().to_vec();
+        source_bytes.push(b'\n');
+        let source_digest = Sha256::digest(source_bytes);
+        assert_eq!(
+            format!(
+                "sha256-{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(source_digest)
+            ),
+            REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST
+        );
+
+        let core = Rev2Core::embedded().unwrap();
+        assert_eq!(
+            corpus["branchBatchVectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "branch-dynamic-read-request",
+                "branch-dynamic-sys-request",
+                "branch-dynamic-write-request",
+                "branch-static-ffi-query",
+                "branch-static-ffi-request-refusal",
+                "branch-static-run-query",
+                "branch-static-run-request-refusal",
+            ]
+        );
+        assert_eq!(
+            corpus["sessionRowIdVectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "session-row-dynamic-read-package",
+                "session-row-dynamic-sys-package",
+                "session-row-dynamic-write-package",
+            ]
+        );
+        for vector in corpus["branchBatchVectors"].as_array().unwrap() {
+            let descriptor = vector["descriptor"].as_object().unwrap();
+            let operation = vector["operation"].as_str().unwrap();
+            let expected = vector["expected"].as_object().unwrap();
+            let descriptor_name = descriptor["name"].as_str().unwrap();
+            let descriptor_keys = descriptor.keys().map(String::as_str).collect::<BTreeSet<_>>();
+            let matching = REV2_RUNTIME_PERMISSION_BRANCHES
+                .iter()
+                .filter(|branch| branch.descriptor_name == descriptor_name)
+                .filter(|branch| {
+                    let keys = branch
+                        .descriptor_required_fields
+                        .iter()
+                        .chain(branch.descriptor_optional_fields.iter())
+                        .copied()
+                        .collect::<BTreeSet<_>>();
+                    if keys != descriptor_keys {
+                        return false;
+                    }
+                    branch.descriptor_scope_field.is_none_or(|field| {
+                        descriptor
+                            .get(field)
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| !value.is_empty())
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "{}", vector["id"]);
+            let branch = matching[0];
+            assert_eq!(branch.id, expected["branchId"]);
+            assert_eq!(branch.disposition, expected["branchDisposition"]);
+            let transition = |slot: &crate::rev2_registry_generated::Rev2RuntimePermissionSlot| {
+                match operation {
+                    "query" => slot.transitions.query,
+                    "request" => slot.transitions.request,
+                    "revoke" => slot.transitions.revoke,
+                    other => panic!("unknown fixture operation {other}"),
+                }
+            };
+            let effect_slot =
+                |slot: &crate::rev2_registry_generated::Rev2RuntimePermissionSlot| match operation {
+                    "query" => slot.operation_effect_slot_ids.query,
+                    "request" => slot.operation_effect_slot_ids.request,
+                    "revoke" => slot.operation_effect_slot_ids.revoke,
+                    other => panic!("unknown fixture operation {other}"),
+                };
+            let transitions = branch.slot_order.iter().map(transition).collect::<Vec<_>>();
+            let disposition = if transitions.is_empty() {
+                "refuse-unsupported-descriptor"
+            } else if transitions.iter().all(|value| *value == transitions[0]) {
+                transitions[0]
+            } else {
+                "refuse-unsupported-descriptor"
+            };
+            assert_eq!(disposition, expected["operationDisposition"]);
+            assert_eq!(
+                branch.slot_order.iter().map(|slot| slot.slot_id).collect::<Vec<_>>(),
+                expected["logicalSlotIds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(Value::as_str)
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap()
+            );
+            assert_eq!(
+                branch.slot_order.iter().filter_map(effect_slot).collect::<Vec<_>>(),
+                expected["operationEffectSlotIds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(Value::as_str)
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap()
+            );
+            assert_eq!(
+                branch.slot_order.iter().map(|slot| slot.capability).collect::<Vec<_>>(),
+                expected["capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(Value::as_str)
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap()
+            );
+
+            let Some(batch) = expected["batchWithoutDigest"].as_object() else {
+                assert!(expected["batchDigest"].is_null());
+                continue;
+            };
+            let batch_value = Value::Object(batch.clone());
+            assert_eq!(
+                domain_digest(REV2_RUNTIME_PERMISSION_BATCH_DIGEST_DOMAIN, &batch_value).unwrap(),
+                expected["batchDigest"]
+            );
+            assert_eq!(batch["operation"], operation);
+            let edge_id = batch["coverageEdgeId"].as_str().unwrap();
+            let expected_edge = match operation {
+                "query" => branch.operation_edge_ids.query,
+                "request" => branch.operation_edge_ids.request,
+                "revoke" => branch.operation_edge_ids.revoke,
+                _ => unreachable!(),
+            };
+            assert_eq!(edge_id, expected_edge);
+            for (index, effect) in batch["effects"].as_array().unwrap().iter().enumerate() {
+                let selector = effect["selector"].as_object().unwrap();
+                let owner: PrincipalRef =
+                    serde_json::from_value(effect["effectOwner"].clone()).unwrap();
+                let normalized_selector = core
+                    .normalize_selector(
+                        &AuthoritySelectorInput {
+                            identity: EngineIdentity::embedded(),
+                            principal: Some(
+                                serde_json::from_value(selector["principal"].clone()).unwrap(),
+                            ),
+                            capability: selector["capability"].as_str().unwrap().to_string(),
+                            resource: selector["resource"].clone(),
+                        },
+                        SelectorPolarity::Positive,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(normalized_selector).unwrap(),
+                    Value::Object(selector.clone())
+                );
+                core.normalize_effect(&EffectInput {
+                    identity: EngineIdentity::embedded(),
+                    edge_id: edge_id.to_string(),
+                    effect_slot_id: effect_slot(&branch.slot_order[index]).unwrap().to_string(),
+                    capability: selector["capability"].as_str().unwrap().to_string(),
+                    effect_owner: owner.key,
+                    occurrence: effect["occurrence"].clone(),
+                })
+                .unwrap();
+                if selector["capability"] == "process:spawn" {
+                    assert_eq!(
+                        effect["occurrence"]["launchSet"],
+                        json!([{
+                            "kind": "entry",
+                            "value": effect["occurrence"]["requestedPath"]["value"],
+                        }]),
+                        "{}",
+                        vector["id"]
+                    );
+                }
+            }
+        }
+
+        for vector in corpus["externalResponseMacVectors"].as_array().unwrap() {
+            let response = &vector["responseWithoutAuthenticationTag"];
+            let canonical = canonical_json(response).unwrap();
+            assert_eq!(canonical, vector["canonicalPayload"]);
+            let mut input = REV2_RUNTIME_EXTERNAL_RESPONSE_MAC_DOMAIN.as_bytes().to_vec();
+            input.extend_from_slice(canonical.as_bytes());
+            assert_eq!(fixture_base64url(vector["macInputBase64url"].as_str().unwrap()), input);
+            let key = fixture_base64url(vector["key"].as_str().unwrap());
+            let tag = fixture_base64url(vector["authenticationTag"].as_str().unwrap());
+            assert_eq!(key.len(), 32);
+            assert_eq!(tag.len(), 32);
+            assert_eq!(fixture_hmac_sha256(&key, &input), tag);
+        }
+        for vector in corpus["sessionRowIdVectors"].as_array().unwrap() {
+            let mut preimage = vector["preimage"].clone();
+            let selector = &preimage["identitySelector"];
+            let normalized = core
+                .normalize_selector(
+                    &AuthoritySelectorInput {
+                        identity: EngineIdentity::embedded(),
+                        principal: Some(
+                            serde_json::from_value(selector["principal"].clone()).unwrap(),
+                        ),
+                        capability: selector["capability"].as_str().unwrap().to_string(),
+                        resource: selector["resource"].clone(),
+                    },
+                    SelectorPolarity::Positive,
+                )
+                .unwrap();
+            preimage["identitySelector"] = json!({
+                "capability": normalized.capability,
+                "principal": normalized.principal,
+                "resource": normalized.resource,
+            });
+            assert_eq!(canonical_json(&preimage).unwrap(), vector["canonicalPreimage"]);
+            assert_eq!(
+                domain_digest(REV2_RUNTIME_SESSION_POSITIVE_ROW_ID_DOMAIN, &preimage).unwrap(),
+                vector["positiveRowId"]
+            );
+            assert_eq!(
+                domain_digest(REV2_RUNTIME_SESSION_REVOCATION_ROW_ID_DOMAIN, &preimage).unwrap(),
+                vector["revocationRowId"]
+            );
+        }
+        for vector in corpus["protectedRowDigestVectors"].as_array().unwrap() {
+            let mut preimage = vector["preimage"].clone();
+            let selector = &preimage["selector"];
+            let normalized = core
+                .normalize_selector(
+                    &AuthoritySelectorInput {
+                        identity: EngineIdentity::embedded(),
+                        principal: Some(
+                            serde_json::from_value(selector["principal"].clone()).unwrap(),
+                        ),
+                        capability: selector["capability"].as_str().unwrap().to_string(),
+                        resource: selector["resource"].clone(),
+                    },
+                    SelectorPolarity::Positive,
+                )
+                .unwrap();
+            assert_eq!(serde_json::to_value(&normalized).unwrap(), *selector);
+            preimage["selector"] = serde_json::to_value(normalized).unwrap();
+            assert_eq!(canonical_json(&preimage).unwrap(), vector["canonicalPreimage"]);
+            assert_eq!(
+                domain_digest(REV2_RUNTIME_PROTECTED_ROW_DIGEST_DOMAIN, &preimage).unwrap(),
+                vector["digest"]
+            );
+        }
+        let protocol_spec = parse_strict_json(REV2_RUNTIME_PROTOCOL_SPEC_JSON).unwrap();
+        let evidence_spec = &protocol_spec["runtimeInstallEvidence"];
+        let evidence_keys = evidence_spec["commonFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<BTreeSet<_>>>()
+            .unwrap();
+        let identity_keys = evidence_spec["runtimeIdentityFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<BTreeSet<_>>>()
+            .unwrap();
+        for vector in corpus["runtimeInstallEvidenceVectors"].as_array().unwrap() {
+            let evidence = vector["evidence"].as_object().unwrap();
+            assert_eq!(evidence.keys().map(String::as_str).collect::<BTreeSet<_>>(), evidence_keys);
+            assert_eq!(evidence["v"], evidence_spec["version"]);
+            assert_eq!(evidence["event"], evidence_spec["event"]);
+            assert_eq!(evidence["decisionStage"], evidence_spec["decisionStage"]);
+            assert_eq!(
+                evidence["runtimeContextSchema"],
+                evidence_spec["runtimeContextSchema"]
+            );
+            let disposition = vector["disposition"].as_str().unwrap();
+            let variant = evidence_spec["variants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == disposition)
+                .unwrap();
+            assert_eq!(evidence["installed"], variant["installed"]);
+            assert_eq!(evidence["armed"], variant["armed"]);
+            let blockers = evidence["blockers"].as_array().unwrap();
+            assert_eq!(canonical_set(Value::Array(blockers.clone()), "fixture", "blockers").unwrap(), evidence["blockers"]);
+            assert_eq!(blockers.is_empty(), variant["blockers"] == "empty");
+            for field in variant["nullFields"].as_array().unwrap() {
+                assert!(evidence[field.as_str().unwrap()].is_null());
+            }
+            if disposition == "installed" {
+                let identity = evidence["runtimeIdentity"].as_object().unwrap();
+                assert_eq!(identity.keys().map(String::as_str).collect::<BTreeSet<_>>(), identity_keys);
+                assert_eq!(evidence["vocabDigest"], identity["vocabDigest"]);
+                assert_eq!(evidence["registryDigest"], identity["registryDigest"]);
+                for field in [
+                    "vocabDigest",
+                    "registryDigest",
+                    "policyDigest",
+                    "armedSnapshotDigest",
+                    "projectDigest",
+                ] {
+                    let encoded = identity[field]
+                        .as_str()
+                        .unwrap()
+                        .strip_prefix("sha256-")
+                        .unwrap();
+                    assert_eq!(fixture_base64url(encoded).len(), 32);
+                }
+                assert!(evidence_spec["executionRoles"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&evidence["executionRole"]));
+            }
+        }
+        for vector in corpus["canonicalSetVectors"].as_array().unwrap() {
+            let normalized = canonical_set(vector["input"].clone(), "fixture", "input").unwrap();
+            assert_eq!(normalized, vector["expected"]);
+            assert_eq!(
+                normalized
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(canonical_json)
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                vector["expectedCanonicalElements"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(Value::as_str)
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn shared_core_owns_the_cache_negative_inventory_digest() {
+        let core = Rev2Core::embedded().unwrap();
+        let mut input = policy(Mode::Enforce);
+        let empty = core.negative_inventory_digest(&input).unwrap();
+        assert_eq!(
+            empty,
+            domain_digest(
+                REV2_RUNTIME_NEGATIVE_INVENTORY_DOMAIN,
+                &serde_json::json!([]),
+            )
+            .unwrap()
+        );
+        input.principal_denials.push(NamedSelectorInput {
+            source_id: "fixture:negative".to_string(),
+            selector: selector(
+                Some(package("negative")),
+                "env:read",
+                json!({ "name": "TOKEN" }),
+            ),
+        });
+        let populated = core.negative_inventory_digest(&input).unwrap();
+        assert_ne!(populated, empty);
+        assert_eq!(populated, core.negative_inventory_digest(&input).unwrap());
+    }
 
     fn package(name: &str) -> PrincipalRef {
         PrincipalRef {

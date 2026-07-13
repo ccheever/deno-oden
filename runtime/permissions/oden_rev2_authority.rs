@@ -35,11 +35,10 @@ use crate::oden_rev2_session::{
 };
 use crate::rev2::CanonicalAuthoritySelector;
 use crate::rev2::CanonicalEffect;
+use crate::rev2::PathBindingInput;
 use crate::rev2::PositiveSource;
 use crate::rev2::PrincipalRef;
 use crate::rev2::canonical_json;
-#[cfg(test)]
-use crate::rev2_registry_generated::REV2_RUNTIME_NEGATIVE_REENTRY_PHASES;
 use crate::rev2_registry_generated::{
   REV2_RUNTIME_AUTHORITY_MAX_ROW_BYTES, REV2_RUNTIME_AUTHORITY_MAX_ROWS,
   REV2_RUNTIME_AUTHORITY_MAX_TOTAL_BYTES, REV2_RUNTIME_CACHE_MAX_DIMENSIONS,
@@ -419,11 +418,135 @@ pub enum AuthorityRowKind {
   Revocation,
 }
 
+/// One host-authenticated path identity captured for an exact permission
+/// occurrence. This value has no `Deserialize` implementation and is never
+/// included in an authority row's wire representation. Session mutation APIs
+/// can only attach it while deriving the row's stable id from the matching
+/// canonical selector.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuthorityPathFact {
+  root_binding_id: String,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  final_object_identities: Vec<serde_json::Value>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  parent_identities: Vec<serde_json::Value>,
+}
+
+impl AuthorityPathFact {
+  pub(crate) fn capture_verified(
+    binding: &PathBindingInput,
+    selector: &CanonicalAuthoritySelector,
+    occurrence: &serde_json::Value,
+  ) -> Result<Self, AuthorityStateError> {
+    let resource = selector.resource.as_object().ok_or(
+      AuthorityStateError::InvalidField("sessionPathFact.selector"),
+    )?;
+    if !selector.capability.starts_with("fs:")
+      || resource.get("root").is_none()
+      || resource.get("path").is_none()
+      || binding.source_id.trim().is_empty()
+      || binding.root_binding_id.trim().is_empty()
+      || binding.final_object_identities.len() > 1
+      || binding.parent_identities.len() > 1
+    {
+      return Err(AuthorityStateError::InvalidField("sessionPathFact"));
+    }
+    let occurrence =
+      occurrence
+        .as_object()
+        .ok_or(AuthorityStateError::InvalidField(
+          "sessionPathFact.occurrence",
+        ))?;
+    if occurrence.get("root") != resource.get("root")
+      || occurrence.get("lexicalPath") != resource.get("path")
+      || occurrence
+        .get("rootBindingId")
+        .and_then(serde_json::Value::as_str)
+        != Some(binding.root_binding_id.as_str())
+    {
+      return Err(AuthorityStateError::InvalidField(
+        "sessionPathFact.occurrence",
+      ));
+    }
+    let state = occurrence
+      .get("finalObjectState")
+      .and_then(serde_json::Value::as_object)
+      .ok_or(AuthorityStateError::InvalidField(
+        "sessionPathFact.finalObjectState",
+      ))?;
+    match state.get("kind").and_then(serde_json::Value::as_str) {
+      Some("existing" | "link-entry") => {
+        let identity =
+          state
+            .get("identity")
+            .ok_or(AuthorityStateError::InvalidField(
+              "sessionPathFact.identity",
+            ))?;
+        if binding.final_object_identities.as_slice()
+          != std::slice::from_ref(identity)
+          || !binding.parent_identities.is_empty()
+        {
+          return Err(AuthorityStateError::InvalidField(
+            "sessionPathFact.identity",
+          ));
+        }
+      }
+      Some("missing" | "proposed") => {
+        let parent = occurrence.get("parentIdentity").ok_or(
+          AuthorityStateError::InvalidField("sessionPathFact.parentIdentity"),
+        )?;
+        if binding.parent_identities.as_slice() != std::slice::from_ref(parent)
+          || !binding.final_object_identities.is_empty()
+        {
+          return Err(AuthorityStateError::InvalidField(
+            "sessionPathFact.parentIdentity",
+          ));
+        }
+      }
+      _ => {
+        return Err(AuthorityStateError::InvalidField(
+          "sessionPathFact.finalObjectState",
+        ));
+      }
+    }
+    let fact = Self {
+      root_binding_id: binding.root_binding_id.clone(),
+      final_object_identities: binding.final_object_identities.clone(),
+      parent_identities: binding.parent_identities.clone(),
+    };
+    let canonical = canonicalize_typed("sessionPathFact", &fact)?;
+    validate_component(
+      "sessionPathFact",
+      &canonical,
+      MAX_CACHE_COMPONENT_BYTES,
+    )?;
+    Ok(fact)
+  }
+
+  fn binding_for_source(&self, source_id: &str) -> PathBindingInput {
+    PathBindingInput {
+      source_id: source_id.to_string(),
+      root_binding_id: self.root_binding_id.clone(),
+      final_object_identities: self.final_object_identities.clone(),
+      parent_identities: self.parent_identities.clone(),
+    }
+  }
+
+  fn encoded_weight_bytes(&self) -> Result<usize, AuthorityStateError> {
+    serde_json::to_vec(self)
+      .map(|encoded| encoded.len())
+      .map_err(|error| AuthorityStateError::Serialization(error.to_string()))
+  }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthorityRow {
   row_id: String,
   selector: CanonicalAuthoritySelector,
+  #[serde(skip)]
+  path_fact: Option<AuthorityPathFact>,
   #[serde(skip)]
   canonical_value: String,
   #[serde(skip)]
@@ -434,6 +557,14 @@ impl AuthorityRow {
   fn from_selector(
     row_id: String,
     selector: &CanonicalAuthoritySelector,
+  ) -> Result<Self, AuthorityStateError> {
+    Self::from_selector_with_path_fact(row_id, selector, None)
+  }
+
+  fn from_selector_with_path_fact(
+    row_id: String,
+    selector: &CanonicalAuthoritySelector,
+    path_fact: Option<&AuthorityPathFact>,
   ) -> Result<Self, AuthorityStateError> {
     validate_component(
       "authorityRow.rowId",
@@ -450,12 +581,24 @@ impl AuthorityRow {
     let mut row = Self {
       row_id,
       selector: selector.clone(),
+      path_fact: path_fact.cloned(),
       canonical_value,
       encoded_weight_bytes: 0,
     };
     row.encoded_weight_bytes = serde_json::to_vec(&row)
       .map_err(|error| AuthorityStateError::Serialization(error.to_string()))?
-      .len();
+      .len()
+      .checked_add(
+        row
+          .path_fact
+          .as_ref()
+          .map(AuthorityPathFact::encoded_weight_bytes)
+          .transpose()?
+          .unwrap_or(0),
+      )
+      .ok_or(AuthorityStateError::AuthorityCapacityExceeded(
+        "per-row byte bound",
+      ))?;
     if row.encoded_weight_bytes > AUTHORITY_STATE_MAX_ROW_WEIGHT_BYTES {
       return Err(AuthorityStateError::AuthorityCapacityExceeded(
         "per-row byte bound",
@@ -474,6 +617,13 @@ impl AuthorityRow {
 
   pub fn selector(&self) -> &CanonicalAuthoritySelector {
     &self.selector
+  }
+
+  pub(crate) fn path_binding(&self) -> Option<PathBindingInput> {
+    self
+      .path_fact
+      .as_ref()
+      .map(|fact| fact.binding_for_source(&self.row_id))
   }
 
   pub fn encoded_weight_bytes(&self) -> usize {
@@ -794,20 +944,39 @@ impl AuthorityTransaction {
     kind: AuthorityRowKind,
     row_id: &str,
     selector: &CanonicalAuthoritySelector,
+    path_fact: Option<&AuthorityPathFact>,
   ) -> Result<SessionRowAdmission, AuthorityStateError> {
-    let existing = self
-      .base_publication
-      .rows
-      .map(kind)
-      .get(row_id)
-      .map(AuthorityRow::selector);
-    classify_same_id_row(existing, selector).map_err(|error| {
-      let error = AuthorityStateError::SessionRowIdentity(error.to_string());
-      if self.construction_error.is_none() {
-        self.construction_error = Some(error.clone());
-      }
-      error
-    })
+    let existing = self.base_publication.rows.map(kind).get(row_id);
+    let admission =
+      classify_same_id_row(existing.map(AuthorityRow::selector), selector)
+        .map_err(|error| {
+          let error =
+            AuthorityStateError::SessionRowIdentity(error.to_string());
+          if self.construction_error.is_none() {
+            self.construction_error = Some(error.clone());
+          }
+          error
+        })?;
+    if existing.is_some_and(|row| row.path_fact.as_ref() != path_fact) {
+      return self.reject(AuthorityStateError::SessionRowIdentity(
+        "same session row id carried a different host path fact".to_string(),
+      ));
+    }
+    Ok(admission)
+  }
+
+  fn validate_session_path_fact(
+    &mut self,
+    selector: &CanonicalAuthoritySelector,
+    path_fact: Option<&AuthorityPathFact>,
+  ) -> Result<(), AuthorityStateError> {
+    let resource_is_path = selector.capability.starts_with("fs:")
+      && selector.resource.get("root").is_some()
+      && selector.resource.get("path").is_some();
+    if resource_is_path != path_fact.is_some() {
+      return self.reject(AuthorityStateError::InvalidField("sessionPathFact"));
+    }
+    Ok(())
   }
 
   fn derive_session_row_ids(
@@ -831,19 +1000,52 @@ impl AuthorityTransaction {
     overlay_owner: &PrincipalRef,
     principal: &PrincipalRef,
     selector: &CanonicalAuthoritySelector,
+    path_fact: Option<&AuthorityPathFact>,
   ) -> Result<SessionRowAdmission, AuthorityStateError> {
+    self.validate_session_path_fact(selector, path_fact)?;
     let ids =
       self.derive_session_row_ids(overlay_owner, principal, selector)?;
     let admission = self.session_admission(
       AuthorityRowKind::SessionRevocation,
       ids.revocation(),
       selector,
+      path_fact,
     )?;
+    if let Some((positive_selector, positive_path_fact)) = self
+      .base_publication
+      .rows
+      .map(AuthorityRowKind::SessionPositive)
+      .get(ids.positive())
+      .map(|row| (row.selector.clone(), row.path_fact.clone()))
+    {
+      let positive_ids = self.derive_session_row_ids(
+        overlay_owner,
+        principal,
+        &positive_selector,
+      )?;
+      if positive_ids != ids {
+        return self.reject(AuthorityStateError::SessionRowIdentity(
+          "paired positive row derived a different logical identity"
+            .to_string(),
+        ));
+      }
+      if positive_path_fact.as_ref() != path_fact {
+        return self.reject(AuthorityStateError::SessionRowIdentity(
+          "session revocation did not preserve the positive row path fact"
+            .to_string(),
+        ));
+      }
+      self.remove_row(
+        AuthorityRowKind::SessionPositive,
+        ids.positive().to_string(),
+      )?;
+    }
     if admission == SessionRowAdmission::Insert {
-      self.upsert_row(
+      self.upsert_row_with_path_fact(
         AuthorityRowKind::SessionRevocation,
         ids.revocation().to_string(),
         selector,
+        path_fact,
       )?;
     }
     Ok(admission)
@@ -858,7 +1060,10 @@ impl AuthorityTransaction {
     principal: &PrincipalRef,
     positive_selector: &CanonicalAuthoritySelector,
     revocation_selector: &CanonicalAuthoritySelector,
+    path_fact: Option<&AuthorityPathFact>,
   ) -> Result<SessionRowAdmission, AuthorityStateError> {
+    self.validate_session_path_fact(positive_selector, path_fact)?;
+    self.validate_session_path_fact(revocation_selector, path_fact)?;
     let positive_ids = self.derive_session_row_ids(
       overlay_owner,
       principal,
@@ -879,11 +1084,13 @@ impl AuthorityTransaction {
       AuthorityRowKind::SessionPositive,
       positive_ids.positive(),
       positive_selector,
+      path_fact,
     )?;
     self.session_admission(
       AuthorityRowKind::SessionRevocation,
       positive_ids.revocation(),
       revocation_selector,
+      path_fact,
     )?;
     if self
       .base_publication
@@ -897,10 +1104,11 @@ impl AuthorityTransaction {
       )?;
     }
     if positive_admission == SessionRowAdmission::Insert {
-      self.upsert_row(
+      self.upsert_row_with_path_fact(
         AuthorityRowKind::SessionPositive,
         positive_ids.positive().to_string(),
         positive_selector,
+        path_fact,
       )?;
     }
     Ok(positive_admission)
@@ -927,7 +1135,19 @@ impl AuthorityTransaction {
     row_id: String,
     selector: &CanonicalAuthoritySelector,
   ) -> Result<(), AuthorityStateError> {
-    let row = match AuthorityRow::from_selector(row_id, selector) {
+    self.upsert_row_with_path_fact(kind, row_id, selector, None)
+  }
+
+  fn upsert_row_with_path_fact(
+    &mut self,
+    kind: AuthorityRowKind,
+    row_id: String,
+    selector: &CanonicalAuthoritySelector,
+    path_fact: Option<&AuthorityPathFact>,
+  ) -> Result<(), AuthorityStateError> {
+    let row = match AuthorityRow::from_selector_with_path_fact(
+      row_id, selector, path_fact,
+    ) {
       Ok(row) => row,
       Err(error) => return self.reject(error),
     };
@@ -1133,14 +1353,15 @@ pub struct DecisionCacheEffect {
 }
 
 impl DecisionCacheEffect {
-  pub(crate) fn from_canonical(
+  pub(crate) fn from_normalized_permission(
+    logical_slot_id: String,
     selector: &CanonicalAuthoritySelector,
     effect: &CanonicalEffect,
   ) -> Result<Self, AuthorityStateError> {
     if selector.capability != effect.capability {
       return Err(AuthorityStateError::InvalidField("cacheEffect.capability"));
     }
-    let slot_id = effect.effect_slot_id.clone();
+    let slot_id = logical_slot_id;
     let effect_owner = selector
       .principal
       .clone()
@@ -1203,8 +1424,32 @@ impl DecisionCacheEffect {
     })
   }
 
+  #[cfg(test)]
+  fn from_canonical(
+    selector: &CanonicalAuthoritySelector,
+    effect: &CanonicalEffect,
+  ) -> Result<Self, AuthorityStateError> {
+    Self::from_normalized_permission(
+      effect.effect_slot_id.clone(),
+      selector,
+      effect,
+    )
+  }
+
   pub fn slot_id(&self) -> &str {
     &self.slot_id
+  }
+
+  pub(crate) fn effect_owner(&self) -> &PrincipalRef {
+    &self.effect_owner
+  }
+
+  pub(crate) fn selector(&self) -> &CanonicalAuthoritySelector {
+    &self.selector
+  }
+
+  pub(crate) fn occurrence(&self) -> &serde_json::Value {
+    &self.occurrence
   }
 }
 
@@ -1422,6 +1667,34 @@ impl DecisionCacheKey {
     self.generations
   }
 
+  pub(crate) fn operation_class(&self) -> &str {
+    &self.operation_class
+  }
+
+  pub(crate) fn coverage_edge_id(&self) -> &str {
+    &self.coverage_edge_id
+  }
+
+  pub(crate) fn stage_id(&self) -> &str {
+    &self.stage_id
+  }
+
+  pub(crate) fn mode(&self) -> RuntimeAuthorityMode {
+    self.mode
+  }
+
+  pub(crate) fn constrained_principals(&self) -> &[PrincipalRef] {
+    &self.constrained_principals
+  }
+
+  pub(crate) fn overlay_owner(&self) -> &PrincipalRef {
+    &self.overlay_owner
+  }
+
+  pub(crate) fn effects(&self) -> &[DecisionCacheEffect] {
+    &self.effects
+  }
+
   fn minimum_receipt_deadline(&self) -> Option<u64> {
     self
       .receipt_dependencies
@@ -1496,6 +1769,22 @@ impl DecisionDimension {
       decision,
       positive_source,
     })
+  }
+
+  pub(crate) fn slot_id(&self) -> &str {
+    &self.slot_id
+  }
+
+  pub(crate) fn principal(&self) -> &PrincipalRef {
+    &self.principal
+  }
+
+  pub(crate) fn decision(&self) -> CachedDecision {
+    self.decision
+  }
+
+  pub(crate) fn positive_source(&self) -> Option<&PositiveSource> {
+    self.positive_source.as_ref()
   }
 }
 
@@ -1588,6 +1877,14 @@ impl DecisionCacheValue {
 
   pub fn weight_bytes(&self) -> u64 {
     self.weight_bytes.0
+  }
+
+  pub(crate) fn negative_inventory_digest(&self) -> &str {
+    &self.negative_inventory_digest
+  }
+
+  pub(crate) fn valid_until_monotonic(&self) -> Option<u64> {
+    self.valid_until_monotonic.map(|deadline| deadline.0)
   }
 
   fn is_expired(&self, now_monotonic: u64) -> bool {
@@ -2158,8 +2455,7 @@ impl RuntimeAuthorityState {
     inner.cache.insert(key, value)
   }
 
-  #[cfg(test)]
-  pub fn cache_candidate(
+  pub(crate) fn cache_candidate(
     &self,
     key: &DecisionCacheKey,
     now_monotonic: u64,
@@ -2192,68 +2488,20 @@ impl RuntimeAuthorityState {
   }
 }
 
-/// A cache hit is deliberately a candidate paired with the exact read view;
-/// callers must evaluate current negatives against this view before reuse.
-#[cfg(test)]
+/// A cache hit is deliberately an internal candidate paired with the exact
+/// read view. It can leave this module only for the context-owned shared-core
+/// re-entry evaluator; there is no callback-shaped validation surface.
 #[derive(Clone, Debug)]
-pub struct DecisionCacheCandidate {
+pub(crate) struct DecisionCacheCandidate {
   value: DecisionCacheValue,
   read_view: RuntimeAuthorityReadView,
 }
 
-#[cfg(test)]
 impl DecisionCacheCandidate {
-  pub fn read_view(&self) -> &RuntimeAuthorityReadView {
-    &self.read_view
-  }
-
-  /// Consume a cache candidate only after a caller re-evaluates every
-  /// generated negative stratum against the candidate's exact immutable view.
-  pub fn revalidate_current_negatives<F>(
+  pub(crate) fn into_parts(
     self,
-    state: &RuntimeAuthorityState,
-    evaluate: F,
-  ) -> Result<ValidatedDecisionCacheHit, AuthorityStateError>
-  where
-    F: FnOnce(
-      &RuntimeAuthorityReadView,
-      &DecisionCacheValue,
-      &[crate::rev2_registry_generated::Rev2RuntimeNegativeReentryPhase],
-    ) -> Result<(), AuthorityStateError>,
-  {
-    if !state.is_current(&self.read_view)? {
-      return Err(AuthorityStateError::GenerationChanged);
-    }
-    evaluate(
-      &self.read_view,
-      &self.value,
-      REV2_RUNTIME_NEGATIVE_REENTRY_PHASES,
-    )?;
-    if !state.is_current(&self.read_view)? {
-      return Err(AuthorityStateError::GenerationChanged);
-    }
-    Ok(ValidatedDecisionCacheHit {
-      value: self.value,
-      read_view: self.read_view,
-    })
-  }
-}
-
-#[cfg(test)]
-#[derive(Clone, Debug)]
-pub struct ValidatedDecisionCacheHit {
-  value: DecisionCacheValue,
-  read_view: RuntimeAuthorityReadView,
-}
-
-#[cfg(test)]
-impl ValidatedDecisionCacheHit {
-  pub fn value(&self) -> &DecisionCacheValue {
-    &self.value
-  }
-
-  pub fn read_view(&self) -> &RuntimeAuthorityReadView {
-    &self.read_view
+  ) -> (DecisionCacheValue, RuntimeAuthorityReadView) {
+    (self.value, self.read_view)
   }
 }
 
@@ -2748,22 +2996,10 @@ mod tests {
       .cache_insert(current_key.clone(), cache_value("current", 0))
       .unwrap();
     let candidate = state.cache_candidate(&current_key, 0).unwrap().unwrap();
-    assert_eq!(candidate.read_view().generations(), current.generations());
-    let validated = candidate
-      .revalidate_current_negatives(&state, |view, value, phases| {
-        assert_eq!(view.generations(), current.generations());
-        assert_eq!(value.decision(), CachedDecision::Allow);
-        assert_eq!(phases.len(), 7);
-        assert!(
-          phases
-            .iter()
-            .all(|phase| phase.strata == [1, 2, 3, 4, 5, 6, 7])
-        );
-        Ok(())
-      })
-      .unwrap();
-    assert_eq!(validated.value().decision(), CachedDecision::Allow);
-    assert_eq!(validated.read_view().generations(), current.generations());
+    let (candidate_value, candidate_view) = candidate.into_parts();
+    assert_eq!(candidate_value.decision(), CachedDecision::Allow);
+    assert_eq!(candidate_view.generations(), current.generations());
+    assert!(state.is_current(&candidate_view).unwrap());
 
     let race_key =
       cache_key(current.identity(), current.generations(), "negative-race");
@@ -2771,18 +3007,14 @@ mod tests {
       .cache_insert(race_key.clone(), cache_value("negative-race", 0))
       .unwrap();
     let candidate = state.cache_candidate(&race_key, 0).unwrap().unwrap();
-    assert!(matches!(
-      candidate.revalidate_current_negatives(&state, |_, _, _| {
-        upsert_once(
-          &state,
-          AuthorityRowKind::NegativeOverlay,
-          "negative-race",
-          "negative-race",
-        );
-        Ok(())
-      }),
-      Err(AuthorityStateError::GenerationChanged)
-    ));
+    let (_, candidate_view) = candidate.into_parts();
+    upsert_once(
+      &state,
+      AuthorityRowKind::NegativeOverlay,
+      "negative-race",
+      "negative-race",
+    );
+    assert!(!state.is_current(&candidate_view).unwrap());
   }
 
   #[test]
@@ -2840,7 +3072,7 @@ mod tests {
     let mut revoke = state.begin_transaction().unwrap();
     assert_eq!(
       revoke
-        .upsert_session_revocation(&owner, &owner, &revocation)
+        .upsert_session_revocation(&owner, &owner, &revocation, None)
         .unwrap(),
       SessionRowAdmission::Insert
     );
@@ -2860,7 +3092,7 @@ mod tests {
     let mut grant = state.begin_transaction().unwrap();
     assert_eq!(
       grant
-        .reconcile_session_grant(&owner, &owner, &positive, &revocation)
+        .reconcile_session_grant(&owner, &owner, &positive, &revocation, None,)
         .unwrap(),
       SessionRowAdmission::Insert
     );
@@ -2882,7 +3114,7 @@ mod tests {
     let mut idempotent = state.begin_transaction().unwrap();
     assert_eq!(
       idempotent
-        .reconcile_session_grant(&owner, &owner, &positive, &revocation)
+        .reconcile_session_grant(&owner, &owner, &positive, &revocation, None,)
         .unwrap(),
       SessionRowAdmission::Idempotent
     );
@@ -2902,7 +3134,13 @@ mod tests {
     conflicting_state.commit(inject).unwrap();
     let mut refused = conflicting_state.begin_transaction().unwrap();
     assert!(matches!(
-      refused.reconcile_session_grant(&owner, &owner, &positive, &revocation,),
+      refused.reconcile_session_grant(
+        &owner,
+        &owner,
+        &positive,
+        &revocation,
+        None,
+      ),
       Err(AuthorityStateError::SessionRowIdentity(_))
     ));
     assert!(conflicting_state.commit(refused).is_err());
@@ -2955,12 +3193,18 @@ mod tests {
       match kind {
         AuthorityRowKind::SessionPositive => {
           setup
-            .reconcile_session_grant(&owner, &owner, &positive, &revocation)
+            .reconcile_session_grant(
+              &owner,
+              &owner,
+              &positive,
+              &revocation,
+              None,
+            )
             .unwrap();
         }
         AuthorityRowKind::SessionRevocation => {
           setup
-            .upsert_session_revocation(&owner, &owner, &revocation)
+            .upsert_session_revocation(&owner, &owner, &revocation, None)
             .unwrap();
         }
         AuthorityRowKind::NegativeOverlay | AuthorityRowKind::Revocation => {

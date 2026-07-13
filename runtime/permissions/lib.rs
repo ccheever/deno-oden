@@ -1692,12 +1692,39 @@ pub const ODEN_CAPSEC_REV2_UNARMED_EXIT_CODE: i32 = 75;
 static ODEN_CAPSEC_REV2_BOOTSTRAP: OnceLock<
   Result<Arc<OdenRev2RuntimeAuthorityContext>, String>,
 > = OnceLock::new();
+static ODEN_CAPSEC_REV2_PUBLICATION_FAILED: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OdenRev2ProcessMode {
+  Rev1,
+  Rev2Installed,
+  Rev2Refused,
+}
+
+pub fn oden_capsec_rev2_process_mode() -> OdenRev2ProcessMode {
+  if ODEN_CAPSEC_REV2_PUBLICATION_FAILED
+    .load(std::sync::atomic::Ordering::Acquire)
+  {
+    return OdenRev2ProcessMode::Rev2Refused;
+  }
+  match ODEN_CAPSEC_REV2_BOOTSTRAP.get() {
+    None => OdenRev2ProcessMode::Rev1,
+    Some(Ok(_)) => OdenRev2ProcessMode::Rev2Installed,
+    Some(Err(_)) => OdenRev2ProcessMode::Rev2Refused,
+  }
+}
 
 /// The one process-wide C04 authority context. Clones retain the same sealed
 /// host object; no policy bytes or independently constructible state cross the
 /// permissions boundary.
 pub fn oden_capsec_rev2_runtime_authority_context()
 -> Option<Arc<OdenRev2RuntimeAuthorityContext>> {
+  if ODEN_CAPSEC_REV2_PUBLICATION_FAILED
+    .load(std::sync::atomic::Ordering::Acquire)
+  {
+    return None;
+  }
   ODEN_CAPSEC_REV2_BOOTSTRAP
     .get()
     .and_then(|result| result.as_ref().ok())
@@ -1705,9 +1732,87 @@ pub fn oden_capsec_rev2_runtime_authority_context()
 }
 
 pub fn oden_capsec_rev2_bootstrap_exit_code() -> Option<i32> {
+  if ODEN_CAPSEC_REV2_PUBLICATION_FAILED
+    .load(std::sync::atomic::Ordering::Acquire)
+  {
+    return Some(ODEN_CAPSEC_REV2_UNARMED_EXIT_CODE);
+  }
   match ODEN_CAPSEC_REV2_BOOTSTRAP.get() {
     Some(Ok(_)) | None => None,
     Some(Err(_)) => Some(ODEN_CAPSEC_REV2_UNARMED_EXIT_CODE),
+  }
+}
+
+fn oden_rev2_execution_role_name(
+  role: oden_rev2_context::OdenRev2ExecutionRole,
+) -> &'static str {
+  match role {
+    oden_rev2_context::OdenRev2ExecutionRole::Run => "run",
+    oden_rev2_context::OdenRev2ExecutionRole::Probe => "probe",
+    oden_rev2_context::OdenRev2ExecutionRole::Candidate => "candidate",
+    oden_rev2_context::OdenRev2ExecutionRole::Baseline => "baseline",
+  }
+}
+
+fn oden_rev2_continues_to_c04(
+  armable: bool,
+  execution_role: Option<&str>,
+) -> bool {
+  armable && execution_role.is_some_and(|role| role != "probe")
+}
+
+/// Emit a distinct C04 transition after the immutable runtime context has
+/// actually been installed. The preceding C03 `rev2_loaded_context` record is
+/// deliberately left verification-only (`armed: false`); consumers must never
+/// reinterpret that frozen record as proof that the live runtime protocol was
+/// installed.
+fn oden_rev2_runtime_install_evidence(
+  result: &Result<Arc<OdenRev2RuntimeAuthorityContext>, String>,
+) -> serde_json::Value {
+  match result {
+    Ok(context) => {
+      let identity = context.identity();
+      serde_json::json!({
+        "v": 1,
+        "event": "rev2_runtime_context",
+        "profile": rev2_registry_generated::REV2_PROFILE,
+        "vocabDigest": rev2_registry_generated::REV2_VOCAB_DIGEST,
+        "registryDigest": rev2_registry_generated::REV2_REGISTRY_DIGEST,
+        "decisionStage": "runtime-install",
+        "runtimeContextSchema": rev2_registry_generated::REV2_RUNTIME_AUTHORITY_CONTEXT_SCHEMA,
+        "runtimeIdentity": {
+          "vocabDigest": identity.vocab_digest(),
+          "registryDigest": identity.registry_digest(),
+          "policyDigest": identity.policy_digest(),
+          "armedSnapshotDigest": identity.armed_snapshot_digest(),
+          "projectDigest": identity.project_digest(),
+          "runNonce": identity.run_nonce(),
+          "channelEpoch": identity.channel_epoch(),
+        },
+        "engineTarget": context.target(),
+        "engineFeatureSet": context.feature_set(),
+        "executionRole": oden_rev2_execution_role_name(context.execution_role()),
+        "installed": true,
+        "armed": true,
+        "blockers": [],
+      })
+    }
+    Err(reason) => serde_json::json!({
+      "v": 1,
+      "event": "rev2_runtime_context",
+      "profile": rev2_registry_generated::REV2_PROFILE,
+      "vocabDigest": rev2_registry_generated::REV2_VOCAB_DIGEST,
+      "registryDigest": rev2_registry_generated::REV2_REGISTRY_DIGEST,
+      "decisionStage": "runtime-install",
+      "runtimeContextSchema": rev2_registry_generated::REV2_RUNTIME_AUTHORITY_CONTEXT_SCHEMA,
+      "runtimeIdentity": null,
+      "engineTarget": null,
+      "engineFeatureSet": null,
+      "executionRole": null,
+      "installed": false,
+      "armed": false,
+      "blockers": [reason],
+    }),
   }
 }
 
@@ -1775,13 +1880,62 @@ pub fn oden_capsec_init_control_plane(
         "blockers": [reason],
       }),
     };
-    // @ref LLP 0019#stage-c-runtime-authority-and-typed-permission-checkpoint-c04--eng-24017 [implements] -- Only an authenticated Armable C03 context can claim and construct the process-wide C04 context, before the CLI creates V8.
-    let runtime_result = loaded_result.and_then(|loaded| {
-      OdenRev2RuntimeAuthorityContext::install(loaded).map(Arc::new)
-    });
-    rev2_armed = runtime_result.is_ok();
-    let _ = ODEN_CAPSEC_REV2_BOOTSTRAP.set(runtime_result);
+    let armable = loaded_result
+      .as_ref()
+      .is_ok_and(|loaded| loaded.state() == OdenRev2LoadState::Armable);
+    let execution_role = loaded_result
+      .as_ref()
+      .ok()
+      .map(|loaded| loaded.execution_role().to_string());
+    let continue_into_c04 =
+      oden_rev2_continues_to_c04(armable, execution_role.as_deref());
+    // C03 evidence is ordered before the C04 transition. Its fixed
+    // `armed:false` claim is therefore true at the point it is authenticated.
     oden_capsec_write_audit_record(&evidence);
+    // @ref LLP 0019#stage-c-runtime-authority-and-typed-permission-checkpoint-c04--eng-24017 [implements] -- Only an authenticated Armable C03 context can claim and construct the process-wide C04 context, before the CLI creates V8.
+    let runtime_result = if continue_into_c04 {
+      loaded_result.and_then(|mut loaded| {
+        let control_root = oden_capsec_audit_channel()
+          .lock()
+          .control_root()
+          .ok_or_else(|| "OD-CAP-REV2-CONTROL-ROOT-MISSING".to_string())?;
+        // @ref LLP 0019#c04-immutable-execution-installation-and-entry [implements] -- Immutable native images are a C04 install step, ordered after the authenticated verification-only C03 record and before the runtime context becomes reachable.
+        loaded.install_immutable_executables(&control_root)?;
+        OdenRev2RuntimeAuthorityContext::install(loaded).map(Arc::new)
+      })
+    } else {
+      Err(match loaded_result {
+        Ok(_) if armable => "OD-CAP-REV2-C03-PROBE-COMPLETE".to_string(),
+        Ok(_) => "OD-CAP-REV2-RUNTIME-CONTEXT-NOT-ARMABLE".to_string(),
+        Err(reason) => reason,
+      })
+    };
+    match ODEN_CAPSEC_REV2_BOOTSTRAP.set(runtime_result) {
+      Ok(()) => {
+        let published = ODEN_CAPSEC_REV2_BOOTSTRAP
+          .get()
+          .expect("Rev2 bootstrap was just published");
+        if continue_into_c04 {
+          // A successful C04 record is truthful only after the exact context
+          // has become reachable through the process-wide sealed publication.
+          let install_evidence = oden_rev2_runtime_install_evidence(published);
+          oden_capsec_write_audit_record(&install_evidence);
+        }
+        rev2_armed = published.is_ok();
+      }
+      Err(_) => {
+        ODEN_CAPSEC_REV2_PUBLICATION_FAILED
+          .store(true, std::sync::atomic::Ordering::Release);
+        if continue_into_c04 {
+          let publication_refusal =
+            Err("OD-CAP-REV2-RUNTIME-CONTEXT-PUBLICATION".to_string());
+          let install_evidence =
+            oden_rev2_runtime_install_evidence(&publication_refusal);
+          oden_capsec_write_audit_record(&install_evidence);
+        }
+        rev2_armed = false;
+      }
+    }
   } else {
     // Keep the frozen Rev1 initialization order unchanged when no Rev2
     // candidate handoff exists.
@@ -1950,16 +2104,7 @@ fn oden_capsec_consume_rev2_snapshot(
   if bytes.len() > ODEN_CAPSEC_REV2_ENVELOPE_READ_CAP as usize {
     return Err("OD-CAP-REV2-SNAPSHOT-BOUNDS".to_string());
   }
-  let mut context = oden_rev2_policy::verify_authenticated_envelope(
-    &bytes,
-    &key,
-    build_identity,
-  )?;
-  if context.state() == OdenRev2LoadState::Armable {
-    // @ref LLP 0019#c04-immutable-execution-installation-and-entry [implements] -- C04 converts the exact C03-retained descriptors into immutable native execution images before V8; failure keeps the candidate unarmed.
-    context.install_immutable_executables(&control_root)?;
-  }
-  Ok(context)
+  oden_rev2_policy::verify_authenticated_envelope(&bytes, &key, build_identity)
 }
 
 #[allow(
@@ -2086,6 +2231,7 @@ pub(crate) fn oden_capsec_current_principal_label() -> Option<String> {
 /// the stock parser only for spelling/path syntax, never for an authority
 /// decision or wildcard fallback.
 /// @ref llp/0015-dynamic-permissions-with-ceiling.plan.md (Deno.permissions.request)
+#[derive(Clone, Copy, Debug)]
 pub struct OdenDynamicPermissionDescriptor<'a> {
   pub name: &'a str,
   pub path: Option<&'a str>,
@@ -2093,6 +2239,34 @@ pub struct OdenDynamicPermissionDescriptor<'a> {
   pub variable: Option<&'a str>,
   pub kind: Option<&'a str>,
   pub command: Option<&'a str>,
+  pub presence: OdenDynamicPermissionFieldPresence,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OdenDynamicPermissionFieldPresence {
+  pub path: bool,
+  pub host: bool,
+  pub variable: bool,
+  pub kind: bool,
+  pub command: bool,
+}
+
+impl OdenDynamicPermissionFieldPresence {
+  pub fn from_values(
+    path: Option<&str>,
+    host: Option<&str>,
+    variable: Option<&str>,
+    kind: Option<&str>,
+    command: Option<&str>,
+  ) -> Self {
+    Self {
+      path: path.is_some(),
+      host: host.is_some(),
+      variable: variable.is_some(),
+      kind: kind.is_some(),
+      command: command.is_some(),
+    }
+  }
 }
 
 pub fn oden_capsec_query_dynamic_permission(
@@ -5073,11 +5247,31 @@ pub fn oden_rev2_capture_live_principals() -> Vec<rev2::PrincipalRef> {
   oden_rev2_capture_live_permission_actors().0
 }
 
+#[cfg(test)]
+thread_local! {
+  static ODEN_REV2_PERMISSION_ACTORS_FOR_TEST: std::cell::RefCell<Option<(Vec<rev2::PrincipalRef>, rev2::PrincipalRef)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn oden_rev2_set_permission_actors_for_test(
+  actors: Option<(Vec<rev2::PrincipalRef>, rev2::PrincipalRef)>,
+) {
+  ODEN_REV2_PERMISSION_ACTORS_FOR_TEST.with(|current| {
+    *current.borrow_mut() = actors;
+  });
+}
+
 /// Capture the constrained principal set and the nearest live effect owner in
 /// one synchronous host observation. The tuple is crate-private so callers
 /// cannot substitute JavaScript-provided attribution between the two fields.
 pub(crate) fn oden_rev2_capture_live_permission_actors()
 -> (Vec<rev2::PrincipalRef>, rev2::PrincipalRef) {
+  #[cfg(test)]
+  if let Some(actors) = ODEN_REV2_PERMISSION_ACTORS_FOR_TEST
+    .with(|current| current.borrow().clone())
+  {
+    return actors;
+  }
   let mut mapped = Vec::new();
   let mut push = |principal: OdenPrincipal, locator: Option<&str>| {
     if principal != OdenPrincipal::Runtime {
@@ -6683,6 +6877,10 @@ impl Hash for PathDescriptor {
 }
 
 impl PathDescriptor {
+  pub(crate) fn resolved_path(&self) -> &Path {
+    &self.path
+  }
+
   pub fn new(
     sys: &impl sys_traits::EnvCurrentDir,
     path: Cow<'_, Path>,
@@ -10842,6 +11040,143 @@ mod tests {
 
   use super::*;
 
+  #[test]
+  fn rev2_runtime_install_refusal_is_a_distinct_closed_c04_record() {
+    let result: Result<Arc<OdenRev2RuntimeAuthorityContext>, String> =
+      Err("OD-CAP-REV2-RUNTIME-CONTEXT-IDENTITY-MISMATCH".to_string());
+    assert_eq!(
+      oden_rev2_runtime_install_evidence(&result),
+      json!({
+        "v": 1,
+        "event": "rev2_runtime_context",
+        "profile": rev2_registry_generated::REV2_PROFILE,
+        "vocabDigest": rev2_registry_generated::REV2_VOCAB_DIGEST,
+        "registryDigest": rev2_registry_generated::REV2_REGISTRY_DIGEST,
+        "decisionStage": "runtime-install",
+        "runtimeContextSchema": rev2_registry_generated::REV2_RUNTIME_AUTHORITY_CONTEXT_SCHEMA,
+        "runtimeIdentity": null,
+        "engineTarget": null,
+        "engineFeatureSet": null,
+        "executionRole": null,
+        "installed": false,
+        "armed": false,
+        "blockers": ["OD-CAP-REV2-RUNTIME-CONTEXT-IDENTITY-MISMATCH"],
+      })
+    );
+  }
+
+  #[test]
+  fn rev2_runtime_install_emitter_matches_generated_closed_contract() {
+    let result: Result<Arc<OdenRev2RuntimeAuthorityContext>, String> =
+      Err("OD-CAP-REV2-RUNTIME-CONTEXT-IDENTITY-MISMATCH".to_string());
+    let evidence = oden_rev2_runtime_install_evidence(&result);
+    let protocol: serde_json::Value = serde_json::from_str(
+      rev2_registry_generated::REV2_RUNTIME_PROTOCOL_SPEC_JSON,
+    )
+    .unwrap();
+    let contract = &protocol["runtimeInstallEvidence"];
+
+    let mut emitted_fields = evidence
+      .as_object()
+      .unwrap()
+      .keys()
+      .map(String::as_str)
+      .collect::<Vec<_>>();
+    emitted_fields.sort_unstable();
+    let mut generated_fields = contract["commonFields"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|field| field.as_str().unwrap())
+      .collect::<Vec<_>>();
+    generated_fields.sort_unstable();
+    assert_eq!(emitted_fields, generated_fields);
+    assert_eq!(evidence["v"], contract["version"]);
+    assert_eq!(evidence["event"], contract["event"]);
+    assert_eq!(evidence["decisionStage"], contract["decisionStage"]);
+    assert_eq!(
+      evidence["runtimeContextSchema"],
+      contract["runtimeContextSchema"]
+    );
+    let refused = contract["variants"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|variant| variant["id"] == "refused")
+      .unwrap();
+    assert_eq!(evidence["installed"], refused["installed"]);
+    assert_eq!(evidence["armed"], refused["armed"]);
+    for field in refused["nullFields"].as_array().unwrap() {
+      assert!(evidence[field.as_str().unwrap()].is_null());
+    }
+  }
+
+  #[test]
+  fn rev2_runtime_install_success_binds_the_installed_context_identity() {
+    let snapshot = crate::oden_rev2_policy::tests::candidate_with_env_policy(
+      crate::oden_rev2_policy::tests::hermetic_target(),
+    );
+    let mut loaded = crate::oden_rev2_policy::tests::verify_armable_snapshot(
+      snapshot,
+      &[0x6d; 32],
+    )
+    .unwrap();
+    loaded
+      .install_immutable_executables(std::path::Path::new("."))
+      .unwrap();
+    let context = Arc::new(
+      OdenRev2RuntimeAuthorityContext::install_for_test(loaded).unwrap(),
+    );
+    let identity = context.identity().clone();
+    let result = Ok(context);
+    let evidence = oden_rev2_runtime_install_evidence(&result);
+    assert_eq!(evidence["installed"], true);
+    assert_eq!(evidence["armed"], true);
+    assert_eq!(evidence["blockers"], json!([]));
+    assert_eq!(
+      evidence["runtimeIdentity"],
+      serde_json::to_value(identity).unwrap()
+    );
+    assert_eq!(
+      evidence["runtimeContextSchema"],
+      rev2_registry_generated::REV2_RUNTIME_AUTHORITY_CONTEXT_SCHEMA
+    );
+  }
+
+  #[test]
+  fn rev2_runtime_install_execution_roles_are_closed() {
+    assert_eq!(
+      oden_rev2_execution_role_name(
+        oden_rev2_context::OdenRev2ExecutionRole::Run
+      ),
+      "run"
+    );
+    assert_eq!(
+      oden_rev2_execution_role_name(
+        oden_rev2_context::OdenRev2ExecutionRole::Probe
+      ),
+      "probe"
+    );
+    assert_eq!(
+      oden_rev2_execution_role_name(
+        oden_rev2_context::OdenRev2ExecutionRole::Candidate
+      ),
+      "candidate"
+    );
+    assert_eq!(
+      oden_rev2_execution_role_name(
+        oden_rev2_context::OdenRev2ExecutionRole::Baseline
+      ),
+      "baseline"
+    );
+    for role in ["run", "candidate", "baseline"] {
+      assert!(oden_rev2_continues_to_c04(true, Some(role)));
+    }
+    assert!(!oden_rev2_continues_to_c04(true, Some("probe")));
+    assert!(!oden_rev2_continues_to_c04(false, Some("run")));
+    assert!(!oden_rev2_continues_to_c04(true, None));
+  }
+
   #[cfg(unix)]
   #[test]
   fn native_fd_classifier_closes_all_inet_stream_passage_by_object_type() {
@@ -11423,6 +11758,10 @@ mod tests {
         variable: Some(variable),
         kind: None,
         command: None,
+        presence: OdenDynamicPermissionFieldPresence {
+          variable: true,
+          ..Default::default()
+        },
       };
       let req = oden_dynamic_request(&desc).unwrap();
       assert!(
@@ -11437,6 +11776,10 @@ mod tests {
       variable: Some("UNRELATED_*"),
       kind: None,
       command: None,
+      presence: OdenDynamicPermissionFieldPresence {
+        variable: true,
+        ..Default::default()
+      },
     };
     let req = oden_dynamic_request(&unrelated).unwrap();
     assert!(!oden_capsec_is_dynamic_control_request(&unrelated, &req));

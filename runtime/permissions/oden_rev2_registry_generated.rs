@@ -1050,8 +1050,1009 @@ pub struct Rev2TargetStatus {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-gqOSZykagyo1k7Y5NQEnSgYWYzvn54edkPxZu8v1t1E";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-bt6W9HkSh7pGGqby7lVzMEWFg1HcWPoaCArHj87olbg";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-nt8rVWkfwjJsvxyJfASUKtPy_-zmWHjT55lZO6nkGTE";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-ywFW8xlqhvPR6TVhzaV9Mice4qzO-XpVbE-4kVy9rkE";
+pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
+pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
+pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-LY6v594AXBBCBR8OWV4bSbDrcqle2XFX3ZRPLUB_dyU";
+pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_JSON: &str = r###"{
+  "branchBatchVectors": [
+    {
+      "descriptor": {
+        "name": "read",
+        "path": "fixtures/input.txt"
+      },
+      "expected": {
+        "batchDigest": "sha256-gPJV4pvRjKlHNkE7IaVRYqYro_vKu6SYG3uCs421Yhs",
+        "batchWithoutDigest": {
+          "atomicity": "conjunctive",
+          "batchSequence": "7",
+          "constrainedPrincipals": [
+            {
+              "key": "pkg:sha256-fixture-package",
+              "kind": "package"
+            }
+          ],
+          "coverageEdgeId": "native-op:runtime/ops/permissions.rs#op_request_permission",
+          "effects": [
+            {
+              "effectOwner": {
+                "key": "pkg:sha256-fixture-package",
+                "kind": "package"
+              },
+              "occurrence": {
+                "effectOwner": "pkg:sha256-fixture-package",
+                "finalObjectState": {
+                  "identity": {
+                    "kind": "platform-object",
+                    "value": "unix-dev-ino:00000000000000010000000000000003"
+                  },
+                  "kind": "existing"
+                },
+                "followMode": "no-follow-final",
+                "lexicalPath": {
+                  "encoding": "unicode",
+                  "value": "fixtures/input.txt"
+                },
+                "parentIdentity": {
+                  "kind": "platform-object",
+                  "value": "unix-dev-ino:00000000000000010000000000000002"
+                },
+                "root": "$PROJECT",
+                "rootBindingId": "root-binding:fixture-project"
+              },
+              "selector": {
+                "capability": "fs:read",
+                "principal": {
+                  "key": "pkg:sha256-fixture-package",
+                  "kind": "package"
+                },
+                "projectionId": "projection.fs:read.positive/2",
+                "resource": {
+                  "kind": "path-exact",
+                  "path": {
+                    "encoding": "unicode",
+                    "value": "fixtures/input.txt"
+                  },
+                  "root": "$PROJECT"
+                }
+              },
+              "slotId": "permission.read:slot:0"
+            }
+          ],
+          "expectedGenerations": {
+            "negativeOverlay": "2",
+            "policySnapshot": "1",
+            "revocation": "3",
+            "sessionOverlay": "5"
+          },
+          "identity": {
+            "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+            "channelEpoch": "channel-epoch:fixture-01",
+            "policyDigest": "sha256-Raonip_nC9JAqZGgK7rhePLqb22V7Nvm13DqDjhWyDs",
+            "projectDigest": "sha256-eNJyk_7Fjxgh7Xhmawxdu9fpd1yM7Q2C1h_6FTkDlKc",
+            "registryDigest": "sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E",
+            "runNonce": "run-nonce:fixture-01",
+            "vocabDigest": "sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54"
+          },
+          "operation": "request",
+          "overlayOwner": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "schema": "oden/capsec-permission-batch/2"
+        },
+        "branchDisposition": "normalize",
+        "branchId": "permission.read.scoped/2",
+        "capabilities": [
+          "fs:read"
+        ],
+        "logicalSlotIds": [
+          "permission.read:slot:0"
+        ],
+        "operationDisposition": "compare-and-commit-session-positive",
+        "operationEffectSlotIds": [
+          "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:5"
+        ],
+        "refusalReasonCode": null
+      },
+      "id": "branch-dynamic-read-request",
+      "operation": "request"
+    },
+    {
+      "descriptor": {
+        "kind": "hostname",
+        "name": "sys"
+      },
+      "expected": {
+        "batchDigest": "sha256-4TFhTXzCXX1OpPd5MrNiXyNdAGkWRzTXUwtfNRErsCY",
+        "batchWithoutDigest": {
+          "atomicity": "conjunctive",
+          "batchSequence": "8",
+          "constrainedPrincipals": [
+            {
+              "key": "pkg:sha256-fixture-package",
+              "kind": "package"
+            }
+          ],
+          "coverageEdgeId": "native-op:runtime/ops/permissions.rs#op_request_permission",
+          "effects": [
+            {
+              "effectOwner": {
+                "key": "pkg:sha256-fixture-package",
+                "kind": "package"
+              },
+              "occurrence": {
+                "effectOwner": "pkg:sha256-fixture-package",
+                "kind": "hostname"
+              },
+              "selector": {
+                "capability": "sys:read",
+                "principal": {
+                  "key": "pkg:sha256-fixture-package",
+                  "kind": "package"
+                },
+                "projectionId": "projection.sys:read.positive/2",
+                "resource": {
+                  "kind": "hostname"
+                }
+              },
+              "slotId": "permission.sys:slot:0"
+            }
+          ],
+          "expectedGenerations": {
+            "negativeOverlay": "2",
+            "policySnapshot": "1",
+            "revocation": "3",
+            "sessionOverlay": "5"
+          },
+          "identity": {
+            "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+            "channelEpoch": "channel-epoch:fixture-01",
+            "policyDigest": "sha256-Raonip_nC9JAqZGgK7rhePLqb22V7Nvm13DqDjhWyDs",
+            "projectDigest": "sha256-eNJyk_7Fjxgh7Xhmawxdu9fpd1yM7Q2C1h_6FTkDlKc",
+            "registryDigest": "sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E",
+            "runNonce": "run-nonce:fixture-01",
+            "vocabDigest": "sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54"
+          },
+          "operation": "request",
+          "overlayOwner": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "schema": "oden/capsec-permission-batch/2"
+        },
+        "branchDisposition": "normalize",
+        "branchId": "permission.sys.scoped/2",
+        "capabilities": [
+          "sys:read"
+        ],
+        "logicalSlotIds": [
+          "permission.sys:slot:0"
+        ],
+        "operationDisposition": "compare-and-commit-session-positive",
+        "operationEffectSlotIds": [
+          "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:2"
+        ],
+        "refusalReasonCode": null
+      },
+      "id": "branch-dynamic-sys-request",
+      "operation": "request"
+    },
+    {
+      "descriptor": {
+        "name": "write",
+        "path": "fixtures/output.txt"
+      },
+      "expected": {
+        "batchDigest": "sha256-tg_Xfsp0jCHMFQ8R7rYW2zRP7ifCi_K9_Fgwb1puYuY",
+        "batchWithoutDigest": {
+          "atomicity": "conjunctive",
+          "batchSequence": "9",
+          "constrainedPrincipals": [
+            {
+              "key": "pkg:sha256-fixture-package",
+              "kind": "package"
+            }
+          ],
+          "coverageEdgeId": "native-op:runtime/ops/permissions.rs#op_request_permission",
+          "effects": [
+            {
+              "effectOwner": {
+                "key": "pkg:sha256-fixture-package",
+                "kind": "package"
+              },
+              "occurrence": {
+                "effectOwner": "pkg:sha256-fixture-package",
+                "finalObjectState": {
+                  "identity": {
+                    "kind": "platform-object",
+                    "value": "unix-dev-ino:00000000000000010000000000000004"
+                  },
+                  "kind": "existing"
+                },
+                "followMode": "no-follow-final",
+                "lexicalPath": {
+                  "encoding": "unicode",
+                  "value": "fixtures/output.txt"
+                },
+                "parentIdentity": {
+                  "kind": "platform-object",
+                  "value": "unix-dev-ino:00000000000000010000000000000002"
+                },
+                "root": "$PROJECT",
+                "rootBindingId": "root-binding:fixture-project"
+              },
+              "selector": {
+                "capability": "fs:write",
+                "principal": {
+                  "key": "pkg:sha256-fixture-package",
+                  "kind": "package"
+                },
+                "projectionId": "projection.fs:write.positive/2",
+                "resource": {
+                  "kind": "path-exact",
+                  "path": {
+                    "encoding": "unicode",
+                    "value": "fixtures/output.txt"
+                  },
+                  "root": "$PROJECT"
+                }
+              },
+              "slotId": "permission.write:slot:0"
+            }
+          ],
+          "expectedGenerations": {
+            "negativeOverlay": "2",
+            "policySnapshot": "1",
+            "revocation": "3",
+            "sessionOverlay": "5"
+          },
+          "identity": {
+            "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+            "channelEpoch": "channel-epoch:fixture-01",
+            "policyDigest": "sha256-Raonip_nC9JAqZGgK7rhePLqb22V7Nvm13DqDjhWyDs",
+            "projectDigest": "sha256-eNJyk_7Fjxgh7Xhmawxdu9fpd1yM7Q2C1h_6FTkDlKc",
+            "registryDigest": "sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E",
+            "runNonce": "run-nonce:fixture-01",
+            "vocabDigest": "sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54"
+          },
+          "operation": "request",
+          "overlayOwner": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "schema": "oden/capsec-permission-batch/2"
+        },
+        "branchDisposition": "normalize",
+        "branchId": "permission.write.scoped/2",
+        "capabilities": [
+          "fs:write"
+        ],
+        "logicalSlotIds": [
+          "permission.write:slot:0"
+        ],
+        "operationDisposition": "compare-and-commit-session-positive",
+        "operationEffectSlotIds": [
+          "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:6"
+        ],
+        "refusalReasonCode": null
+      },
+      "id": "branch-dynamic-write-request",
+      "operation": "request"
+    },
+    {
+      "descriptor": {
+        "name": "ffi",
+        "path": "/usr/lib/libfixture.so"
+      },
+      "expected": {
+        "batchDigest": "sha256-xNdkIDte9P4n7OHrK6g-qZwnYlKkekDuUoAmxCmUkg0",
+        "batchWithoutDigest": {
+          "atomicity": "conjunctive",
+          "batchSequence": "10",
+          "constrainedPrincipals": [
+            {
+              "key": "root:sha256-fixture-root",
+              "kind": "root"
+            }
+          ],
+          "coverageEdgeId": "native-op:runtime/ops/permissions.rs#op_query_permission",
+          "effects": [
+            {
+              "effectOwner": {
+                "key": "root:sha256-fixture-root",
+                "kind": "root"
+              },
+              "occurrence": {
+                "effectOwner": "root:sha256-fixture-root",
+                "objectIdentity": {
+                  "kind": "verified-content",
+                  "value": "sha256-NO1pEygvaObDQzwbIYcn9Cr4iGZEG6FA0yJh-Aw1sYM"
+                },
+                "requestedPath": {
+                  "encoding": "unicode",
+                  "value": "/usr/lib/libfixture.so"
+                }
+              },
+              "selector": {
+                "capability": "ffi:load",
+                "principal": {
+                  "key": "root:sha256-fixture-root",
+                  "kind": "root"
+                },
+                "projectionId": "projection.ffi:load.positive/2",
+                "resource": {
+                  "objectIdentity": {
+                    "kind": "verified-content",
+                    "value": "sha256-NO1pEygvaObDQzwbIYcn9Cr4iGZEG6FA0yJh-Aw1sYM"
+                  },
+                  "path": {
+                    "encoding": "unicode",
+                    "value": "/usr/lib/libfixture.so"
+                  }
+                }
+              },
+              "slotId": "permission.ffi:slot:0"
+            }
+          ],
+          "expectedGenerations": {
+            "negativeOverlay": "2",
+            "policySnapshot": "1",
+            "revocation": "3",
+            "sessionOverlay": "5"
+          },
+          "identity": {
+            "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+            "channelEpoch": "channel-epoch:fixture-01",
+            "policyDigest": "sha256-Raonip_nC9JAqZGgK7rhePLqb22V7Nvm13DqDjhWyDs",
+            "projectDigest": "sha256-eNJyk_7Fjxgh7Xhmawxdu9fpd1yM7Q2C1h_6FTkDlKc",
+            "registryDigest": "sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E",
+            "runNonce": "run-nonce:fixture-01",
+            "vocabDigest": "sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54"
+          },
+          "operation": "query",
+          "overlayOwner": {
+            "key": "root:sha256-fixture-root",
+            "kind": "root"
+          },
+          "schema": "oden/capsec-permission-batch/2"
+        },
+        "branchDisposition": "normalize",
+        "branchId": "permission.ffi.scoped/2",
+        "capabilities": [
+          "ffi:load"
+        ],
+        "logicalSlotIds": [
+          "permission.ffi:slot:0"
+        ],
+        "operationDisposition": "evaluate-static-only",
+        "operationEffectSlotIds": [
+          "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:4"
+        ],
+        "refusalReasonCode": null
+      },
+      "id": "branch-static-ffi-query",
+      "operation": "query"
+    },
+    {
+      "descriptor": {
+        "name": "ffi",
+        "path": "/usr/lib/libfixture.so"
+      },
+      "expected": {
+        "batchDigest": null,
+        "batchWithoutDigest": null,
+        "branchDisposition": "normalize",
+        "branchId": "permission.ffi.scoped/2",
+        "capabilities": [
+          "ffi:load"
+        ],
+        "logicalSlotIds": [
+          "permission.ffi:slot:0"
+        ],
+        "operationDisposition": "refuse-static-only",
+        "operationEffectSlotIds": [],
+        "refusalReasonCode": "generated:static-only"
+      },
+      "id": "branch-static-ffi-request-refusal",
+      "operation": "request"
+    },
+    {
+      "descriptor": {
+        "command": "/usr/bin/fixture-tool",
+        "name": "run"
+      },
+      "expected": {
+        "batchDigest": "sha256-hzemyh1gMOv8iC-h_85qFyLcaiGFw_bUqcdAppI-leM",
+        "batchWithoutDigest": {
+          "atomicity": "conjunctive",
+          "batchSequence": "11",
+          "constrainedPrincipals": [
+            {
+              "key": "root:sha256-fixture-root",
+              "kind": "root"
+            }
+          ],
+          "coverageEdgeId": "native-op:runtime/ops/permissions.rs#op_query_permission",
+          "effects": [
+            {
+              "effectOwner": {
+                "key": "root:sha256-fixture-root",
+                "kind": "root"
+              },
+              "occurrence": {
+                "effectOwner": "root:sha256-fixture-root",
+                "interpreterIdentity": {
+                  "kind": "verified-content",
+                  "value": "sha256-c2Z2QtlwiDP0JwXfHbRelAbiHJeVm1jcDrMAHAXCbp8"
+                },
+                "launchSet": [
+                  {
+                    "kind": "entry",
+                    "value": "/usr/bin/fixture-tool"
+                  }
+                ],
+                "objectIdentity": {
+                  "kind": "verified-content",
+                  "value": "sha256-AHjNYUOq8BBvfagqNCvIA1Ok7T52ve-GbHwY8ThsIwI"
+                },
+                "requestedPath": {
+                  "encoding": "unicode",
+                  "value": "/usr/bin/fixture-tool"
+                }
+              },
+              "selector": {
+                "capability": "process:spawn",
+                "principal": {
+                  "key": "root:sha256-fixture-root",
+                  "kind": "root"
+                },
+                "projectionId": "projection.process:spawn.positive/2",
+                "resource": {
+                  "interpreterIdentity": {
+                    "kind": "verified-content",
+                    "value": "sha256-c2Z2QtlwiDP0JwXfHbRelAbiHJeVm1jcDrMAHAXCbp8"
+                  },
+                  "objectIdentity": {
+                    "kind": "verified-content",
+                    "value": "sha256-AHjNYUOq8BBvfagqNCvIA1Ok7T52ve-GbHwY8ThsIwI"
+                  },
+                  "path": {
+                    "encoding": "unicode",
+                    "value": "/usr/bin/fixture-tool"
+                  }
+                }
+              },
+              "slotId": "permission.run:slot:0"
+            }
+          ],
+          "expectedGenerations": {
+            "negativeOverlay": "2",
+            "policySnapshot": "1",
+            "revocation": "3",
+            "sessionOverlay": "5"
+          },
+          "identity": {
+            "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+            "channelEpoch": "channel-epoch:fixture-01",
+            "policyDigest": "sha256-Raonip_nC9JAqZGgK7rhePLqb22V7Nvm13DqDjhWyDs",
+            "projectDigest": "sha256-eNJyk_7Fjxgh7Xhmawxdu9fpd1yM7Q2C1h_6FTkDlKc",
+            "registryDigest": "sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E",
+            "runNonce": "run-nonce:fixture-01",
+            "vocabDigest": "sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54"
+          },
+          "operation": "query",
+          "overlayOwner": {
+            "key": "root:sha256-fixture-root",
+            "kind": "root"
+          },
+          "schema": "oden/capsec-permission-batch/2"
+        },
+        "branchDisposition": "normalize",
+        "branchId": "permission.run.scoped/2",
+        "capabilities": [
+          "process:spawn"
+        ],
+        "logicalSlotIds": [
+          "permission.run:slot:0"
+        ],
+        "operationDisposition": "evaluate-static-only",
+        "operationEffectSlotIds": [
+          "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:1"
+        ],
+        "refusalReasonCode": null
+      },
+      "id": "branch-static-run-query",
+      "operation": "query"
+    },
+    {
+      "descriptor": {
+        "command": "/usr/bin/fixture-tool",
+        "name": "run"
+      },
+      "expected": {
+        "batchDigest": null,
+        "batchWithoutDigest": null,
+        "branchDisposition": "normalize",
+        "branchId": "permission.run.scoped/2",
+        "capabilities": [
+          "process:spawn"
+        ],
+        "logicalSlotIds": [
+          "permission.run:slot:0"
+        ],
+        "operationDisposition": "refuse-static-only",
+        "operationEffectSlotIds": [],
+        "refusalReasonCode": "generated:static-only"
+      },
+      "id": "branch-static-run-request-refusal",
+      "operation": "request"
+    }
+  ],
+  "canonicalSetVectors": [
+    {
+      "expected": [
+        {
+          "key": "pkg:sha256-fixture-package",
+          "kind": "package"
+        },
+        {
+          "key": "quarantine:fixture",
+          "kind": "quarantine"
+        },
+        {
+          "key": "root:sha256-fixture-root",
+          "kind": "root"
+        }
+      ],
+      "expectedCanonicalElements": [
+        "{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"}",
+        "{\"key\":\"quarantine:fixture\",\"kind\":\"quarantine\"}",
+        "{\"key\":\"root:sha256-fixture-root\",\"kind\":\"root\"}"
+      ],
+      "id": "canonical-set-principal-kinds",
+      "input": [
+        {
+          "key": "root:sha256-fixture-root",
+          "kind": "root"
+        },
+        {
+          "key": "pkg:sha256-fixture-package",
+          "kind": "package"
+        },
+        {
+          "key": "quarantine:fixture",
+          "kind": "quarantine"
+        },
+        {
+          "key": "pkg:sha256-fixture-package",
+          "kind": "package"
+        }
+      ]
+    },
+    {
+      "expected": [
+        {
+          "positiveSource": null,
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "state": "denied"
+        },
+        {
+          "positiveSource": {
+            "generation": "5",
+            "kind": "session",
+            "sourceId": "session:1"
+          },
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "state": "granted"
+        },
+        {
+          "positiveSource": {
+            "generation": null,
+            "kind": "floor",
+            "sourceId": "floor:root"
+          },
+          "principal": {
+            "key": "root:sha256-fixture-root",
+            "kind": "root"
+          },
+          "state": "granted"
+        }
+      ],
+      "expectedCanonicalElements": [
+        "{\"positiveSource\":null,\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"state\":\"denied\"}",
+        "{\"positiveSource\":{\"generation\":\"5\",\"kind\":\"session\",\"sourceId\":\"session:1\"},\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"state\":\"granted\"}",
+        "{\"positiveSource\":{\"generation\":null,\"kind\":\"floor\",\"sourceId\":\"floor:root\"},\"principal\":{\"key\":\"root:sha256-fixture-root\",\"kind\":\"root\"},\"state\":\"granted\"}"
+      ],
+      "id": "canonical-set-result-dimensions",
+      "input": [
+        {
+          "positiveSource": {
+            "generation": null,
+            "kind": "floor",
+            "sourceId": "floor:root"
+          },
+          "principal": {
+            "key": "root:sha256-fixture-root",
+            "kind": "root"
+          },
+          "state": "granted"
+        },
+        {
+          "positiveSource": null,
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "state": "denied"
+        },
+        {
+          "positiveSource": {
+            "generation": "5",
+            "kind": "session",
+            "sourceId": "session:1"
+          },
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "state": "granted"
+        },
+        {
+          "positiveSource": null,
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "state": "denied"
+        }
+      ]
+    },
+    {
+      "expected": [
+        {
+          "decision": "allow",
+          "positiveSource": {
+            "generation": null,
+            "kind": "floor",
+            "sourceId": "floor:run"
+          },
+          "principal": {
+            "key": "root:sha256-fixture-root",
+            "kind": "root"
+          },
+          "slotId": "permission.run:slot:0"
+        },
+        {
+          "decision": "deny",
+          "positiveSource": null,
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "slotId": "permission.sys:slot:0"
+        },
+        {
+          "decision": "prompt",
+          "positiveSource": null,
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "slotId": "permission.sys:slot:0"
+        }
+      ],
+      "expectedCanonicalElements": [
+        "{\"decision\":\"allow\",\"positiveSource\":{\"generation\":null,\"kind\":\"floor\",\"sourceId\":\"floor:run\"},\"principal\":{\"key\":\"root:sha256-fixture-root\",\"kind\":\"root\"},\"slotId\":\"permission.run:slot:0\"}",
+        "{\"decision\":\"deny\",\"positiveSource\":null,\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"slotId\":\"permission.sys:slot:0\"}",
+        "{\"decision\":\"prompt\",\"positiveSource\":null,\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"slotId\":\"permission.sys:slot:0\"}"
+      ],
+      "id": "canonical-set-cache-dimensions",
+      "input": [
+        {
+          "decision": "prompt",
+          "positiveSource": null,
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "slotId": "permission.sys:slot:0"
+        },
+        {
+          "decision": "allow",
+          "positiveSource": {
+            "generation": null,
+            "kind": "floor",
+            "sourceId": "floor:run"
+          },
+          "principal": {
+            "key": "root:sha256-fixture-root",
+            "kind": "root"
+          },
+          "slotId": "permission.run:slot:0"
+        },
+        {
+          "decision": "deny",
+          "positiveSource": null,
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "slotId": "permission.sys:slot:0"
+        }
+      ]
+    }
+  ],
+  "externalResponseMacVectors": [
+    {
+      "authenticationTag": "XVdaz1ptHjmh8FO_keJbksSXG4BYE1zskx2zLjalvTI",
+      "canonicalPayload": "{\"batchDigest\":\"sha256-4TFhTXzCXX1OpPd5MrNiXyNdAGkWRzTXUwtfNRErsCY\",\"batchSequence\":\"8\",\"decision\":\"granted\",\"expectedGenerations\":{\"negativeOverlay\":\"2\",\"policySnapshot\":\"1\",\"revocation\":\"3\",\"sessionOverlay\":\"5\"},\"identity\":{\"armedSnapshotDigest\":\"sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg\",\"channelEpoch\":\"channel-epoch:fixture-01\",\"policyDigest\":\"sha256-Raonip_nC9JAqZGgK7rhePLqb22V7Nvm13DqDjhWyDs\",\"projectDigest\":\"sha256-eNJyk_7Fjxgh7Xhmawxdu9fpd1yM7Q2C1h_6FTkDlKc\",\"registryDigest\":\"sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E\",\"runNonce\":\"run-nonce:fixture-01\",\"vocabDigest\":\"sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54\"},\"operation\":\"request\",\"schema\":\"oden/capsec-permission-external-response/2\"}",
+      "id": "external-response-granted",
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "macInputBase64url": "b2RlbjpjYXBzZWM6cGVybWlzc2lvbi1yZXNwb25zZToyeyJiYXRjaERpZ2VzdCI6InNoYTI1Ni00VEZoVFh6Q1hYMU9wUGQ1TXJOaVh5TmRBR2tXUnpUWFV3dGZOUkVyc0NZIiwiYmF0Y2hTZXF1ZW5jZSI6IjgiLCJkZWNpc2lvbiI6ImdyYW50ZWQiLCJleHBlY3RlZEdlbmVyYXRpb25zIjp7Im5lZ2F0aXZlT3ZlcmxheSI6IjIiLCJwb2xpY3lTbmFwc2hvdCI6IjEiLCJyZXZvY2F0aW9uIjoiMyIsInNlc3Npb25PdmVybGF5IjoiNSJ9LCJpZGVudGl0eSI6eyJhcm1lZFNuYXBzaG90RGlnZXN0Ijoic2hhMjU2LTFVTktVbE5zcUw3cUJrcjJWQUpNWjNqYmYyXzBXODNKTjYyX1lCRGFFUWciLCJjaGFubmVsRXBvY2giOiJjaGFubmVsLWVwb2NoOmZpeHR1cmUtMDEiLCJwb2xpY3lEaWdlc3QiOiJzaGEyNTYtUmFvbmlwX25DOUpBcVpHZ0s3cmhlUExxYjIyVjdOdm0xM0RxRGpoV3lEcyIsInByb2plY3REaWdlc3QiOiJzaGEyNTYtZU5KeWtfN0ZqeGdoN1hobWF3eGR1OWZwZDF5TTdRMkMxaF82RlRrRGxLYyIsInJlZ2lzdHJ5RGlnZXN0Ijoic2hhMjU2LWV1UWxjd0lDV3Ntb3BGVjlFbEsyM1A3c012eF9yczMxXzAyMnN3VVByMUUiLCJydW5Ob25jZSI6InJ1bi1ub25jZTpmaXh0dXJlLTAxIiwidm9jYWJEaWdlc3QiOiJzaGEyNTYtdW10c0RNVHl5RURCQTJfSkxVdEF2VzMwSFZUWVgwbmJ6c1JXNVNmXy01NCJ9LCJvcGVyYXRpb24iOiJyZXF1ZXN0Iiwic2NoZW1hIjoib2Rlbi9jYXBzZWMtcGVybWlzc2lvbi1leHRlcm5hbC1yZXNwb25zZS8yIn0",
+      "responseWithoutAuthenticationTag": {
+        "batchDigest": "sha256-4TFhTXzCXX1OpPd5MrNiXyNdAGkWRzTXUwtfNRErsCY",
+        "batchSequence": "8",
+        "decision": "granted",
+        "expectedGenerations": {
+          "negativeOverlay": "2",
+          "policySnapshot": "1",
+          "revocation": "3",
+          "sessionOverlay": "5"
+        },
+        "identity": {
+          "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+          "channelEpoch": "channel-epoch:fixture-01",
+          "policyDigest": "sha256-Raonip_nC9JAqZGgK7rhePLqb22V7Nvm13DqDjhWyDs",
+          "projectDigest": "sha256-eNJyk_7Fjxgh7Xhmawxdu9fpd1yM7Q2C1h_6FTkDlKc",
+          "registryDigest": "sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E",
+          "runNonce": "run-nonce:fixture-01",
+          "vocabDigest": "sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54"
+        },
+        "operation": "request",
+        "schema": "oden/capsec-permission-external-response/2"
+      }
+    },
+    {
+      "authenticationTag": "K58dMi2VpDEF-wwxIslMWV4-Zciv3_XGQsl-d69MkFI",
+      "canonicalPayload": "{\"batchDigest\":\"sha256-4TFhTXzCXX1OpPd5MrNiXyNdAGkWRzTXUwtfNRErsCY\",\"batchSequence\":\"8\",\"decision\":\"denied\",\"expectedGenerations\":{\"negativeOverlay\":\"2\",\"policySnapshot\":\"1\",\"revocation\":\"3\",\"sessionOverlay\":\"5\"},\"identity\":{\"armedSnapshotDigest\":\"sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg\",\"channelEpoch\":\"channel-epoch:fixture-01\",\"policyDigest\":\"sha256-Raonip_nC9JAqZGgK7rhePLqb22V7Nvm13DqDjhWyDs\",\"projectDigest\":\"sha256-eNJyk_7Fjxgh7Xhmawxdu9fpd1yM7Q2C1h_6FTkDlKc\",\"registryDigest\":\"sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E\",\"runNonce\":\"run-nonce:fixture-01\",\"vocabDigest\":\"sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54\"},\"operation\":\"request\",\"schema\":\"oden/capsec-permission-external-response/2\"}",
+      "id": "external-response-denied",
+      "key": "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA",
+      "macInputBase64url": "b2RlbjpjYXBzZWM6cGVybWlzc2lvbi1yZXNwb25zZToyeyJiYXRjaERpZ2VzdCI6InNoYTI1Ni00VEZoVFh6Q1hYMU9wUGQ1TXJOaVh5TmRBR2tXUnpUWFV3dGZOUkVyc0NZIiwiYmF0Y2hTZXF1ZW5jZSI6IjgiLCJkZWNpc2lvbiI6ImRlbmllZCIsImV4cGVjdGVkR2VuZXJhdGlvbnMiOnsibmVnYXRpdmVPdmVybGF5IjoiMiIsInBvbGljeVNuYXBzaG90IjoiMSIsInJldm9jYXRpb24iOiIzIiwic2Vzc2lvbk92ZXJsYXkiOiI1In0sImlkZW50aXR5Ijp7ImFybWVkU25hcHNob3REaWdlc3QiOiJzaGEyNTYtMVVOS1VsTnNxTDdxQmtyMlZBSk1aM2piZjJfMFc4M0pONjJfWUJEYUVRZyIsImNoYW5uZWxFcG9jaCI6ImNoYW5uZWwtZXBvY2g6Zml4dHVyZS0wMSIsInBvbGljeURpZ2VzdCI6InNoYTI1Ni1SYW9uaXBfbkM5SkFxWkdnSzdyaGVQTHFiMjJWN052bTEzRHFEamhXeURzIiwicHJvamVjdERpZ2VzdCI6InNoYTI1Ni1lTkp5a183Rmp4Z2g3WGhtYXd4ZHU5ZnBkMXlNN1EyQzFoXzZGVGtEbEtjIiwicmVnaXN0cnlEaWdlc3QiOiJzaGEyNTYtZXVRbGN3SUNXc21vcEZWOUVsSzIzUDdzTXZ4X3JzMzFfMDIyc3dVUHIxRSIsInJ1bk5vbmNlIjoicnVuLW5vbmNlOmZpeHR1cmUtMDEiLCJ2b2NhYkRpZ2VzdCI6InNoYTI1Ni11bXRzRE1UeXlFREJBMl9KTFV0QXZXMzBIVlRZWDBuYnpzUlc1U2ZfLTU0In0sIm9wZXJhdGlvbiI6InJlcXVlc3QiLCJzY2hlbWEiOiJvZGVuL2NhcHNlYy1wZXJtaXNzaW9uLWV4dGVybmFsLXJlc3BvbnNlLzIifQ",
+      "responseWithoutAuthenticationTag": {
+        "batchDigest": "sha256-4TFhTXzCXX1OpPd5MrNiXyNdAGkWRzTXUwtfNRErsCY",
+        "batchSequence": "8",
+        "decision": "denied",
+        "expectedGenerations": {
+          "negativeOverlay": "2",
+          "policySnapshot": "1",
+          "revocation": "3",
+          "sessionOverlay": "5"
+        },
+        "identity": {
+          "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+          "channelEpoch": "channel-epoch:fixture-01",
+          "policyDigest": "sha256-Raonip_nC9JAqZGgK7rhePLqb22V7Nvm13DqDjhWyDs",
+          "projectDigest": "sha256-eNJyk_7Fjxgh7Xhmawxdu9fpd1yM7Q2C1h_6FTkDlKc",
+          "registryDigest": "sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E",
+          "runNonce": "run-nonce:fixture-01",
+          "vocabDigest": "sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54"
+        },
+        "operation": "request",
+        "schema": "oden/capsec-permission-external-response/2"
+      }
+    }
+  ],
+  "profile": "oden/capsec/2",
+  "protectedRowDigestVectors": [
+    {
+      "canonicalPreimage": "{\"predicateId\":\"predicate.protected-receipt/2\",\"reasonDigest\":\"sha256-zljEPlD4NDggPLNR5a-V2H6gUKiRsvaZNhqen0De22U\",\"selector\":{\"capability\":\"fs:read\",\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"projectionId\":\"projection.fs:read.positive/2\",\"resource\":{\"kind\":\"path-exact\",\"path\":{\"encoding\":\"unicode\",\"value\":\"fixtures/input.txt\"},\"root\":\"$PROJECT\"}},\"sourceId\":\"protected-row:package-read\"}",
+      "digest": "sha256-rUuR56HUZzlFi9MxQ2QdKgxCjb6l2Mdzw0aNpE9mbvc",
+      "id": "protected-row-package-read",
+      "preimage": {
+        "predicateId": "predicate.protected-receipt/2",
+        "reasonDigest": "sha256-zljEPlD4NDggPLNR5a-V2H6gUKiRsvaZNhqen0De22U",
+        "selector": {
+          "capability": "fs:read",
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "projectionId": "projection.fs:read.positive/2",
+          "resource": {
+            "kind": "path-exact",
+            "path": {
+              "encoding": "unicode",
+              "value": "fixtures/input.txt"
+            },
+            "root": "$PROJECT"
+          }
+        },
+        "sourceId": "protected-row:package-read"
+      }
+    },
+    {
+      "canonicalPreimage": "{\"predicateId\":\"predicate.protected-receipt/2\",\"reasonDigest\":\"sha256-R9M3AZ4QlumTeCwc22T40omSvPbk01ZrmzSbT9ZM-ts\",\"selector\":{\"capability\":\"sys:read\",\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"projectionId\":\"projection.sys:read.positive/2\",\"resource\":{\"kind\":\"hostname\"}},\"sourceId\":\"protected-row:package-sys\"}",
+      "digest": "sha256-XUz9GhXv87buJ3byiX0NYonjwhzp8MORbieVSkqjObw",
+      "id": "protected-row-package-sys",
+      "preimage": {
+        "predicateId": "predicate.protected-receipt/2",
+        "reasonDigest": "sha256-R9M3AZ4QlumTeCwc22T40omSvPbk01ZrmzSbT9ZM-ts",
+        "selector": {
+          "capability": "sys:read",
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "projectionId": "projection.sys:read.positive/2",
+          "resource": {
+            "kind": "hostname"
+          }
+        },
+        "sourceId": "protected-row:package-sys"
+      }
+    }
+  ],
+  "runtimeInstallEvidenceVectors": [
+    {
+      "disposition": "installed",
+      "evidence": {
+        "armed": true,
+        "blockers": [],
+        "decisionStage": "runtime-install",
+        "engineFeatureSet": "fixture-features-v2",
+        "engineTarget": "fixture-target-v2",
+        "event": "rev2_runtime_context",
+        "executionRole": "candidate",
+        "installed": true,
+        "profile": "oden/capsec/2",
+        "registryDigest": "sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E",
+        "runtimeContextSchema": "oden/capsec-runtime-authority-context/2",
+        "runtimeIdentity": {
+          "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+          "channelEpoch": "channel-epoch:fixture-01",
+          "policyDigest": "sha256-Raonip_nC9JAqZGgK7rhePLqb22V7Nvm13DqDjhWyDs",
+          "projectDigest": "sha256-eNJyk_7Fjxgh7Xhmawxdu9fpd1yM7Q2C1h_6FTkDlKc",
+          "registryDigest": "sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E",
+          "runNonce": "run-nonce:fixture-01",
+          "vocabDigest": "sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54"
+        },
+        "v": 1,
+        "vocabDigest": "sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54"
+      },
+      "id": "runtime-install-success"
+    },
+    {
+      "disposition": "refused",
+      "evidence": {
+        "armed": false,
+        "blockers": [
+          "OD-CAP-REV2-RUNTIME-CONTEXT-IDENTITY-MISMATCH"
+        ],
+        "decisionStage": "runtime-install",
+        "engineFeatureSet": null,
+        "engineTarget": null,
+        "event": "rev2_runtime_context",
+        "executionRole": null,
+        "installed": false,
+        "profile": "oden/capsec/2",
+        "registryDigest": "sha256-euQlcwICWsmopFV9ElK23P7sMvx_rs31_022swUPr1E",
+        "runtimeContextSchema": "oden/capsec-runtime-authority-context/2",
+        "runtimeIdentity": null,
+        "v": 1,
+        "vocabDigest": "sha256-umtsDMTyyEDBA2_JLUtAvW30HVTYX0nbzsRW5Sf_-54"
+      },
+      "id": "runtime-install-refusal"
+    }
+  ],
+  "schema": "oden/capsec-runtime-protocol-fixture-corpus/2",
+  "sessionRowIdVectors": [
+    {
+      "canonicalPreimage": "{\"armedSnapshotDigest\":\"sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg\",\"capability\":\"fs:read\",\"identitySelector\":{\"capability\":\"fs:read\",\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"resource\":{\"kind\":\"path-exact\",\"path\":{\"encoding\":\"unicode\",\"value\":\"fixtures/input.txt\"},\"root\":\"$PROJECT\"}},\"overlayOwner\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"schema\":\"oden/capsec-session-row-id-preimage/2\"}",
+      "id": "session-row-dynamic-read-package",
+      "positiveRowId": "sha256-u-gGv30y1LLLPdwvLp8ibKlAufW5k4tgexM1Vv6nkVM",
+      "preimage": {
+        "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+        "capability": "fs:read",
+        "identitySelector": {
+          "capability": "fs:read",
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "resource": {
+            "kind": "path-exact",
+            "path": {
+              "encoding": "unicode",
+              "value": "fixtures/input.txt"
+            },
+            "root": "$PROJECT"
+          }
+        },
+        "overlayOwner": {
+          "key": "pkg:sha256-fixture-package",
+          "kind": "package"
+        },
+        "principal": {
+          "key": "pkg:sha256-fixture-package",
+          "kind": "package"
+        },
+        "schema": "oden/capsec-session-row-id-preimage/2"
+      },
+      "revocationRowId": "sha256-p6anbYBIAH23y0RooZ3Lde-UncQ44tU6UgXjJQUm1Jc"
+    },
+    {
+      "canonicalPreimage": "{\"armedSnapshotDigest\":\"sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg\",\"capability\":\"sys:read\",\"identitySelector\":{\"capability\":\"sys:read\",\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"resource\":{\"kind\":\"hostname\"}},\"overlayOwner\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"schema\":\"oden/capsec-session-row-id-preimage/2\"}",
+      "id": "session-row-dynamic-sys-package",
+      "positiveRowId": "sha256-lwV0ZX01J-sh4k1MXD1nJiloZscD-S-3W-dL-ggE9Q4",
+      "preimage": {
+        "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+        "capability": "sys:read",
+        "identitySelector": {
+          "capability": "sys:read",
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "resource": {
+            "kind": "hostname"
+          }
+        },
+        "overlayOwner": {
+          "key": "pkg:sha256-fixture-package",
+          "kind": "package"
+        },
+        "principal": {
+          "key": "pkg:sha256-fixture-package",
+          "kind": "package"
+        },
+        "schema": "oden/capsec-session-row-id-preimage/2"
+      },
+      "revocationRowId": "sha256--jnS3akJWyLhW9WHBK1aOH4S9QXTuGrYs4_b58GYhxo"
+    },
+    {
+      "canonicalPreimage": "{\"armedSnapshotDigest\":\"sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg\",\"capability\":\"fs:write\",\"identitySelector\":{\"capability\":\"fs:write\",\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"resource\":{\"kind\":\"path-exact\",\"path\":{\"encoding\":\"unicode\",\"value\":\"fixtures/output.txt\"},\"root\":\"$PROJECT\"}},\"overlayOwner\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"principal\":{\"key\":\"pkg:sha256-fixture-package\",\"kind\":\"package\"},\"schema\":\"oden/capsec-session-row-id-preimage/2\"}",
+      "id": "session-row-dynamic-write-package",
+      "positiveRowId": "sha256-PghSbSQTsdQYbbyNcVtW5-Z-yPLpDww-XyQw-XuBhzQ",
+      "preimage": {
+        "armedSnapshotDigest": "sha256-1UNKUlNsqL7qBkr2VAJMZ3jbf2_0W83JN62_YBDaEQg",
+        "capability": "fs:write",
+        "identitySelector": {
+          "capability": "fs:write",
+          "principal": {
+            "key": "pkg:sha256-fixture-package",
+            "kind": "package"
+          },
+          "resource": {
+            "kind": "path-exact",
+            "path": {
+              "encoding": "unicode",
+              "value": "fixtures/output.txt"
+            },
+            "root": "$PROJECT"
+          }
+        },
+        "overlayOwner": {
+          "key": "pkg:sha256-fixture-package",
+          "kind": "package"
+        },
+        "principal": {
+          "key": "pkg:sha256-fixture-package",
+          "kind": "package"
+        },
+        "schema": "oden/capsec-session-row-id-preimage/2"
+      },
+      "revocationRowId": "sha256-QggPXrYXTg325QAnb1pFjROdwFXwB_qMz85esQhsLOc"
+    }
+  ]
+}"###;
 pub const REV2_ADVERTISED_TARGETS: &[&str] = &[];
 
 pub const REV2_TARGET_STATUS: &[Rev2TargetStatus] = &[
@@ -87129,6 +88130,72 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "recordType": "RuntimeGenerationVector"
         }
       ],
+      "runtimeInstallEvidence": {
+        "commonFields": [
+          "v",
+          "event",
+          "profile",
+          "vocabDigest",
+          "registryDigest",
+          "decisionStage",
+          "runtimeContextSchema",
+          "runtimeIdentity",
+          "engineTarget",
+          "engineFeatureSet",
+          "executionRole",
+          "installed",
+          "armed",
+          "blockers"
+        ],
+        "decisionStage": "runtime-install",
+        "event": "rev2_runtime_context",
+        "executionRoles": [
+          "baseline",
+          "candidate",
+          "probe",
+          "run"
+        ],
+        "runtimeContextSchema": "oden/capsec-runtime-authority-context/2",
+        "runtimeIdentityFields": [
+          "vocabDigest",
+          "registryDigest",
+          "policyDigest",
+          "armedSnapshotDigest",
+          "projectDigest",
+          "runNonce",
+          "channelEpoch"
+        ],
+        "schema": "oden/capsec-runtime-install-evidence-spec/2",
+        "variants": [
+          {
+            "armed": true,
+            "blockers": "empty",
+            "boundFields": [
+              "runtimeIdentity",
+              "engineTarget",
+              "engineFeatureSet",
+              "executionRole"
+            ],
+            "id": "installed",
+            "installed": true,
+            "nullFields": []
+          },
+          {
+            "armed": false,
+            "blockers": "nonempty-canonical-set",
+            "boundFields": [],
+            "id": "refused",
+            "installed": false,
+            "nullFields": [
+              "runtimeIdentity",
+              "engineTarget",
+              "engineFeatureSet",
+              "executionRole"
+            ]
+          }
+        ],
+        "version": 1
+      },
       "schema": "oden/capsec-runtime-protocol-spec/2",
       "sessionRows": {
         "batchSequenceDisposition": "excluded-from-row-identity",
@@ -93029,6 +94096,72 @@ pub const REV2_RUNTIME_PROTOCOL_SPEC_JSON: &str = r###"{
       "recordType": "RuntimeGenerationVector"
     }
   ],
+  "runtimeInstallEvidence": {
+    "commonFields": [
+      "v",
+      "event",
+      "profile",
+      "vocabDigest",
+      "registryDigest",
+      "decisionStage",
+      "runtimeContextSchema",
+      "runtimeIdentity",
+      "engineTarget",
+      "engineFeatureSet",
+      "executionRole",
+      "installed",
+      "armed",
+      "blockers"
+    ],
+    "decisionStage": "runtime-install",
+    "event": "rev2_runtime_context",
+    "executionRoles": [
+      "baseline",
+      "candidate",
+      "probe",
+      "run"
+    ],
+    "runtimeContextSchema": "oden/capsec-runtime-authority-context/2",
+    "runtimeIdentityFields": [
+      "vocabDigest",
+      "registryDigest",
+      "policyDigest",
+      "armedSnapshotDigest",
+      "projectDigest",
+      "runNonce",
+      "channelEpoch"
+    ],
+    "schema": "oden/capsec-runtime-install-evidence-spec/2",
+    "variants": [
+      {
+        "armed": true,
+        "blockers": "empty",
+        "boundFields": [
+          "runtimeIdentity",
+          "engineTarget",
+          "engineFeatureSet",
+          "executionRole"
+        ],
+        "id": "installed",
+        "installed": true,
+        "nullFields": []
+      },
+      {
+        "armed": false,
+        "blockers": "nonempty-canonical-set",
+        "boundFields": [],
+        "id": "refused",
+        "installed": false,
+        "nullFields": [
+          "runtimeIdentity",
+          "engineTarget",
+          "engineFeatureSet",
+          "executionRole"
+        ]
+      }
+    ],
+    "version": 1
+  },
   "schema": "oden/capsec-runtime-protocol-spec/2",
   "sessionRows": {
     "batchSequenceDisposition": "excluded-from-row-identity",

@@ -15,6 +15,8 @@ deno_core::extension!(
     op_request_permission,
   ],
   state = |state| {
+    let mode = ::deno_permissions::oden_capsec_rev2_process_mode();
+    state.put(mode);
     if let Some(context) =
       ::deno_permissions::oden_capsec_rev2_runtime_authority_context()
     {
@@ -23,15 +25,51 @@ deno_core::extension!(
   },
 );
 
+#[derive(Default)]
+enum PermissionArgField {
+  #[default]
+  Absent,
+  Null,
+  String(String),
+}
+
+impl PermissionArgField {
+  fn as_deref(&self) -> Option<&str> {
+    match self {
+      Self::String(value) => Some(value),
+      Self::Absent | Self::Null => None,
+    }
+  }
+
+  fn is_present(&self) -> bool {
+    !matches!(self, Self::Absent)
+  }
+}
+
+impl<'de> Deserialize<'de> for PermissionArgField {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    Option::<String>::deserialize(deserializer)
+      .map(|value| value.map_or(Self::Null, Self::String))
+  }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionArgs {
   name: String,
-  path: Option<String>,
-  host: Option<String>,
-  variable: Option<String>,
-  kind: Option<String>,
-  command: Option<String>,
+  #[serde(default)]
+  path: PermissionArgField,
+  #[serde(default)]
+  host: PermissionArgField,
+  #[serde(default)]
+  variable: PermissionArgField,
+  #[serde(default)]
+  kind: PermissionArgField,
+  #[serde(default)]
+  command: PermissionArgField,
 }
 
 #[derive(ToV8)]
@@ -104,6 +142,13 @@ fn dynamic_descriptor(
     variable: args.variable.as_deref(),
     kind: args.kind.as_deref(),
     command: args.command.as_deref(),
+    presence: ::deno_permissions::OdenDynamicPermissionFieldPresence {
+      path: args.path.is_present(),
+      host: args.host.is_present(),
+      variable: args.variable.is_present(),
+      kind: args.kind.is_present(),
+      command: args.command.is_present(),
+    },
   }
 }
 
@@ -118,11 +163,11 @@ fn rev2_permission(
   args: &PermissionArgs,
   operation: ::deno_permissions::OdenRev2PermissionOperation,
 ) -> Option<Result<PermissionState, PermissionError>> {
-  let context = state
-    .try_borrow::<std::sync::Arc<
-      ::deno_permissions::OdenRev2RuntimeAuthorityContext,
-    >>()
-    .cloned()?;
+  let context = match resolve_rev2_context(state) {
+    Ok(Some(context)) => context,
+    Ok(None) => return None,
+    Err(error) => return Some(Err(error)),
+  };
   let permissions = state.borrow::<PermissionsContainer>();
   Some(
     ::deno_permissions::oden_capsec_rev2_permission_operation(
@@ -133,6 +178,74 @@ fn rev2_permission(
     )
     .map_err(|error| PermissionError::Rev2(error.to_string())),
   )
+}
+
+fn resolve_rev2_context(
+  state: &OpState,
+) -> Result<
+  Option<std::sync::Arc<::deno_permissions::OdenRev2RuntimeAuthorityContext>>,
+  PermissionError,
+> {
+  use ::deno_permissions::OdenRev2ProcessMode;
+  let process_mode = ::deno_permissions::oden_capsec_rev2_process_mode();
+  let state_mode = state.try_borrow::<OdenRev2ProcessMode>().copied();
+  let state_context = state
+    .try_borrow::<std::sync::Arc<
+      ::deno_permissions::OdenRev2RuntimeAuthorityContext,
+    >>()
+    .cloned();
+  let global = ::deno_permissions::oden_capsec_rev2_runtime_authority_context();
+  let ptr_equal = match (&global, &state_context) {
+    (Some(global), Some(state_context)) => {
+      std::sync::Arc::ptr_eq(global, state_context)
+    }
+    _ => false,
+  };
+  let rev2 = validate_rev2_opstate_binding(
+    process_mode,
+    state_mode,
+    global.is_some(),
+    state_context.is_some(),
+    ptr_equal,
+  )
+  .map_err(|reason| PermissionError::Rev2(reason.to_string()))?;
+  if rev2 { Ok(state_context) } else { Ok(None) }
+}
+
+fn validate_rev2_opstate_binding(
+  process_mode: ::deno_permissions::OdenRev2ProcessMode,
+  state_mode: Option<::deno_permissions::OdenRev2ProcessMode>,
+  global_present: bool,
+  state_present: bool,
+  ptr_equal: bool,
+) -> Result<bool, &'static str> {
+  use ::deno_permissions::OdenRev2ProcessMode;
+  match process_mode {
+    OdenRev2ProcessMode::Rev1 => {
+      if state_mode.is_some_and(|mode| mode != OdenRev2ProcessMode::Rev1)
+        || global_present
+        || state_present
+      {
+        Err("OD-CAP-REV2-OPSTATE-MODE-MISMATCH")
+      } else {
+        Ok(false)
+      }
+    }
+    OdenRev2ProcessMode::Rev2Refused => Err("OD-CAP-REV2-PROCESS-REFUSED"),
+    OdenRev2ProcessMode::Rev2Installed => {
+      if !global_present {
+        Err("OD-CAP-REV2-GLOBAL-CONTEXT-MISSING")
+      } else if state_mode != Some(OdenRev2ProcessMode::Rev2Installed) {
+        Err("OD-CAP-REV2-OPSTATE-MODE-MISMATCH")
+      } else if !state_present {
+        Err("OD-CAP-REV2-OPSTATE-CONTEXT-MISSING")
+      } else if !ptr_equal {
+        Err("OD-CAP-REV2-OPSTATE-CONTEXT-MISMATCH")
+      } else {
+        Ok(true)
+      }
+    }
+  }
 }
 
 #[op2(stack_trace)]
@@ -237,6 +350,36 @@ mod tests {
   use super::*;
 
   #[test]
+  fn descriptor_fields_preserve_absent_null_and_string_presence() {
+    let absent: PermissionArgs =
+      deno_core::serde_json::from_str(r#"{"name":"sys","kind":"cpus"}"#)
+        .unwrap();
+    assert!(!absent.path.is_present());
+    assert!(absent.kind.is_present());
+    assert_eq!(absent.kind.as_deref(), Some("cpus"));
+
+    let present_null: PermissionArgs = deno_core::serde_json::from_str(
+      r#"{"name":"sys","kind":"cpus","path":null}"#,
+    )
+    .unwrap();
+    assert!(present_null.path.is_present());
+    assert_eq!(present_null.path.as_deref(), None);
+
+    assert!(
+      deno_core::serde_json::from_str::<PermissionArgs>(
+        r#"{"name":"sys","kind":"cpus","unknown":true}"#,
+      )
+      .is_err()
+    );
+    assert!(
+      deno_core::serde_json::from_str::<PermissionArgs>(
+        r#"{"name":"sys","kind":"cpus","path":7}"#,
+      )
+      .is_err()
+    );
+  }
+
+  #[test]
   fn installed_rev2_refusal_propagates_without_rev1_fallback() {
     let result = resolve_rev2_permission::<PermissionState>(Some(Err(
       PermissionError::Rev2("generated refusal".to_string()),
@@ -253,6 +396,52 @@ mod tests {
       resolve_rev2_permission::<PermissionState>(None)
         .unwrap()
         .is_none()
+    );
+  }
+
+  #[test]
+  fn rev2_opstate_marker_cannot_select_a_different_process_mode() {
+    let mut state = OpState::new(None);
+    assert!(resolve_rev2_context(&state).unwrap().is_none());
+    state.put(::deno_permissions::OdenRev2ProcessMode::Rev2Installed);
+    assert!(matches!(
+      resolve_rev2_context(&state),
+      Err(PermissionError::Rev2(reason))
+        if reason == "OD-CAP-REV2-OPSTATE-MODE-MISMATCH"
+    ));
+  }
+
+  #[test]
+  fn installed_rev2_opstate_requires_the_exact_global_arc_and_marker() {
+    use ::deno_permissions::OdenRev2ProcessMode;
+    let validate = |state_mode, global, state, same| {
+      validate_rev2_opstate_binding(
+        OdenRev2ProcessMode::Rev2Installed,
+        state_mode,
+        global,
+        state,
+        same,
+      )
+    };
+    assert_eq!(
+      validate(None, true, true, true),
+      Err("OD-CAP-REV2-OPSTATE-MODE-MISMATCH")
+    );
+    assert_eq!(
+      validate(Some(OdenRev2ProcessMode::Rev2Installed), false, true, true),
+      Err("OD-CAP-REV2-GLOBAL-CONTEXT-MISSING")
+    );
+    assert_eq!(
+      validate(Some(OdenRev2ProcessMode::Rev2Installed), true, false, false),
+      Err("OD-CAP-REV2-OPSTATE-CONTEXT-MISSING")
+    );
+    assert_eq!(
+      validate(Some(OdenRev2ProcessMode::Rev2Installed), true, true, false),
+      Err("OD-CAP-REV2-OPSTATE-CONTEXT-MISMATCH")
+    );
+    assert_eq!(
+      validate(Some(OdenRev2ProcessMode::Rev2Installed), true, true, true),
+      Ok(true)
     );
   }
 }
