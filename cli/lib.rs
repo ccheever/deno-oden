@@ -15,6 +15,18 @@ mod node;
 mod node_compat_shim;
 mod npm;
 mod oden_capsec_filesystem_candidate;
+// @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
+// Keep the fail-closed native child lifecycle compiled but unreachable until
+// trusted parent capture admits the first generated filesystem case. A POSIX
+// process group is not complete-tree containment: activation also requires the
+// platform containment or verified no-fork/no-escape boundary that prevents a
+// descendant from leaving this group.
+#[cfg(unix)]
+#[allow(
+  dead_code,
+  reason = "native process lifecycle remains dormant while case tables are empty"
+)]
+mod oden_capsec_filesystem_process;
 mod oden_capsec_filesystem_protocol;
 mod oden_capsec_filesystem_supervisor;
 mod ops;
