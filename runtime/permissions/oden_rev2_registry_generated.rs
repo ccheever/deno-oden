@@ -462,14 +462,14 @@ pub enum Rev2FilesystemCandidateFinalObjectState {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Rev2FilesystemCandidateInitialObjectKind {
-  #[serde(rename = "device")]
-  Device,
+  #[serde(rename = "block-device")]
+  BlockDevice,
+  #[serde(rename = "character-device")]
+  CharacterDevice,
   #[serde(rename = "directory")]
   Directory,
   #[serde(rename = "fifo")]
   Fifo,
-  #[serde(rename = "hardlink")]
-  Hardlink,
   #[serde(rename = "missing")]
   Missing,
   #[serde(rename = "regular-file")]
@@ -628,6 +628,44 @@ pub enum Rev2FilesystemCandidateOperationEdgeId {
   NativeOpExtFsOpsRsOpFsLstatSync,
   #[serde(rename = "native-op:ext/fs/ops.rs#op_fs_mkdir_sync")]
   NativeOpExtFsOpsRsOpFsMkdirSync,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateTracePhase {
+  #[serde(rename = "actors-captured")]
+  ActorsCaptured,
+  #[serde(rename = "authorization-complete")]
+  AuthorizationComplete,
+  #[serde(rename = "core-commit-recorded")]
+  CoreCommitRecorded,
+  #[serde(rename = "delivery-serialized")]
+  DeliverySerialized,
+  #[serde(rename = "discovery-complete")]
+  DiscoveryComplete,
+  #[serde(rename = "harness-admitted")]
+  HarnessAdmitted,
+  #[serde(rename = "harness-exited")]
+  HarnessExited,
+  #[serde(rename = "namespace-gate-acquired")]
+  NamespaceGateAcquired,
+  #[serde(rename = "namespace-gate-released")]
+  NamespaceGateReleased,
+  #[serde(rename = "native-commit-recorded")]
+  NativeCommitRecorded,
+  #[serde(rename = "operation-completed")]
+  OperationCompleted,
+  #[serde(rename = "post-prepare-revalidated")]
+  PostPrepareRevalidated,
+  #[serde(rename = "preparation-complete")]
+  PreparationComplete,
+  #[serde(rename = "provisional-resources-released")]
+  ProvisionalResourcesReleased,
+  #[serde(rename = "public-op-entered")]
+  PublicOpEntered,
+  #[serde(rename = "sources-revalidated")]
+  SourcesRevalidated,
+  #[serde(rename = "target-revalidated")]
+  TargetRevalidated,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
@@ -912,7 +950,7 @@ pub struct Rev2FilesystemCandidateModeDerivation { pub algorithm: Rev2Filesystem
 pub enum Rev2FilesystemCandidateOperation { #[serde(rename = "lstat-sync")] LstatSync { edge_id: Rev2FilesystemCandidateLstatEdgeId, follow_mode: Rev2FilesystemCandidateFollowMode, input_bindings: Rev2FilesystemCandidateCommonInputBindings, ordered_slots: Vec<Rev2FilesystemCandidateSlot>, target_state_classifications: Vec<Rev2FilesystemCandidateTargetStateClassification>, authorized_outcomes: Vec<Rev2FilesystemCandidateAuthorizedOutcome>, result_model_id: Rev2FilesystemCandidateLstatResultModelId }, #[serde(rename = "mkdir-sync")] MkdirSync { edge_id: Rev2FilesystemCandidateMkdirEdgeId, follow_mode: Rev2FilesystemCandidateFollowMode, input_bindings: Rev2FilesystemCandidateMkdirInputBindings, recursive_policy: Rev2FilesystemCandidateRecursivePolicy, mode_derivation: Rev2FilesystemCandidateModeDerivation, ordered_slots: Vec<Rev2FilesystemCandidateSlot>, target_state_classifications: Vec<Rev2FilesystemCandidateTargetStateClassification>, authorized_outcomes: Vec<Rev2FilesystemCandidateAuthorizedOutcome>, result_model_id: Rev2FilesystemCandidateMkdirResultModelId } }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Rev2FilesystemCandidateCaseTargetState { pub edge_id: Rev2FilesystemCandidateOperationEdgeId, pub target_state: Rev2FilesystemCandidateTargetState }
+pub struct Rev2FilesystemCandidateCaseTargetState { pub edge_id: Rev2FilesystemCandidateOperationEdgeId, pub initial_kind: Rev2FilesystemCandidateInitialObjectKind, pub target_state: Rev2FilesystemCandidateTargetState, pub trace_phases: Vec<Rev2FilesystemCandidateTracePhase> }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Rev2FilesystemCandidateCasePlan { pub case_kind: Rev2FilesystemCandidateCaseKind, pub target_states: Vec<Rev2FilesystemCandidateCaseTargetState>, pub execution_mode: Rev2FilesystemCandidateExecutionMode, pub principal_plan: Rev2FilesystemCandidatePrincipalPlan, pub authority_plan: Rev2FilesystemCandidateAuthorityPlan, pub input_mutation: Rev2FilesystemCandidateInputMutation, pub fault_plan: Rev2FilesystemCandidateFaultPlan, pub core_expectation: Rev2FilesystemCandidateCoreExpectation, pub committed_slots: Rev2FilesystemCandidateCommittedSlots, pub outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition, pub lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement }
@@ -926,6 +964,10 @@ pub struct Rev2FilesystemCandidateNormalizedSlotStateSpec { pub effect_slot_id: 
 pub struct Rev2FilesystemCandidateAuthorizedOutcomeSpec { pub target_state: Rev2FilesystemCandidateTargetState, pub normalized_slot_states: &'static [Rev2FilesystemCandidateNormalizedSlotStateSpec], pub native_result: Rev2FilesystemCandidateNativeResult, pub permitted_side_effects: &'static [Rev2FilesystemCandidateCreateSideEffect], pub delivery: Rev2FilesystemCandidateDelivery, pub cleanup: Rev2FilesystemCandidateCleanup }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Rev2FilesystemCandidateOperationSpec { LstatSync { edge_id: &'static str, follow_mode: Rev2FilesystemCandidateFollowMode, input_bindings: Rev2FilesystemCandidateCommonInputBindings, ordered_slots: &'static [Rev2FilesystemCandidateSlotSpec], target_state_classifications: &'static [Rev2FilesystemCandidateTargetStateClassificationSpec], authorized_outcomes: &'static [Rev2FilesystemCandidateAuthorizedOutcomeSpec], result_model_id: Rev2FilesystemCandidateLstatResultModelId }, MkdirSync { edge_id: &'static str, follow_mode: Rev2FilesystemCandidateFollowMode, input_bindings: Rev2FilesystemCandidateMkdirInputBindings, recursive_policy: Rev2FilesystemCandidateRecursivePolicy, mode_derivation: Rev2FilesystemCandidateModeDerivation, ordered_slots: &'static [Rev2FilesystemCandidateSlotSpec], target_state_classifications: &'static [Rev2FilesystemCandidateTargetStateClassificationSpec], authorized_outcomes: &'static [Rev2FilesystemCandidateAuthorizedOutcomeSpec], result_model_id: Rev2FilesystemCandidateMkdirResultModelId } }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2FilesystemCandidateCaseTargetStateSpec { pub edge_id: Rev2FilesystemCandidateOperationEdgeId, pub initial_kind: Rev2FilesystemCandidateInitialObjectKind, pub target_state: Rev2FilesystemCandidateTargetState, pub trace_phases: &'static [Rev2FilesystemCandidateTracePhase] }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2FilesystemCandidateCasePlanSpec { pub case_kind: Rev2FilesystemCandidateCaseKind, pub target_states: &'static [Rev2FilesystemCandidateCaseTargetStateSpec], pub execution_mode: Rev2FilesystemCandidateExecutionMode, pub principal_plan: Rev2FilesystemCandidatePrincipalPlan, pub authority_plan: Rev2FilesystemCandidateAuthorityPlan, pub input_mutation: Rev2FilesystemCandidateInputMutation, pub fault_plan: Rev2FilesystemCandidateFaultPlan, pub core_expectation: Rev2FilesystemCandidateCoreExpectation, pub committed_slots: Rev2FilesystemCandidateCommittedSlots, pub outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition, pub lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rev2RuntimePolicyRules { pub resource_schemas: Vec<Rev2TypedSchema>, pub occurrence_schemas: Vec<Rev2TypedSchema>, pub value_schemas: Vec<Rev2TypedSchema>, pub schema_evaluation_spec: Rev2SchemaEvaluationSpec, pub schema_fixture_vectors: Vec<Rev2JsonValue>, pub projections: Vec<Rev2Projection>, pub match_evaluation_spec: Rev2MatchEvaluationSpec, pub normalizers: Vec<Rev2Normalizer>, pub predicates: Vec<Rev2Predicate>, pub protected_receipt_schema: Option<Rev2JsonValue>, pub predicate_fixture_vectors: Vec<Rev2JsonValue>, pub risk_rules: Vec<Rev2RiskRule>, pub risk_evaluation_spec: Rev2RiskEvaluationSpec, pub runtime_protocol_spec: Rev2JsonValue, pub negative_closure_specs: Vec<Rev2JsonValue>, pub edge_semantic_spec: Rev2JsonValue, pub filesystem_candidate_operations: Vec<Rev2FilesystemCandidateOperation>, pub filesystem_candidate_case_plans: Vec<Rev2FilesystemCandidateCasePlan>, pub derivation_rules: Vec<Rev2JsonValue>, pub ceiling_rules: Vec<Rev2JsonValue>, pub aliases: Vec<Rev2JsonValue>, pub macro_policy: Rev2JsonValue, pub macros: Vec<Rev2JsonValue>, pub system_information_kinds: Vec<Rev2JsonValue>, pub dispositions: Vec<Rev2JsonValue>, pub sensitive_environment_names: Vec<String>, pub loader_control_environment_names: Vec<String>, pub ambient_network_config_neutralization: Option<Rev2JsonValue>, pub ip_address_classes: Option<Rev2JsonValue>, pub public_suffix_input: Rev2JsonValue, pub special_files: Vec<Rev2JsonValue>, pub lifetime_contracts: Vec<Rev2JsonValue>, pub reason_codes: Vec<Rev2JsonValue> }
@@ -1493,7 +1535,7 @@ pub const REV2_FILESYSTEM_CANDIDATE_OPERATIONS: &[Rev2FilesystemCandidateOperati
     target_state_classifications: &[
       Rev2FilesystemCandidateTargetStateClassificationSpec {
         target_state: Rev2FilesystemCandidateTargetState::Existing,
-        initial_kinds: &[Rev2FilesystemCandidateInitialObjectKind::Device, Rev2FilesystemCandidateInitialObjectKind::Directory, Rev2FilesystemCandidateInitialObjectKind::Fifo, Rev2FilesystemCandidateInitialObjectKind::Hardlink, Rev2FilesystemCandidateInitialObjectKind::RegularFile, Rev2FilesystemCandidateInitialObjectKind::Socket],
+        initial_kinds: &[Rev2FilesystemCandidateInitialObjectKind::BlockDevice, Rev2FilesystemCandidateInitialObjectKind::CharacterDevice, Rev2FilesystemCandidateInitialObjectKind::Directory, Rev2FilesystemCandidateInitialObjectKind::Fifo, Rev2FilesystemCandidateInitialObjectKind::RegularFile, Rev2FilesystemCandidateInitialObjectKind::Socket],
       },
       Rev2FilesystemCandidateTargetStateClassificationSpec {
         target_state: Rev2FilesystemCandidateTargetState::LinkEntry,
@@ -1557,7 +1599,7 @@ pub const REV2_FILESYSTEM_CANDIDATE_OPERATIONS: &[Rev2FilesystemCandidateOperati
     target_state_classifications: &[
       Rev2FilesystemCandidateTargetStateClassificationSpec {
         target_state: Rev2FilesystemCandidateTargetState::Existing,
-        initial_kinds: &[Rev2FilesystemCandidateInitialObjectKind::Device, Rev2FilesystemCandidateInitialObjectKind::Directory, Rev2FilesystemCandidateInitialObjectKind::Fifo, Rev2FilesystemCandidateInitialObjectKind::Hardlink, Rev2FilesystemCandidateInitialObjectKind::RegularFile, Rev2FilesystemCandidateInitialObjectKind::Socket],
+        initial_kinds: &[Rev2FilesystemCandidateInitialObjectKind::BlockDevice, Rev2FilesystemCandidateInitialObjectKind::CharacterDevice, Rev2FilesystemCandidateInitialObjectKind::Directory, Rev2FilesystemCandidateInitialObjectKind::Fifo, Rev2FilesystemCandidateInitialObjectKind::RegularFile, Rev2FilesystemCandidateInitialObjectKind::Socket],
       },
       Rev2FilesystemCandidateTargetStateClassificationSpec {
         target_state: Rev2FilesystemCandidateTargetState::LinkEntry,
@@ -1613,6 +1655,501 @@ pub const REV2_FILESYSTEM_CANDIDATE_OPERATIONS: &[Rev2FilesystemCandidateOperati
   },
 ];
 
+pub const REV2_FILESYSTEM_CANDIDATE_CASE_PLANS: &[Rev2FilesystemCandidateCasePlanSpec] = &[
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::AuthorableCrossActionDenial,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::CrossActionFirst,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::CrossActionFirstMissing,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::PermissionDenied,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::AuthorableNoUserDenial,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::ExplicitNoUser,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::NoUserStaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::UnattributedDenyAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::PermissionDenied,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::AuthorableMissingPrincipalDenial,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::ActorUnconstrained,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::None,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::UnattributedDenyAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::PermissionDenied,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::AuthorableQuarantineDenial,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Audit,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Quarantine,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::None,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::QuarantineDenyAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::PermissionDenied,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::MultiEffectNMinusOneDenied,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::PrincipalDenialLastOverStaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::PrincipalDenyLast,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::PermissionDenied,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::AuthorableNegative,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::PrincipalDenialOverStaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::PrincipalDenyAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::PermissionDenied,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::StagedBarrierAuthorization,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::ProcessDenialOverStaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::ProcessDenyAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::PermissionDenied,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::StagedBarrierRevocation,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::SessionAllDormantRevocationAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::RevokeAllAfterAuthorization,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::SessionRevokedAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::PermissionDenied,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::MultiEffectNoPartialCommit,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::SessionAllDormantRevocationLast,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::RevokeLastAfterAuthorization,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::SessionRevokedLast,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::PermissionDenied,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::AuthorablePositive,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::PreparationComplete, Rev2FilesystemCandidateTracePhase::PostPrepareRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::NativeCommitRecorded, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::All,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::LstatExisting,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::All,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::LstatFinalMissing,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::All,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::LstatLinkEntry,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Symlink,
+        target_state: Rev2FilesystemCandidateTargetState::LinkEntry,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::All,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::MalformedResourceRefusal,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::TargetPathDotDot,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::NotReached,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::SchemaRefused,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::NoneBeforeCore,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::MkdirExistingConflict,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Directory,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::All,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::MkdirLinkConflict,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Symlink,
+        target_state: Rev2FilesystemCandidateTargetState::LinkEntry,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::All,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::MkdirMissingCreate,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::PreparationComplete, Rev2FilesystemCandidateTracePhase::PostPrepareRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::NativeCommitRecorded, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::All,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::MultiEffectAllAuthorized,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::PreparationComplete, Rev2FilesystemCandidateTracePhase::PostPrepareRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::NativeCommitRecorded, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::All,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::StagedBarrierCancellation,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::CancelSafeBoundary,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::CancellationRefused,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::StagedBarrierCleanup,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::PreparationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::OmitRequiredStage,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::ActorSequenceRefused,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::AuthorableWrongPrincipalDenial,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::ActorAndOther,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::WrongPrincipalStaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::None,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::MissingAuthorityAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::PermissionDenied,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rev2Definition {
   pub id: &'static str,
@@ -1638,8 +2175,8 @@ pub struct Rev2TargetStatus {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-Cgg1vv58PoPBNoAwsI8cvW9HLKpObp8-5l7ygqn31hY";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-aG6i6E1RfyLHn8CKP_M7dkb2Xx2bSQvrdZigtWON-Eo";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-a-uQBpqZ-PcfBvX5Oiuk-Q7LEs5z6kmkqhzJczUEo0M";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-gamthrHJYK2Yvsy3PxKvD_PkIHdBDpLUBMmmApiw9ns";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-SFvyfj3PfQcUC0REjPviGqms_7DEwFcghE7kL9WYSyo";
@@ -82131,10 +82668,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         "targetStateClassifications": [
           {
             "initialKinds": [
-              "device",
+              "block-device",
+              "character-device",
               "directory",
               "fifo",
-              "hardlink",
               "regular-file",
               "socket"
             ],
@@ -82266,10 +82803,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         "targetStateClassifications": [
           {
             "initialKinds": [
-              "device",
+              "block-device",
+              "character-device",
               "directory",
               "fifo",
-              "hardlink",
               "regular-file",
               "socket"
             ],
@@ -103464,6 +104001,7 @@ mod tests {
   fn filesystem_candidate_request_variants_fail_closed() {
     let payload: Rev2RuntimeSemanticPayload = serde_json::from_str(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
     assert_eq!(payload.policy_rules_and_classifiers.filesystem_candidate_operations.len(), 2);
+    assert_eq!(payload.policy_rules_and_classifiers.filesystem_candidate_case_plans.len(), REV2_FILESYSTEM_CANDIDATE_CASE_PLANS.len());
 
     let mut mismatched_kind: serde_json::Value = serde_json::from_str(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
     mismatched_kind["policyRulesAndClassifiers"]["filesystemCandidateOperations"][0]["requestKind"] = serde_json::Value::String("mkdir-sync".to_string());
@@ -103476,6 +104014,18 @@ mod tests {
     let mut widened_recursive: serde_json::Value = serde_json::from_str(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
     widened_recursive["policyRulesAndClassifiers"]["filesystemCandidateOperations"][1]["recursivePolicy"] = serde_json::Value::String("allow-true".to_string());
     assert!(serde_json::from_value::<Rev2RuntimeSemanticPayload>(widened_recursive).is_err());
+
+    let mut missing_initial_kind: serde_json::Value = serde_json::from_str(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
+    missing_initial_kind["policyRulesAndClassifiers"]["filesystemCandidateCasePlans"][0]["targetStates"][0].as_object_mut().unwrap().remove("initialKind");
+    assert!(serde_json::from_value::<Rev2RuntimeSemanticPayload>(missing_initial_kind).is_err());
+
+    let mut missing_trace_phases: serde_json::Value = serde_json::from_str(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
+    missing_trace_phases["policyRulesAndClassifiers"]["filesystemCandidateCasePlans"][0]["targetStates"][0].as_object_mut().unwrap().remove("tracePhases");
+    assert!(serde_json::from_value::<Rev2RuntimeSemanticPayload>(missing_trace_phases).is_err());
+
+    let mut legacy_initial_kind: serde_json::Value = serde_json::from_str(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
+    legacy_initial_kind["policyRulesAndClassifiers"]["filesystemCandidateCasePlans"][0]["targetStates"][0]["initialKind"] = serde_json::Value::String("hardlink".to_string());
+    assert!(serde_json::from_value::<Rev2RuntimeSemanticPayload>(legacy_initial_kind).is_err());
   }
 }
 }
