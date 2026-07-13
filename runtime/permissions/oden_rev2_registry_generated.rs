@@ -1050,8 +1050,8 @@ pub struct Rev2TargetStatus {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-nt8rVWkfwjJsvxyJfASUKtPy_-zmWHjT55lZO6nkGTE";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-nJ-ZWUNKp5u8sEPlRmbgGZRhzJQw5jJ3DtC0-shBVME";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-vmkeJBeilMHOuWSr0tauYIU0cXAcTCRt_5XI43oJh5c";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-Kr7Ti7Nk65El3gjEyawuQLw4K3KQis2qGBg4Np6SZYY";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-SFvyfj3PfQcUC0REjPviGqms_7DEwFcghE7kL9WYSyo";
@@ -46938,18 +46938,18 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": null,
-            "capability": "fs:read",
+            "capability": "fs:list",
             "cardinality": "exactly-one",
-            "condition": null,
+            "condition": "no-follow-final metadata observation of the queried lexical entry",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0",
-            "sourceResourceDescription": "filesystem path"
+            "sourceResourceDescription": "exact no-follow-final filesystem entry with verified parent identity and existing or link-entry final object state"
           }
         ],
         "gate": {
           "branchId": "default",
           "branchKind": "single",
-          "condition": "source-derived op body and bounded two-hop same-file helper graph; per-target fixtures remain unproved",
+          "condition": "resolve and retain the no-follow-final entry without candidate-visible delivery, authorize fs:list over its exact lexical and identity facts, then deliver metadata from the retained checked entry without reopening the path",
           "enforcementDisposition": "bidirectional",
           "mechanism": "reclassifies",
           "negativeClosureSpecId": null
@@ -47321,7 +47321,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "operation-actor",
           "principal-set"
         ],
-        "atomicityGroup": null,
+        "atomicityGroup": "atomic:native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
         "barriers": {
           "authorization": "before-commit",
           "cancellation": "release-provisional-state",
@@ -47342,16 +47342,26 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "branchId": null,
             "capability": "fs:write",
             "cardinality": "exactly-one",
-            "condition": null,
+            "condition": "recursive == false; proposed child creation under a verified canonical parent",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0",
-            "sourceResourceDescription": "filesystem path"
+            "sourceResourceDescription": "same exact proposed child under the same verified canonical parent"
+          },
+          {
+            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
+            "branchId": null,
+            "capability": "fs:list",
+            "cardinality": "exactly-one",
+            "condition": "recursive == false; destination namespace entry observation under a verified canonical parent",
+            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
+            "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1",
+            "sourceResourceDescription": "same exact proposed child under the same verified canonical parent"
           }
         ],
         "gate": {
           "branchId": "default",
           "branchKind": "single",
-          "condition": "source-derived op body and bounded two-hop same-file helper graph; per-target fixtures remain unproved",
+          "condition": "op_fs_mkdir_sync supports recursive == false only: authorize fs:list and fs:write conjunctively over the same exact proposed child and verified canonical parent before one parent-relative commit; recursive == true is unsupported and must refuse before discovery or mutation",
           "enforcementDisposition": "bidirectional",
           "mechanism": "reclassifies",
           "negativeClosureSpecId": null
@@ -94277,6 +94287,8 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/node_sqlite/database.rs#DatabaseSync::open", effect_slot_id: "native-op:ext/node_sqlite/database.rs#DatabaseSync::open:effect-slot:0", capability: Rev2CapabilityId::FfiLoad, resource_schema_id: "resource.library-identity/2", occurrence_schema_id: "occurrence.library-load/2", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_query_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:4", capability: Rev2CapabilityId::FfiLoad, resource_schema_id: "resource.library-identity/2", occurrence_schema_id: "occurrence.library-load/2", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:4", capability: Rev2CapabilityId::FfiLoad, resource_schema_id: "resource.library-identity/2", occurrence_schema_id: "occurrence.library-load/2", positive_projection_id: "projection.ffi:load.positive/2", negative_projection_id: "projection.ffi:load.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
+  Rev2ForkIntegrationRow { edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync", effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0", capability: Rev2CapabilityId::FsList, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-list/2", positive_projection_id: "projection.fs:list.positive/2", negative_projection_id: "projection.fs:list.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
+  Rev2ForkIntegrationRow { edge_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync", effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1", capability: Rev2CapabilityId::FsList, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-list/2", positive_projection_id: "projection.fs:list.positive/2", negative_projection_id: "projection.fs:list.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "loader-branch:cli/module_loader.rs#local-computed-dynamic-javascript", effect_slot_id: "loader-branch:cli/module_loader.rs#local-computed-dynamic-javascript:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "loader-branch:cli/module_loader.rs#local-computed-dynamic-other", effect_slot_id: "loader-branch:cli/module_loader.rs#local-computed-dynamic-other:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "loader-branch:cli/module_loader.rs#local-computed-dynamic-typescript", effect_slot_id: "loader-branch:cli/module_loader.rs#local-computed-dynamic-typescript:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -94319,7 +94331,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/fs/ops.rs#op_fs_link_async", effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_link_async:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/fs/ops.rs#op_fs_link_sync", effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_link_sync:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_async", effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_lstat_async:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync", effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/fs/ops.rs#op_fs_open_async#read-only", effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_open_async#read-only:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/fs/ops.rs#op_fs_open_async#read-write", effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_open_async#read-write:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/fs/ops.rs#op_fs_open_sync#read-only", effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_open_sync#read-only:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
