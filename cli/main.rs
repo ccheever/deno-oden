@@ -5,5 +5,10 @@ pub fn main() {
   // to run tests without building a binary on the CI.
   //
   // Prefer to keep this file simple and mostly empty.
+  if let Some(exit_code) =
+    deno::maybe_run_oden_capsec_filesystem_candidate(std::env::args_os())
+  {
+    std::process::exit(exit_code);
+  }
   deno::main()
 }

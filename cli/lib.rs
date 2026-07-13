@@ -14,6 +14,7 @@ mod module_loader;
 mod node;
 mod node_compat_shim;
 mod npm;
+mod oden_capsec_filesystem_candidate;
 mod ops;
 mod registry;
 mod resolver;
@@ -78,6 +79,8 @@ use crate::util::env::WatchEnvTracker;
 use crate::util::env::load_env_variables_from_env_files;
 use crate::util::v8::get_v8_flags_from_env;
 use crate::util::v8::init_v8_flags;
+
+pub use oden_capsec_filesystem_candidate::maybe_run_oden_capsec_filesystem_candidate;
 
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
