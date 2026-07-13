@@ -1050,8 +1050,8 @@ pub struct Rev2TargetStatus {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-vmkeJBeilMHOuWSr0tauYIU0cXAcTCRt_5XI43oJh5c";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-Kr7Ti7Nk65El3gjEyawuQLw4K3KQis2qGBg4Np6SZYY";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-kJ1x_zr1gKGeTObQOqxBCc89517tujMjjmqWHQdmNUI";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-K7uVaYTvcMUhOLWxMWiG1vPNBU6lYotIBQJh_oiS1uk";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-SFvyfj3PfQcUC0REjPviGqms_7DEwFcghE7kL9WYSyo";
@@ -46940,16 +46940,16 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "branchId": null,
             "capability": "fs:list",
             "cardinality": "exactly-one",
-            "condition": "no-follow-final metadata observation of the queried lexical entry",
+            "condition": "no-follow-final metadata or ENOENT observation of the queried lexical entry; finalObjectState is existing, link-entry, or missing under a verified retained parent",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0",
-            "sourceResourceDescription": "exact no-follow-final filesystem entry with verified parent identity and existing or link-entry final object state"
+            "sourceResourceDescription": "exact no-follow-final lexical entry with verified parent identity; existing and link-entry carry final object identity, while missing carries no identity"
           }
         ],
         "gate": {
           "branchId": "default",
           "branchKind": "single",
-          "condition": "resolve and retain the no-follow-final entry without candidate-visible delivery, authorize fs:list over its exact lexical and identity facts, then deliver metadata from the retained checked entry without reopening the path",
+          "condition": "resolve the no-follow-final entry under a retained verified parent without candidate-visible delivery; authorize exactly one fs:list occurrence over the exact lexical, parent, and existing, link-entry, or missing state before delivering retained metadata or ENOENT; never reopen the path, and refuse missing-ancestor cases until staged ancestor disclosures are modeled",
           "enforcementDisposition": "bidirectional",
           "mechanism": "reclassifies",
           "negativeClosureSpecId": null
@@ -47342,26 +47342,26 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "branchId": null,
             "capability": "fs:write",
             "cardinality": "exactly-one",
-            "condition": "recursive == false; proposed child creation under a verified canonical parent",
+            "condition": "recursive == false; missing-success uses finalObjectState proposed, while existing-conflict uses existing or link-entry with identity",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0",
-            "sourceResourceDescription": "same exact proposed child under the same verified canonical parent"
+            "sourceResourceDescription": "same exact no-follow destination entry and verified canonical parent as fs:list; proposed on success, existing or link-entry identity on conflict"
           },
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": null,
             "capability": "fs:list",
             "cardinality": "exactly-one",
-            "condition": "recursive == false; destination namespace entry observation under a verified canonical parent",
+            "condition": "recursive == false; destination disclosure uses finalObjectState missing for success or existing or link-entry with identity for EEXIST conflict",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1",
-            "sourceResourceDescription": "same exact proposed child under the same verified canonical parent"
+            "sourceResourceDescription": "same exact no-follow destination entry and verified canonical parent as fs:write; missing on success, existing or link-entry identity on conflict"
           }
         ],
         "gate": {
           "branchId": "default",
           "branchKind": "single",
-          "condition": "op_fs_mkdir_sync supports recursive == false only: authorize fs:list and fs:write conjunctively over the same exact proposed child and verified canonical parent before one parent-relative commit; recursive == true is unsupported and must refuse before discovery or mutation",
+          "condition": "recursive == false only: resolve the destination no-follow under a retained verified parent; for a missing destination authorize conjunctive fs:list(missing) and fs:write(proposed), revalidate absence, and commit with an atomic parent-relative no-replace mkdir; for an existing or link destination authorize conjunctive fs:list and fs:write over the same identity before delivering EEXIST without mutation; recursive == true refuses before discovery or mutation",
           "enforcementDisposition": "bidirectional",
           "mechanism": "reclassifies",
           "negativeClosureSpecId": null
