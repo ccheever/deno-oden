@@ -304,6 +304,7 @@ fn evaluate_singleton_permission(
   operation: PermissionOperation,
   dynamically_authorable: bool,
   build_host_effect: impl FnOnce(
+    &[crate::rev2::PrincipalRef],
     &crate::rev2::PrincipalRef,
   ) -> Result<
     VerifiedHostEffect,
@@ -334,7 +335,7 @@ fn evaluate_singleton_permission(
     &principals,
     overlay_owner.clone(),
   )?;
-  let host_effect = build_host_effect(&overlay_owner)?;
+  let host_effect = build_host_effect(&principals, &overlay_owner)?;
   let core = Rev2Core::embedded()
     .map_err(|error| OdenRev2PermissionError::Core(error.to_string()))?;
   let effect_input = EffectInput {
@@ -638,107 +639,98 @@ fn platform_identity(metadata: &std::fs::Metadata) -> Value {
   })
 }
 
-fn static_path_source<'a>(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StaticPathSourceClass {
+  Negative,
+  Floor,
+  Ceiling,
+}
+
+#[cfg(unix)]
+struct StaticPathRoot<'a> {
+  binding: &'a crate::oden_rev2_context::OdenRev2RootBinding,
+  retained: &'a crate::oden_rev2_policy::OdenRev2RetainedObject,
+  row: &'a crate::oden_rev2_context::OdenRev2StaticAuthorityRow,
+  class: StaticPathSourceClass,
+}
+
+#[cfg(unix)]
+fn collect_static_path_roots<'a>(
   context: &'a OdenRev2RuntimeAuthorityContext,
-  owner: &crate::rev2::PrincipalRef,
-  source_id: &str,
+  constrained_principals: &[crate::rev2::PrincipalRef],
   capability: &str,
-) -> Option<(u8, &'a crate::oden_rev2_context::OdenRev2StaticAuthorityRow)> {
-  let matches = |row: &crate::oden_rev2_context::OdenRev2StaticAuthorityRow| {
-    row.source_id() == source_id
-      && row.selector().capability == capability
-      && row
-        .selector()
-        .principal
-        .as_ref()
-        .is_none_or(|principal| principal == owner)
-  };
-  if let Some(row) = context
+) -> Result<Vec<StaticPathRoot<'a>>, OdenRev2PermissionError> {
+  let constrained = constrained_principals.iter().collect::<BTreeSet<_>>();
+  let mut rows = Vec::new();
+  for row in context
     .static_policy()
     .process_denials()
     .iter()
     .chain(context.static_policy().deny_ceiling())
-    .find(|row| matches(row))
-    .or_else(|| {
-      context
-        .static_policy()
-        .principals()
+  {
+    if row.selector().capability == capability
+      && row
+        .selector()
+        .principal
+        .as_ref()
+        .is_none_or(|principal| constrained.contains(principal))
+    {
+      rows.push((row, StaticPathSourceClass::Negative));
+    }
+  }
+  for principal in context.static_policy().principals() {
+    if !constrained.contains(principal.principal()) {
+      continue;
+    }
+    rows.extend(
+      principal
+        .denials()
         .iter()
-        .filter(|principal| principal.principal() == owner)
-        .flat_map(|principal| principal.denials())
-        .find(|row| matches(row))
-    })
-  {
-    return Some((0, row));
+        .filter(|row| row.selector().capability == capability)
+        .map(|row| (row, StaticPathSourceClass::Negative)),
+    );
+    rows.extend(
+      principal
+        .floor()
+        .iter()
+        .filter(|row| row.selector().capability == capability)
+        .map(|row| (row, StaticPathSourceClass::Floor)),
+    );
+    rows.extend(
+      principal
+        .escalation_ceiling()
+        .iter()
+        .filter(|row| row.selector().capability == capability)
+        .map(|row| (row, StaticPathSourceClass::Ceiling)),
+    );
   }
-  if let Some(row) = context
-    .static_policy()
-    .principals()
-    .iter()
-    .filter(|principal| principal.principal() == owner)
-    .flat_map(|principal| principal.floor())
-    .find(|row| matches(row))
-  {
-    return Some((1, row));
-  }
-  context
-    .static_policy()
-    .principals()
-    .iter()
-    .filter(|principal| principal.principal() == owner)
-    .flat_map(|principal| principal.escalation_ceiling())
-    .find(|row| matches(row))
-    .map(|row| (2, row))
-}
-
-#[cfg(unix)]
-fn select_retained_roots<'a>(
-  context: &'a OdenRev2RuntimeAuthorityContext,
-  owner: &crate::rev2::PrincipalRef,
-  capability: &str,
-  requested: &Path,
-) -> Result<
-  Vec<(
-    &'a crate::oden_rev2_context::OdenRev2RootBinding,
-    &'a crate::oden_rev2_policy::OdenRev2RetainedObject,
-    PathBuf,
-    u8,
-  )>,
-  OdenRev2PermissionError,
-> {
-  let mut candidates = context
-    .bindings()
-    .roots()
-    .iter()
-    .filter(|binding| binding.principal().is_none_or(|value| value == owner))
-    .filter_map(|binding| {
-      static_path_source(context, owner, binding.source_id(), capability)
-        .map(|(rank, _)| (binding, rank))
-    })
-    .filter_map(|(binding, rank)| {
-      let root = bound_platform_path(binding.canonical_path());
-      requested
-        .strip_prefix(&root)
-        .ok()
-        .map(|relative| (binding, root, relative.to_path_buf(), rank))
-    })
-    .collect::<Vec<_>>();
-  let Some(deepest) = candidates
-    .iter()
-    .map(|(_, root, _, _)| root.components().count())
-    .max()
-  else {
-    return Err(OdenRev2PermissionError::HostVerifierUnavailable(
-      "unbound-path-root".to_string(),
-    ));
-  };
-  candidates.retain(|(_, root, _, _)| root.components().count() == deepest);
-  candidates.sort_by(|left, right| {
-    (left.3, left.0.source_id()).cmp(&(right.3, right.0.source_id()))
+  rows.retain(|(row, _)| {
+    row.selector().resource.get("root").is_some()
+      && row.selector().resource.get("path").is_some()
   });
-  candidates
+  rows.sort_by(|left, right| left.0.source_id().cmp(right.0.source_id()));
+  if rows
+    .windows(2)
+    .any(|rows| rows[0].0.source_id() == rows[1].0.source_id())
+  {
+    return Err(OdenRev2PermissionError::HostVerifierUnavailable(
+      "ambiguous-path-source".to_string(),
+    ));
+  }
+  rows
     .into_iter()
-    .map(|(binding, _, relative, rank)| {
+    .map(|(row, class)| {
+      let bindings = context
+        .bindings()
+        .roots()
+        .iter()
+        .filter(|binding| binding.source_id() == row.source_id())
+        .collect::<Vec<_>>();
+      let [binding] = bindings.as_slice() else {
+        return Err(OdenRev2PermissionError::HostVerifierUnavailable(
+          "ambiguous-path-source-binding".to_string(),
+        ));
+      };
       let retained = context
         .retained_objects()
         .iter()
@@ -750,9 +742,84 @@ fn select_retained_roots<'a>(
             "retained-path-root".to_string(),
           )
         })?;
-      Ok((binding, retained, relative, rank))
+      Ok(StaticPathRoot {
+        binding,
+        retained,
+        row,
+        class,
+      })
     })
     .collect()
+}
+
+#[cfg(unix)]
+fn select_primary_path_root<'a>(
+  roots: &'a [StaticPathRoot<'a>],
+  owner: &crate::rev2::PrincipalRef,
+  requested: &Path,
+) -> Result<(&'a StaticPathRoot<'a>, PathBuf), OdenRev2PermissionError> {
+  let mut candidates = roots
+    .iter()
+    .filter_map(|root| {
+      let canonical_root = bound_platform_path(root.binding.canonical_path());
+      let relative =
+        requested.strip_prefix(&canonical_root).ok()?.to_path_buf();
+      let owner_source = root.row.selector().principal.as_ref() == Some(owner);
+      let rank = match (owner_source, root.class) {
+        (true, StaticPathSourceClass::Floor) => 0,
+        (true, StaticPathSourceClass::Ceiling) => 1,
+        (true, StaticPathSourceClass::Negative) => 2,
+        (false, StaticPathSourceClass::Negative) => 3,
+        (false, StaticPathSourceClass::Floor) => 4,
+        (false, StaticPathSourceClass::Ceiling) => 5,
+      };
+      Some((root, relative, rank, canonical_root.components().count()))
+    })
+    .collect::<Vec<_>>();
+  candidates.sort_by(|left, right| {
+    (
+      left.2,
+      std::cmp::Reverse(left.3),
+      left.0.binding.source_id(),
+    )
+      .cmp(&(
+        right.2,
+        std::cmp::Reverse(right.3),
+        right.0.binding.source_id(),
+      ))
+  });
+  let Some((selected, relative, selected_rank, selected_depth)) =
+    candidates.first()
+  else {
+    return Err(OdenRev2PermissionError::HostVerifierUnavailable(
+      "unbound-path-root".to_string(),
+    ));
+  };
+  let selected_lexical =
+    platform_path_value(if relative.as_os_str().is_empty() {
+      Path::new(".")
+    } else {
+      relative
+    });
+  if candidates
+    .iter()
+    .take_while(|candidate| {
+      candidate.2 == *selected_rank && candidate.3 == *selected_depth
+    })
+    .any(|(candidate, candidate_relative, _, _)| {
+      candidate.binding.logical_root() != selected.binding.logical_root()
+        || platform_path_value(if candidate_relative.as_os_str().is_empty() {
+          Path::new(".")
+        } else {
+          candidate_relative
+        }) != selected_lexical
+    })
+  {
+    return Err(OdenRev2PermissionError::HostVerifierUnavailable(
+      "ambiguous-path-root".to_string(),
+    ));
+  }
+  Ok((selected, relative.clone()))
 }
 
 #[cfg(unix)]
@@ -955,86 +1022,122 @@ fn observe_relative_path(
 }
 
 #[cfg(unix)]
+struct AuthenticatedRetainedRoot {
+  walker: File,
+  identity: Value,
+  handles: Vec<File>,
+}
+
+#[cfg(unix)]
+fn authenticate_retained_root(
+  root: &StaticPathRoot<'_>,
+) -> Result<AuthenticatedRetainedRoot, OdenRev2PermissionError> {
+  let expected_identity = root.binding.object_identity().value();
+  let retained_metadata = root.retained.file().metadata().map_err(|_| {
+    OdenRev2PermissionError::HostVerifierUnavailable(
+      "retained-path-root-metadata".to_string(),
+    )
+  })?;
+  let identity = platform_identity(&retained_metadata);
+  if identity["value"] != expected_identity {
+    return Err(OdenRev2PermissionError::HostVerifierUnavailable(
+      "retained-path-root-identity".to_string(),
+    ));
+  }
+  let named_root =
+    reopen_bound_root(&bound_platform_path(root.binding.canonical_path()))
+      .map_err(|_| {
+        OdenRev2PermissionError::HostVerifierUnavailable(
+          "retained-path-root-name".to_string(),
+        )
+      })?;
+  if platform_identity(&named_root.metadata().map_err(|_| {
+    OdenRev2PermissionError::HostVerifierUnavailable(
+      "retained-path-root-name-metadata".to_string(),
+    )
+  })?)["value"]
+    != expected_identity
+  {
+    return Err(OdenRev2PermissionError::HostVerifierUnavailable(
+      "retained-path-root-name-identity".to_string(),
+    ));
+  }
+  let walker = named_root.try_clone().map_err(|_| {
+    OdenRev2PermissionError::HostVerifierUnavailable(
+      "retained-path-root-clone".to_string(),
+    )
+  })?;
+  Ok(AuthenticatedRetainedRoot {
+    walker,
+    identity,
+    handles: vec![
+      root.retained.file().try_clone().map_err(|_| {
+        OdenRev2PermissionError::HostVerifierUnavailable(
+          "retained-path-root-clone".to_string(),
+        )
+      })?,
+      named_root,
+    ],
+  })
+}
+
+#[cfg(unix)]
+fn recheck_retained_root(
+  root: &StaticPathRoot<'_>,
+) -> Result<File, OdenRev2PermissionError> {
+  let expected_identity = root.binding.object_identity().value();
+  let after = root.retained.file().metadata().map_err(|_| {
+    OdenRev2PermissionError::HostVerifierUnavailable(
+      "retained-path-root-metadata".to_string(),
+    )
+  })?;
+  if platform_identity(&after)["value"] != expected_identity {
+    return Err(OdenRev2PermissionError::HostVerifierUnavailable(
+      "retained-path-root-race".to_string(),
+    ));
+  }
+  let named_root =
+    reopen_bound_root(&bound_platform_path(root.binding.canonical_path()))
+      .map_err(|_| {
+        OdenRev2PermissionError::HostVerifierUnavailable(
+          "retained-path-root-name-race".to_string(),
+        )
+      })?;
+  if platform_identity(&named_root.metadata().map_err(|_| {
+    OdenRev2PermissionError::HostVerifierUnavailable(
+      "retained-path-root-name-metadata".to_string(),
+    )
+  })?)["value"]
+    != expected_identity
+  {
+    return Err(OdenRev2PermissionError::HostVerifierUnavailable(
+      "retained-path-root-name-race".to_string(),
+    ));
+  }
+  Ok(named_root)
+}
+
+#[cfg(unix)]
 fn verified_path_effect(
   context: &OdenRev2RuntimeAuthorityContext,
+  constrained_principals: &[crate::rev2::PrincipalRef],
   owner: &crate::rev2::PrincipalRef,
   capability: &str,
   requested: &Path,
 ) -> Result<VerifiedHostEffect, OdenRev2PermissionError> {
-  let roots = select_retained_roots(context, owner, capability, requested)?;
-  let (binding, _, relative, _) = roots
-    .first()
-    .expect("retained-root selection returns a nonempty set");
-  let root_path = bound_platform_path(binding.canonical_path());
+  let roots =
+    collect_static_path_roots(context, constrained_principals, capability)?;
+  let (primary, relative) = select_primary_path_root(&roots, owner, requested)?;
+  let primary_root = authenticate_retained_root(primary)?;
   let mut handles = Vec::new();
-  let mut current = None;
-  let mut root_identity = None;
-  for (index, (candidate, retained, candidate_relative, _)) in
-    roots.iter().enumerate()
-  {
-    if candidate.logical_root() != binding.logical_root()
-      || bound_platform_path(candidate.canonical_path()) != root_path
-      || candidate_relative != relative
-    {
-      return Err(OdenRev2PermissionError::HostVerifierUnavailable(
-        "ambiguous-path-root".to_string(),
-      ));
-    }
-    let expected_root_identity = candidate.object_identity().value();
-    let retained_metadata = retained.file().metadata().map_err(|_| {
-      OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-metadata".to_string(),
-      )
-    })?;
-    let observed_root_identity = platform_identity(&retained_metadata);
-    if observed_root_identity["value"] != expected_root_identity
-      || root_identity
-        .as_ref()
-        .is_some_and(|identity| identity != &observed_root_identity)
-    {
-      return Err(OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-identity".to_string(),
-      ));
-    }
-    root_identity.get_or_insert(observed_root_identity);
-    let named_root = reopen_bound_root(&root_path).map_err(|_| {
-      OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-name".to_string(),
-      )
-    })?;
-    if platform_identity(&named_root.metadata().map_err(|_| {
-      OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-name-metadata".to_string(),
-      )
-    })?)["value"]
-      != expected_root_identity
-    {
-      return Err(OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-name-identity".to_string(),
-      ));
-    }
-    handles.push(retained.file().try_clone().map_err(|_| {
-      OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-clone".to_string(),
-      )
-    })?);
-    if index == 0 {
-      current = Some(named_root.try_clone().map_err(|_| {
-        OdenRev2PermissionError::HostVerifierUnavailable(
-          "retained-path-root-clone".to_string(),
-        )
-      })?);
-    }
-    handles.push(named_root);
-  }
-  let root_identity = root_identity.expect("nonempty roots set identity");
   let observed = observe_relative_path(
-    &current.expect("primary retained root was cloned"),
-    &root_identity,
-    relative,
+    &primary_root.walker,
+    &primary_root.identity,
+    &relative,
   )?;
   let final_state = observed.final_state;
   let parent_identity = observed.parent_identity;
+  handles.extend(primary_root.handles);
   handles.extend(observed.handles);
   let final_object_identities = final_state
     .get("identity")
@@ -1047,98 +1150,72 @@ fn verified_path_effect(
     Vec::new()
   };
   let mut path_bindings = Vec::with_capacity(roots.len());
-  for (candidate, retained, _, rank) in &roots {
-    let (source_rank, source_row) =
-      static_path_source(context, owner, candidate.source_id(), capability)
-        .ok_or_else(|| {
-          OdenRev2PermissionError::HostVerifierUnavailable(
-            "path-source-binding".to_string(),
-          )
-        })?;
-    if source_rank != *rank {
-      return Err(OdenRev2PermissionError::HostVerifierUnavailable(
-        "path-source-binding".to_string(),
-      ));
-    }
-    let (source_final_identities, source_parent_identities) = if source_rank
-      == 0
-    {
-      if source_row
+  for source in &roots {
+    let source_root = authenticate_retained_root(source)?;
+    let source_relative = if source.class == StaticPathSourceClass::Negative {
+      if source
+        .row
         .selector()
         .resource
         .get("root")
         .and_then(Value::as_str)
-        != Some(candidate.logical_root())
+        != Some(source.binding.logical_root())
       {
         return Err(OdenRev2PermissionError::HostVerifierUnavailable(
           "path-source-logical-root".to_string(),
         ));
       }
-      let selector_path = relative_platform_path(
-        source_row.selector().resource.get("path").ok_or_else(|| {
+      Some(relative_platform_path(
+        source.row.selector().resource.get("path").ok_or_else(|| {
           OdenRev2PermissionError::HostVerifierUnavailable(
             "path-selector-platform-path".to_string(),
           )
         })?,
-      )?;
-      let source_observed =
-        observe_relative_path(retained.file(), &root_identity, &selector_path)?;
-      let source_final = source_observed
-        .final_state
-        .get("identity")
-        .cloned()
-        .into_iter()
-        .collect::<Vec<_>>();
-      let source_parent = if source_observed.final_state["kind"] == "missing" {
+      )?)
+    } else {
+      let source_host_root =
+        bound_platform_path(source.binding.canonical_path());
+      requested
+        .strip_prefix(&source_host_root)
+        .ok()
+        .map(Path::to_path_buf)
+    };
+    let Some(source_relative) = source_relative else {
+      handles.extend(source_root.handles);
+      continue;
+    };
+    let source_observed = observe_relative_path(
+      &source_root.walker,
+      &source_root.identity,
+      &source_relative,
+    )?;
+    let source_final_identities = source_observed
+      .final_state
+      .get("identity")
+      .cloned()
+      .into_iter()
+      .collect::<Vec<_>>();
+    let source_parent_identities =
+      if source_observed.final_state["kind"] == "missing" {
         vec![source_observed.parent_identity]
       } else {
         Vec::new()
       };
-      handles.extend(source_observed.handles);
-      (source_final, source_parent)
-    } else {
-      (final_object_identities.clone(), parent_identities.clone())
-    };
+    handles.extend(source_root.handles);
+    handles.extend(source_observed.handles);
     path_bindings.push(PathBindingInput {
-      source_id: candidate.source_id().to_string(),
-      // One occurrence can name only one root binding. Every source binding
-      // admitted here was independently retained and proved equivalent to the
-      // selected occurrence root above; context projection rechecks that
-      // equivalence before the shared core sees this source-specific fact.
-      root_binding_id: binding.binding_id().to_string(),
+      source_id: source.binding.source_id().to_string(),
+      // The fact was independently resolved through `source`'s authenticated
+      // retained descriptor. Shared-core matching keys facts by the one root
+      // id carried in the occurrence, so the host-private projection binds it
+      // to that separately authenticated occurrence root id.
+      root_binding_id: primary.binding.binding_id().to_string(),
       final_object_identities: source_final_identities,
       parent_identities: source_parent_identities,
     });
   }
-  for (candidate, retained, _, _) in &roots {
-    let after = retained.file().metadata().map_err(|_| {
-      OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-metadata".to_string(),
-      )
-    })?;
-    if platform_identity(&after)["value"] != candidate.object_identity().value()
-    {
-      return Err(OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-race".to_string(),
-      ));
-    }
-    let named_root_after = reopen_bound_root(&root_path).map_err(|_| {
-      OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-name-race".to_string(),
-      )
-    })?;
-    if platform_identity(&named_root_after.metadata().map_err(|_| {
-      OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-name-metadata".to_string(),
-      )
-    })?)["value"]
-      != candidate.object_identity().value()
-    {
-      return Err(OdenRev2PermissionError::HostVerifierUnavailable(
-        "retained-path-root-name-race".to_string(),
-      ));
-    }
-    handles.push(named_root_after);
+  for source in &roots {
+    handles.push(recheck_retained_root(source)?);
   }
 
   let lexical = if relative.as_os_str().is_empty() {
@@ -1147,24 +1224,24 @@ fn verified_path_effect(
     relative.as_path()
   };
   let session_path_binding = PathBindingInput {
-    source_id: binding.source_id().to_string(),
-    root_binding_id: binding.binding_id().to_string(),
+    source_id: primary.binding.source_id().to_string(),
+    root_binding_id: primary.binding.binding_id().to_string(),
     final_object_identities,
     parent_identities,
   };
   Ok(VerifiedHostEffect {
     resource: json!({
       "kind": "path-exact",
-      "root": binding.logical_root(),
+      "root": primary.binding.logical_root(),
       "path": platform_path_value(lexical),
     }),
     occurrence: json!({
       "effectOwner": owner.key,
-      "root": binding.logical_root(),
+      "root": primary.binding.logical_root(),
       "followMode": "follow-final",
       "finalObjectState": final_state,
       "parentIdentity": parent_identity,
-      "rootBindingId": binding.binding_id(),
+      "rootBindingId": primary.binding.binding_id(),
       "lexicalPath": platform_path_value(lexical),
     }),
     path_bindings,
@@ -1177,6 +1254,7 @@ fn verified_path_effect(
 #[cfg(not(unix))]
 fn verified_path_effect(
   _context: &OdenRev2RuntimeAuthorityContext,
+  _constrained_principals: &[crate::rev2::PrincipalRef],
   _owner: &crate::rev2::PrincipalRef,
   _capability: &str,
   _requested: &Path,
@@ -1370,9 +1448,13 @@ pub fn oden_capsec_rev2_permission_operation(
           OdenRev2PermissionError::DescriptorInvalid(error.to_string())
         })?;
       let canonical = canonical_system_information_kind(spelling)?;
-      evaluate_singleton_permission(context, branch, operation, true, |owner| {
-        Ok(system_information_effect(owner, &canonical))
-      })
+      evaluate_singleton_permission(
+        context,
+        branch,
+        operation,
+        true,
+        |_, owner| Ok(system_information_effect(owner, &canonical)),
+      )
     }
     "read" => {
       let parsed = permissions
@@ -1384,9 +1466,15 @@ pub fn oden_capsec_rev2_permission_operation(
           OdenRev2PermissionError::DescriptorInvalid(error.to_string())
         })?;
       let path = parsed.0.resolved_path().to_path_buf();
-      evaluate_singleton_permission(context, branch, operation, true, |owner| {
-        verified_path_effect(context, owner, "fs:read", &path)
-      })
+      evaluate_singleton_permission(
+        context,
+        branch,
+        operation,
+        true,
+        |principals, owner| {
+          verified_path_effect(context, principals, owner, "fs:read", &path)
+        },
+      )
     }
     "write" => {
       let parsed = permissions
@@ -1398,9 +1486,15 @@ pub fn oden_capsec_rev2_permission_operation(
           OdenRev2PermissionError::DescriptorInvalid(error.to_string())
         })?;
       let path = parsed.0.resolved_path().to_path_buf();
-      evaluate_singleton_permission(context, branch, operation, true, |owner| {
-        verified_path_effect(context, owner, "fs:write", &path)
-      })
+      evaluate_singleton_permission(
+        context,
+        branch,
+        operation,
+        true,
+        |principals, owner| {
+          verified_path_effect(context, principals, owner, "fs:write", &path)
+        },
+      )
     }
     "run" => {
       let command = descriptor.command.expect("generated scoped branch");
@@ -1429,7 +1523,7 @@ pub fn oden_capsec_rev2_permission_operation(
         branch,
         operation,
         false,
-        |owner| {
+        |_, owner| {
           verified_installed_effect(context, owner, "process:spawn", &path)
         },
       )
@@ -1447,7 +1541,7 @@ pub fn oden_capsec_rev2_permission_operation(
         branch,
         operation,
         false,
-        |owner| verified_installed_effect(context, owner, "ffi:load", &path),
+        |_, owner| verified_installed_effect(context, owner, "ffi:load", &path),
       )
     }
     _ => Err(OdenRev2PermissionError::DescriptorRefused(
@@ -1481,6 +1575,14 @@ mod tests {
       owner.clone(),
     )));
     (ActorGuard, owner)
+  }
+
+  fn install_test_actor_set(
+    principals: Vec<PrincipalRef>,
+    owner: PrincipalRef,
+  ) -> ActorGuard {
+    crate::oden_rev2_set_permission_actors_for_test(Some((principals, owner)));
+    ActorGuard
   }
 
   fn test_permissions() -> PermissionsContainer {
@@ -1670,6 +1772,142 @@ mod tests {
   }
 
   #[cfg(unix)]
+  fn overlapping_deputy_path_context(
+    shallow_root: &Path,
+    deep_root: &Path,
+    denied: &Path,
+    unrelated: &Path,
+    owner: &PrincipalRef,
+    deputy: &PrincipalRef,
+  ) -> OdenRev2RuntimeAuthorityContext {
+    let core = Rev2Core::embedded().unwrap();
+    let selector = |principal: &PrincipalRef,
+                    capability: &str,
+                    kind: &str,
+                    root: &str,
+                    path: &Path,
+                    polarity: SelectorPolarity| {
+      core
+        .normalize_selector(
+          &AuthoritySelectorInput {
+            identity: EngineIdentity::embedded(),
+            principal: Some(principal.clone()),
+            capability: capability.to_string(),
+            resource: json!({
+              "kind": kind,
+              "path": platform_path_value(path),
+              "root": root,
+            }),
+          },
+          polarity,
+        )
+        .unwrap()
+    };
+    let owner_floor = json!({
+      "sourceId": "floor:owner-deep",
+      "selector": selector(
+        owner,
+        "fs:read",
+        "path-tree",
+        "$PACKAGE",
+        Path::new("data"),
+        SelectorPolarity::Positive,
+      ),
+    });
+    let deputy_floor = json!({
+      "sourceId": "floor:deputy-exact",
+      "selector": selector(
+        deputy,
+        "fs:read",
+        "path-exact",
+        "$PACKAGE",
+        unrelated.strip_prefix(deep_root).unwrap(),
+        SelectorPolarity::Positive,
+      ),
+    });
+    let deputy_deny = json!({
+      "sourceId": "deny:deputy-shallow",
+      "selector": selector(
+        deputy,
+        "fs:read",
+        "path-exact",
+        "$PROJECT",
+        denied.strip_prefix(shallow_root).unwrap(),
+        SelectorPolarity::Negative,
+      ),
+    });
+    let principal_row =
+      |principal: &PrincipalRef, floor: Vec<Value>, denials: Vec<Value>| {
+        json!({
+          "principal": principal,
+          "binding": {
+            "resolverId": "fixture-lock-resolver/2",
+            "bindingDigest": crate::rev2_registry_generated::REV2_VOCAB_DIGEST,
+          },
+          "floor": floor,
+          "escalationCeiling": [],
+          "denials": denials,
+        })
+      };
+    let mut principals = vec![
+      principal_row(owner, vec![owner_floor], Vec::new()),
+      principal_row(deputy, vec![deputy_floor], vec![deputy_deny]),
+    ];
+    principals
+      .sort_by_key(|principal| crate::rev2::canonical_json(principal).unwrap());
+    let root_binding = |source_id: &str,
+                        logical_root: &str,
+                        principal: &PrincipalRef,
+                        binding_id: &str,
+                        canonical_root: &Path| {
+      json!({
+        "sourceId": source_id,
+        "logicalRoot": logical_root,
+        "principal": principal,
+        "rootBindingId": binding_id,
+        "canonicalPath": platform_path_value(canonical_root),
+        "objectIdentity": policy_fixtures::platform_identity(canonical_root),
+        "bindingProvenanceDigest": crate::rev2_registry_generated::REV2_REGISTRY_DIGEST,
+      })
+    };
+    let mut root_bindings = vec![
+      root_binding(
+        "floor:owner-deep",
+        "$PACKAGE",
+        owner,
+        "root-binding:owner-deep",
+        deep_root,
+      ),
+      root_binding(
+        "floor:deputy-exact",
+        "$PACKAGE",
+        deputy,
+        "root-binding:deputy-deep",
+        deep_root,
+      ),
+      root_binding(
+        "deny:deputy-shallow",
+        "$PROJECT",
+        deputy,
+        "root-binding:deputy-shallow",
+        shallow_root,
+      ),
+    ];
+    root_bindings
+      .sort_by_key(|binding| crate::rev2::canonical_json(binding).unwrap());
+    let mut snapshot = policy_fixtures::candidate_with_env_policy(
+      policy_fixtures::hermetic_target(),
+    );
+    snapshot["canonicalPolicy"]["principals"] = Value::Array(principals);
+    snapshot["rootBindings"] = Value::Array(root_bindings);
+    policy_fixtures::refresh_digests(&mut snapshot);
+    let mut loaded =
+      policy_fixtures::verify_armable_snapshot(snapshot, &[95_u8; 32]).unwrap();
+    loaded.install_immutable_executables(shallow_root).unwrap();
+    OdenRev2RuntimeAuthorityContext::install_for_test(loaded).unwrap()
+  }
+
+  #[cfg(unix)]
   fn executable_context(
     object: &Path,
     interpreter: &Path,
@@ -1816,8 +2054,14 @@ mod tests {
     owner: &PrincipalRef,
     path: &Path,
   ) {
-    let verified =
-      verified_path_effect(context, owner, "fs:read", path).unwrap();
+    let verified = verified_path_effect(
+      context,
+      std::slice::from_ref(owner),
+      owner,
+      "fs:read",
+      path,
+    )
+    .unwrap();
     let core = Rev2Core::embedded().unwrap();
     let positive = core
       .normalize_selector(
@@ -1958,10 +2202,22 @@ mod tests {
       PublicPermissionState::Granted,
     );
 
-    let alias_facts =
-      verified_path_effect(&context, &owner, "fs:read", &alias).unwrap();
-    let unrelated_facts =
-      verified_path_effect(&context, &owner, "fs:read", &unrelated).unwrap();
+    let alias_facts = verified_path_effect(
+      &context,
+      std::slice::from_ref(&owner),
+      &owner,
+      "fs:read",
+      &alias,
+    )
+    .unwrap();
+    let unrelated_facts = verified_path_effect(
+      &context,
+      std::slice::from_ref(&owner),
+      &owner,
+      "fs:read",
+      &unrelated,
+    )
+    .unwrap();
     fn denial_fact(effect: &VerifiedHostEffect) -> &PathBindingInput {
       effect
         .path_bindings
@@ -1989,6 +2245,96 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
+  fn deputy_denial_follows_a_hardlink_across_a_shallower_overlapping_root_without_widening_positives()
+   {
+    let (_initial_guard, owner) = install_test_actor();
+    let deputy = PrincipalRef {
+      kind: crate::rev2::PrincipalKind::Package,
+      key: "pkg:sha256-BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+    };
+    let shallow = temp_root("deputy-overlap");
+    let deep = shallow.join("deep");
+    std::fs::create_dir_all(deep.join("data")).unwrap();
+    let denied = shallow.join("denied.txt");
+    let alias = deep.join("data/denied-hardlink.txt");
+    let unrelated = deep.join("data/unrelated.txt");
+    let outside_deputy_floor = deep.join("data/owner-only.txt");
+    std::fs::write(&denied, b"deputy denied object").unwrap();
+    std::fs::hard_link(&denied, &alias).unwrap();
+    std::fs::write(&unrelated, b"both principals allow exactly this").unwrap();
+    std::fs::write(&outside_deputy_floor, b"owner floor only").unwrap();
+    let context = overlapping_deputy_path_context(
+      &shallow, &deep, &denied, &unrelated, &owner, &deputy,
+    );
+    let _actor = install_test_actor_set(
+      vec![owner.clone(), deputy.clone()],
+      owner.clone(),
+    );
+    let permissions = test_permissions();
+
+    assert_eq!(
+      oden_capsec_rev2_permission_operation(
+        &context,
+        &permissions,
+        OdenRev2PermissionOperation::Query,
+        &descriptor("read", Some(alias.to_str().unwrap()), None),
+      )
+      .unwrap(),
+      PublicPermissionState::Denied,
+    );
+    assert_eq!(
+      oden_capsec_rev2_permission_operation(
+        &context,
+        &permissions,
+        OdenRev2PermissionOperation::Query,
+        &descriptor("read", Some(unrelated.to_str().unwrap()), None),
+      )
+      .unwrap(),
+      PublicPermissionState::Granted,
+    );
+    assert_eq!(
+      oden_capsec_rev2_permission_operation(
+        &context,
+        &permissions,
+        OdenRev2PermissionOperation::Query,
+        &descriptor(
+          "read",
+          Some(outside_deputy_floor.to_str().unwrap()),
+          None,
+        ),
+      )
+      .unwrap(),
+      PublicPermissionState::Denied,
+    );
+
+    let facts = verified_path_effect(
+      &context,
+      &[owner.clone(), deputy.clone()],
+      &owner,
+      "fs:read",
+      &alias,
+    )
+    .unwrap();
+    let occurrence_root = facts
+      .session_path_binding
+      .as_ref()
+      .unwrap()
+      .root_binding_id
+      .as_str();
+    let deputy_denial = facts
+      .path_bindings
+      .iter()
+      .find(|binding| binding.source_id == "deny:deputy-shallow")
+      .unwrap();
+    assert_eq!(deputy_denial.root_binding_id, occurrence_root);
+    assert_eq!(deputy_denial.final_object_identities.len(), 1);
+
+    drop(context);
+    std::fs::remove_dir_all(shallow).unwrap();
+  }
+
+  #[cfg(unix)]
+  #[test]
   fn equivalent_floor_and_ceiling_roots_produce_distinct_source_facts_without_ambiguity()
    {
     let (_actor, owner) = install_test_actor();
@@ -1997,8 +2343,14 @@ mod tests {
     let file = root.join("data/file.txt");
     std::fs::write(&file, b"same object").unwrap();
     let context = path_context_with_deny(&root, &owner, false, true, None);
-    let verified =
-      verified_path_effect(&context, &owner, "fs:read", &file).unwrap();
+    let verified = verified_path_effect(
+      &context,
+      std::slice::from_ref(&owner),
+      &owner,
+      "fs:read",
+      &file,
+    )
+    .unwrap();
     let sources = verified
       .path_bindings
       .iter()
@@ -2059,8 +2411,14 @@ mod tests {
       PublicPermissionState::Prompt,
     );
 
-    let verified =
-      verified_path_effect(&context, &owner, "fs:read", &file).unwrap();
+    let verified = verified_path_effect(
+      &context,
+      std::slice::from_ref(&owner),
+      &owner,
+      "fs:read",
+      &file,
+    )
+    .unwrap();
     let core = Rev2Core::embedded().unwrap();
     let positive = core
       .normalize_selector(
@@ -2182,8 +2540,14 @@ mod tests {
     let branch = select_branch(&file_descriptor).unwrap();
     let slot = &branch.slot_order[0];
     let matches_session_revocation = |path: &Path| {
-      let verified =
-        verified_path_effect(&context, &owner, "fs:read", path).unwrap();
+      let verified = verified_path_effect(
+        &context,
+        std::slice::from_ref(&owner),
+        &owner,
+        "fs:read",
+        path,
+      )
+      .unwrap();
       let policy = context
         .decision_policy_for_operation(
           &view,

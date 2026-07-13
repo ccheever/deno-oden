@@ -48,6 +48,9 @@ const CLASSIFIER_INPUT_DOMAIN: &str = "oden:capsec:classifier-input:2";
 const MAX_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BINDING_ROWS: usize = 16_384;
 
+pub(crate) const C04_SCRIPT_LAUNCH_UNSUPPORTED: &str =
+  "OD-CAP-REV2-RUNTIME-CONTEXT-SCRIPT-LAUNCH-UNSUPPORTED";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OdenRev2CompiledBuildIdentity {
   pub target: &'static str,
@@ -239,6 +242,67 @@ impl OdenRev2LoadedPolicyContext {
     self
       .installed_executables
       .install_once(&self.retained_objects, control_root)
+  }
+
+  /// Refuse a C03-authenticated execution shape that the initial C04 run
+  /// adapter cannot represent without inventing a logical interpreter path.
+  ///
+  /// C03 deliberately authenticates and retains both images for a script.
+  /// The initial C04 permission projection, however, has only the logical
+  /// entry path needed by the generated `launchSet`; it has no authenticated
+  /// logical interpreter path. Distinct object/interpreter identities are
+  /// therefore refused before the process-wide runtime context is published.
+  pub(crate) fn validate_c04_execution_support(&self) -> Result<(), String> {
+    if self.state != OdenRev2LoadState::Armable {
+      return Ok(());
+    }
+    let principals = self
+      .snapshot
+      .get("canonicalPolicy")
+      .and_then(Value::as_object)
+      .and_then(|policy| policy.get("principals"))
+      .and_then(Value::as_array)
+      .ok_or_else(|| {
+        "OD-CAP-REV2-RUNTIME-CONTEXT-EXECUTION-POLICY-SHAPE".to_string()
+      })?;
+    for principal in principals {
+      let floor = principal
+        .get("floor")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+          "OD-CAP-REV2-RUNTIME-CONTEXT-EXECUTION-POLICY-SHAPE".to_string()
+        })?;
+      for row in floor {
+        let Some(selector) = row.get("selector") else {
+          return Err(
+            "OD-CAP-REV2-RUNTIME-CONTEXT-EXECUTION-POLICY-SHAPE".to_string(),
+          );
+        };
+        if selector.get("capability").and_then(Value::as_str)
+          != Some("process:spawn")
+        {
+          continue;
+        }
+        let resource = selector
+          .get("resource")
+          .and_then(Value::as_object)
+          .ok_or_else(|| {
+            "OD-CAP-REV2-RUNTIME-CONTEXT-EXECUTION-POLICY-SHAPE".to_string()
+          })?;
+        let object_identity =
+          resource.get("objectIdentity").ok_or_else(|| {
+            "OD-CAP-REV2-RUNTIME-CONTEXT-EXECUTION-POLICY-SHAPE".to_string()
+          })?;
+        let interpreter_identity =
+          resource.get("interpreterIdentity").ok_or_else(|| {
+            "OD-CAP-REV2-RUNTIME-CONTEXT-EXECUTION-POLICY-SHAPE".to_string()
+          })?;
+        if object_identity != interpreter_identity {
+          return Err(C04_SCRIPT_LAUNCH_UNSUPPORTED.to_string());
+        }
+      }
+    }
+    Ok(())
   }
 
   pub(crate) fn into_runtime_parts(

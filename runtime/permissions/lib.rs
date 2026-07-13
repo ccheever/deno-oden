@@ -11066,6 +11066,20 @@ mod tests {
   }
 
   #[test]
+  fn rev2_script_install_refusal_cannot_emit_success_evidence() {
+    let result: Result<Arc<OdenRev2RuntimeAuthorityContext>, String> =
+      Err(oden_rev2_policy::C04_SCRIPT_LAUNCH_UNSUPPORTED.to_string());
+    let evidence = oden_rev2_runtime_install_evidence(&result);
+    assert_eq!(evidence["installed"], false);
+    assert_eq!(evidence["armed"], false);
+    assert!(evidence["runtimeIdentity"].is_null());
+    assert_eq!(
+      evidence["blockers"],
+      json!([oden_rev2_policy::C04_SCRIPT_LAUNCH_UNSUPPORTED])
+    );
+  }
+
+  #[test]
   fn rev2_runtime_install_emitter_matches_generated_closed_contract() {
     let result: Result<Arc<OdenRev2RuntimeAuthorityContext>, String> =
       Err("OD-CAP-REV2-RUNTIME-CONTEXT-IDENTITY-MISMATCH".to_string());

@@ -512,6 +512,8 @@ impl OdenRev2RuntimeAuthorityContext {
   pub(crate) fn install(
     loaded: OdenRev2LoadedPolicyContext,
   ) -> Result<Self, String> {
+    // @ref LLP 0019#c04-immutable-execution-installation-and-entry [constrained-by] -- The initial C04 projection has no authenticated logical interpreter path, so a script-bearing C03 context refuses before the sealed process-wide publication can report success.
+    loaded.validate_c04_execution_support()?;
     Self::install_with(&RUNTIME_AUTHORITY_INSTALLER, loaded)
   }
 
@@ -519,6 +521,14 @@ impl OdenRev2RuntimeAuthorityContext {
   pub(crate) fn install_for_test(
     loaded: OdenRev2LoadedPolicyContext,
   ) -> Result<Self, String> {
+    Self::install_with(&RuntimeAuthorityInstaller::new(), loaded)
+  }
+
+  #[cfg(test)]
+  pub(crate) fn install_candidate_for_test(
+    loaded: OdenRev2LoadedPolicyContext,
+  ) -> Result<Self, String> {
+    loaded.validate_c04_execution_support()?;
     Self::install_with(&RuntimeAuthorityInstaller::new(), loaded)
   }
 
@@ -945,15 +955,8 @@ fn validate_operation_facts(
       .roots
       .iter()
       .find(|root| root.binding_id == binding.root_binding_id);
-    let equivalent =
-      source_root
-        .zip(occurrence_root)
-        .is_some_and(|(source, occurrence)| {
-          source.logical_root == occurrence.logical_root
-            && source.canonical_path == occurrence.canonical_path
-            && source.object_identity == occurrence.object_identity
-        });
-    if !equivalent
+    if source_root.is_none()
+      || occurrence_root.is_none()
       || !path_keys
         .insert((binding.source_id.clone(), binding.root_binding_id.clone()))
     {
@@ -2310,6 +2313,69 @@ mod tests {
         .all(|binding| binding.source_id != "session:path")
     );
     drop(context);
+    std::fs::remove_dir_all(raw).unwrap();
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn production_candidate_install_accepts_native_and_refuses_script_contexts() {
+    let unique = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    let raw = std::env::temp_dir().join(format!(
+      "oden-rev2-context-c04-launch-{}-{unique}",
+      std::process::id()
+    ));
+    std::fs::create_dir(&raw).unwrap();
+    std::fs::set_permissions(&raw, std::fs::Permissions::from_mode(0o700))
+      .unwrap();
+    let raw = std::fs::canonicalize(raw).unwrap();
+
+    let native = raw.join("native");
+    std::fs::write(&native, b"native image\n").unwrap();
+    let native = std::fs::canonicalize(native).unwrap();
+    let native_snapshot = policy_fixtures::candidate_with_executable_policy(
+      policy_fixtures::hermetic_target(),
+      &native,
+      &native,
+    );
+    let mut native_loaded =
+      policy_fixtures::verify_armable_snapshot(native_snapshot, &[72_u8; 32])
+        .unwrap();
+    native_loaded.install_immutable_executables(&raw).unwrap();
+    let native_context =
+      OdenRev2RuntimeAuthorityContext::install_candidate_for_test(
+        native_loaded,
+      )
+      .unwrap();
+    assert_eq!(native_context.bindings().executables().len(), 2);
+    drop(native_context);
+
+    let script = raw.join("worker.js");
+    let interpreter = raw.join("interpreter");
+    std::fs::write(&script, b"#!interpreter\nconsole.log('script');\n")
+      .unwrap();
+    std::fs::write(&interpreter, b"interpreter image\n").unwrap();
+    let script = std::fs::canonicalize(script).unwrap();
+    let interpreter = std::fs::canonicalize(interpreter).unwrap();
+    let script_snapshot = policy_fixtures::candidate_with_executable_policy(
+      policy_fixtures::hermetic_target(),
+      &script,
+      &interpreter,
+    );
+    let mut script_loaded =
+      policy_fixtures::verify_armable_snapshot(script_snapshot, &[73_u8; 32])
+        .unwrap();
+    script_loaded.install_immutable_executables(&raw).unwrap();
+    assert!(matches!(
+      OdenRev2RuntimeAuthorityContext::install_candidate_for_test(
+        script_loaded,
+      ),
+      Err(reason)
+        if reason == crate::oden_rev2_policy::C04_SCRIPT_LAUNCH_UNSUPPORTED
+    ));
+
     std::fs::remove_dir_all(raw).unwrap();
   }
 

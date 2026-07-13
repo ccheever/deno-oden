@@ -1051,10 +1051,10 @@ pub struct Rev2TargetStatus {
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
 pub const REV2_VOCAB_DIGEST: &str = "sha256-nt8rVWkfwjJsvxyJfASUKtPy_-zmWHjT55lZO6nkGTE";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-ywFW8xlqhvPR6TVhzaV9Mice4qzO-XpVbE-4kVy9rkE";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-nJ-ZWUNKp5u8sEPlRmbgGZRhzJQw5jJ3DtC0-shBVME";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
-pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-LY6v594AXBBCBR8OWV4bSbDrcqle2XFX3ZRPLUB_dyU";
+pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-SFvyfj3PfQcUC0REjPviGqms_7DEwFcghE7kL9WYSyo";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_JSON: &str = r###"{
   "branchBatchVectors": [
     {
@@ -1464,7 +1464,7 @@ pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_JSON: &str = r###"{
         "name": "run"
       },
       "expected": {
-        "batchDigest": "sha256-hzemyh1gMOv8iC-h_85qFyLcaiGFw_bUqcdAppI-leM",
+        "batchDigest": "sha256-8KfHsv-QoG_NqEQwuymwRBqcDytjzgOQfjRNOFL8rjE",
         "batchWithoutDigest": {
           "atomicity": "conjunctive",
           "batchSequence": "11",
@@ -1485,7 +1485,7 @@ pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_JSON: &str = r###"{
                 "effectOwner": "root:sha256-fixture-root",
                 "interpreterIdentity": {
                   "kind": "verified-content",
-                  "value": "sha256-c2Z2QtlwiDP0JwXfHbRelAbiHJeVm1jcDrMAHAXCbp8"
+                  "value": "sha256-AHjNYUOq8BBvfagqNCvIA1Ok7T52ve-GbHwY8ThsIwI"
                 },
                 "launchSet": [
                   {
@@ -1512,7 +1512,7 @@ pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_JSON: &str = r###"{
                 "resource": {
                   "interpreterIdentity": {
                     "kind": "verified-content",
-                    "value": "sha256-c2Z2QtlwiDP0JwXfHbRelAbiHJeVm1jcDrMAHAXCbp8"
+                    "value": "sha256-AHjNYUOq8BBvfagqNCvIA1Ok7T52ve-GbHwY8ThsIwI"
                   },
                   "objectIdentity": {
                     "kind": "verified-content",
@@ -1848,6 +1848,26 @@ pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_JSON: &str = r###"{
         "operation": "request",
         "schema": "oden/capsec-permission-external-response/2"
       }
+    }
+  ],
+  "nativeVerifierVectors": [
+    {
+      "capability": "process:spawn",
+      "expectedDisposition": "supported-native",
+      "id": "native-run-equal-identity",
+      "interpreterContentDigest": "sha256-AHjNYUOq8BBvfagqNCvIA1Ok7T52ve-GbHwY8ThsIwI",
+      "objectContentDigest": "sha256-AHjNYUOq8BBvfagqNCvIA1Ok7T52ve-GbHwY8ThsIwI",
+      "refusalReasonCode": null,
+      "shape": "native"
+    },
+    {
+      "capability": "process:spawn",
+      "expectedDisposition": "refused-unsupported-script",
+      "id": "script-run-distinct-identity-refusal",
+      "interpreterContentDigest": "sha256-c2Z2QtlwiDP0JwXfHbRelAbiHJeVm1jcDrMAHAXCbp8",
+      "objectContentDigest": "sha256-AHjNYUOq8BBvfagqNCvIA1Ok7T52ve-GbHwY8ThsIwI",
+      "refusalReasonCode": "process:spawn-script-logical-interpreter-path",
+      "shape": "script"
     }
   ],
   "profile": "oden/capsec/2",
