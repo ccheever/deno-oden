@@ -450,7 +450,7 @@ struct OdenRev2FsRootState {
   source_id: String,
   logical_root: String,
   binding_id: String,
-  canonical_path: PathBuf,
+  canonical_path: Option<PathBuf>,
   identity: OdenRev2FsPlatformIdentity,
   adapter: OdenRev2FsCanonicalizerAdapter,
   retained: Arc<File>,
@@ -505,6 +505,45 @@ impl OdenRev2FsAuthenticatedRoot {
     expected_identity: &str,
     retained: File,
   ) -> Result<Self, OdenRev2FsError> {
+    Self::authenticate_parts_with_path(
+      source_id,
+      logical_root,
+      binding_id,
+      Some(canonical_path),
+      expected_identity,
+      retained,
+    )
+  }
+
+  /// Authenticate a candidate-only root directly from its retained
+  /// descriptor. It carries no ambient pathname and therefore cannot claim
+  /// named-root replacement coverage; those cases require an anchor-relative
+  /// reopener before they can become executable.
+  pub(crate) fn authenticate_descriptor_parts(
+    source_id: String,
+    logical_root: String,
+    binding_id: String,
+    expected_identity: &str,
+    retained: File,
+  ) -> Result<Self, OdenRev2FsError> {
+    Self::authenticate_parts_with_path(
+      source_id,
+      logical_root,
+      binding_id,
+      None,
+      expected_identity,
+      retained,
+    )
+  }
+
+  fn authenticate_parts_with_path(
+    source_id: String,
+    logical_root: String,
+    binding_id: String,
+    canonical_path: Option<PathBuf>,
+    expected_identity: &str,
+    retained: File,
+  ) -> Result<Self, OdenRev2FsError> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
       let _ = (
@@ -525,7 +564,10 @@ impl OdenRev2FsAuthenticatedRoot {
       {
         return Err(OdenRev2FsError::InvalidBinding("empty root identity"));
       }
-      if !canonical_path.is_absolute() {
+      if canonical_path
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+      {
         return Err(OdenRev2FsError::InvalidBinding(
           "root path must be absolute",
         ));
@@ -537,8 +579,13 @@ impl OdenRev2FsAuthenticatedRoot {
       {
         return Err(OdenRev2FsError::InvalidBinding("retained root identity"));
       }
-      let named = open_absolute_non_consuming(&canonical_path, true)
-        .map_err(|error| OdenRev2FsError::io("open named root", error))?;
+      let named = match canonical_path.as_ref() {
+        Some(path) => open_absolute_non_consuming(path, true)
+          .map_err(|error| OdenRev2FsError::io("open named root", error))?,
+        None => retained.try_clone().map_err(|error| {
+          OdenRev2FsError::io("clone descriptor root", error)
+        })?,
+      };
       let named_metadata = metadata_from_file(&named, "stat named root")?;
       if named_metadata.kind != OdenRev2FsObjectKind::Directory
         || named_metadata.identity != retained_metadata.identity
@@ -650,17 +697,22 @@ fn revalidate_root(state: &OdenRev2FsRootState) -> Result<(), OdenRev2FsError> {
   {
     let retained = metadata_from_file(&state.retained, "stat retained root")?;
     let named_retained = metadata_from_file(&state.named, "stat named root")?;
-    let named = open_absolute_non_consuming(&state.canonical_path, true)
-      .map_err(|_| OdenRev2FsError::RootReplacement)?;
-    let named = metadata_from_file(&named, "stat reopened root")?;
     if retained.identity != state.identity
       || named_retained.identity != state.identity
-      || named.identity != state.identity
       || retained.kind != OdenRev2FsObjectKind::Directory
       || named_retained.kind != OdenRev2FsObjectKind::Directory
-      || named.kind != OdenRev2FsObjectKind::Directory
     {
       return Err(OdenRev2FsError::RootReplacement);
+    }
+    if let Some(canonical_path) = state.canonical_path.as_ref() {
+      let named = open_absolute_non_consuming(canonical_path, true)
+        .map_err(|_| OdenRev2FsError::RootReplacement)?;
+      let named = metadata_from_file(&named, "stat reopened root")?;
+      if named.identity != state.identity
+        || named.kind != OdenRev2FsObjectKind::Directory
+      {
+        return Err(OdenRev2FsError::RootReplacement);
+      }
     }
     Ok(())
   }
@@ -1082,7 +1134,7 @@ impl OdenRev2FsPendingSymlink {
     self.validate_authorization(&authorization)?;
     self.revalidate_link_and_root()?;
     let normalized_target = normalize_symlink_target(
-      &self.continuation.root.canonical_path,
+      self.continuation.root.canonical_path.as_deref(),
       &self.continuation.resolved,
       &self.target,
     )?;
@@ -2219,15 +2271,21 @@ fn validate_actor_source_evidence(
       evidence.checked.lexical_fact.relative_path() == selector_relative
     }
     OdenRev2FsActorSourceClass::Floor | OdenRev2FsActorSourceClass::Ceiling => {
-      evidence
-        .checked
-        .root
-        .canonical_path
-        .join(evidence.checked.lexical_fact.relative_path())
-        == target
-          .root
-          .canonical_path
-          .join(target.lexical_fact.relative_path())
+      match (
+        evidence.checked.root.canonical_path.as_ref(),
+        target.root.canonical_path.as_ref(),
+      ) {
+        (Some(source), Some(target_root)) => {
+          source.join(evidence.checked.lexical_fact.relative_path())
+            == target_root.join(target.lexical_fact.relative_path())
+        }
+        _ => {
+          evidence.checked.lexical_fact.source_root
+            == target.lexical_fact.source_root
+            && evidence.checked.lexical_fact.relative_path()
+              == target.lexical_fact.relative_path()
+        }
+      }
     }
   };
   if valid_path {
@@ -2967,11 +3025,12 @@ fn components_path(components: &[OsString]) -> PathBuf {
 }
 
 fn normalize_symlink_target(
-  canonical_root: &Path,
+  canonical_root: Option<&Path>,
   resolved_parent: &[OsString],
   target: &Path,
 ) -> Result<Vec<OsString>, OdenRev2FsError> {
   let (mut result, target) = if target.is_absolute() {
+    let canonical_root = canonical_root.ok_or(OdenRev2FsError::RootEscape)?;
     let relative = target
       .strip_prefix(canonical_root)
       .map_err(|_| OdenRev2FsError::RootEscape)?;
@@ -3333,6 +3392,28 @@ mod tests {
     .unwrap()
   }
 
+  fn test_descriptor_root(
+    path: &Path,
+    source_id: &str,
+    logical_root: &str,
+    binding_id: &str,
+  ) -> OdenRev2FsAuthenticatedRoot {
+    let retained = open_absolute_non_consuming(path, true).unwrap();
+    let identity =
+      metadata_from_file(&retained, "test descriptor root metadata")
+        .unwrap()
+        .identity
+        .canonical_value();
+    OdenRev2FsAuthenticatedRoot::authenticate_descriptor_parts(
+      source_id.to_string(),
+      logical_root.to_string(),
+      binding_id.to_string(),
+      &identity,
+      retained,
+    )
+    .unwrap()
+  }
+
   fn test_session(label: &str) -> OdenRev2FsOperationSession {
     test_session_parts(format!("actor:{label}"), format!("generation:{label}"))
   }
@@ -3488,8 +3569,18 @@ mod tests {
     {
       return Err(OdenRev2FsError::RootTransitionMismatch);
     }
+    let source_path = source
+      .state
+      .canonical_path
+      .as_deref()
+      .ok_or(OdenRev2FsError::RootTransitionMismatch)?;
+    let destination_path = destination
+      .state
+      .canonical_path
+      .as_deref()
+      .ok_or(OdenRev2FsError::RootTransitionMismatch)?;
     if normalize_symlink_target(
-      &source.state.canonical_path,
+      Some(source_path),
       &challenge.resolved_parent,
       &challenge.opaque_target,
     )
@@ -3498,13 +3589,14 @@ mod tests {
       return Err(OdenRev2FsError::RootTransitionMismatch);
     }
     let absolute_target = lexical_absolute_symlink_target(
-      &source.state.canonical_path,
+      source_path,
       &challenge.resolved_parent,
       &challenge.opaque_target,
     )?;
-    let destination_relative = absolute_target
-      .strip_prefix(&destination.state.canonical_path)
-      .map_err(|_| OdenRev2FsError::RootTransitionMismatch)?;
+    let destination_relative =
+      absolute_target
+        .strip_prefix(destination_path)
+        .map_err(|_| OdenRev2FsError::RootTransitionMismatch)?;
     let target_components =
       checked_relative_components(destination_relative)
         .map_err(|_| OdenRev2FsError::RootTransitionMismatch)?;
@@ -4361,6 +4453,37 @@ mod tests {
     );
     let observation = checked.consume_for_metadata(&session).unwrap();
     assert_eq!(observation.kind(), OdenRev2FsObjectKind::Symlink);
+  }
+
+  #[test]
+  fn descriptor_root_revalidates_without_reopening_an_ambient_name() {
+    let parent = TempRoot::new("descriptor-root");
+    let path = parent.0.join("root");
+    let moved = parent.0.join("moved");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("entry"), b"retained").unwrap();
+    let authenticated = test_descriptor_root(
+      &path,
+      "candidate:path-read",
+      "$PROJECT",
+      "binding:candidate",
+    );
+
+    std::fs::rename(&path, &moved).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    authenticated.revalidate().unwrap();
+
+    let session = test_session("descriptor-root");
+    let checked = checked_without_hops_for_session(
+      &authenticated,
+      &session,
+      Path::new("entry"),
+      OdenRev2FsFollowMode::NoFollowFinal,
+    );
+    assert_eq!(
+      checked.operation_support(OdenRev2FsOperation::ObserveMetadata),
+      OdenRev2FsOperationSupport::RetainedObjectObservation
+    );
   }
 
   #[test]
