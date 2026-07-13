@@ -392,6 +392,414 @@ pub enum Rev2AuditDecision {
   Deny,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateRequestKind {
+  #[serde(rename = "lstat-sync")]
+  LstatSync,
+  #[serde(rename = "mkdir-sync")]
+  MkdirSync,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateLstatEdgeId {
+  #[serde(rename = "native-op:ext/fs/ops.rs#op_fs_lstat_sync")]
+  NativeOpExtFsOpsRsOpFsLstatSync,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateMkdirEdgeId {
+  #[serde(rename = "native-op:ext/fs/ops.rs#op_fs_mkdir_sync")]
+  NativeOpExtFsOpsRsOpFsMkdirSync,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateLstatResultModelId {
+  #[serde(rename = "filesystem-result.lstat-no-follow/2")]
+  FilesystemResultLstatNoFollow2,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateMkdirResultModelId {
+  #[serde(rename = "filesystem-result.mkdir-no-replace/2")]
+  FilesystemResultMkdirNoReplace2,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateFollowMode {
+  #[serde(rename = "no-follow-final")]
+  NoFollowFinal,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateSlotRole {
+  #[serde(rename = "target-list-observation")]
+  TargetListObservation,
+  #[serde(rename = "target-write-intent")]
+  TargetWriteIntent,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateTargetState {
+  #[serde(rename = "existing")]
+  Existing,
+  #[serde(rename = "link-entry")]
+  LinkEntry,
+  #[serde(rename = "missing")]
+  Missing,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateFinalObjectState {
+  #[serde(rename = "existing")]
+  Existing,
+  #[serde(rename = "link-entry")]
+  LinkEntry,
+  #[serde(rename = "missing")]
+  Missing,
+  #[serde(rename = "proposed")]
+  Proposed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateInitialObjectKind {
+  #[serde(rename = "device")]
+  Device,
+  #[serde(rename = "directory")]
+  Directory,
+  #[serde(rename = "fifo")]
+  Fifo,
+  #[serde(rename = "hardlink")]
+  Hardlink,
+  #[serde(rename = "missing")]
+  Missing,
+  #[serde(rename = "regular-file")]
+  RegularFile,
+  #[serde(rename = "socket")]
+  Socket,
+  #[serde(rename = "symlink")]
+  Symlink,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateResultModelId {
+  #[serde(rename = "filesystem-result.lstat-no-follow/2")]
+  FilesystemResultLstatNoFollow2,
+  #[serde(rename = "filesystem-result.mkdir-no-replace/2")]
+  FilesystemResultMkdirNoReplace2,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateNativeResultClass {
+  #[serde(rename = "lstat-complete")]
+  LstatComplete,
+  #[serde(rename = "lstat-not-found")]
+  LstatNotFound,
+  #[serde(rename = "mkdir-already-exists")]
+  MkdirAlreadyExists,
+  #[serde(rename = "mkdir-complete")]
+  MkdirComplete,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateMetadataDigestAlgorithm {
+  #[serde(rename = "hjcs-sha256-base64url")]
+  HjcsSha256Base64url,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateMetadataDigestSource {
+  #[serde(rename = "initial-target-metadata")]
+  InitialTargetMetadata,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateMetadataDigestDomain {
+  #[serde(rename = "oden:capsec:filesystem-lstat-metadata:2")]
+  OdenCapsecFilesystemLstatMetadata2,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateMetadataDigestPreimage {
+  #[serde(rename = "exact-initial-filesystem-metadata-projection-jcs")]
+  ExactInitialFilesystemMetadataProjectionJcs,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateIdentitySource {
+  #[serde(rename = "initial-target-identity")]
+  InitialTargetIdentity,
+  #[serde(rename = "none")]
+  None,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateTargetRefInput {
+  #[serde(rename = "operation-request.target-ref")]
+  OperationRequestTargetRef,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateTargetStateInput {
+  #[serde(rename = "initial-sandbox.object-state-by-target-ref")]
+  InitialSandboxObjectStateByTargetRef,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateParentIdentityInput {
+  #[serde(rename = "initial-sandbox.parent-identity-by-target-ref")]
+  InitialSandboxParentIdentityByTargetRef,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateSlotActorsInput {
+  #[serde(rename = "execution-plan.actor-by-slot")]
+  ExecutionPlanActorBySlot,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateRequestedModeInput {
+  #[serde(rename = "operation-request.requested-mode")]
+  OperationRequestRequestedMode,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateCapturedUmaskInput {
+  #[serde(rename = "parent-capture.captured-umask")]
+  ParentCaptureCapturedUmask,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateRecursivePolicy {
+  #[serde(rename = "require-false")]
+  RequireFalse,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateModeAlgorithm {
+  #[serde(rename = "directory-type-or-masked-request-minus-umask")]
+  DirectoryTypeOrMaskedRequestMinusUmask,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateSideEffectKind {
+  #[serde(rename = "create")]
+  Create,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateSideEffectObjectIdSource {
+  #[serde(rename = "target-ref-object-id")]
+  TargetRefObjectId,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateSideEffectDigestSource {
+  #[serde(rename = "none")]
+  None,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateSideEffectFinalKind {
+  #[serde(rename = "directory")]
+  Directory,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateSideEffectModeSource {
+  #[serde(rename = "effective-directory-mode")]
+  EffectiveDirectoryMode,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateDelivery {
+  #[serde(rename = "delivered")]
+  Delivered,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateCleanup {
+  #[serde(rename = "complete")]
+  Complete,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateOperationEdgeId {
+  #[serde(rename = "native-op:ext/fs/ops.rs#op_fs_lstat_sync")]
+  NativeOpExtFsOpsRsOpFsLstatSync,
+  #[serde(rename = "native-op:ext/fs/ops.rs#op_fs_mkdir_sync")]
+  NativeOpExtFsOpsRsOpFsMkdirSync,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateCaseKind {
+  #[serde(rename = "authorable-cross-action-denial")]
+  AuthorableCrossActionDenial,
+  #[serde(rename = "authorable-missing-principal-denial")]
+  AuthorableMissingPrincipalDenial,
+  #[serde(rename = "authorable-negative")]
+  AuthorableNegative,
+  #[serde(rename = "authorable-no-user-denial")]
+  AuthorableNoUserDenial,
+  #[serde(rename = "authorable-positive")]
+  AuthorablePositive,
+  #[serde(rename = "authorable-quarantine-denial")]
+  AuthorableQuarantineDenial,
+  #[serde(rename = "authorable-wrong-principal-denial")]
+  AuthorableWrongPrincipalDenial,
+  #[serde(rename = "lstat-existing")]
+  LstatExisting,
+  #[serde(rename = "lstat-final-missing")]
+  LstatFinalMissing,
+  #[serde(rename = "lstat-link-entry")]
+  LstatLinkEntry,
+  #[serde(rename = "malformed-resource-refusal")]
+  MalformedResourceRefusal,
+  #[serde(rename = "mkdir-existing-conflict")]
+  MkdirExistingConflict,
+  #[serde(rename = "mkdir-link-conflict")]
+  MkdirLinkConflict,
+  #[serde(rename = "mkdir-missing-create")]
+  MkdirMissingCreate,
+  #[serde(rename = "multi-effect-all-authorized")]
+  MultiEffectAllAuthorized,
+  #[serde(rename = "multi-effect-n-minus-one-denied")]
+  MultiEffectNMinusOneDenied,
+  #[serde(rename = "multi-effect-no-partial-commit")]
+  MultiEffectNoPartialCommit,
+  #[serde(rename = "staged-barrier:authorization")]
+  StagedBarrierAuthorization,
+  #[serde(rename = "staged-barrier:cancellation")]
+  StagedBarrierCancellation,
+  #[serde(rename = "staged-barrier:cleanup")]
+  StagedBarrierCleanup,
+  #[serde(rename = "staged-barrier:revocation")]
+  StagedBarrierRevocation,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateExecutionMode {
+  #[serde(rename = "audit")]
+  Audit,
+  #[serde(rename = "enforce")]
+  Enforce,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidatePrincipalPlan {
+  #[serde(rename = "actor")]
+  Actor,
+  #[serde(rename = "actor-and-other")]
+  ActorAndOther,
+  #[serde(rename = "actor-unconstrained")]
+  ActorUnconstrained,
+  #[serde(rename = "explicit-no-user")]
+  ExplicitNoUser,
+  #[serde(rename = "quarantine")]
+  Quarantine,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateAuthorityPlan {
+  #[serde(rename = "cross-action-first")]
+  CrossActionFirst,
+  #[serde(rename = "no-user-static-all")]
+  NoUserStaticAll,
+  #[serde(rename = "none")]
+  None,
+  #[serde(rename = "principal-denial-last-over-static-all")]
+  PrincipalDenialLastOverStaticAll,
+  #[serde(rename = "principal-denial-over-static-all")]
+  PrincipalDenialOverStaticAll,
+  #[serde(rename = "process-denial-over-static-all")]
+  ProcessDenialOverStaticAll,
+  #[serde(rename = "session-all-dormant-revocation-all")]
+  SessionAllDormantRevocationAll,
+  #[serde(rename = "session-all-dormant-revocation-last")]
+  SessionAllDormantRevocationLast,
+  #[serde(rename = "static-all")]
+  StaticAll,
+  #[serde(rename = "wrong-principal-static-all")]
+  WrongPrincipalStaticAll,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateInputMutation {
+  #[serde(rename = "none")]
+  None,
+  #[serde(rename = "target-path-dot-dot")]
+  TargetPathDotDot,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateFaultPlan {
+  #[serde(rename = "cancel-safe-boundary")]
+  CancelSafeBoundary,
+  #[serde(rename = "none")]
+  None,
+  #[serde(rename = "omit-required-stage")]
+  OmitRequiredStage,
+  #[serde(rename = "revoke-all-after-authorization")]
+  RevokeAllAfterAuthorization,
+  #[serde(rename = "revoke-last-after-authorization")]
+  RevokeLastAfterAuthorization,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateCoreExpectation {
+  #[serde(rename = "cross-action-first-missing")]
+  CrossActionFirstMissing,
+  #[serde(rename = "missing-authority-all")]
+  MissingAuthorityAll,
+  #[serde(rename = "not-reached")]
+  NotReached,
+  #[serde(rename = "principal-deny-all")]
+  PrincipalDenyAll,
+  #[serde(rename = "principal-deny-last")]
+  PrincipalDenyLast,
+  #[serde(rename = "process-deny-all")]
+  ProcessDenyAll,
+  #[serde(rename = "quarantine-deny-all")]
+  QuarantineDenyAll,
+  #[serde(rename = "session-revoked-all")]
+  SessionRevokedAll,
+  #[serde(rename = "session-revoked-last")]
+  SessionRevokedLast,
+  #[serde(rename = "static-allow-all")]
+  StaticAllowAll,
+  #[serde(rename = "unattributed-deny-all")]
+  UnattributedDenyAll,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateCommittedSlots {
+  #[serde(rename = "all")]
+  All,
+  #[serde(rename = "none")]
+  None,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateOutcomeDisposition {
+  #[serde(rename = "actor-sequence-refused")]
+  ActorSequenceRefused,
+  #[serde(rename = "authorized-operation")]
+  AuthorizedOperation,
+  #[serde(rename = "cancellation-refused")]
+  CancellationRefused,
+  #[serde(rename = "permission-denied")]
+  PermissionDenied,
+  #[serde(rename = "schema-refused")]
+  SchemaRefused,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rev2FilesystemCandidateLifecycleRequirement {
+  #[serde(rename = "balanced-operation")]
+  BalancedOperation,
+  #[serde(rename = "none-before-core")]
+  NoneBeforeCore,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Rev2JsonValue { Null, Bool(bool), Number(f64), String(String), Array(Vec<Rev2JsonValue>), Object(BTreeMap<String, Rev2JsonValue>) }
@@ -469,9 +877,58 @@ pub struct Rev2RuntimeDefinition { pub id: Rev2CapabilityId, pub family: String,
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rev2SemanticEdge { pub id: String, pub kind: Rev2EdgeKind, pub surface_kind: String, pub semantics: Rev2JsonValue }
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateCommonInputBindings { pub target_ref: Rev2FilesystemCandidateTargetRefInput, pub target_state: Rev2FilesystemCandidateTargetStateInput, pub parent_identity: Rev2FilesystemCandidateParentIdentityInput, pub slot_actors: Rev2FilesystemCandidateSlotActorsInput }
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateMkdirInputBindings { pub target_ref: Rev2FilesystemCandidateTargetRefInput, pub target_state: Rev2FilesystemCandidateTargetStateInput, pub parent_identity: Rev2FilesystemCandidateParentIdentityInput, pub slot_actors: Rev2FilesystemCandidateSlotActorsInput, pub requested_mode: Rev2FilesystemCandidateRequestedModeInput, pub captured_umask: Rev2FilesystemCandidateCapturedUmaskInput }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateSlot { pub effect_slot_id: String, pub role: Rev2FilesystemCandidateSlotRole, pub capability: Rev2CapabilityId }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateTargetStateClassification { pub target_state: Rev2FilesystemCandidateTargetState, pub initial_kinds: Vec<Rev2FilesystemCandidateInitialObjectKind> }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateNormalizedSlotState { pub effect_slot_id: String, pub final_object_state: Rev2FilesystemCandidateFinalObjectState, pub identity_source: Rev2FilesystemCandidateIdentitySource }
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateMetadataDigestModel { pub source: Rev2FilesystemCandidateMetadataDigestSource, pub algorithm: Rev2FilesystemCandidateMetadataDigestAlgorithm, pub domain: Rev2FilesystemCandidateMetadataDigestDomain, pub preimage: Rev2FilesystemCandidateMetadataDigestPreimage }
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateNativeResult { pub class: Rev2FilesystemCandidateNativeResultClass, pub metadata_digest: Option<Rev2FilesystemCandidateMetadataDigestModel> }
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateCreateSideEffect { pub kind: Rev2FilesystemCandidateSideEffectKind, pub object_id_source: Rev2FilesystemCandidateSideEffectObjectIdSource, pub digest_source: Rev2FilesystemCandidateSideEffectDigestSource, pub final_kind: Rev2FilesystemCandidateSideEffectFinalKind, pub mode_source: Rev2FilesystemCandidateSideEffectModeSource }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateAuthorizedOutcome { pub target_state: Rev2FilesystemCandidateTargetState, pub normalized_slot_states: Vec<Rev2FilesystemCandidateNormalizedSlotState>, pub native_result: Rev2FilesystemCandidateNativeResult, pub permitted_side_effects: Vec<Rev2FilesystemCandidateCreateSideEffect>, pub delivery: Rev2FilesystemCandidateDelivery, pub cleanup: Rev2FilesystemCandidateCleanup }
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateModeDerivation { pub algorithm: Rev2FilesystemCandidateModeAlgorithm, pub requested_mode_mask: u16, pub captured_umask_mask: u16, pub required_captured_umask: u16, pub directory_type_bits: u16 }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "requestKind", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum Rev2FilesystemCandidateOperation { #[serde(rename = "lstat-sync")] LstatSync { edge_id: Rev2FilesystemCandidateLstatEdgeId, follow_mode: Rev2FilesystemCandidateFollowMode, input_bindings: Rev2FilesystemCandidateCommonInputBindings, ordered_slots: Vec<Rev2FilesystemCandidateSlot>, target_state_classifications: Vec<Rev2FilesystemCandidateTargetStateClassification>, authorized_outcomes: Vec<Rev2FilesystemCandidateAuthorizedOutcome>, result_model_id: Rev2FilesystemCandidateLstatResultModelId }, #[serde(rename = "mkdir-sync")] MkdirSync { edge_id: Rev2FilesystemCandidateMkdirEdgeId, follow_mode: Rev2FilesystemCandidateFollowMode, input_bindings: Rev2FilesystemCandidateMkdirInputBindings, recursive_policy: Rev2FilesystemCandidateRecursivePolicy, mode_derivation: Rev2FilesystemCandidateModeDerivation, ordered_slots: Vec<Rev2FilesystemCandidateSlot>, target_state_classifications: Vec<Rev2FilesystemCandidateTargetStateClassification>, authorized_outcomes: Vec<Rev2FilesystemCandidateAuthorizedOutcome>, result_model_id: Rev2FilesystemCandidateMkdirResultModelId } }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateCaseTargetState { pub edge_id: Rev2FilesystemCandidateOperationEdgeId, pub target_state: Rev2FilesystemCandidateTargetState }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rev2FilesystemCandidateCasePlan { pub case_kind: Rev2FilesystemCandidateCaseKind, pub target_states: Vec<Rev2FilesystemCandidateCaseTargetState>, pub execution_mode: Rev2FilesystemCandidateExecutionMode, pub principal_plan: Rev2FilesystemCandidatePrincipalPlan, pub authority_plan: Rev2FilesystemCandidateAuthorityPlan, pub input_mutation: Rev2FilesystemCandidateInputMutation, pub fault_plan: Rev2FilesystemCandidateFaultPlan, pub core_expectation: Rev2FilesystemCandidateCoreExpectation, pub committed_slots: Rev2FilesystemCandidateCommittedSlots, pub outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition, pub lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2FilesystemCandidateSlotSpec { pub effect_slot_id: &'static str, pub role: Rev2FilesystemCandidateSlotRole, pub capability: Rev2CapabilityId }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2FilesystemCandidateTargetStateClassificationSpec { pub target_state: Rev2FilesystemCandidateTargetState, pub initial_kinds: &'static [Rev2FilesystemCandidateInitialObjectKind] }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2FilesystemCandidateNormalizedSlotStateSpec { pub effect_slot_id: &'static str, pub final_object_state: Rev2FilesystemCandidateFinalObjectState, pub identity_source: Rev2FilesystemCandidateIdentitySource }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rev2FilesystemCandidateAuthorizedOutcomeSpec { pub target_state: Rev2FilesystemCandidateTargetState, pub normalized_slot_states: &'static [Rev2FilesystemCandidateNormalizedSlotStateSpec], pub native_result: Rev2FilesystemCandidateNativeResult, pub permitted_side_effects: &'static [Rev2FilesystemCandidateCreateSideEffect], pub delivery: Rev2FilesystemCandidateDelivery, pub cleanup: Rev2FilesystemCandidateCleanup }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Rev2FilesystemCandidateOperationSpec { LstatSync { edge_id: &'static str, follow_mode: Rev2FilesystemCandidateFollowMode, input_bindings: Rev2FilesystemCandidateCommonInputBindings, ordered_slots: &'static [Rev2FilesystemCandidateSlotSpec], target_state_classifications: &'static [Rev2FilesystemCandidateTargetStateClassificationSpec], authorized_outcomes: &'static [Rev2FilesystemCandidateAuthorizedOutcomeSpec], result_model_id: Rev2FilesystemCandidateLstatResultModelId }, MkdirSync { edge_id: &'static str, follow_mode: Rev2FilesystemCandidateFollowMode, input_bindings: Rev2FilesystemCandidateMkdirInputBindings, recursive_policy: Rev2FilesystemCandidateRecursivePolicy, mode_derivation: Rev2FilesystemCandidateModeDerivation, ordered_slots: &'static [Rev2FilesystemCandidateSlotSpec], target_state_classifications: &'static [Rev2FilesystemCandidateTargetStateClassificationSpec], authorized_outcomes: &'static [Rev2FilesystemCandidateAuthorizedOutcomeSpec], result_model_id: Rev2FilesystemCandidateMkdirResultModelId } }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Rev2RuntimePolicyRules { pub resource_schemas: Vec<Rev2TypedSchema>, pub occurrence_schemas: Vec<Rev2TypedSchema>, pub value_schemas: Vec<Rev2TypedSchema>, pub schema_evaluation_spec: Rev2SchemaEvaluationSpec, pub schema_fixture_vectors: Vec<Rev2JsonValue>, pub projections: Vec<Rev2Projection>, pub match_evaluation_spec: Rev2MatchEvaluationSpec, pub normalizers: Vec<Rev2Normalizer>, pub predicates: Vec<Rev2Predicate>, pub protected_receipt_schema: Option<Rev2JsonValue>, pub predicate_fixture_vectors: Vec<Rev2JsonValue>, pub risk_rules: Vec<Rev2RiskRule>, pub risk_evaluation_spec: Rev2RiskEvaluationSpec, pub runtime_protocol_spec: Rev2JsonValue, pub negative_closure_specs: Vec<Rev2JsonValue>, pub edge_semantic_spec: Rev2JsonValue, pub derivation_rules: Vec<Rev2JsonValue>, pub ceiling_rules: Vec<Rev2JsonValue>, pub aliases: Vec<Rev2JsonValue>, pub macro_policy: Rev2JsonValue, pub macros: Vec<Rev2JsonValue>, pub system_information_kinds: Vec<Rev2JsonValue>, pub dispositions: Vec<Rev2JsonValue>, pub sensitive_environment_names: Vec<String>, pub loader_control_environment_names: Vec<String>, pub ambient_network_config_neutralization: Option<Rev2JsonValue>, pub ip_address_classes: Option<Rev2JsonValue>, pub public_suffix_input: Rev2JsonValue, pub special_files: Vec<Rev2JsonValue>, pub lifetime_contracts: Vec<Rev2JsonValue>, pub reason_codes: Vec<Rev2JsonValue> }
+pub struct Rev2RuntimePolicyRules { pub resource_schemas: Vec<Rev2TypedSchema>, pub occurrence_schemas: Vec<Rev2TypedSchema>, pub value_schemas: Vec<Rev2TypedSchema>, pub schema_evaluation_spec: Rev2SchemaEvaluationSpec, pub schema_fixture_vectors: Vec<Rev2JsonValue>, pub projections: Vec<Rev2Projection>, pub match_evaluation_spec: Rev2MatchEvaluationSpec, pub normalizers: Vec<Rev2Normalizer>, pub predicates: Vec<Rev2Predicate>, pub protected_receipt_schema: Option<Rev2JsonValue>, pub predicate_fixture_vectors: Vec<Rev2JsonValue>, pub risk_rules: Vec<Rev2RiskRule>, pub risk_evaluation_spec: Rev2RiskEvaluationSpec, pub runtime_protocol_spec: Rev2JsonValue, pub negative_closure_specs: Vec<Rev2JsonValue>, pub edge_semantic_spec: Rev2JsonValue, pub filesystem_candidate_operations: Vec<Rev2FilesystemCandidateOperation>, pub filesystem_candidate_case_plans: Vec<Rev2FilesystemCandidateCasePlan>, pub derivation_rules: Vec<Rev2JsonValue>, pub ceiling_rules: Vec<Rev2JsonValue>, pub aliases: Vec<Rev2JsonValue>, pub macro_policy: Rev2JsonValue, pub macros: Vec<Rev2JsonValue>, pub system_information_kinds: Vec<Rev2JsonValue>, pub dispositions: Vec<Rev2JsonValue>, pub sensitive_environment_names: Vec<String>, pub loader_control_environment_names: Vec<String>, pub ambient_network_config_neutralization: Option<Rev2JsonValue>, pub ip_address_classes: Option<Rev2JsonValue>, pub public_suffix_input: Rev2JsonValue, pub special_files: Vec<Rev2JsonValue>, pub lifetime_contracts: Vec<Rev2JsonValue>, pub reason_codes: Vec<Rev2JsonValue> }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rev2RuntimeSemanticPayload { pub schema: String, pub profile: String, pub definitions: Vec<Rev2RuntimeDefinition>, pub coverage_edges: Vec<Rev2SemanticEdge>, pub policy_rules_and_classifiers: Rev2RuntimePolicyRules }
@@ -1025,6 +1482,137 @@ pub const REV2_RUNTIME_EXECUTABLE_MAX_IMAGES: usize = 256;
 pub const REV2_RUNTIME_EXECUTABLE_MAX_IMAGE_BYTES: usize = 536870912;
 pub const REV2_RUNTIME_EXECUTABLE_MAX_AGGREGATE_BYTES: usize = 1073741824;
 
+pub const REV2_FILESYSTEM_CANDIDATE_OPERATIONS: &[Rev2FilesystemCandidateOperationSpec] = &[
+  Rev2FilesystemCandidateOperationSpec::LstatSync {
+    edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+    follow_mode: Rev2FilesystemCandidateFollowMode::NoFollowFinal,
+    input_bindings: Rev2FilesystemCandidateCommonInputBindings { target_ref: Rev2FilesystemCandidateTargetRefInput::OperationRequestTargetRef, target_state: Rev2FilesystemCandidateTargetStateInput::InitialSandboxObjectStateByTargetRef, parent_identity: Rev2FilesystemCandidateParentIdentityInput::InitialSandboxParentIdentityByTargetRef, slot_actors: Rev2FilesystemCandidateSlotActorsInput::ExecutionPlanActorBySlot },
+    ordered_slots: &[
+      Rev2FilesystemCandidateSlotSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0", role: Rev2FilesystemCandidateSlotRole::TargetListObservation, capability: Rev2CapabilityId::FsList },
+    ],
+    target_state_classifications: &[
+      Rev2FilesystemCandidateTargetStateClassificationSpec {
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        initial_kinds: &[Rev2FilesystemCandidateInitialObjectKind::Device, Rev2FilesystemCandidateInitialObjectKind::Directory, Rev2FilesystemCandidateInitialObjectKind::Fifo, Rev2FilesystemCandidateInitialObjectKind::Hardlink, Rev2FilesystemCandidateInitialObjectKind::RegularFile, Rev2FilesystemCandidateInitialObjectKind::Socket],
+      },
+      Rev2FilesystemCandidateTargetStateClassificationSpec {
+        target_state: Rev2FilesystemCandidateTargetState::LinkEntry,
+        initial_kinds: &[Rev2FilesystemCandidateInitialObjectKind::Symlink],
+      },
+      Rev2FilesystemCandidateTargetStateClassificationSpec {
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        initial_kinds: &[Rev2FilesystemCandidateInitialObjectKind::Missing],
+      },
+    ],
+    authorized_outcomes: &[
+      Rev2FilesystemCandidateAuthorizedOutcomeSpec {
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        normalized_slot_states: &[
+          Rev2FilesystemCandidateNormalizedSlotStateSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0", final_object_state: Rev2FilesystemCandidateFinalObjectState::Existing, identity_source: Rev2FilesystemCandidateIdentitySource::InitialTargetIdentity },
+        ],
+        native_result: Rev2FilesystemCandidateNativeResult { class: Rev2FilesystemCandidateNativeResultClass::LstatComplete, metadata_digest: Some(Rev2FilesystemCandidateMetadataDigestModel { source: Rev2FilesystemCandidateMetadataDigestSource::InitialTargetMetadata, algorithm: Rev2FilesystemCandidateMetadataDigestAlgorithm::HjcsSha256Base64url, domain: Rev2FilesystemCandidateMetadataDigestDomain::OdenCapsecFilesystemLstatMetadata2, preimage: Rev2FilesystemCandidateMetadataDigestPreimage::ExactInitialFilesystemMetadataProjectionJcs }) },
+        permitted_side_effects: &[
+
+        ],
+        delivery: Rev2FilesystemCandidateDelivery::Delivered,
+        cleanup: Rev2FilesystemCandidateCleanup::Complete,
+      },
+      Rev2FilesystemCandidateAuthorizedOutcomeSpec {
+        target_state: Rev2FilesystemCandidateTargetState::LinkEntry,
+        normalized_slot_states: &[
+          Rev2FilesystemCandidateNormalizedSlotStateSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0", final_object_state: Rev2FilesystemCandidateFinalObjectState::LinkEntry, identity_source: Rev2FilesystemCandidateIdentitySource::InitialTargetIdentity },
+        ],
+        native_result: Rev2FilesystemCandidateNativeResult { class: Rev2FilesystemCandidateNativeResultClass::LstatComplete, metadata_digest: Some(Rev2FilesystemCandidateMetadataDigestModel { source: Rev2FilesystemCandidateMetadataDigestSource::InitialTargetMetadata, algorithm: Rev2FilesystemCandidateMetadataDigestAlgorithm::HjcsSha256Base64url, domain: Rev2FilesystemCandidateMetadataDigestDomain::OdenCapsecFilesystemLstatMetadata2, preimage: Rev2FilesystemCandidateMetadataDigestPreimage::ExactInitialFilesystemMetadataProjectionJcs }) },
+        permitted_side_effects: &[
+
+        ],
+        delivery: Rev2FilesystemCandidateDelivery::Delivered,
+        cleanup: Rev2FilesystemCandidateCleanup::Complete,
+      },
+      Rev2FilesystemCandidateAuthorizedOutcomeSpec {
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        normalized_slot_states: &[
+          Rev2FilesystemCandidateNormalizedSlotStateSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0", final_object_state: Rev2FilesystemCandidateFinalObjectState::Missing, identity_source: Rev2FilesystemCandidateIdentitySource::None },
+        ],
+        native_result: Rev2FilesystemCandidateNativeResult { class: Rev2FilesystemCandidateNativeResultClass::LstatNotFound, metadata_digest: None },
+        permitted_side_effects: &[
+
+        ],
+        delivery: Rev2FilesystemCandidateDelivery::Delivered,
+        cleanup: Rev2FilesystemCandidateCleanup::Complete,
+      },
+    ],
+    result_model_id: Rev2FilesystemCandidateLstatResultModelId::FilesystemResultLstatNoFollow2,
+  },
+  Rev2FilesystemCandidateOperationSpec::MkdirSync {
+    edge_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+    follow_mode: Rev2FilesystemCandidateFollowMode::NoFollowFinal,
+    input_bindings: Rev2FilesystemCandidateMkdirInputBindings { target_ref: Rev2FilesystemCandidateTargetRefInput::OperationRequestTargetRef, target_state: Rev2FilesystemCandidateTargetStateInput::InitialSandboxObjectStateByTargetRef, parent_identity: Rev2FilesystemCandidateParentIdentityInput::InitialSandboxParentIdentityByTargetRef, slot_actors: Rev2FilesystemCandidateSlotActorsInput::ExecutionPlanActorBySlot, requested_mode: Rev2FilesystemCandidateRequestedModeInput::OperationRequestRequestedMode, captured_umask: Rev2FilesystemCandidateCapturedUmaskInput::ParentCaptureCapturedUmask },
+    recursive_policy: Rev2FilesystemCandidateRecursivePolicy::RequireFalse,
+    mode_derivation: Rev2FilesystemCandidateModeDerivation { algorithm: Rev2FilesystemCandidateModeAlgorithm::DirectoryTypeOrMaskedRequestMinusUmask, requested_mode_mask: 511, captured_umask_mask: 511, required_captured_umask: 63, directory_type_bits: 16384 },
+    ordered_slots: &[
+      Rev2FilesystemCandidateSlotSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0", role: Rev2FilesystemCandidateSlotRole::TargetWriteIntent, capability: Rev2CapabilityId::FsWrite },
+      Rev2FilesystemCandidateSlotSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1", role: Rev2FilesystemCandidateSlotRole::TargetListObservation, capability: Rev2CapabilityId::FsList },
+    ],
+    target_state_classifications: &[
+      Rev2FilesystemCandidateTargetStateClassificationSpec {
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        initial_kinds: &[Rev2FilesystemCandidateInitialObjectKind::Device, Rev2FilesystemCandidateInitialObjectKind::Directory, Rev2FilesystemCandidateInitialObjectKind::Fifo, Rev2FilesystemCandidateInitialObjectKind::Hardlink, Rev2FilesystemCandidateInitialObjectKind::RegularFile, Rev2FilesystemCandidateInitialObjectKind::Socket],
+      },
+      Rev2FilesystemCandidateTargetStateClassificationSpec {
+        target_state: Rev2FilesystemCandidateTargetState::LinkEntry,
+        initial_kinds: &[Rev2FilesystemCandidateInitialObjectKind::Symlink],
+      },
+      Rev2FilesystemCandidateTargetStateClassificationSpec {
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        initial_kinds: &[Rev2FilesystemCandidateInitialObjectKind::Missing],
+      },
+    ],
+    authorized_outcomes: &[
+      Rev2FilesystemCandidateAuthorizedOutcomeSpec {
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        normalized_slot_states: &[
+          Rev2FilesystemCandidateNormalizedSlotStateSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0", final_object_state: Rev2FilesystemCandidateFinalObjectState::Existing, identity_source: Rev2FilesystemCandidateIdentitySource::InitialTargetIdentity },
+          Rev2FilesystemCandidateNormalizedSlotStateSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1", final_object_state: Rev2FilesystemCandidateFinalObjectState::Existing, identity_source: Rev2FilesystemCandidateIdentitySource::InitialTargetIdentity },
+        ],
+        native_result: Rev2FilesystemCandidateNativeResult { class: Rev2FilesystemCandidateNativeResultClass::MkdirAlreadyExists, metadata_digest: None },
+        permitted_side_effects: &[
+
+        ],
+        delivery: Rev2FilesystemCandidateDelivery::Delivered,
+        cleanup: Rev2FilesystemCandidateCleanup::Complete,
+      },
+      Rev2FilesystemCandidateAuthorizedOutcomeSpec {
+        target_state: Rev2FilesystemCandidateTargetState::LinkEntry,
+        normalized_slot_states: &[
+          Rev2FilesystemCandidateNormalizedSlotStateSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0", final_object_state: Rev2FilesystemCandidateFinalObjectState::LinkEntry, identity_source: Rev2FilesystemCandidateIdentitySource::InitialTargetIdentity },
+          Rev2FilesystemCandidateNormalizedSlotStateSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1", final_object_state: Rev2FilesystemCandidateFinalObjectState::LinkEntry, identity_source: Rev2FilesystemCandidateIdentitySource::InitialTargetIdentity },
+        ],
+        native_result: Rev2FilesystemCandidateNativeResult { class: Rev2FilesystemCandidateNativeResultClass::MkdirAlreadyExists, metadata_digest: None },
+        permitted_side_effects: &[
+
+        ],
+        delivery: Rev2FilesystemCandidateDelivery::Delivered,
+        cleanup: Rev2FilesystemCandidateCleanup::Complete,
+      },
+      Rev2FilesystemCandidateAuthorizedOutcomeSpec {
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        normalized_slot_states: &[
+          Rev2FilesystemCandidateNormalizedSlotStateSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0", final_object_state: Rev2FilesystemCandidateFinalObjectState::Proposed, identity_source: Rev2FilesystemCandidateIdentitySource::None },
+          Rev2FilesystemCandidateNormalizedSlotStateSpec { effect_slot_id: "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1", final_object_state: Rev2FilesystemCandidateFinalObjectState::Missing, identity_source: Rev2FilesystemCandidateIdentitySource::None },
+        ],
+        native_result: Rev2FilesystemCandidateNativeResult { class: Rev2FilesystemCandidateNativeResultClass::MkdirComplete, metadata_digest: None },
+        permitted_side_effects: &[
+          Rev2FilesystemCandidateCreateSideEffect { kind: Rev2FilesystemCandidateSideEffectKind::Create, object_id_source: Rev2FilesystemCandidateSideEffectObjectIdSource::TargetRefObjectId, digest_source: Rev2FilesystemCandidateSideEffectDigestSource::None, final_kind: Rev2FilesystemCandidateSideEffectFinalKind::Directory, mode_source: Rev2FilesystemCandidateSideEffectModeSource::EffectiveDirectoryMode },
+        ],
+        delivery: Rev2FilesystemCandidateDelivery::Delivered,
+        cleanup: Rev2FilesystemCandidateCleanup::Complete,
+      },
+    ],
+    result_model_id: Rev2FilesystemCandidateMkdirResultModelId::FilesystemResultMkdirNoReplace2,
+  },
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rev2Definition {
   pub id: &'static str,
@@ -1050,8 +1638,8 @@ pub struct Rev2TargetStatus {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-kJ1x_zr1gKGeTObQOqxBCc89517tujMjjmqWHQdmNUI";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-K7uVaYTvcMUhOLWxMWiG1vPNBU6lYotIBQJh_oiS1uk";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-Cgg1vv58PoPBNoAwsI8cvW9HLKpObp8-5l7ygqn31hY";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-aG6i6E1RfyLHn8CKP_M7dkb2Xx2bSQvrdZigtWON-Eo";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-SFvyfj3PfQcUC0REjPviGqms_7DEwFcghE7kL9WYSyo";
@@ -80593,6 +81181,1115 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         "captured-constrained-set"
       ]
     },
+    "filesystemCandidateCasePlans": [
+      {
+        "authorityPlan": "cross-action-first",
+        "caseKind": "authorable-cross-action-denial",
+        "committedSlots": "none",
+        "coreExpectation": "cross-action-first-missing",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "permission-denied",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "no-user-static-all",
+        "caseKind": "authorable-no-user-denial",
+        "committedSlots": "none",
+        "coreExpectation": "unattributed-deny-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "permission-denied",
+        "principalPlan": "explicit-no-user",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "none",
+        "caseKind": "authorable-missing-principal-denial",
+        "committedSlots": "none",
+        "coreExpectation": "unattributed-deny-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "permission-denied",
+        "principalPlan": "actor-unconstrained",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "none",
+        "caseKind": "authorable-quarantine-denial",
+        "committedSlots": "none",
+        "coreExpectation": "quarantine-deny-all",
+        "executionMode": "audit",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "permission-denied",
+        "principalPlan": "quarantine",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "principal-denial-last-over-static-all",
+        "caseKind": "multi-effect-n-minus-one-denied",
+        "committedSlots": "none",
+        "coreExpectation": "principal-deny-last",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "permission-denied",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "principal-denial-over-static-all",
+        "caseKind": "authorable-negative",
+        "committedSlots": "none",
+        "coreExpectation": "principal-deny-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "permission-denied",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "process-denial-over-static-all",
+        "caseKind": "staged-barrier:authorization",
+        "committedSlots": "none",
+        "coreExpectation": "process-deny-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "permission-denied",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "session-all-dormant-revocation-all",
+        "caseKind": "staged-barrier:revocation",
+        "committedSlots": "none",
+        "coreExpectation": "session-revoked-all",
+        "executionMode": "enforce",
+        "faultPlan": "revoke-all-after-authorization",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "permission-denied",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "session-all-dormant-revocation-last",
+        "caseKind": "multi-effect-no-partial-commit",
+        "committedSlots": "none",
+        "coreExpectation": "session-revoked-last",
+        "executionMode": "enforce",
+        "faultPlan": "revoke-last-after-authorization",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "permission-denied",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "authorable-positive",
+        "committedSlots": "all",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "authorized-operation",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "operation-completed",
+              "delivery-serialized",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "preparation-complete",
+              "post-prepare-revalidated",
+              "core-commit-recorded",
+              "native-commit-recorded",
+              "operation-completed",
+              "delivery-serialized",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "lstat-existing",
+        "committedSlots": "all",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "authorized-operation",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "operation-completed",
+              "delivery-serialized",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "lstat-final-missing",
+        "committedSlots": "all",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "authorized-operation",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "operation-completed",
+              "delivery-serialized",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "lstat-link-entry",
+        "committedSlots": "all",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "authorized-operation",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "symlink",
+            "targetState": "link-entry",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "operation-completed",
+              "delivery-serialized",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "malformed-resource-refusal",
+        "committedSlots": "none",
+        "coreExpectation": "not-reached",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "target-path-dot-dot",
+        "lifecycleRequirement": "none-before-core",
+        "outcomeDisposition": "schema-refused",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "mkdir-existing-conflict",
+        "committedSlots": "all",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "authorized-operation",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "directory",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "operation-completed",
+              "delivery-serialized",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "mkdir-link-conflict",
+        "committedSlots": "all",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "authorized-operation",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "symlink",
+            "targetState": "link-entry",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "operation-completed",
+              "delivery-serialized",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "mkdir-missing-create",
+        "committedSlots": "all",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "authorized-operation",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "preparation-complete",
+              "post-prepare-revalidated",
+              "core-commit-recorded",
+              "native-commit-recorded",
+              "operation-completed",
+              "delivery-serialized",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "multi-effect-all-authorized",
+        "committedSlots": "all",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "authorized-operation",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "preparation-complete",
+              "post-prepare-revalidated",
+              "core-commit-recorded",
+              "native-commit-recorded",
+              "operation-completed",
+              "delivery-serialized",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "staged-barrier:cancellation",
+        "committedSlots": "none",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "cancel-safe-boundary",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "cancellation-refused",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "staged-barrier:cleanup",
+        "committedSlots": "none",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "omit-required-stage",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "actor-sequence-refused",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "preparation-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "wrong-principal-static-all",
+        "caseKind": "authorable-wrong-principal-denial",
+        "committedSlots": "none",
+        "coreExpectation": "missing-authority-all",
+        "executionMode": "enforce",
+        "faultPlan": "none",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "permission-denied",
+        "principalPlan": "actor-and-other",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      }
+    ],
+    "filesystemCandidateOperations": [
+      {
+        "authorizedOutcomes": [
+          {
+            "cleanup": "complete",
+            "delivery": "delivered",
+            "nativeResult": {
+              "class": "lstat-complete",
+              "metadataDigest": {
+                "algorithm": "hjcs-sha256-base64url",
+                "domain": "oden:capsec:filesystem-lstat-metadata:2",
+                "preimage": "exact-initial-filesystem-metadata-projection-jcs",
+                "source": "initial-target-metadata"
+              }
+            },
+            "normalizedSlotStates": [
+              {
+                "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0",
+                "finalObjectState": "existing",
+                "identitySource": "initial-target-identity"
+              }
+            ],
+            "permittedSideEffects": [],
+            "targetState": "existing"
+          },
+          {
+            "cleanup": "complete",
+            "delivery": "delivered",
+            "nativeResult": {
+              "class": "lstat-complete",
+              "metadataDigest": {
+                "algorithm": "hjcs-sha256-base64url",
+                "domain": "oden:capsec:filesystem-lstat-metadata:2",
+                "preimage": "exact-initial-filesystem-metadata-projection-jcs",
+                "source": "initial-target-metadata"
+              }
+            },
+            "normalizedSlotStates": [
+              {
+                "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0",
+                "finalObjectState": "link-entry",
+                "identitySource": "initial-target-identity"
+              }
+            ],
+            "permittedSideEffects": [],
+            "targetState": "link-entry"
+          },
+          {
+            "cleanup": "complete",
+            "delivery": "delivered",
+            "nativeResult": {
+              "class": "lstat-not-found",
+              "metadataDigest": null
+            },
+            "normalizedSlotStates": [
+              {
+                "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0",
+                "finalObjectState": "missing",
+                "identitySource": "none"
+              }
+            ],
+            "permittedSideEffects": [],
+            "targetState": "missing"
+          }
+        ],
+        "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+        "followMode": "no-follow-final",
+        "inputBindings": {
+          "parentIdentity": "initial-sandbox.parent-identity-by-target-ref",
+          "slotActors": "execution-plan.actor-by-slot",
+          "targetRef": "operation-request.target-ref",
+          "targetState": "initial-sandbox.object-state-by-target-ref"
+        },
+        "orderedSlots": [
+          {
+            "capability": "fs:list",
+            "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0",
+            "role": "target-list-observation"
+          }
+        ],
+        "requestKind": "lstat-sync",
+        "resultModelId": "filesystem-result.lstat-no-follow/2",
+        "targetStateClassifications": [
+          {
+            "initialKinds": [
+              "device",
+              "directory",
+              "fifo",
+              "hardlink",
+              "regular-file",
+              "socket"
+            ],
+            "targetState": "existing"
+          },
+          {
+            "initialKinds": [
+              "symlink"
+            ],
+            "targetState": "link-entry"
+          },
+          {
+            "initialKinds": [
+              "missing"
+            ],
+            "targetState": "missing"
+          }
+        ]
+      },
+      {
+        "authorizedOutcomes": [
+          {
+            "cleanup": "complete",
+            "delivery": "delivered",
+            "nativeResult": {
+              "class": "mkdir-already-exists",
+              "metadataDigest": null
+            },
+            "normalizedSlotStates": [
+              {
+                "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0",
+                "finalObjectState": "existing",
+                "identitySource": "initial-target-identity"
+              },
+              {
+                "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1",
+                "finalObjectState": "existing",
+                "identitySource": "initial-target-identity"
+              }
+            ],
+            "permittedSideEffects": [],
+            "targetState": "existing"
+          },
+          {
+            "cleanup": "complete",
+            "delivery": "delivered",
+            "nativeResult": {
+              "class": "mkdir-already-exists",
+              "metadataDigest": null
+            },
+            "normalizedSlotStates": [
+              {
+                "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0",
+                "finalObjectState": "link-entry",
+                "identitySource": "initial-target-identity"
+              },
+              {
+                "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1",
+                "finalObjectState": "link-entry",
+                "identitySource": "initial-target-identity"
+              }
+            ],
+            "permittedSideEffects": [],
+            "targetState": "link-entry"
+          },
+          {
+            "cleanup": "complete",
+            "delivery": "delivered",
+            "nativeResult": {
+              "class": "mkdir-complete",
+              "metadataDigest": null
+            },
+            "normalizedSlotStates": [
+              {
+                "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0",
+                "finalObjectState": "proposed",
+                "identitySource": "none"
+              },
+              {
+                "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1",
+                "finalObjectState": "missing",
+                "identitySource": "none"
+              }
+            ],
+            "permittedSideEffects": [
+              {
+                "digestSource": "none",
+                "finalKind": "directory",
+                "kind": "create",
+                "modeSource": "effective-directory-mode",
+                "objectIdSource": "target-ref-object-id"
+              }
+            ],
+            "targetState": "missing"
+          }
+        ],
+        "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+        "followMode": "no-follow-final",
+        "inputBindings": {
+          "capturedUmask": "parent-capture.captured-umask",
+          "parentIdentity": "initial-sandbox.parent-identity-by-target-ref",
+          "requestedMode": "operation-request.requested-mode",
+          "slotActors": "execution-plan.actor-by-slot",
+          "targetRef": "operation-request.target-ref",
+          "targetState": "initial-sandbox.object-state-by-target-ref"
+        },
+        "modeDerivation": {
+          "algorithm": "directory-type-or-masked-request-minus-umask",
+          "capturedUmaskMask": 511,
+          "directoryTypeBits": 16384,
+          "requestedModeMask": 511,
+          "requiredCapturedUmask": 63
+        },
+        "orderedSlots": [
+          {
+            "capability": "fs:write",
+            "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:0",
+            "role": "target-write-intent"
+          },
+          {
+            "capability": "fs:list",
+            "effectSlotId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync:effect-slot:1",
+            "role": "target-list-observation"
+          }
+        ],
+        "recursivePolicy": "require-false",
+        "requestKind": "mkdir-sync",
+        "resultModelId": "filesystem-result.mkdir-no-replace/2",
+        "targetStateClassifications": [
+          {
+            "initialKinds": [
+              "device",
+              "directory",
+              "fifo",
+              "hardlink",
+              "regular-file",
+              "socket"
+            ],
+            "targetState": "existing"
+          },
+          {
+            "initialKinds": [
+              "symlink"
+            ],
+            "targetState": "link-entry"
+          },
+          {
+            "initialKinds": [
+              "missing"
+            ],
+            "targetState": "missing"
+          }
+        ]
+      }
+    ],
     "ipAddressClasses": {
       "classes": [
         {
@@ -101761,6 +103458,24 @@ mod tests {
   fn registry_contains_no_planned_runtime_rows_or_unknown_cell_states() {
     assert!(REV2_DEFINITIONS.iter().all(|row| row.lifecycle != "planned"));
     assert!(REV2_BACKEND_CELLS.iter().all(|(_, _, status)| matches!(*status, "enforced" | "closed" | "absent" | "unsupported")));
+  }
+
+  #[test]
+  fn filesystem_candidate_request_variants_fail_closed() {
+    let payload: Rev2RuntimeSemanticPayload = serde_json::from_str(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
+    assert_eq!(payload.policy_rules_and_classifiers.filesystem_candidate_operations.len(), 2);
+
+    let mut mismatched_kind: serde_json::Value = serde_json::from_str(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
+    mismatched_kind["policyRulesAndClassifiers"]["filesystemCandidateOperations"][0]["requestKind"] = serde_json::Value::String("mkdir-sync".to_string());
+    assert!(serde_json::from_value::<Rev2RuntimeSemanticPayload>(mismatched_kind).is_err());
+
+    let mut missing_constraint: serde_json::Value = serde_json::from_str(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
+    missing_constraint["policyRulesAndClassifiers"]["filesystemCandidateOperations"][1].as_object_mut().unwrap().remove("modeDerivation");
+    assert!(serde_json::from_value::<Rev2RuntimeSemanticPayload>(missing_constraint).is_err());
+
+    let mut widened_recursive: serde_json::Value = serde_json::from_str(REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON).unwrap();
+    widened_recursive["policyRulesAndClassifiers"]["filesystemCandidateOperations"][1]["recursivePolicy"] = serde_json::Value::String("allow-true".to_string());
+    assert!(serde_json::from_value::<Rev2RuntimeSemanticPayload>(widened_recursive).is_err());
   }
 }
 }
