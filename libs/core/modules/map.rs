@@ -35,6 +35,9 @@ use super::IntoModuleName;
 use super::LazyEsmModuleLoader;
 use super::ModuleConcreteError;
 use super::RequestedModuleType;
+use super::SealedModuleRole;
+use super::SealedStaticImportPolicy;
+use super::SealedStaticImportState;
 use super::loaders::ModuleLoadOptions;
 use super::module_map_data::ModuleMapData;
 use super::module_map_data::ModuleMapSnapshotData;
@@ -58,6 +61,7 @@ use crate::modules::ModuleId;
 use crate::modules::ModuleImportPhase;
 use crate::modules::ModuleLoadId;
 use crate::modules::ModuleLoader;
+use crate::modules::ModuleLoaderError;
 use crate::modules::ModuleName;
 use crate::modules::ModuleReference;
 use crate::modules::ModuleRequest;
@@ -282,6 +286,7 @@ pub(crate) struct ModuleMap {
   module_waker: AtomicWaker,
   data: RefCell<ModuleMapData>,
   will_snapshot: bool,
+  sealed_static_import: Option<SealedStaticImportState>,
 
   /// A counter used to delay our dynamic import deadlock detection by one spin
   /// of the event loop.
@@ -365,9 +370,12 @@ impl ModuleMap {
     source_mapper: Rc<RefCell<SourceMapper>>,
     exception_state: Rc<ExceptionState>,
     will_snapshot: bool,
+    sealed_static_import: Option<SealedStaticImportPolicy>,
   ) -> Self {
     Self {
       will_snapshot,
+      sealed_static_import: sealed_static_import
+        .map(SealedStaticImportState::new),
       loader: loader.into(),
       source_mapper,
       exception_state,
@@ -396,6 +404,19 @@ impl ModuleMap {
       .data
       .borrow_mut()
       .update_with_snapshotted_data(scope, data_store, data);
+  }
+
+  pub(crate) fn validate_sealed_startup_snapshot(
+    &self,
+  ) -> Result<(), JsErrorBox> {
+    let Some(sealed) = &self.sealed_static_import else {
+      return Ok(());
+    };
+    let data = self.data.borrow();
+    sealed.validate_startup_snapshot_mappings(
+      |name| data.contains_name(name),
+      |name| data.alias_chain_touches(name),
+    )
   }
 
   /// Get module id, following all aliases in case of module specifier
@@ -512,6 +533,15 @@ impl ModuleMap {
       module_url_specified,
       code_cache,
     } = module_source;
+
+    if let Some(sealed) = &self.sealed_static_import {
+      sealed
+        .validate_loaded_specifiers(
+          module_url_specified.as_str(),
+          module_url_found.as_ref().map(FastString::as_str),
+        )
+        .map_err(|err| ModuleError::Core(err.into()))?;
+    }
 
     // Register the module in the module map unless it's already there. If the
     // specified URL and the "true" URL are different, register the alias.
@@ -923,6 +953,19 @@ impl ModuleMap {
     is_dynamic_import: bool,
     mut code_cache_info: Option<CodeCacheInfo>,
   ) -> Result<NewModuleResult, ModuleError> {
+    let sealed_role = if let Some(sealed) = &self.sealed_static_import {
+      sealed
+        .classify_compilation(
+          main,
+          name.as_str(),
+          source.as_bytes(),
+          is_dynamic_import,
+        )
+        .map_err(|err| ModuleError::Core(err.into()))?
+    } else {
+      SealedModuleRole::Ordinary
+    };
+
     if main {
       let data = self.data.borrow();
       if let Some(main_module) = data.main_module_id {
@@ -1121,27 +1164,44 @@ impl ModuleMap {
       } else {
         ResolutionKind::Import
       };
-      let module_specifier = match self.resolve_with_scope(
-        tc_scope,
-        &import_specifier,
-        name.as_ref(),
-        resolve_kind,
-        &attributes,
-      ) {
-        Ok(s) => s,
-        Err(e) => {
-          // Fall back to lazy ESM sources for bare internal specifiers (e.g.
-          // `node:_http_common` from `node:_http_outgoing`) that the
-          // user-facing loader doesn't know about. If the specifier matches
-          // a registered lazy ESM entry, use it verbatim.
-          if self.has_lazy_esm_source(&import_specifier)
-            && let Ok(parsed) = ModuleSpecifier::parse(&import_specifier)
-          {
-            parsed
-          } else {
-            return Err(ModuleError::Core(e.into()));
+      let module_specifier = if let Some(result) =
+        self.sealed_static_import.as_ref().and_then(|sealed| {
+          sealed.resolve_static_request(
+            sealed_role,
+            &import_specifier,
+            &attributes,
+          )
+        }) {
+        result.map_err(|err| ModuleError::Core(err.into()))?
+      } else {
+        let resolved = match self.resolve_with_scope(
+          tc_scope,
+          &import_specifier,
+          name.as_ref(),
+          resolve_kind,
+          &attributes,
+        ) {
+          Ok(s) => s,
+          Err(e) => {
+            // Fall back to lazy ESM sources for bare internal specifiers (e.g.
+            // `node:_http_common` from `node:_http_outgoing`) that the
+            // user-facing loader doesn't know about. If the specifier matches
+            // a registered lazy ESM entry, use it verbatim.
+            if self.has_lazy_esm_source(&import_specifier)
+              && let Ok(parsed) = ModuleSpecifier::parse(&import_specifier)
+            {
+              parsed
+            } else {
+              return Err(ModuleError::Core(e.into()));
+            }
           }
+        };
+        if let Some(sealed) = &self.sealed_static_import {
+          sealed
+            .reject_loader_resolution(&import_specifier, &resolved)
+            .map_err(|err| ModuleError::Core(err.into()))?;
         }
+        resolved
       };
       let requested_module_type =
         get_requested_module_type_from_attributes(&attributes);
@@ -1175,6 +1235,12 @@ impl ModuleMap {
       requests.push(request);
     }
 
+    if let Some(sealed) = &self.sealed_static_import {
+      sealed
+        .validate_requests(sealed_role, &requests)
+        .map_err(|err| ModuleError::Core(err.into()))?;
+    }
+
     let handle = v8::Global::<v8::Module>::new(tc_scope, module);
     let id = self.data.borrow_mut().create_module_info(
       name,
@@ -1183,6 +1249,62 @@ impl ModuleMap {
       main,
       requests,
     );
+    if sealed_role != SealedModuleRole::Ordinary {
+      let data = self.data.borrow();
+      if sealed_role == SealedModuleRole::TrustedMain
+        && data.main_module_id != Some(id)
+      {
+        return Err(ModuleError::Core(
+          JsErrorBox::type_error(
+            "Sealed static import authorization refused: the trusted main was not ModuleMap-owned",
+          )
+          .into(),
+        ));
+      }
+      let handle = data
+        .get_handle(id)
+        .expect("newly-created module handle was not in ModuleMapData");
+      let dependency = if sealed_role == SealedModuleRole::Target {
+        let sealed = self.sealed_static_import.as_ref().unwrap();
+        let dependency_name = sealed.target_dependency_specifier();
+        if data.is_alias(dependency_name, &RequestedModuleType::None) {
+          return Err(ModuleError::Core(
+            JsErrorBox::type_error(
+              "Sealed static import authorization refused: the target dependency name was an alias",
+            )
+            .into(),
+          ));
+        }
+        let dependency_id = data
+          .get_id(dependency_name, &RequestedModuleType::None)
+          .ok_or_else(|| {
+            ModuleError::Core(
+              JsErrorBox::type_error(
+                "Sealed static import authorization refused: the target dependency was absent from ModuleMap",
+              )
+              .into(),
+            )
+          })?;
+        let dependency_handle = data.get_handle(dependency_id).ok_or_else(|| {
+          ModuleError::Core(
+            JsErrorBox::type_error(
+              "Sealed static import authorization refused: the target dependency handle was absent from ModuleMap",
+            )
+            .into(),
+          )
+        })?;
+        Some((dependency_id, dependency_handle))
+      } else {
+        None
+      };
+      drop(data);
+      self
+        .sealed_static_import
+        .as_ref()
+        .unwrap()
+        .record_module(sealed_role, id, handle, dependency)
+        .map_err(|err| ModuleError::Core(err.into()))?;
+    }
     Ok(NewModuleResult::Ready(id))
   }
 
@@ -1401,12 +1523,6 @@ impl ModuleMap {
 
     let referrer_global = v8::Global::new(scope, referrer);
 
-    let referrer_name = module_map
-      .data
-      .borrow()
-      .get_name_by_module(&referrer_global)
-      .expect("ModuleInfo not found");
-
     let mut specifier_buf: [std::mem::MaybeUninit<u8>; 1024] =
       [std::mem::MaybeUninit::uninit(); 1024];
     let specifier_str = specifier.to_rust_cow_lossy(scope, &mut specifier_buf);
@@ -1418,22 +1534,82 @@ impl ModuleMap {
     );
     let requested_module_type =
       get_requested_module_type_from_attributes(&attributes);
-    let pre_resolved_specifier = {
+    let (referrer_id, referrer_name, pre_resolved_specifier) = {
       let module_map_data = module_map.data.borrow();
-      let referrer_info = module_map_data
-        .get_info_by_module(&referrer_global)
-        .expect("ModuleInfo not found");
-      referrer_info
-        .requests
-        .iter()
-        .find(|r| {
-          r.specifier_key
-            .as_ref()
-            .is_some_and(|s| s == &specifier_str)
-            && r.reference.requested_module_type == requested_module_type
-        })
-        .map(|r| r.reference.specifier.clone())
+      if let Some(referrer_info) =
+        module_map_data.get_info_by_module(&referrer_global)
+      {
+        let pre_resolved_specifier = referrer_info
+          .requests
+          .iter()
+          .find(|r| {
+            r.specifier_key
+              .as_ref()
+              .is_some_and(|s| s == &specifier_str)
+              && r.reference.requested_module_type == requested_module_type
+          })
+          .map(|r| r.reference.specifier.clone());
+        (
+          Some(referrer_info.id),
+          Some(referrer_info.name.as_str().to_string()),
+          pre_resolved_specifier,
+        )
+      } else {
+        (None, None, None)
+      }
     };
+
+    if let Some(result) =
+      module_map.sealed_static_import.as_ref().and_then(|sealed| {
+        sealed.authorize_instantiation_edge(
+          referrer_id,
+          &referrer_global,
+          &specifier_str,
+          pre_resolved_specifier.as_ref(),
+          &attributes,
+        )
+      })
+    {
+      match result {
+        Ok(resolved_specifier) => {
+          if let Some(id) = module_map
+            .get_id(resolved_specifier.as_str(), &requested_module_type)
+            && let Some(handle) = module_map.get_handle(id)
+          {
+            let is_alias = module_map
+              .data
+              .borrow()
+              .is_alias(resolved_specifier.as_str(), &requested_module_type);
+            if let Some(sealed) = &module_map.sealed_static_import
+              && let Err(err) = sealed
+                .validate_authorized_instantiation_identity(
+                  &resolved_specifier,
+                  id,
+                  &handle,
+                  is_alias,
+                )
+            {
+              crate::error::throw_js_error_class(scope, &err);
+              return None;
+            }
+            return Some(v8::Local::new(scope, handle));
+          }
+          crate::error::throw_js_error_class(
+            scope,
+            &JsErrorBox::type_error(
+              "Sealed static import authorization refused: the exact instantiation target was absent from ModuleMap",
+            ),
+          );
+          return None;
+        }
+        Err(err) => {
+          crate::error::throw_js_error_class(scope, &err);
+          return None;
+        }
+      }
+    }
+
+    let referrer_name = referrer_name.expect("ModuleInfo not found");
     let maybe_module = module_map.resolve_callback(
       scope,
       &specifier_str,
@@ -1519,6 +1695,10 @@ impl ModuleMap {
     referrer: &str,
     kind: ResolutionKind,
   ) -> ModuleResolveResponse {
+    if let Some(sealed) = &self.sealed_static_import {
+      sealed.reject_direct_target_request(specifier)?;
+    }
+
     if specifier.starts_with("ext:")
       && !referrer.starts_with("ext:")
       && !referrer.starts_with("node:")
@@ -1538,7 +1718,11 @@ impl ModuleMap {
       return Err(JsErrorBox::type_error(msg));
     }
 
-    self.loader.borrow().resolve(specifier, referrer, kind)
+    let resolved = self.loader.borrow().resolve(specifier, referrer, kind)?;
+    if let Some(sealed) = &self.sealed_static_import {
+      sealed.reject_loader_resolution(specifier, &resolved)?;
+    }
+    Ok(resolved)
   }
 
   pub fn resolve_with_scope(
@@ -1549,6 +1733,10 @@ impl ModuleMap {
     kind: ResolutionKind,
     import_attributes: &HashMap<String, String>,
   ) -> ModuleResolveResponse {
+    if let Some(sealed) = &self.sealed_static_import {
+      sealed.reject_direct_target_request(specifier)?;
+    }
+
     if specifier.starts_with("ext:")
       && !referrer.starts_with("ext:")
       && !referrer.starts_with("node:")
@@ -1568,16 +1756,56 @@ impl ModuleMap {
       return Err(JsErrorBox::type_error(msg));
     }
 
-    self.loader.borrow().resolve_with_scope(
+    let resolved = self.loader.borrow().resolve_with_scope(
       scope,
       specifier,
       referrer,
       kind,
       import_attributes,
-    )
+    )?;
+    if let Some(sealed) = &self.sealed_static_import {
+      sealed.reject_loader_resolution(specifier, &resolved)?;
+    }
+    Ok(resolved)
   }
 
   /// Called by `module_resolve_callback` during module instantiation.
+  fn normal_instantiation_handle<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    id: ModuleId,
+    handle: v8::Global<v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Module>> {
+    if let Some(sealed) = &self.sealed_static_import
+      && let Err(err) = sealed.reject_normal_instantiation_identity(id, &handle)
+    {
+      crate::error::throw_js_error_class(scope, &err);
+      return None;
+    }
+    Some(v8::Local::new(scope, handle))
+  }
+
+  fn normal_instantiation_module<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    module: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Module>> {
+    let global = v8::Global::new(scope, module);
+    let id = self
+      .data
+      .borrow()
+      .get_info_by_module(&global)
+      .map(|info| info.id);
+    if let Some(id) = id
+      && let Some(sealed) = &self.sealed_static_import
+      && let Err(err) = sealed.reject_normal_instantiation_identity(id, &global)
+    {
+      crate::error::throw_js_error_class(scope, &err);
+      return None;
+    }
+    Some(module)
+  }
+
   fn resolve_callback<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
@@ -1596,10 +1824,10 @@ impl ModuleMap {
       if let Some(id) = self.get_id(specifier, &RequestedModuleType::None)
         && let Some(handle) = self.get_handle(id)
       {
-        return Some(v8::Local::new(scope, handle));
+        return self.normal_instantiation_handle(scope, id, handle);
       }
       if let Some(module) = self.try_resolve_synthetic_esm(scope, specifier) {
-        return Some(module);
+        return self.normal_instantiation_module(scope, module);
       }
     }
 
@@ -1637,7 +1865,7 @@ impl ModuleMap {
     if let Some(id) = self.get_id(resolved_specifier.as_str(), module_type)
       && let Some(handle) = self.get_handle(id)
     {
-      return Some(v8::Local::new(scope, handle));
+      return self.normal_instantiation_handle(scope, id, handle);
     }
 
     // Synthetic ESM dispatch (post-resolve): in case the loader returned
@@ -1646,7 +1874,7 @@ impl ModuleMap {
     if let Some(module) =
       self.try_resolve_synthetic_esm(scope, resolved_specifier.as_str())
     {
-      return Some(module);
+      return self.normal_instantiation_module(scope, module);
     }
 
     // Fallback: check lazy-loaded ESM sources (modules embedded in the
@@ -1663,7 +1891,7 @@ impl ModuleMap {
       ) {
         Ok(mod_id) => {
           if let Some(handle) = self.get_handle(mod_id) {
-            return Some(v8::Local::new(scope, handle));
+            return self.normal_instantiation_handle(scope, mod_id, handle);
           }
         }
         Err(e) => {
@@ -2748,6 +2976,9 @@ impl ModuleMap {
     source_code: ModuleCodeString,
     code_cache_info: Option<CodeCacheInfo>,
   ) -> Result<v8::Global<v8::Value>, CoreError> {
+    if let Some(sealed) = &self.sealed_static_import {
+      sealed.reject_direct_target_request(module_specifier)?;
+    }
     let specifier = ModuleSpecifier::parse(module_specifier)?;
     let mod_id = self
       .new_es_module(
@@ -2853,6 +3084,40 @@ impl ModuleMap {
     Some(give)
   }
 
+  /// Return the protected target only for the one recursive request emitted
+  /// by the recorded trusted-main handle. `Some(Err(_))` is intentionally
+  /// distinct from `None`: a protected request must never fall through to the
+  /// embedder's module loader.
+  pub(crate) fn take_sealed_static_import_source(
+    &self,
+    referrer_id: ModuleId,
+    request: &ModuleRequest,
+  ) -> Option<Result<ModuleCodeString, ModuleLoaderError>> {
+    let sealed = self.sealed_static_import.as_ref()?;
+    if !sealed.is_target_specifier(request.reference.specifier.as_str()) {
+      return None;
+    }
+
+    let referrer_handle = match self.data.borrow().get_handle(referrer_id) {
+      Some(handle) => handle,
+      None => {
+        return Some(Err(JsErrorBox::type_error(
+          "Sealed static import authorization refused: recursive referrer was absent from ModuleMap",
+        )));
+      }
+    };
+    let source = self.take_lazy_esm_source(sealed.target_specifier());
+    let authorization = sealed.authorize_recursive_edge(
+      referrer_id,
+      &referrer_handle,
+      request,
+      source.as_ref().map(|source| source.as_bytes()),
+    );
+    Some(authorization.map(|()| {
+      source.expect("successful sealed authorization requires target source")
+    }))
+  }
+
   pub(crate) fn add_lazy_loaded_esm_source(
     &self,
     specifier: ModuleName,
@@ -2942,6 +3207,9 @@ impl ModuleMap {
     scope: &mut v8::PinScope,
     module_specifier: &str,
   ) -> Result<v8::Global<v8::Value>, CoreError> {
+    if let Some(sealed) = &self.sealed_static_import {
+      sealed.reject_direct_target_request(module_specifier)?;
+    }
     let (lazy_esm_sources, residual_lazy_esm_sources) = {
       let data = self.data.borrow();
       (

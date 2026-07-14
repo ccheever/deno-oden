@@ -70,6 +70,14 @@ impl<T> ModuleNameTypeMap<T> {
     map.get(name)
   }
 
+  fn contains_name<Q>(&self, name: &Q) -> bool
+  where
+    ModuleName: std::borrow::Borrow<Q>,
+    Q: std::cmp::Eq + std::hash::Hash + std::fmt::Debug + ?Sized,
+  {
+    self.submaps.iter().any(|map| map.contains_key(name))
+  }
+
   pub fn insert(
     &mut self,
     module_type: &RequestedModuleType,
@@ -110,6 +118,35 @@ impl<T> ModuleNameTypeMap<T> {
         i += 1;
       }
     }
+  }
+}
+
+impl ModuleNameTypeMap<SymbolicModule> {
+  fn alias_chain_touches(&self, protected_name: &str) -> bool {
+    self.submaps.iter().any(|map| {
+      map.iter().any(|(key, value)| {
+        let SymbolicModule::Alias(target) = value else {
+          return false;
+        };
+        let mut target = target.as_str();
+        if key.as_str() == protected_name {
+          return true;
+        }
+        let mut seen = HashSet::new();
+        loop {
+          if target == protected_name {
+            return true;
+          }
+          if !seen.insert(target) {
+            return false;
+          }
+          let Some(SymbolicModule::Alias(next)) = map.get(target) else {
+            return false;
+          };
+          target = next.as_str();
+        }
+      })
+    })
   }
 }
 
@@ -365,7 +402,6 @@ impl ModuleMapData {
     );
   }
 
-  #[cfg(test)]
   pub(crate) fn is_alias(
     &self,
     name: &str,
@@ -374,6 +410,14 @@ impl ModuleMapData {
     let map = &self.by_name;
     let entry = map.get(requested_module_type.as_ref(), name);
     matches!(entry, Some(SymbolicModule::Alias(_)))
+  }
+
+  pub(crate) fn contains_name(&self, name: &str) -> bool {
+    self.by_name.contains_name(name)
+  }
+
+  pub(crate) fn alias_chain_touches(&self, name: &str) -> bool {
+    self.by_name.alias_chain_touches(name)
   }
 
   pub(crate) fn get_handle(

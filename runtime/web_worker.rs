@@ -624,6 +624,7 @@ impl WebWorker {
 
     let mut js_runtime = JsRuntime::new(RuntimeOptions {
       module_loader: Some(services.module_loader),
+      sealed_static_import: None,
       startup_snapshot: options.startup_snapshot,
       residual_lazy_js_sources: options.residual_lazy_js_sources,
       residual_lazy_esm_sources: options.residual_lazy_esm_sources,

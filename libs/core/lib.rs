@@ -164,6 +164,7 @@ pub use crate::modules::ModuleType;
 pub use crate::modules::NoopModuleLoader;
 pub use crate::modules::RequestedModuleType;
 pub use crate::modules::ResolutionKind;
+pub use crate::modules::SealedStaticImportPolicy;
 pub use crate::modules::SourceCodeCacheInfo;
 pub use crate::modules::StaticModuleLoader;
 pub use crate::modules::ValidateImportAttributesCb;

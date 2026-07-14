@@ -1317,6 +1317,7 @@ fn common_runtime(opts: CommonRuntimeOptions) -> JsRuntime {
 
   let js_runtime = JsRuntime::new(RuntimeOptions {
     module_loader: Some(opts.module_loader),
+    sealed_static_import: None,
     startup_snapshot: opts.startup_snapshot,
     residual_lazy_js_sources: opts.residual_lazy_js_sources,
     residual_lazy_esm_sources: opts.residual_lazy_esm_sources,

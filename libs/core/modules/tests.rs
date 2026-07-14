@@ -32,6 +32,7 @@ use crate::ModuleSpecifier;
 use crate::ModuleType;
 use crate::ResolutionKind;
 use crate::RuntimeOptions;
+use crate::SealedStaticImportPolicy;
 use crate::ascii_str;
 // deno_ops macros generate code assuming deno_core in scope.
 use crate::deno_core;
@@ -55,6 +56,213 @@ use crate::resolve_import;
 use crate::resolve_url;
 use crate::runtime::JsRuntime;
 use crate::runtime::JsRuntimeForSnapshot;
+
+const SEALED_STATIC_IMPORT_MAIN: &str = "file:///sealed-main.js";
+const SEALED_STATIC_IMPORT_TARGET: &str = "sealed:test-target";
+const SEALED_STATIC_IMPORT_DEPENDENCY: &str = "ext:core/ops";
+const SEALED_STATIC_IMPORT_TARGET_SOURCE: &str =
+  include_str!("testdata/sealed_static_import_target.js");
+const SEALED_STATIC_IMPORT_MAIN_SOURCE: &str = r#"import { sealedValue } from "sealed:test-target";
+if (!sealedValue) throw new Error("sealed target did not evaluate");
+"#;
+
+deno_core::extension!(
+  sealed_static_import_test_ext,
+  lazy_loaded_esm = [
+    dir "modules/testdata",
+    "sealed:test-target" = "sealed_static_import_target.js",
+  ],
+);
+
+fn sealed_static_import_policy(
+  main_source: &'static str,
+  target_source: &'static str,
+) -> SealedStaticImportPolicy {
+  SealedStaticImportPolicy::new(
+    ModuleSpecifier::parse(SEALED_STATIC_IMPORT_MAIN).unwrap(),
+    main_source,
+    ModuleSpecifier::parse(SEALED_STATIC_IMPORT_TARGET).unwrap(),
+    target_source,
+    ModuleSpecifier::parse(SEALED_STATIC_IMPORT_DEPENDENCY).unwrap(),
+  )
+  .unwrap()
+}
+
+#[test]
+fn sealed_static_import_policy_requires_distinct_specifiers() {
+  let main = ModuleSpecifier::parse(SEALED_STATIC_IMPORT_MAIN).unwrap();
+  let target = ModuleSpecifier::parse(SEALED_STATIC_IMPORT_TARGET).unwrap();
+  let dependency =
+    ModuleSpecifier::parse(SEALED_STATIC_IMPORT_DEPENDENCY).unwrap();
+
+  for (main, target, dependency) in [
+    (main.clone(), main.clone(), dependency.clone()),
+    (main.clone(), target.clone(), main.clone()),
+    (main, target.clone(), target),
+  ] {
+    let error = SealedStaticImportPolicy::new(
+      main,
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+      target,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+      dependency,
+    )
+    .unwrap_err();
+    assert!(
+      error
+        .to_string()
+        .contains("requires distinct main, target, and dependency")
+    );
+  }
+}
+
+#[test]
+fn sealed_static_import_policy_is_runtime_only() {
+  let error = JsRuntimeForSnapshot::try_new(RuntimeOptions {
+    sealed_static_import: Some(sealed_static_import_policy(
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )),
+    ..Default::default()
+  })
+  .err()
+  .expect("snapshot construction must reject the runtime-only policy");
+  assert!(
+    error
+      .to_string()
+      .contains("runtime-only and cannot be snapshotted")
+  );
+}
+
+#[test]
+fn sealed_static_import_accepts_clean_startup_snapshot() {
+  let snapshot = {
+    let runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
+      extensions: vec![sealed_static_import_test_ext::init()],
+      ..Default::default()
+    });
+    runtime.snapshot()
+  };
+  let snapshot = Box::leak(snapshot);
+  let mut runtime = JsRuntime::try_new(RuntimeOptions {
+    startup_snapshot: Some(snapshot),
+    extensions: vec![sealed_static_import_test_ext::init()],
+    residual_lazy_esm_sources: &[(
+      SEALED_STATIC_IMPORT_TARGET,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )],
+    module_loader: Some(Rc::new(StaticModuleLoader::default())),
+    sealed_static_import: Some(sealed_static_import_policy(
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )),
+    ..Default::default()
+  })
+  .unwrap();
+
+  let main_id =
+    futures::executor::block_on(runtime.load_main_es_module_from_code(
+      &ModuleSpecifier::parse(SEALED_STATIC_IMPORT_MAIN).unwrap(),
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+    ))
+    .unwrap();
+  let evaluation = runtime.mod_evaluate(main_id);
+  futures::executor::block_on(runtime.run_event_loop(Default::default()))
+    .unwrap();
+  futures::executor::block_on(evaluation).unwrap();
+}
+
+#[test]
+fn sealed_static_import_rejects_startup_snapshot_name_collisions() {
+  let trusted_main_snapshot = {
+    let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
+      extensions: vec![sealed_static_import_test_ext::init()],
+      ..Default::default()
+    });
+    let module_id =
+      futures::executor::block_on(runtime.load_side_es_module_from_code(
+        &ModuleSpecifier::parse(SEALED_STATIC_IMPORT_MAIN).unwrap(),
+        "export const preexistingMain = true;\n",
+      ))
+      .unwrap();
+    let evaluation = runtime.mod_evaluate(module_id);
+    futures::executor::block_on(runtime.run_event_loop(Default::default()))
+      .unwrap();
+    futures::executor::block_on(evaluation).unwrap();
+    runtime.snapshot()
+  };
+  let error = JsRuntime::try_new(RuntimeOptions {
+    startup_snapshot: Some(Box::leak(trusted_main_snapshot)),
+    extensions: vec![sealed_static_import_test_ext::init()],
+    sealed_static_import: Some(sealed_static_import_policy(
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )),
+    ..Default::default()
+  })
+  .err()
+  .expect("a snapshotted trusted-main mapping must be refused");
+  assert!(
+    error
+      .to_string()
+      .contains("startup snapshot already mapped the trusted main name")
+  );
+
+  let target_alias_snapshot = {
+    let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
+      extensions: vec![sealed_static_import_test_ext::init()],
+      ..Default::default()
+    });
+    let alternate_specifier =
+      ModuleSpecifier::parse("sealed:snapshotted-alternate").unwrap();
+    let module_id =
+      futures::executor::block_on(runtime.load_side_es_module_from_code(
+        &alternate_specifier,
+        "export const replaced = true;\n",
+      ))
+      .unwrap();
+    let evaluation = runtime.mod_evaluate(module_id);
+    futures::executor::block_on(runtime.run_event_loop(Default::default()))
+      .unwrap();
+    futures::executor::block_on(evaluation).unwrap();
+    runtime.module_map().get_data().borrow_mut().alias(
+      alternate_specifier.to_string().into(),
+      &RequestedModuleType::None,
+      SEALED_STATIC_IMPORT_TARGET.to_string().into(),
+    );
+    assert!(
+      runtime
+        .module_map()
+        .is_alias(alternate_specifier.as_str(), &RequestedModuleType::None)
+    );
+    runtime.snapshot()
+  };
+  let error = JsRuntime::try_new(RuntimeOptions {
+    startup_snapshot: Some(Box::leak(target_alias_snapshot)),
+    extensions: vec![sealed_static_import_test_ext::init()],
+    sealed_static_import: Some(sealed_static_import_policy(
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )),
+    ..Default::default()
+  })
+  .err()
+  .expect("a snapshotted target alias must be refused");
+  assert!(
+    error
+      .to_string()
+      .contains("startup snapshot already mapped the target name")
+  );
+}
+
+fn assert_sealed_static_import_refusal(error: &impl fmt::Display) {
+  assert!(
+    error
+      .to_string()
+      .contains("Sealed static import authorization refused"),
+    "unexpected error: {error}"
+  );
+}
 
 #[derive(Default)]
 struct MockLoader {
@@ -618,6 +826,453 @@ async fn test_lazy_loaded_esm_aliased_via_import() {
   let result = runtime.mod_evaluate(mod_id);
   runtime.run_event_loop(Default::default()).await.unwrap();
   result.await.unwrap();
+}
+
+#[tokio::test]
+async fn sealed_static_import_authorizes_exact_lazy_extension_route() {
+  let loader = Rc::new(TestingModuleLoader::new(StaticModuleLoader::default()));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![sealed_static_import_test_ext::init()],
+    module_loader: Some(loader.clone()),
+    sealed_static_import: Some(sealed_static_import_policy(
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )),
+    ..Default::default()
+  });
+
+  let main_id = runtime
+    .load_main_es_module_from_code(
+      &ModuleSpecifier::parse(SEALED_STATIC_IMPORT_MAIN).unwrap(),
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+    )
+    .await
+    .unwrap();
+  let evaluation = runtime.mod_evaluate(main_id);
+  runtime.run_event_loop(Default::default()).await.unwrap();
+  evaluation.await.unwrap();
+
+  // Main-root resolution still visits the embedder, but neither protected
+  // edge and, critically, no protected source does.
+  assert_eq!(loader.counts().load, 0);
+}
+
+#[tokio::test]
+async fn sealed_static_import_absent_preserves_ordinary_lazy_imports() {
+  deno_core::extension!(
+    ordinary_lazy_ext,
+    lazy_loaded_esm = [
+      dir "modules/testdata",
+      "custom:ordinary-lazy" = "lazy_loaded_aliased.js",
+    ]
+  );
+
+  const ORDINARY_MAIN_SOURCE: &str = r#"import { value } from "custom:ordinary-lazy";
+if (value !== "aliased") throw new Error("ordinary lazy import changed");
+"#;
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![ordinary_lazy_ext::init()],
+    module_loader: Some(Rc::new(StaticModuleLoader::default())),
+    ..Default::default()
+  });
+  let main_id = runtime
+    .load_main_es_module_from_code(
+      &ModuleSpecifier::parse("file:///ordinary-main.js").unwrap(),
+      ORDINARY_MAIN_SOURCE,
+    )
+    .await
+    .unwrap();
+  let evaluation = runtime.mod_evaluate(main_id);
+  runtime.run_event_loop(Default::default()).await.unwrap();
+  evaluation.await.unwrap();
+}
+
+#[test]
+fn sealed_static_import_rejects_preexisting_alias_to_target_handle() {
+  const ALIAS: &str = "sealed:test-target-alias";
+  const MAIN_WITH_ALIAS: &str = r#"import "sealed:test-target";
+import "sealed:test-target-alias";
+"#;
+
+  let loader = Rc::new(TestingModuleLoader::new(StaticModuleLoader::default()));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![sealed_static_import_test_ext::init()],
+    module_loader: Some(loader.clone()),
+    sealed_static_import: Some(sealed_static_import_policy(
+      MAIN_WITH_ALIAS,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )),
+    ..Default::default()
+  });
+  let module_map = runtime.module_map();
+  module_map.get_data().borrow_mut().alias(
+    ALIAS.to_string().into(),
+    &RequestedModuleType::None,
+    SEALED_STATIC_IMPORT_TARGET.to_string().into(),
+  );
+
+  let (main_id, target_id) = {
+    deno_core::scope!(scope, runtime);
+    let main_id = module_map
+      .new_es_module(
+        scope,
+        true,
+        SEALED_STATIC_IMPORT_MAIN.to_string().into(),
+        MAIN_WITH_ALIAS.to_string().into(),
+        false,
+        None,
+      )
+      .unwrap();
+    let target_request = module_map
+      .get_requested_modules(main_id)
+      .unwrap()
+      .into_iter()
+      .find(|request| {
+        request.reference.specifier.as_str() == SEALED_STATIC_IMPORT_TARGET
+      })
+      .unwrap();
+    let target_source = module_map
+      .take_sealed_static_import_source(main_id, &target_request)
+      .unwrap()
+      .unwrap();
+    let target_id = module_map
+      .new_es_module(
+        scope,
+        false,
+        SEALED_STATIC_IMPORT_TARGET.to_string().into(),
+        target_source,
+        false,
+        None,
+      )
+      .unwrap();
+    (main_id, target_id)
+  };
+
+  assert_eq!(
+    module_map.get_id(ALIAS, &RequestedModuleType::None),
+    Some(target_id),
+    "the fixture must exercise ModuleMapData::get_id alias following"
+  );
+  runtime.instantiate_module(target_id).unwrap();
+  let exception = runtime.instantiate_module(main_id).unwrap_err();
+  deno_core::scope!(scope, runtime);
+  let exception = v8::Local::new(scope, exception);
+  let _error =
+    exception_to_err_result::<()>(scope, exception, false, true).unwrap_err();
+  assert_eq!(loader.counts().load, 0);
+}
+
+#[test]
+fn sealed_static_import_rejects_target_dependency_alias() {
+  let loader = Rc::new(TestingModuleLoader::new(StaticModuleLoader::default()));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![sealed_static_import_test_ext::init()],
+    module_loader: Some(loader.clone()),
+    sealed_static_import: Some(sealed_static_import_policy(
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )),
+    ..Default::default()
+  });
+  let module_map = runtime.module_map();
+
+  deno_core::scope!(scope, runtime);
+  let main_id = module_map
+    .new_es_module(
+      scope,
+      true,
+      SEALED_STATIC_IMPORT_MAIN.to_string().into(),
+      SEALED_STATIC_IMPORT_MAIN_SOURCE.to_string().into(),
+      false,
+      None,
+    )
+    .unwrap();
+  let target_request = module_map
+    .get_requested_modules(main_id)
+    .unwrap()
+    .into_iter()
+    .find(|request| {
+      request.reference.specifier.as_str() == SEALED_STATIC_IMPORT_TARGET
+    })
+    .unwrap();
+  let target_source = module_map
+    .take_sealed_static_import_source(main_id, &target_request)
+    .unwrap()
+    .unwrap();
+
+  // Overwrite the direct virtual-ops registration with a dangling alias.
+  // Creating the target registers the alias destination before dependency
+  // identity capture, so a get_id-only check would resolve it to the target.
+  module_map.get_data().borrow_mut().alias(
+    SEALED_STATIC_IMPORT_DEPENDENCY.to_string().into(),
+    &RequestedModuleType::None,
+    SEALED_STATIC_IMPORT_TARGET.to_string().into(),
+  );
+  let error = module_map
+    .new_es_module(
+      scope,
+      false,
+      SEALED_STATIC_IMPORT_TARGET.to_string().into(),
+      target_source,
+      false,
+      None,
+    )
+    .unwrap_err();
+  let ModuleError::Core(error) = error else {
+    panic!("dependency alias refusal had unexpected error type");
+  };
+  assert!(
+    error
+      .to_string()
+      .contains("target dependency name was an alias")
+  );
+  assert_eq!(loader.counts().load, 0);
+}
+
+#[tokio::test]
+async fn sealed_static_import_rejects_source_and_edge_shape_changes() {
+  async fn load_main(
+    expected_main: &'static str,
+    actual_main: &'static str,
+    expected_target: &'static str,
+  ) -> crate::error::CoreError {
+    let mut runtime = JsRuntime::new(RuntimeOptions {
+      extensions: vec![sealed_static_import_test_ext::init()],
+      module_loader: Some(Rc::new(StaticModuleLoader::default())),
+      sealed_static_import: Some(sealed_static_import_policy(
+        expected_main,
+        expected_target,
+      )),
+      ..Default::default()
+    });
+    runtime
+      .load_main_es_module_from_code(
+        &ModuleSpecifier::parse(SEALED_STATIC_IMPORT_MAIN).unwrap(),
+        actual_main,
+      )
+      .await
+      .unwrap_err()
+  }
+
+  const WRONG_MAIN: &str = r#"import { sealedValue } from "sealed:test-target";
+if (!sealedValue) throw new Error("changed main source");
+"#;
+  const MISSING_EDGE: &str = "export const noSealedEdge = true;\n";
+  const DUPLICATE_EDGE: &str = r#"import { sealedValue as first } from "sealed:test-target";
+import { sealedValue as second } from "sealed:test-target";
+if (!first || !second) throw new Error("sealed target did not evaluate");
+"#;
+  const ESCAPED_EDGE: &str = r#"import { sealedValue } from "sealed:test-\x74arget";
+if (!sealedValue) throw new Error("sealed target did not evaluate");
+"#;
+  const WRONG_TARGET: &str = r#"// Copyright 2018-2026 the Deno authors. MIT license.
+import { op_print } from "ext:core/ops";
+
+export const sealedValue = typeof op_print !== "function";
+"#;
+
+  let error = load_main(
+    SEALED_STATIC_IMPORT_MAIN_SOURCE,
+    WRONG_MAIN,
+    SEALED_STATIC_IMPORT_TARGET_SOURCE,
+  )
+  .await;
+  assert_sealed_static_import_refusal(&error);
+
+  let error = load_main(
+    ESCAPED_EDGE,
+    ESCAPED_EDGE,
+    SEALED_STATIC_IMPORT_TARGET_SOURCE,
+  )
+  .await;
+  assert_sealed_static_import_refusal(&error);
+
+  let error = load_main(
+    MISSING_EDGE,
+    MISSING_EDGE,
+    SEALED_STATIC_IMPORT_TARGET_SOURCE,
+  )
+  .await;
+  assert_sealed_static_import_refusal(&error);
+
+  let error = load_main(
+    DUPLICATE_EDGE,
+    DUPLICATE_EDGE,
+    SEALED_STATIC_IMPORT_TARGET_SOURCE,
+  )
+  .await;
+  assert_sealed_static_import_refusal(&error);
+
+  let error = load_main(
+    SEALED_STATIC_IMPORT_MAIN_SOURCE,
+    SEALED_STATIC_IMPORT_MAIN_SOURCE,
+    WRONG_TARGET,
+  )
+  .await;
+  assert_sealed_static_import_refusal(&error);
+}
+
+#[tokio::test]
+async fn sealed_static_import_rejects_spoofed_referrers_and_routes() {
+  let new_runtime = || {
+    JsRuntime::new(RuntimeOptions {
+      extensions: vec![sealed_static_import_test_ext::init()],
+      module_loader: Some(Rc::new(StaticModuleLoader::default())),
+      sealed_static_import: Some(sealed_static_import_policy(
+        SEALED_STATIC_IMPORT_MAIN_SOURCE,
+        SEALED_STATIC_IMPORT_TARGET_SOURCE,
+      )),
+      ..Default::default()
+    })
+  };
+
+  let mut side_spoof = new_runtime();
+  let error = side_spoof
+    .load_side_es_module_from_code(
+      &ModuleSpecifier::parse(SEALED_STATIC_IMPORT_MAIN).unwrap(),
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+    )
+    .await
+    .unwrap_err();
+  assert_sealed_static_import_refusal(&error);
+
+  // A ModuleMap-owned module whose caller-selected name resembles node:vm is
+  // still an ordinary side-module handle, never the recorded main handle.
+  let mut vm_name_spoof = new_runtime();
+  let error = vm_name_spoof
+    .load_side_es_module_from_code(
+      &ModuleSpecifier::parse("node:vm").unwrap(),
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+    )
+    .await
+    .unwrap_err();
+  assert_sealed_static_import_refusal(&error);
+
+  let mut runtime = new_runtime();
+  let main_id = runtime
+    .load_main_es_module_from_code(
+      &ModuleSpecifier::parse(SEALED_STATIC_IMPORT_MAIN).unwrap(),
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+    )
+    .await
+    .unwrap();
+  let evaluation = runtime.mod_evaluate(main_id);
+  runtime.run_event_loop(Default::default()).await.unwrap();
+  evaluation.await.unwrap();
+
+  let second_route = runtime
+    .execute_script(
+      "file:///second-route.js",
+      r#"Deno.core.createLazyLoader("sealed:test-target")();"#,
+    )
+    .unwrap_err();
+  assert_sealed_static_import_refusal(&second_route);
+
+  runtime
+    .execute_script(
+      "file:///dynamic-route.js",
+      r#"globalThis.sealedDynamicDenied = false;
+import("sealed:test-target").then(
+  () => globalThis.sealedDynamicDenied = false,
+  () => globalThis.sealedDynamicDenied = true,
+);"#,
+    )
+    .unwrap();
+  runtime.run_event_loop(Default::default()).await.unwrap();
+  runtime
+    .execute_script(
+      "file:///check-dynamic-route.js",
+      "if (!globalThis.sealedDynamicDenied) throw new Error('dynamic route was admitted');",
+    )
+    .unwrap();
+
+  let error = runtime
+    .load_side_es_module(
+      &ModuleSpecifier::parse(SEALED_STATIC_IMPORT_TARGET).unwrap(),
+    )
+    .await
+    .unwrap_err();
+  assert_sealed_static_import_refusal(&error);
+}
+
+#[tokio::test]
+async fn sealed_static_import_never_falls_back_to_loader() {
+  struct AliasLoader;
+
+  impl ModuleLoader for AliasLoader {
+    fn resolve(
+      &self,
+      specifier: &str,
+      referrer: &str,
+      _kind: ResolutionKind,
+    ) -> ModuleResolveResponse {
+      if specifier == "sealed:test-target-alias" {
+        return Ok(
+          ModuleSpecifier::parse(SEALED_STATIC_IMPORT_TARGET).unwrap(),
+        );
+      }
+      resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
+    }
+
+    fn load(
+      &self,
+      _module_specifier: &ModuleSpecifier,
+      _maybe_referrer: Option<&ModuleLoadReferrer>,
+      _options: ModuleLoadOptions,
+    ) -> ModuleLoadResponse {
+      ModuleLoadResponse::Sync(Err(JsErrorBox::generic(
+        "the sealed target must not reach this loader",
+      )))
+    }
+  }
+
+  const ALTERNATE_EDGE: &str = r#"import "sealed:test-target";
+import "sealed:test-target-alias";
+"#;
+  let alias_loader = Rc::new(TestingModuleLoader::new(AliasLoader));
+  let mut alias_runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![sealed_static_import_test_ext::init()],
+    module_loader: Some(alias_loader.clone()),
+    sealed_static_import: Some(sealed_static_import_policy(
+      ALTERNATE_EDGE,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )),
+    ..Default::default()
+  });
+  let error = alias_runtime
+    .load_main_es_module_from_code(
+      &ModuleSpecifier::parse(SEALED_STATIC_IMPORT_MAIN).unwrap(),
+      ALTERNATE_EDGE,
+    )
+    .await
+    .unwrap_err();
+  assert_sealed_static_import_refusal(&error);
+  assert_eq!(alias_loader.counts().load, 0);
+
+  // Even a loader that has exact target bytes cannot substitute for the
+  // missing lazy-loaded extension registration.
+  let fallback_loader =
+    Rc::new(TestingModuleLoader::new(StaticModuleLoader::with(
+      ModuleSpecifier::parse(SEALED_STATIC_IMPORT_TARGET).unwrap(),
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )));
+  let mut fallback_runtime = JsRuntime::new(RuntimeOptions {
+    module_loader: Some(fallback_loader.clone()),
+    sealed_static_import: Some(sealed_static_import_policy(
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+      SEALED_STATIC_IMPORT_TARGET_SOURCE,
+    )),
+    ..Default::default()
+  });
+  let error = fallback_runtime
+    .load_main_es_module_from_code(
+      &ModuleSpecifier::parse(SEALED_STATIC_IMPORT_MAIN).unwrap(),
+      SEALED_STATIC_IMPORT_MAIN_SOURCE,
+    )
+    .await
+    .unwrap_err();
+  assert_sealed_static_import_refusal(&error);
+  assert_eq!(fallback_loader.counts().load, 0);
 }
 
 /// Regression test for https://github.com/denoland/deno/issues/33940

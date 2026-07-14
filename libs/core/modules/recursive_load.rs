@@ -512,7 +512,18 @@ impl RecursiveModuleLoad {
 
                 // First check if this module is a lazy-loaded ESM source
                 // (embedded in binary but not snapshotted).
-                let load_result = if let Some(source_code) = module_map_rc
+                let sealed_source = module_map_rc
+                  .take_sealed_static_import_source(module_id, &request);
+                let load_result = if let Some(source_code) = sealed_source {
+                  source_code.map(|source_code| {
+                    ModuleSource::new(
+                      crate::ModuleType::JavaScript,
+                      ModuleSourceCode::String(source_code),
+                      &resolved_specifier,
+                      None,
+                    )
+                  })
+                } else if let Some(source_code) = module_map_rc
                   .take_lazy_esm_source(resolved_specifier.as_str())
                 {
                   Ok(ModuleSource::new(

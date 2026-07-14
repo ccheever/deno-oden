@@ -259,7 +259,7 @@ struct ParentLifecycleCellImpl<B: LifecycleBackend> {
 /// Owns the supervisor group leader and candidate group member as exact direct
 /// children. No method returns until every admitted handle is reaped and the
 /// post-reap ESRCH proof is terminal.
-// @ref LLP 0019#parent-supervisor-transport-and-single-process-lifetime-cell
+// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
 // [implements] — WNOWAIT observations precede exact candidate/supervisor reaps;
 // destructive group signalling is forbidden after the leader reap.
 pub(crate) struct ParentLifecycleCell {

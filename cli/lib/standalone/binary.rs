@@ -129,7 +129,7 @@ impl OdenParentCaptureV2Metadata {
     ) {
       return Err("metadata target is not in the Oden v1 release matrix");
     }
-    if !is_oden_parent_token(&self.feature_set, 1, 128)
+    if !is_oden_parent_ascii_text(&self.feature_set, 1, 4096)
       || !is_oden_parent_token(&self.parent_build_marker, 1, 256)
       || !is_oden_parent_token(&self.paired_engine_build_marker, 1, 256)
     {
@@ -197,6 +197,15 @@ fn is_oden_parent_token(value: &str, minimum: usize, maximum: usize) -> bool {
     })
 }
 
+fn is_oden_parent_ascii_text(
+  value: &str,
+  minimum: usize,
+  maximum: usize,
+) -> bool {
+  (minimum..=maximum).contains(&value.len())
+    && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+}
+
 // Note: Don't use hashmaps/hashsets. Ensure the serialization
 // is deterministic.
 #[derive(Deserialize, Serialize)]
@@ -260,7 +269,10 @@ mod oden_parent_capture_v2_metadata_tests {
       "schema": ODEN_PARENT_CAPTURE_V2_METADATA_SCHEMA,
       "profile": "oden/capsec/2",
       "target": "x86_64-unknown-linux-gnu",
-      "featureSet": "default",
+      "featureSet": format!(
+        "rust:1.95.0;profile:oden/capsec/1.1;capsec:{}",
+        "a".repeat(256)
+      ),
       "forkCommit": "1".repeat(40),
       "parentBuildMarker": "oden-parent-build-v2",
       "denortBaseImageDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -285,6 +297,7 @@ mod oden_parent_capture_v2_metadata_tests {
     let record: OdenParentCaptureV2Metadata =
       serde_json::from_value(record_json()).unwrap();
     assert_eq!(record.schema, ODEN_PARENT_CAPTURE_V2_METADATA_SCHEMA);
+    assert!(record.feature_set.len() > 128);
     assert_eq!(
       record.private_module_specifier,
       ODEN_PARENT_CAPTURE_V2_MODULE_SPECIFIER

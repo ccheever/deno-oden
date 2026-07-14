@@ -21,6 +21,7 @@ mod loaders;
 mod map;
 mod module_map_data;
 pub(crate) mod recursive_load;
+mod sealed_static_import;
 
 #[cfg(all(test, not(miri)))]
 mod tests;
@@ -43,6 +44,9 @@ pub(crate) use map::synthetic_module_evaluation_steps;
 pub use map::wrap_lazy_ext_script;
 pub(crate) use module_map_data::ModuleMapSnapshotData;
 pub(crate) use recursive_load::SideModuleKind;
+pub(crate) use sealed_static_import::SealedModuleRole;
+pub use sealed_static_import::SealedStaticImportPolicy;
+pub(crate) use sealed_static_import::SealedStaticImportState;
 
 pub type ModuleId = usize;
 pub(crate) type ModuleLoadId = i32;

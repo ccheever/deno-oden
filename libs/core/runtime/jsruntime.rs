@@ -116,6 +116,7 @@ use crate::modules::ModuleLoader;
 use crate::modules::ModuleMap;
 use crate::modules::ModuleName;
 use crate::modules::RequestedModuleType;
+use crate::modules::SealedStaticImportPolicy;
 use crate::modules::SideModuleKind;
 use crate::modules::ValidateImportAttributesCb;
 use crate::modules::recursive_load::RecursiveModuleLoad;
@@ -566,6 +567,11 @@ pub struct RuntimeOptions {
   /// executed tries to load modules.
   pub module_loader: Option<Rc<dyn ModuleLoader>>,
 
+  /// Authorize one exact, runtime-only static import from a source-pinned main
+  /// module to a source-pinned `lazy_loaded_esm` module. The policy is not
+  /// serialized into snapshots and must be supplied anew by the embedder.
+  pub sealed_static_import: Option<SealedStaticImportPolicy>,
+
   /// If specified, enables V8 code cache for extension code.
   pub extension_code_cache: Option<Rc<dyn ExtCodeCache>>,
 
@@ -805,6 +811,14 @@ impl JsRuntime {
     mut options: RuntimeOptions,
     will_snapshot: bool,
   ) -> Result<JsRuntime, CoreError> {
+    if will_snapshot && options.sealed_static_import.is_some() {
+      return Err(
+        JsErrorBox::type_error(
+          "Sealed static import policy is runtime-only and cannot be snapshotted",
+        )
+        .into(),
+      );
+    }
     let _phase_total = startup_phase_begin();
     let init_mode = InitMode::from_options(&options);
     let mut extensions = std::mem::take(&mut options.extensions);
@@ -1160,6 +1174,7 @@ impl JsRuntime {
         state_rc.source_mapper.clone(),
         exception_state.clone(),
         will_snapshot,
+        options.sealed_static_import.take(),
       ));
 
       let _phase = startup_phase_begin();
@@ -1173,6 +1188,7 @@ impl JsRuntime {
           &mut data_store,
           snapshotted_data.module_map_data,
         );
+        module_map.validate_sealed_startup_snapshot()?;
 
         if let Some(index) = snapshotted_data.ext_import_meta_proto {
           *context_state.ext_import_meta_proto.borrow_mut() =
