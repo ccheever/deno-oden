@@ -2404,6 +2404,14 @@ On the first invocation of `deno compile`, Deno will download the relevant binar
           .help_heading(COMPILE_HEADING),
       )
       .arg(
+        Arg::new("oden-parent-capture-contract")
+          .long("_oden-parent-capture-contract")
+          .value_name("PATH")
+          .value_parser(value_parser!(String))
+          .value_hint(ValueHint::FilePath)
+          .hide(true),
+      )
+      .arg(
         Arg::new("bundle")
           .long("bundle")
           .help(cstr!("<y>Experimental.</> Bundle the entrypoint with esbuild before embedding, instead of shipping the whole node_modules tree.
@@ -6866,6 +6874,8 @@ fn compile_parse(
   let no_terminal = matches.get_flag("no-terminal");
   let eszip = matches.get_flag("eszip-internal-do-not-use");
   let self_extracting = matches.get_flag("self-extracting");
+  let oden_parent_capture_contract =
+    matches.remove_one::<String>("oden-parent-capture-contract");
   let bundle = matches.get_flag("bundle");
   let app_name = matches.remove_one::<String>("app-name");
   let minify = matches.get_flag("minify");
@@ -6893,6 +6903,7 @@ fn compile_parse(
     exclude,
     eszip,
     self_extracting,
+    oden_parent_capture_contract,
     bundle,
     app_name,
     minify,
@@ -14125,6 +14136,7 @@ mod tests {
           exclude: Default::default(),
           eszip: false,
           self_extracting: false,
+          oden_parent_capture_contract: None,
           bundle: false,
           app_name: None,
           minify: false,
@@ -14134,6 +14146,33 @@ mod tests {
         code_cache_enabled: true,
         ..Flags::default()
       }
+    );
+  }
+
+  #[test]
+  fn compile_with_reserved_oden_parent_capture_contract() {
+    let mut command = compile_subcommand();
+    command.build();
+    let arg = command
+      .get_arguments()
+      .find(|arg| arg.get_id().as_str() == "oden-parent-capture-contract")
+      .unwrap();
+    assert!(arg.is_hide_set());
+
+    let flags = flags_from_vec(svec![
+      "deno",
+      "compile",
+      "--_oden-parent-capture-contract",
+      "parent-contract.json",
+      "main.ts"
+    ])
+    .unwrap();
+    let DenoSubcommand::Compile(compile_flags) = flags.subcommand else {
+      panic!("expected compile subcommand");
+    };
+    assert_eq!(
+      compile_flags.oden_parent_capture_contract.as_deref(),
+      Some("parent-contract.json")
     );
   }
 
@@ -14206,6 +14245,7 @@ mod tests {
           exclude: Default::default(),
           eszip: false,
           self_extracting: false,
+          oden_parent_capture_contract: None,
           bundle: false,
           app_name: None,
           minify: false,
@@ -14243,6 +14283,7 @@ mod tests {
           exclude: vec!["exclude.txt".to_string()],
           eszip: false,
           self_extracting: false,
+          oden_parent_capture_contract: None,
           bundle: false,
           app_name: None,
           minify: false,
@@ -17263,6 +17304,7 @@ Usage: deno lint [OPTIONS] [files]...\n"
           exclude: Default::default(),
           eszip: false,
           self_extracting: false,
+          oden_parent_capture_contract: None,
           bundle: false,
           app_name: None,
           minify: false,

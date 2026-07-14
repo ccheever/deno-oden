@@ -43,6 +43,9 @@ pub async fn compile(
   flags: Flags,
   compile_flags: CompileFlags,
 ) -> Result<(), AnyError> {
+  ensure_oden_parent_capture_contract_is_disabled(
+    compile_flags.oden_parent_capture_contract.as_deref(),
+  )?;
   if let Some(watch_flags) = &flags.watch {
     let no_clear_screen = watch_flags.no_clear_screen;
     file_watcher::watch_func(
@@ -65,6 +68,20 @@ pub async fn compile(
   } else {
     compile_inner(flags, compile_flags, None).await
   }
+}
+
+// @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
+// The internal input remains mechanically incapable of minting a brand until
+// the compiler validates the frozen entry/VFS/import graph and allowlist.
+fn ensure_oden_parent_capture_contract_is_disabled(
+  contract_path: Option<&str>,
+) -> Result<(), AnyError> {
+  if contract_path.is_some() {
+    bail!(
+      "The internal `--_oden-parent-capture-contract` build input is reserved but not yet enabled; no standalone was produced"
+    );
+  }
+  Ok(())
 }
 
 async fn compile_inner(
@@ -639,6 +656,9 @@ pub async fn compile_binary(
   is_desktop: bool,
   watcher_communicator: Option<Arc<WatcherCommunicator>>,
 ) -> Result<PathBuf, AnyError> {
+  ensure_oden_parent_capture_contract_is_disabled(
+    compile_flags.oden_parent_capture_contract.as_deref(),
+  )?;
   let factory = if let Some(watcher_communicator) = watcher_communicator.clone()
   {
     CliFactory::from_flags_for_watcher(flags, watcher_communicator)
@@ -1372,6 +1392,19 @@ mod test {
   use crate::util::env::resolve_cwd;
 
   #[test]
+  fn oden_parent_capture_contract_input_is_fail_closed() {
+    ensure_oden_parent_capture_contract_is_disabled(None).unwrap();
+    let err = ensure_oden_parent_capture_contract_is_disabled(Some(
+      "parent-contract.json",
+    ))
+    .unwrap_err();
+    assert_eq!(
+      err.to_string(),
+      "The internal `--_oden-parent-capture-contract` build input is reserved but not yet enabled; no standalone was produced"
+    );
+  }
+
+  #[test]
   fn compile_watch_paths_include_includes_and_icon() {
     let initial_cwd = resolve_cwd(None).unwrap();
     let included_path = initial_cwd.join("data.txt");
@@ -1393,6 +1426,7 @@ mod test {
         exclude: Default::default(),
         eszip: false,
         self_extracting: false,
+        oden_parent_capture_contract: None,
         bundle: false,
         app_name: None,
         minify: false,
@@ -1423,6 +1457,7 @@ mod test {
         exclude: Default::default(),
         eszip: true,
         self_extracting: false,
+        oden_parent_capture_contract: None,
         bundle: false,
         app_name: None,
         minify: false,
@@ -1460,6 +1495,7 @@ mod test {
         no_terminal: false,
         eszip: true,
         self_extracting: false,
+        oden_parent_capture_contract: None,
         bundle: false,
         app_name: None,
         minify: false,

@@ -1117,6 +1117,10 @@ impl<'a> DenoCompileBinaryWriter<'a> {
         .to_desktop_config()
         .ok()
         .and_then(|c| c.release.as_ref()?.base_url.clone()),
+      // The generic compiler cannot mint the Oden parent brand. A later
+      // checkpoint wires the explicit build-only contract after native
+      // validation; keeping this absent preserves the closed activation gate.
+      oden_parent_capture_v2: None,
     };
 
     let (data_section_bytes, section_sizes) = serialize_binary_data_section(

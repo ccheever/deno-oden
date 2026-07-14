@@ -89,7 +89,10 @@ pub(crate) mod unix_transport {
   use std::ptr;
   use std::time::Instant;
 
-  pub(crate) const MAX_PACKET_BYTES: usize = 64 * 1024;
+  use deno_core::serde_json::Value;
+
+  pub(crate) const MAX_CONTROL_PACKET_BYTES: usize = 64 * 1024;
+  pub(crate) const MAX_CANDIDATE_READY_PACKET_BYTES: usize = 16 * 1024;
   const FRAME_HEADER_BYTES: usize = size_of::<u32>();
   const LINUX_SCM_MAX_FD: usize = 253;
   const XNU_UIPC_MAX_CMSG_FD: usize = 512;
@@ -120,9 +123,29 @@ pub(crate) mod unix_transport {
   }
 
   #[derive(Debug)]
-  pub(crate) struct ReceivedPacket {
-    pub(crate) bytes: Vec<u8>,
+  struct ReceivedPacket {
+    bytes: Vec<u8>,
+    descriptors: Vec<OwnedFd>,
+  }
+
+  #[derive(Debug)]
+  pub(crate) struct ReceivedCanonicalJcsPacket {
+    pub(crate) raw_bytes: Vec<u8>,
+    pub(crate) value: Value,
     pub(crate) descriptors: Vec<OwnedFd>,
+  }
+
+  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+  pub(crate) struct FrameByteLimit(usize);
+
+  impl FrameByteLimit {
+    pub(crate) const CONTROL: Self = Self(MAX_CONTROL_PACKET_BYTES);
+    pub(crate) const CANDIDATE_READY: Self =
+      Self(MAX_CANDIDATE_READY_PACKET_BYTES);
+
+    fn bytes(self) -> usize {
+      self.0
+    }
   }
 
   impl FramedStreamEndpoint {
@@ -136,11 +159,69 @@ pub(crate) mod unix_transport {
       descriptors: &[BorrowedFd<'_>],
       deadline: Instant,
     ) -> io::Result<()> {
+      self.send_packet_with_descriptors_bounded(
+        packet,
+        descriptors,
+        FrameByteLimit::CONTROL,
+        deadline,
+      )
+    }
+
+    pub(crate) fn send_packet_with_descriptors_bounded(
+      &self,
+      packet: &[u8],
+      descriptors: &[BorrowedFd<'_>],
+      byte_limit: FrameByteLimit,
+      deadline: Instant,
+    ) -> io::Result<()> {
+      let raw_descriptors = descriptors
+        .iter()
+        .map(AsRawFd::as_raw_fd)
+        .collect::<Vec<_>>();
+      self.send_packet_with_raw_descriptors_bounded(
+        packet,
+        &raw_descriptors,
+        byte_limit,
+        deadline,
+        || {},
+      )
+    }
+
+    // The spawn-result handoff consumes the parent's sole candidate-peer copy.
+    // Its descriptor is closed immediately after the first positive sendmsg,
+    // before any partial frame tail is written or an error can return.
+    pub(crate) fn send_packet_transferring_descriptor(
+      &self,
+      packet: &[u8],
+      descriptor: OwnedFd,
+      deadline: Instant,
+    ) -> io::Result<()> {
+      let raw_descriptor = descriptor.as_raw_fd();
+      self.send_packet_with_raw_descriptors_bounded(
+        packet,
+        &[raw_descriptor],
+        FrameByteLimit::CONTROL,
+        deadline,
+        move || drop(descriptor),
+      )
+    }
+
+    fn send_packet_with_raw_descriptors_bounded<F>(
+      &self,
+      packet: &[u8],
+      descriptors: &[RawFd],
+      byte_limit: FrameByteLimit,
+      deadline: Instant,
+      after_first_write: F,
+    ) -> io::Result<()>
+    where
+      F: FnOnce(),
+    {
       if packet.is_empty() {
         return Err(invalid_input("candidate packet must not be empty"));
       }
-      if packet.len() > MAX_PACKET_BYTES {
-        return Err(invalid_input("candidate packet exceeds 64 KiB"));
+      if packet.len() > byte_limit.bytes() {
+        return Err(invalid_input("candidate packet exceeds its frame bound"));
       }
       if descriptors.len() > MAX_DESCRIPTOR_COUNT {
         return Err(invalid_input(
@@ -189,7 +270,7 @@ pub(crate) mod unix_transport {
           (*cmsg).cmsg_len = cmsg_len(descriptor_payload_bytes)? as _;
           let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
           for (index, descriptor) in descriptors.iter().enumerate() {
-            *data.add(index) = descriptor.as_raw_fd();
+            *data.add(index) = *descriptor;
           }
         }
       }
@@ -221,6 +302,7 @@ pub(crate) mod unix_transport {
       if first_written == 0 {
         return Err(write_zero());
       }
+      after_first_write();
       let mut offset = first_written;
       while offset < frame.len() {
         let written = loop {
@@ -255,17 +337,61 @@ pub(crate) mod unix_transport {
       Ok(())
     }
 
-    pub(crate) fn receive_packet_with_exact_descriptors(
+    fn receive_packet_with_exact_descriptors(
       &self,
       expected_descriptor_count: usize,
       deadline: Instant,
     ) -> io::Result<ReceivedPacket> {
       // Do not expose frame bytes or received rights until EOF proves there is
       // no second frame. One caller-supplied monotonic deadline governs both.
-      let packet =
-        receive_frame(self.fd.as_fd(), expected_descriptor_count, deadline)?;
-      expect_eof(self.fd.as_fd(), deadline)?;
+      let packet = self.receive_one_frame(
+        FrameByteLimit::CONTROL,
+        expected_descriptor_count,
+        deadline,
+      )?;
+      self.require_eof(deadline)?;
       Ok(packet)
+    }
+
+    fn receive_one_frame(
+      &self,
+      byte_limit: FrameByteLimit,
+      expected_descriptor_count: usize,
+      deadline: Instant,
+    ) -> io::Result<ReceivedPacket> {
+      receive_frame(
+        self.fd.as_fd(),
+        byte_limit,
+        expected_descriptor_count,
+        deadline,
+      )
+    }
+
+    // @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
+    // [implements] — The reusable transport exposes raw bytes for transcript
+    // hashing only together with strict, byte-exact JCS validation. A later
+    // role/state wrapper owns ordering, schema closure, and one batch deadline.
+    pub(crate) fn receive_one_canonical_jcs_frame(
+      &self,
+      byte_limit: FrameByteLimit,
+      expected_descriptor_count: usize,
+      deadline: Instant,
+    ) -> io::Result<ReceivedCanonicalJcsPacket> {
+      let packet = self.receive_one_frame(
+        byte_limit,
+        expected_descriptor_count,
+        deadline,
+      )?;
+      let value = parse_canonical_jcs(&packet.bytes)?;
+      Ok(ReceivedCanonicalJcsPacket {
+        raw_bytes: packet.bytes,
+        value,
+        descriptors: packet.descriptors,
+      })
+    }
+
+    pub(crate) fn require_eof(&self, deadline: Instant) -> io::Result<()> {
+      expect_eof(self.fd.as_fd(), deadline)
     }
 
     pub(crate) fn shutdown_write(&self) -> io::Result<()> {
@@ -340,8 +466,27 @@ pub(crate) mod unix_transport {
     ))
   }
 
+  // @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
+  // [implements] — A control frame is accepted only when its original bytes
+  // are strict I-JSON and already equal to their RFC 8785 encoding. Parsing to
+  // an ordinary map first would erase duplicate-key evidence.
+  pub(crate) fn parse_canonical_jcs(packet: &[u8]) -> io::Result<Value> {
+    let input = std::str::from_utf8(packet)
+      .map_err(|_| invalid_data("candidate frame is not UTF-8 JSON"))?;
+    let value = deno_runtime::deno_permissions::rev2::parse_strict_json(input)
+      .map_err(|_| invalid_data("candidate frame is not strict I-JSON"))?;
+    let canonical =
+      deno_runtime::deno_permissions::rev2::canonical_json(&value)
+        .map_err(|_| invalid_data("candidate frame is not canonical JCS"))?;
+    if canonical.as_bytes() != packet {
+      return Err(invalid_data("candidate frame is not canonical JCS"));
+    }
+    Ok(value)
+  }
+
   fn receive_frame(
     endpoint: BorrowedFd<'_>,
+    byte_limit: FrameByteLimit,
     expected_descriptor_count: usize,
     deadline: Instant,
   ) -> io::Result<ReceivedPacket> {
@@ -352,9 +497,18 @@ pub(crate) mod unix_transport {
     }
     let mut ancillary = AncillaryState::new(expected_descriptor_count);
     let mut header = [0u8; FRAME_HEADER_BYTES];
-    recv_exact(endpoint, &mut header, &mut ancillary, deadline)?;
+    if expected_descriptor_count == 0 {
+      recv_exact(endpoint, &mut header, &mut ancillary, deadline)?;
+    } else {
+      // SCM_RIGHTS is frozen to the first header byte, not merely the first
+      // recvmsg that happens to cover some portion of the header. A one-byte
+      // initial iovec makes a right attached to header bytes 2..4 observable
+      // only by the next chunk, where AncillaryState rejects it as late.
+      recv_exact(endpoint, &mut header[..1], &mut ancillary, deadline)?;
+      recv_exact(endpoint, &mut header[1..], &mut ancillary, deadline)?;
+    }
     let packet_len = u32::from_be_bytes(header) as usize;
-    if packet_len == 0 || packet_len > MAX_PACKET_BYTES {
+    if packet_len == 0 || packet_len > byte_limit.bytes() {
       return Err(invalid_data(
         "candidate frame declared an invalid packet length",
       ));
@@ -840,6 +994,40 @@ pub(crate) mod unix_transport {
     }
 
     #[test]
+    fn sole_peer_transfer_closes_the_sender_copy_before_receive() {
+      let (sender, receiver) = framed_stream_socketpair().unwrap();
+      let (read_end, write_end) = pipe_pair().unwrap();
+      let transferred_raw = write_end.as_raw_fd();
+      let final_deadline = deadline();
+
+      sender
+        .send_packet_transferring_descriptor(
+          br#"{"schema":"spawn-result"}"#,
+          write_end,
+          final_deadline,
+        )
+        .unwrap();
+      // SAFETY: F_GETFD does not mutate the descriptor table. No recvmsg has
+      // run yet, so the transferred right cannot have reused this number.
+      assert_eq!(unsafe { libc::fcntl(transferred_raw, libc::F_GETFD) }, -1);
+      assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+      sender.shutdown_write().unwrap();
+
+      let received = receiver
+        .receive_one_canonical_jcs_frame(
+          FrameByteLimit::CONTROL,
+          1,
+          final_deadline,
+        )
+        .unwrap();
+      assert_eq!(received.value["schema"], "spawn-result");
+      assert_eq!(received.descriptors.len(), 1);
+      receiver.require_eof(final_deadline).unwrap();
+      drop(received);
+      assert_no_pipe_writer(read_end.as_fd());
+    }
+
+    #[test]
     fn missing_descriptors_are_rejected() {
       let (sender, receiver) = framed_stream_socketpair().unwrap();
       sender
@@ -901,6 +1089,27 @@ pub(crate) mod unix_transport {
       send_raw(sender.as_fd(), &[0, 0, 0, 1]).unwrap();
       send_raw_with_descriptors(sender.as_fd(), b"x", &[write_end.as_fd()])
         .unwrap();
+      sender.shutdown_write().unwrap();
+
+      let error = receiver
+        .receive_packet_with_exact_descriptors(1, deadline())
+        .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      drop(write_end);
+      assert_no_pipe_writer(read_end.as_fd());
+    }
+
+    #[test]
+    fn rights_attached_after_the_first_header_byte_are_rejected_and_closed() {
+      let (sender, receiver) = framed_stream_socketpair().unwrap();
+      let (read_end, write_end) = pipe_pair().unwrap();
+      send_raw(sender.as_fd(), &[0]).unwrap();
+      send_raw_with_descriptors(
+        sender.as_fd(),
+        &[0, 0, 1, b'x'],
+        &[write_end.as_fd()],
+      )
+      .unwrap();
       sender.shutdown_write().unwrap();
 
       let error = receiver
@@ -1098,9 +1307,122 @@ pub(crate) mod unix_transport {
     }
 
     #[test]
+    fn ordered_frames_are_received_before_explicit_eof() {
+      let (sender, receiver) = framed_stream_socketpair().unwrap();
+      let final_deadline = deadline();
+      sender
+        .send_packet_with_descriptors(
+          br#"{"schema":"ready"}"#,
+          &[],
+          final_deadline,
+        )
+        .unwrap();
+      sender
+        .send_packet_with_descriptors(
+          br#"{"schema":"response"}"#,
+          &[],
+          final_deadline,
+        )
+        .unwrap();
+      sender.shutdown_write().unwrap();
+
+      let ready = receiver
+        .receive_one_canonical_jcs_frame(
+          FrameByteLimit::CANDIDATE_READY,
+          0,
+          final_deadline,
+        )
+        .unwrap();
+      assert_eq!(ready.raw_bytes, br#"{"schema":"ready"}"#);
+      assert_eq!(ready.value["schema"], "ready");
+      assert!(ready.descriptors.is_empty());
+      let response = receiver
+        .receive_one_canonical_jcs_frame(
+          FrameByteLimit::CONTROL,
+          0,
+          final_deadline,
+        )
+        .unwrap();
+      assert_eq!(response.raw_bytes, br#"{"schema":"response"}"#);
+      assert_eq!(response.value["schema"], "response");
+      assert!(response.descriptors.is_empty());
+      receiver.require_eof(final_deadline).unwrap();
+    }
+
+    #[test]
+    fn candidate_ready_uses_its_distinct_16_kib_bound() {
+      let (sender, receiver) = framed_stream_socketpair().unwrap();
+      let oversized_ready = vec![b'x'; MAX_CANDIDATE_READY_PACKET_BYTES + 1];
+      send_raw(
+        sender.as_fd(),
+        &(oversized_ready.len() as u32).to_be_bytes(),
+      )
+      .unwrap();
+
+      let error = receiver
+        .receive_one_frame(FrameByteLimit::CANDIDATE_READY, 0, deadline())
+        .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+      let (sender, _receiver) = framed_stream_socketpair().unwrap();
+      let error = sender
+        .send_packet_with_descriptors_bounded(
+          &oversized_ready,
+          &[],
+          FrameByteLimit::CANDIDATE_READY,
+          deadline(),
+        )
+        .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn control_json_requires_strict_byte_exact_jcs() {
+      let value = parse_canonical_jcs(br#"{"a":1,"b":[true,null]}"#).unwrap();
+      assert_eq!(value["a"], 1);
+
+      for invalid in [
+        br#"{"a":1,"a":2}"#.as_slice(),
+        br#"{"b":2,"a":1}"#,
+        br#"{ "a":1}"#,
+        br#"{"a":1.0}"#,
+        br#"{"a":9007199254740992}"#,
+        b"\xff",
+      ] {
+        let error = parse_canonical_jcs(invalid).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      }
+    }
+
+    #[test]
+    fn canonical_frame_gate_closes_rights_on_json_refusal() {
+      let (sender, receiver) = framed_stream_socketpair().unwrap();
+      let (read_end, write_end) = pipe_pair().unwrap();
+      let final_deadline = deadline();
+      sender
+        .send_packet_with_descriptors(
+          br#"{"b":2,"a":1}"#,
+          &[write_end.as_fd()],
+          final_deadline,
+        )
+        .unwrap();
+
+      let error = receiver
+        .receive_one_canonical_jcs_frame(
+          FrameByteLimit::CONTROL,
+          1,
+          final_deadline,
+        )
+        .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      drop(write_end);
+      assert_no_pipe_writer(read_end.as_fd());
+    }
+
+    #[test]
     fn packet_bound_invalid_lengths_and_early_eof_are_rejected() {
       let (sender, receiver) = framed_stream_socketpair().unwrap();
-      let oversized = vec![0u8; MAX_PACKET_BYTES + 1];
+      let oversized = vec![0u8; MAX_CONTROL_PACKET_BYTES + 1];
       let error = sender
         .send_packet_with_descriptors(&oversized, &[], deadline())
         .unwrap_err();
@@ -1248,12 +1570,24 @@ pub(crate) mod unix_transport {
 
     fn assert_no_pipe_writer(read_end: BorrowedFd<'_>) {
       set_nonblocking(read_end).unwrap();
-      let mut byte = 0u8;
-      // SAFETY: byte is valid one-byte writable storage.
-      let result = unsafe {
-        libc::read(read_end.as_raw_fd(), ptr::from_mut(&mut byte).cast(), 1)
-      };
-      assert_eq!(result, 0, "a rejected received descriptor leaked");
+      let final_deadline = deadline();
+      loop {
+        let mut byte = 0u8;
+        // SAFETY: byte is valid one-byte writable storage.
+        let result = unsafe {
+          libc::read(read_end.as_raw_fd(), ptr::from_mut(&mut byte).cast(), 1)
+        };
+        if result == 0 {
+          return;
+        }
+        let error = io::Error::last_os_error();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+          Instant::now() < final_deadline,
+          "a rejected received descriptor leaked"
+        );
+        thread::sleep(Duration::from_millis(10));
+      }
     }
 
     fn fill_send_buffer(descriptor: BorrowedFd<'_>) {

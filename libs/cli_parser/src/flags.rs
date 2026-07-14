@@ -172,6 +172,10 @@ pub struct CompileFlags {
   pub exclude: Vec<String>,
   pub eszip: bool,
   pub self_extracting: bool,
+  /// Internal-only path to the closed Oden parent-capture contract input.
+  /// This is reserved until the compiler can recompute and validate the exact
+  /// entry/VFS/import graph against the generated allowlist.
+  pub oden_parent_capture_contract: Option<String>,
   /// Bundle the entrypoint with esbuild before embedding it, instead of
   /// shipping the entire node_modules tree. Experimental.
   pub bundle: bool,

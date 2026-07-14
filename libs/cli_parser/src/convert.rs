@@ -1857,6 +1857,9 @@ fn compile_parse(result: &ParseResult, flags: &mut Flags) {
     exclude,
     eszip,
     self_extracting,
+    oden_parent_capture_contract: result
+      .get_one("oden-parent-capture-contract")
+      .map(|s| s.to_string()),
     bundle: result.get_bool("bundle"),
     app_name: result.get_one("app-name").map(|s| s.to_string()),
     minify: result.get_bool("minify"),

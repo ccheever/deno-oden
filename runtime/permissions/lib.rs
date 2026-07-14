@@ -72,6 +72,10 @@ pub use oden_rev2_context::OdenRev2MkdirDelivery;
 pub use oden_rev2_context::OdenRev2RuntimeAuthorityContext;
 pub use oden_rev2_context::oden_capsec_rev2_lstat_sync;
 pub use oden_rev2_context::oden_capsec_rev2_mkdir_sync;
+#[doc(hidden)]
+pub use oden_rev2_executable::OdenRev2HarnessExecutableImage;
+#[doc(hidden)]
+pub use oden_rev2_executable::oden_rev2_stage_harness_executable_image;
 pub use oden_rev2_permission::OdenRev2PermissionError;
 pub use oden_rev2_permission::OdenRev2PermissionOperation;
 pub use oden_rev2_permission::oden_capsec_rev2_permission_operation;

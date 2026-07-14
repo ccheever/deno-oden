@@ -75,6 +75,21 @@ pub fn extract_standalone_with_finder(
   // read metadata first to determine the root path
   let (mut metadata, remaining) = read_section_metadata(data)?;
 
+  // @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements]
+  // — Presence never degrades to a generic standalone. Until native startup
+  // validates the complete branded graph and installs the private one-shot
+  // extension, even a well-shaped record remains mechanically unavailable.
+  if let Some(parent_metadata) = &metadata.oden_parent_capture_v2 {
+    parent_metadata.validate_closed_syntax().map_err(|reason| {
+      deno_core::anyhow::anyhow!(
+        "Invalid Oden parent-capture standalone metadata: {reason}"
+      )
+    })?;
+    bail!(
+      "Oden parent-capture standalone metadata is reserved but not yet enabled"
+    );
+  }
+
   // for self-extracting executables, use the extraction directory as root
   // so that module specifiers resolve to extracted file paths
   let root_path = if let Some(hash) = &metadata.self_extracting {

@@ -1468,3 +1468,29 @@ fn levenshtein_basics() {
   .unwrap_err();
   assert!(err.suggestion.as_ref().unwrap().contains("--allow-read"));
 }
+
+#[test]
+fn compile_parser_accepts_hidden_oden_parent_capture_contract() {
+  let flags = crate::convert::flags_from_vec(svec![
+    "deno",
+    "compile",
+    "--_oden-parent-capture-contract",
+    "parent-contract.json",
+    "main.ts"
+  ])
+  .unwrap();
+  let crate::flags::DenoSubcommand::Compile(compile_flags) = flags.subcommand
+  else {
+    panic!("expected compile subcommand");
+  };
+  assert_eq!(
+    compile_flags.oden_parent_capture_contract.as_deref(),
+    Some("parent-contract.json")
+  );
+}
+
+#[test]
+fn compile_parser_hides_oden_parent_capture_contract() {
+  let help = crate::help::render_help(&crate::defs::COMPILE_SUBCOMMAND);
+  assert!(!help.contains("_oden-parent-capture-contract"));
+}

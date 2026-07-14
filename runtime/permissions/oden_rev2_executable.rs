@@ -52,6 +52,10 @@ const MAX_EXECUTABLE_IMAGE_BYTES: u64 =
   REV2_RUNTIME_EXECUTABLE_MAX_IMAGE_BYTES as u64;
 const MAX_EXECUTABLE_AGGREGATE_BYTES: u64 =
   REV2_RUNTIME_EXECUTABLE_MAX_AGGREGATE_BYTES as u64;
+// The parent-brokered conformance harness retains exactly one paired engine
+// image for a target batch. This bound is intentionally narrower than C04's
+// provisional general-purpose image ceiling.
+const HARNESS_MAX_ENGINE_IMAGE_BYTES: u64 = 402_653_184;
 
 struct BoundedRetainedExecutable<'a> {
   object: &'a OdenRev2RetainedObject,
@@ -283,6 +287,148 @@ impl OdenRev2ImmutableExecutableImage {
   }
 }
 
+/// One immutable harness image derived from, and retaining, an already-open
+/// paired-engine descriptor.
+///
+/// This is deliberately opaque: the future compiled-parent broker receives
+/// only the platform-specific immutable entry primitive and evidence getters.
+/// It cannot supply a pathname for the source or cause this value to reopen
+/// one after verification.
+// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell [implements] -- The dormant parent harness keeps the exact opened engine object and stages one bounded immutable image without a validate-then-reopen gap.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct OdenRev2HarnessExecutableImage {
+  retained_source: File,
+  canonical_content_identity: String,
+  byte_len: u64,
+  image: OdenRev2ImmutableExecutableImage,
+}
+
+impl OdenRev2HarnessExecutableImage {
+  /// Exact raw SHA-256 content identity verified while copying the retained
+  /// source descriptor.
+  pub fn canonical_content_identity(&self) -> &str {
+    &self.canonical_content_identity
+  }
+
+  /// Exact verified source and staged-image length.
+  pub fn byte_len(&self) -> u64 {
+    self.byte_len
+  }
+
+  /// Stable name for the target-specific immutable staging mechanism.
+  pub fn platform_kind(&self) -> &'static str {
+    self.image.platform_kind()
+  }
+
+  /// Borrow the sealed executable memfd retained for a future `execveat`.
+  #[cfg(target_os = "linux")]
+  pub fn linux_executable_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+    use std::os::fd::AsFd;
+    self.image.file().as_fd()
+  }
+
+  /// Complete Linux memfd seal mask observed after installation.
+  #[cfg(target_os = "linux")]
+  pub fn linux_seals(&self) -> libc::c_int {
+    self.image.linux_seals()
+  }
+
+  /// Whether this kernel accepted the explicit `MFD_EXEC` flag.
+  #[cfg(target_os = "linux")]
+  pub fn linux_explicit_exec(&self) -> bool {
+    self.image.linux_explicit_exec()
+  }
+
+  /// Retained immutable path used for Darwin kernel entry.
+  #[cfg(target_os = "macos")]
+  pub fn macos_executable_path(&self) -> &Path {
+    self.image.macos_path()
+  }
+
+  /// Darwin flags observed on the retained immutable staged image.
+  #[cfg(target_os = "macos")]
+  pub fn macos_flags(&self) -> u32 {
+    self.image.macos_flags()
+  }
+}
+
+/// Stage one exact already-open paired engine into the platform's immutable
+/// C04 execution form while retaining the source descriptor for the complete
+/// lifetime of the returned image.
+///
+/// `expected_content_identity` must be the canonical
+/// `sha256-BASE64URL-NOPAD(SHA-256(bytes))` identity, and `expected_len` must
+/// match the same opened object. The function never accepts or reconstructs a
+/// source pathname.
+// @ref LLP 0019#c04-immutable-execution-installation-and-entry [implements] -- Harness staging reuses the C04 descriptor copy, digest, mutation, and target immutability checks.
+#[doc(hidden)]
+pub fn oden_rev2_stage_harness_executable_image(
+  retained_source: File,
+  expected_content_identity: &str,
+  expected_len: u64,
+  control_root: &Path,
+) -> Result<OdenRev2HarnessExecutableImage, String> {
+  validate_harness_image_request(expected_content_identity, expected_len)?;
+  #[cfg(not(target_os = "macos"))]
+  let _ = control_root;
+
+  #[cfg(target_os = "linux")]
+  let image = {
+    let name = std::ffi::CString::new("oden-capsec-filesystem-engine")
+      .map_err(|_| format!("{STAGE_ERROR_PREFIX}-MEMFD-NAME"))?;
+    stage_linux_image(
+      &retained_source,
+      expected_content_identity,
+      expected_len,
+      &name,
+    )?
+  };
+  #[cfg(target_os = "macos")]
+  let image = {
+    let directory = create_macos_staging_directory(control_root)?;
+    let image = stage_macos_image(
+      directory.clone(),
+      &retained_source,
+      expected_content_identity,
+      expected_len,
+      0,
+    )?;
+    directory.seal()?;
+    image
+  };
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  let image = {
+    return Err(format!("{STAGE_ERROR_PREFIX}-PLATFORM-UNSUPPORTED"));
+  };
+
+  Ok(OdenRev2HarnessExecutableImage {
+    retained_source,
+    canonical_content_identity: expected_content_identity.to_string(),
+    byte_len: expected_len,
+    image,
+  })
+}
+
+fn validate_harness_image_request(
+  expected_content_identity: &str,
+  expected_len: u64,
+) -> Result<(), String> {
+  if expected_len == 0 || expected_len > HARNESS_MAX_ENGINE_IMAGE_BYTES {
+    return Err(format!("{STAGE_ERROR_PREFIX}-HARNESS-IMAGE-BOUNDS"));
+  }
+  let Some(encoded) = expected_content_identity.strip_prefix("sha256-") else {
+    return Err(format!("{STAGE_ERROR_PREFIX}-HARNESS-DIGEST-FORMAT"));
+  };
+  let decoded = URL_SAFE_NO_PAD
+    .decode(encoded)
+    .map_err(|_| format!("{STAGE_ERROR_PREFIX}-HARNESS-DIGEST-FORMAT"))?;
+  if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&decoded) != encoded {
+    return Err(format!("{STAGE_ERROR_PREFIX}-HARNESS-DIGEST-FORMAT"));
+  }
+  Ok(())
+}
+
 fn installed_metadata(
   retained: &OdenRev2RetainedObject,
   byte_len: u64,
@@ -345,10 +491,6 @@ fn install_linux(
 ) -> Result<Vec<OdenRev2InstalledExecutable>, String> {
   use std::ffi::CString;
 
-  let required_seals = libc::F_SEAL_WRITE
-    | libc::F_SEAL_GROW
-    | libc::F_SEAL_SHRINK
-    | libc::F_SEAL_SEAL;
   let mut installed = Vec::with_capacity(retained.len());
   for (index, bounded) in retained.iter().enumerate() {
     let object = bounded.object;
@@ -357,38 +499,51 @@ fn install_linux(
       .ok_or_else(|| format!("{STAGE_ERROR_PREFIX}-METADATA"))?;
     let name = CString::new(format!("oden-rev2-executable-{index}"))
       .map_err(|_| format!("{STAGE_ERROR_PREFIX}-MEMFD-NAME"))?;
-    let (file, explicit_exec) = create_linux_memfd(&name)?;
-    copy_and_verify(object.file(), &file, expected, bounded.byte_len)?;
-    // SAFETY: the descriptor is valid and exclusively owned by `file` here.
-    if unsafe { libc::fchmod(file.as_raw_fd(), 0o500) } != 0 {
-      return Err(format!("{STAGE_ERROR_PREFIX}-MEMFD-MODE"));
-    }
-    // SAFETY: F_ADD_SEALS is valid for a memfd created with ALLOW_SEALING.
-    if unsafe {
-      libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, required_seals)
-    } != 0
-    {
-      return Err(format!("{STAGE_ERROR_PREFIX}-MEMFD-SEAL"));
-    }
-    // SAFETY: F_GET_SEALS accepts no fourth argument and does not mutate memory.
-    let seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
-    if seals < 0 || seals & required_seals != required_seals {
-      return Err(format!("{STAGE_ERROR_PREFIX}-MEMFD-SEAL-VERIFY"));
-    }
-    verify_opened_digest(&file, expected, bounded.byte_len)?;
     installed.push(installed_metadata(
       object,
       bounded.byte_len,
-      OdenRev2ImmutableExecutableImage {
-        inner: OdenRev2ImmutableExecutableImageInner::LinuxMemfd {
-          file,
-          seals,
-          explicit_exec,
-        },
-      },
+      stage_linux_image(object.file(), expected, bounded.byte_len, &name)?,
     )?);
   }
   Ok(installed)
+}
+
+#[cfg(target_os = "linux")]
+fn stage_linux_image(
+  source: &File,
+  expected: &str,
+  expected_len: u64,
+  name: &std::ffi::CStr,
+) -> Result<OdenRev2ImmutableExecutableImage, String> {
+  let required_seals = libc::F_SEAL_WRITE
+    | libc::F_SEAL_GROW
+    | libc::F_SEAL_SHRINK
+    | libc::F_SEAL_SEAL;
+  let (file, explicit_exec) = create_linux_memfd(name)?;
+  copy_and_verify(source, &file, expected, expected_len)?;
+  // SAFETY: the descriptor is valid and exclusively owned by `file` here.
+  if unsafe { libc::fchmod(file.as_raw_fd(), 0o500) } != 0 {
+    return Err(format!("{STAGE_ERROR_PREFIX}-MEMFD-MODE"));
+  }
+  // SAFETY: F_ADD_SEALS is valid for a memfd created with ALLOW_SEALING.
+  if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, required_seals) }
+    != 0
+  {
+    return Err(format!("{STAGE_ERROR_PREFIX}-MEMFD-SEAL"));
+  }
+  // SAFETY: F_GET_SEALS accepts no fourth argument and does not mutate memory.
+  let seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+  if seals < 0 || seals & required_seals != required_seals {
+    return Err(format!("{STAGE_ERROR_PREFIX}-MEMFD-SEAL-VERIFY"));
+  }
+  verify_opened_digest(&file, expected, expected_len)?;
+  Ok(OdenRev2ImmutableExecutableImage {
+    inner: OdenRev2ImmutableExecutableImageInner::LinuxMemfd {
+      file,
+      seals,
+      explicit_exec,
+    },
+  })
 }
 
 #[cfg(target_os = "linux")]
@@ -645,13 +800,34 @@ fn install_macos_file(
   bounded: &BoundedRetainedExecutable<'_>,
   index: usize,
 ) -> Result<OdenRev2InstalledExecutable, String> {
-  use std::ffi::CString;
-  use std::os::unix::fs::MetadataExt;
-
   let retained = bounded.object;
   let expected = retained
     .canonical_content_identity()
     .ok_or_else(|| format!("{STAGE_ERROR_PREFIX}-METADATA"))?;
+  installed_metadata(
+    retained,
+    bounded.byte_len,
+    stage_macos_image(
+      directory,
+      retained.file(),
+      expected,
+      bounded.byte_len,
+      index,
+    )?,
+  )
+}
+
+#[cfg(target_os = "macos")]
+fn stage_macos_image(
+  directory: Arc<MacStagingDirectory>,
+  source: &File,
+  expected: &str,
+  expected_len: u64,
+  index: usize,
+) -> Result<OdenRev2ImmutableExecutableImage, String> {
+  use std::ffi::CString;
+  use std::os::unix::fs::MetadataExt;
+
   let entry = CString::new(format!("image-{index}"))
     .map_err(|_| format!("{STAGE_ERROR_PREFIX}-MACOS-FILE-NAME"))?;
   // SAFETY: the directory and entry are valid. O_EXCL and O_NOFOLLOW_ANY
@@ -680,7 +856,7 @@ fn install_macos_file(
       .map_err(|_| format!("{STAGE_ERROR_PREFIX}-MACOS-FILE-NAME"))?,
   );
 
-  copy_and_verify(retained.file(), &writable, expected, bounded.byte_len)?;
+  copy_and_verify(source, &writable, expected, expected_len)?;
   // SAFETY: writable is the retained exact destination descriptor.
   if unsafe { libc::fchmod(writable.as_raw_fd(), 0o500) } != 0 {
     return Err(format!("{STAGE_ERROR_PREFIX}-MACOS-FILE-MODE"));
@@ -693,7 +869,7 @@ fn install_macos_file(
   if flags & libc::UF_IMMUTABLE == 0 {
     return Err(format!("{STAGE_ERROR_PREFIX}-MACOS-FILE-IMMUTABLE-VERIFY"));
   }
-  verify_opened_digest(&writable, expected, bounded.byte_len)?;
+  verify_opened_digest(&writable, expected, expected_len)?;
   let writable_metadata = writable
     .metadata()
     .map_err(|_| format!("{STAGE_ERROR_PREFIX}-MACOS-FILE-METADATA"))?;
@@ -728,21 +904,17 @@ fn install_macos_file(
   if read_flags & libc::UF_IMMUTABLE == 0 {
     return Err(format!("{STAGE_ERROR_PREFIX}-MACOS-FILE-IMMUTABLE-VERIFY"));
   }
-  verify_opened_digest(&file, expected, bounded.byte_len)?;
+  verify_opened_digest(&file, expected, expected_len)?;
   drop(writable);
 
-  installed_metadata(
-    retained,
-    bounded.byte_len,
-    OdenRev2ImmutableExecutableImage {
-      inner: OdenRev2ImmutableExecutableImageInner::MacImmutablePath {
-        directory,
-        file,
-        path,
-        flags: read_flags,
-      },
+  Ok(OdenRev2ImmutableExecutableImage {
+    inner: OdenRev2ImmutableExecutableImageInner::MacImmutablePath {
+      directory,
+      file,
+      path,
+      flags: read_flags,
     },
-  )
+  })
 }
 
 #[cfg(target_os = "macos")]
@@ -959,12 +1131,140 @@ mod tests {
     Ok(context)
   }
 
-  fn read_image(image: &OdenRev2ImmutableExecutableImage) -> Vec<u8> {
-    let mut file = image.file().try_clone().unwrap();
+  fn read_file(file: &File) -> Vec<u8> {
+    let mut file = file.try_clone().unwrap();
     file.seek(SeekFrom::Start(0)).unwrap();
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).unwrap();
     bytes
+  }
+
+  fn read_image(image: &OdenRev2ImmutableExecutableImage) -> Vec<u8> {
+    read_file(image.file())
+  }
+
+  #[test]
+  fn harness_stage_uses_the_retained_descriptor_after_path_replacement() {
+    let root = test_root("harness-retained-descriptor");
+    let source = root.join("deno");
+    let original = b"authenticated engine image";
+    let replacement = b"attacker pathname replacement";
+    std::fs::write(&source, original).unwrap();
+    let retained_source = File::open(&source).unwrap();
+
+    std::fs::remove_file(&source).unwrap();
+    std::fs::write(&source, replacement).unwrap();
+
+    let image = oden_rev2_stage_harness_executable_image(
+      retained_source,
+      &digest(original),
+      original.len() as u64,
+      &root,
+    )
+    .unwrap();
+
+    assert_eq!(image.canonical_content_identity(), digest(original));
+    assert_eq!(image.byte_len(), original.len() as u64);
+    assert_eq!(read_file(&image.retained_source), original);
+    assert_eq!(read_image(&image.image), original);
+    assert_eq!(std::fs::read(&source).unwrap(), replacement);
+
+    #[cfg(target_os = "linux")]
+    {
+      use std::os::fd::AsRawFd;
+
+      let required = libc::F_SEAL_WRITE
+        | libc::F_SEAL_GROW
+        | libc::F_SEAL_SHRINK
+        | libc::F_SEAL_SEAL;
+      assert_eq!(image.platform_kind(), "linux-sealed-memfd");
+      assert!(image.linux_executable_fd().as_raw_fd() >= 0);
+      assert_eq!(image.linux_seals() & required, required);
+      let _explicit_exec_or_legacy_kernel = image.linux_explicit_exec();
+      assert!(image.image.file().write_at(b"x", 0).is_err());
+      assert!(image.image.file().set_len(1).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+      let stage_path = image.macos_executable_path().to_path_buf();
+      assert_eq!(image.platform_kind(), "macos-private-immutable-path");
+      assert!(stage_path.starts_with(&root));
+      assert_eq!(image.macos_flags() & libc::UF_IMMUTABLE, libc::UF_IMMUTABLE);
+      assert!(std::fs::write(&stage_path, b"mutation").is_err());
+      drop(image);
+      assert!(!stage_path.exists());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    drop(image);
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_dir(root).unwrap();
+  }
+
+  #[test]
+  fn harness_stage_refuses_noncanonical_digest_and_harness_length_bounds() {
+    let root = test_root("harness-request-bounds");
+    let source = root.join("deno");
+    let bytes = b"bounded engine image";
+    std::fs::write(&source, bytes).unwrap();
+
+    let error = oden_rev2_stage_harness_executable_image(
+      File::open(&source).unwrap(),
+      "sha256-not-a-canonical-sha256-digest",
+      bytes.len() as u64,
+      &root,
+    )
+    .unwrap_err();
+    assert_eq!(error, "OD-CAP-REV2-EXECUTABLE-STAGE-HARNESS-DIGEST-FORMAT");
+
+    for invalid_len in [0, HARNESS_MAX_ENGINE_IMAGE_BYTES + 1] {
+      let error = oden_rev2_stage_harness_executable_image(
+        File::open(&source).unwrap(),
+        &digest(bytes),
+        invalid_len,
+        &root,
+      )
+      .unwrap_err();
+      assert_eq!(error, "OD-CAP-REV2-EXECUTABLE-STAGE-HARNESS-IMAGE-BOUNDS");
+    }
+
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_dir(root).unwrap();
+  }
+
+  #[test]
+  fn harness_stage_refuses_length_or_digest_mismatch_without_fallback() {
+    let root = test_root("harness-exact-match");
+    let source = root.join("deno");
+    let bytes = b"exact engine image";
+    std::fs::write(&source, bytes).unwrap();
+
+    let length_error = oden_rev2_stage_harness_executable_image(
+      File::open(&source).unwrap(),
+      &digest(bytes),
+      bytes.len() as u64 + 1,
+      &root,
+    )
+    .unwrap_err();
+    assert_eq!(
+      length_error,
+      "OD-CAP-REV2-EXECUTABLE-STAGE-SOURCE-BOUNDS-RACED"
+    );
+
+    let digest_error = oden_rev2_stage_harness_executable_image(
+      File::open(&source).unwrap(),
+      &digest(b"different engine image"),
+      bytes.len() as u64,
+      &root,
+    )
+    .unwrap_err();
+    assert_eq!(digest_error, "OD-CAP-REV2-EXECUTABLE-STAGE-DIGEST");
+
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_dir(root).unwrap();
   }
 
   #[test]

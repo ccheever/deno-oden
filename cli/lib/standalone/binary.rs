@@ -18,6 +18,16 @@ use crate::args::UnstableConfig;
 
 pub const MAGIC_BYTES: &[u8; 8] = b"d3n0l4nd";
 
+pub const ODEN_PARENT_CAPTURE_V2_METADATA_SCHEMA: &str =
+  "oden/capsec-filesystem-parent-standalone-metadata/2";
+pub const ODEN_PARENT_CAPTURE_V2_METADATA_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-standalone-metadata:2";
+pub const ODEN_PARENT_CAPTURE_V2_MODULE_SPECIFIER: &str =
+  "oden-internal:filesystem-parent-capture-v2";
+pub const ODEN_PARENT_CAPTURE_V2_PRIMITIVE_ID: &str =
+  "oden.filesystem-parent-capture/2";
+pub const ODEN_CAPSEC_REV2_PROFILE: &str = "oden/capsec/2";
+
 pub trait DenoRtDeserializable<'a>: Sized {
   fn deserialize(input: &'a [u8]) -> std::io::Result<(&'a [u8], Self)>;
 }
@@ -71,6 +81,122 @@ pub struct SerializedWorkspaceResolver {
   pub catalogs: IndexMap<String, IndexMap<String, String>>,
 }
 
+// @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
+// Reserve the exact closed standalone-parent record without enabling its
+// private extension. Generic and older standalone metadata omit this field.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OdenParentCaptureV2Metadata {
+  pub schema: String,
+  pub profile: String,
+  pub target: String,
+  pub feature_set: String,
+  pub fork_commit: String,
+  pub parent_build_marker: String,
+  pub denort_base_image_digest: String,
+  pub entrypoint_key: String,
+  pub entrypoint_source_digest: String,
+  pub vfs_graph_digest: String,
+  pub private_module_specifier: String,
+  pub static_import_edge_digest: String,
+  pub parent_primitive_id: String,
+  pub paired_engine_build_marker: String,
+  pub paired_engine_digest: String,
+  pub engine_provenance_schema: u8,
+  pub capture_contract_digest: String,
+  pub source_closure_contract_digest: String,
+  pub release_contract_digest: String,
+  pub generated_allowlist_digest: String,
+}
+
+impl OdenParentCaptureV2Metadata {
+  /// Validate the closed wire-level syntax before any generated allowlist or
+  /// image-specific relation is consulted. Passing this check alone never
+  /// enables the private parent extension.
+  pub fn validate_closed_syntax(&self) -> Result<(), &'static str> {
+    if self.schema != ODEN_PARENT_CAPTURE_V2_METADATA_SCHEMA {
+      return Err("metadata schema is not the frozen Oden parent schema");
+    }
+    if self.profile != ODEN_CAPSEC_REV2_PROFILE {
+      return Err("metadata profile is not Oden capsec Rev2");
+    }
+    if !matches!(
+      self.target.as_str(),
+      "aarch64-apple-darwin"
+        | "x86_64-apple-darwin"
+        | "aarch64-unknown-linux-gnu"
+        | "x86_64-unknown-linux-gnu"
+    ) {
+      return Err("metadata target is not in the Oden v1 release matrix");
+    }
+    if !is_oden_parent_token(&self.feature_set, 1, 128)
+      || !is_oden_parent_token(&self.parent_build_marker, 1, 256)
+      || !is_oden_parent_token(&self.paired_engine_build_marker, 1, 256)
+    {
+      return Err("metadata feature set or build marker is malformed");
+    }
+    if !is_lower_hex(&self.fork_commit, 40) {
+      return Err("metadata fork commit is malformed");
+    }
+    if self.entrypoint_key.is_empty()
+      || self.entrypoint_key.len() > 4096
+      || self.entrypoint_key.bytes().any(|byte| byte == 0)
+    {
+      return Err("metadata entrypoint key is malformed");
+    }
+    if self.private_module_specifier != ODEN_PARENT_CAPTURE_V2_MODULE_SPECIFIER
+    {
+      return Err("metadata private module specifier is not frozen");
+    }
+    if self.parent_primitive_id != ODEN_PARENT_CAPTURE_V2_PRIMITIVE_ID {
+      return Err("metadata parent primitive id is not frozen");
+    }
+    if self.engine_provenance_schema != 2 {
+      return Err("metadata engine provenance schema is unsupported");
+    }
+    for digest in [
+      &self.denort_base_image_digest,
+      &self.entrypoint_source_digest,
+      &self.vfs_graph_digest,
+      &self.static_import_edge_digest,
+      &self.paired_engine_digest,
+      &self.capture_contract_digest,
+      &self.source_closure_contract_digest,
+      &self.release_contract_digest,
+      &self.generated_allowlist_digest,
+    ] {
+      if !is_sha256_base64url_digest(digest) {
+        return Err("metadata contains a malformed digest");
+      }
+    }
+    Ok(())
+  }
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+  value.len() == length
+    && value
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_sha256_base64url_digest(value: &str) -> bool {
+  let Some(value) = value.strip_prefix("sha256-") else {
+    return false;
+  };
+  value.len() == 43
+    && value
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn is_oden_parent_token(value: &str, minimum: usize, maximum: usize) -> bool {
+  (minimum..=maximum).contains(&value.len())
+    && value.bytes().all(|byte| {
+      byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+    })
+}
+
 // Note: Don't use hashmaps/hashsets. Ensure the serialization
 // is deterministic.
 #[derive(Deserialize, Serialize)]
@@ -114,6 +240,95 @@ pub struct Metadata {
   /// Auto-update release base URL from deno.json `desktop.release.baseUrl`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub release_base_url: Option<String>,
+  /// Exact Oden-only parent-capture brand. Absence preserves generic
+  /// standalone compatibility; presence is fail-closed until native startup
+  /// validates the complete record and private module graph.
+  #[serde(
+    default,
+    rename = "odenParentCaptureV2",
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub oden_parent_capture_v2: Option<OdenParentCaptureV2Metadata>,
+}
+
+#[cfg(test)]
+mod oden_parent_capture_v2_metadata_tests {
+  use super::*;
+
+  fn record_json() -> serde_json::Value {
+    serde_json::json!({
+      "schema": ODEN_PARENT_CAPTURE_V2_METADATA_SCHEMA,
+      "profile": "oden/capsec/2",
+      "target": "x86_64-unknown-linux-gnu",
+      "featureSet": "default",
+      "forkCommit": "1".repeat(40),
+      "parentBuildMarker": "oden-parent-build-v2",
+      "denortBaseImageDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "entrypointKey": "src/main.ts",
+      "entrypointSourceDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "vfsGraphDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "privateModuleSpecifier": ODEN_PARENT_CAPTURE_V2_MODULE_SPECIFIER,
+      "staticImportEdgeDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "parentPrimitiveId": "oden.filesystem-parent-capture/2",
+      "pairedEngineBuildMarker": "oden-engine-build-v2",
+      "pairedEngineDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "engineProvenanceSchema": 2,
+      "captureContractDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "sourceClosureContractDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "releaseContractDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "generatedAllowlistDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    })
+  }
+
+  #[test]
+  fn parent_record_has_exact_camel_case_wire_shape() {
+    let record: OdenParentCaptureV2Metadata =
+      serde_json::from_value(record_json()).unwrap();
+    assert_eq!(record.schema, ODEN_PARENT_CAPTURE_V2_METADATA_SCHEMA);
+    assert_eq!(
+      record.private_module_specifier,
+      ODEN_PARENT_CAPTURE_V2_MODULE_SPECIFIER
+    );
+    record.validate_closed_syntax().unwrap();
+    assert_eq!(serde_json::to_value(record).unwrap(), record_json());
+  }
+
+  #[test]
+  fn parent_record_rejects_unknown_fields() {
+    let mut value = record_json();
+    value
+      .as_object_mut()
+      .unwrap()
+      .insert("extra".to_string(), serde_json::Value::Bool(true));
+    assert!(
+      serde_json::from_value::<OdenParentCaptureV2Metadata>(value).is_err()
+    );
+  }
+
+  #[test]
+  fn parent_record_closed_syntax_refuses_wrong_identity() {
+    for (field, replacement) in [
+      ("schema", serde_json::json!("wrong")),
+      ("profile", serde_json::json!("oden/capsec/1.1")),
+      ("target", serde_json::json!("x86_64-pc-windows-msvc")),
+      ("forkCommit", serde_json::json!("A".repeat(40))),
+      (
+        "privateModuleSpecifier",
+        serde_json::json!("oden-internal:other"),
+      ),
+      ("engineProvenanceSchema", serde_json::json!(1)),
+      ("pairedEngineDigest", serde_json::json!("sha256-short")),
+    ] {
+      let mut value = record_json();
+      value
+        .as_object_mut()
+        .unwrap()
+        .insert(field.to_string(), replacement);
+      let record: OdenParentCaptureV2Metadata =
+        serde_json::from_value(value).unwrap();
+      assert!(record.validate_closed_syntax().is_err(), "accepted {field}");
+    }
+  }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]

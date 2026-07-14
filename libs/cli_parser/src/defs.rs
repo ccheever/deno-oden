@@ -1243,6 +1243,11 @@ pub static COMPILE_SUBCOMMAND: CommandDef = CommandDef {
     ArgDef::new("self-extracting")
       .long("self-extracting")
       .set_true(),
+    ArgDef::new("oden-parent-capture-contract")
+      .long("_oden-parent-capture-contract")
+      .action(ArgAction::Set)
+      .num_args(NumArgs::Exact(1))
+      .hidden(),
     ArgDef::new("check")
       .long("check")
       .action(ArgAction::Set)

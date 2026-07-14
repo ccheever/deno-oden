@@ -393,6 +393,7 @@ async fn install_global_compiled(
     exclude: vec![],
     eszip: false,
     self_extracting: false,
+    oden_parent_capture_contract: None,
     bundle: false,
     app_name: None,
     minify: false,

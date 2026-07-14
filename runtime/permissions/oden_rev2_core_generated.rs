@@ -1251,6 +1251,65 @@ pub struct FilesystemCandidateOracleInput {
     pub parent_capture_facts: FilesystemParentCaptureFacts,
 }
 
+/// A closed, expected-free execution input admitted for the native filesystem
+/// candidate. The fields remain private and the type deliberately implements
+/// neither `Serialize` nor `Deserialize`: only
+/// [`validate_filesystem_candidate_execution`] can construct it.
+///
+/// @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
+/// Candidate execution receives only the registered execution projection and
+/// initial sandbox preimage; oracle output, manifest expected data, trace,
+/// final state, and verdict never enter this token.
+#[derive(Debug)]
+pub struct ValidatedFilesystemCandidateExecution {
+    input: FilesystemCandidateOracleInput,
+    runtime_slots: Vec<FilesystemEffectSlot>,
+    target_setup_index: usize,
+    target_initial_index: usize,
+    parent_identity: FilesystemObjectIdentity,
+}
+
+impl ValidatedFilesystemCandidateExecution {
+    pub fn execution_projection(&self) -> &FilesystemExecutionProjection {
+        &self.input.case_projection
+    }
+
+    pub fn execution_projection_digest(&self) -> &str {
+        &self.input.case_projection_digest
+    }
+
+    pub fn initial_sandbox(&self) -> &FilesystemInitialSandboxInventory {
+        &self.input.initial_sandbox
+    }
+
+    pub fn initial_inventory_digest(&self) -> &str {
+        &self.input.initial_inventory_digest
+    }
+
+    pub fn parent_capture_facts(&self) -> &FilesystemParentCaptureFacts {
+        &self.input.parent_capture_facts
+    }
+
+    /// Slots normalized from the registered operation model. A generated
+    /// pre-validation mutation has no runtime slots even though its fixture
+    /// comparison retains the operation's base slots in the oracle path.
+    pub fn runtime_slots(&self) -> &[FilesystemEffectSlot] {
+        &self.runtime_slots
+    }
+
+    pub fn target_setup(&self) -> &FilesystemSetupObject {
+        &self.input.case_projection.setup.objects[self.target_setup_index]
+    }
+
+    pub fn target_initial(&self) -> &FilesystemInitialSandboxObject {
+        &self.input.initial_sandbox.objects[self.target_initial_index]
+    }
+
+    pub fn parent_identity(&self) -> &FilesystemObjectIdentity {
+        &self.parent_identity
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum FilesystemFinalObjectState {
@@ -5427,6 +5486,9 @@ fn generated_trace_phase(
     }
 }
 
+// This reverse projection remains dormant until the first reviewed
+// filesystem conformance case row is generated.
+#[allow(dead_code)]
 fn filesystem_trace_phase(
     phase: generated::Rev2FilesystemCandidateTracePhase,
 ) -> FilesystemTracePhase {
@@ -6130,12 +6192,12 @@ fn push_resource_lifecycle(
     });
 }
 
-fn expected_resource_lifecycle(
+fn case_plan_resource_lifecycle(
     projection: &FilesystemExecutionProjection,
     operation: &generated::Rev2FilesystemCandidateOperationSpec,
     plan: &generated::Rev2FilesystemCandidateCasePlanSpec,
     target: &FilesystemSetupObject,
-    outcome: &generated::Rev2FilesystemCandidateAuthorizedOutcomeSpec,
+    target_state: generated::Rev2FilesystemCandidateTargetState,
 ) -> Vec<FilesystemResourceLifecycleEntry> {
     let mut rows = Vec::new();
     let operation_owner = format!("operation:{}", projection.case_id);
@@ -6228,7 +6290,13 @@ fn expected_resource_lifecycle(
     }
     let creates_child = plan.outcome_disposition
         == generated::Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation
-        && outcome.permitted_side_effects.len() == 1;
+        && matches!(
+            (operation, target_state),
+            (
+                generated::Rev2FilesystemCandidateOperationSpec::MkdirSync { .. },
+                generated::Rev2FilesystemCandidateTargetState::Missing
+            )
+        );
     if creates_child {
         push_resource_lifecycle(
             &mut rows,
@@ -6358,7 +6426,6 @@ fn validate_case_plan_binding(
     plan: &generated::Rev2FilesystemCandidateCasePlanSpec,
     target_setup: &FilesystemSetupObject,
     state: generated::Rev2FilesystemCandidateTargetState,
-    outcome: &generated::Rev2FilesystemCandidateAuthorizedOutcomeSpec,
 ) -> Result<(), CoreError> {
     let expected_case_plan_digest = generated_case_plan_digest(&projection.case_kind)?;
     if projection.case_plan_digest != expected_case_plan_digest
@@ -6406,7 +6473,7 @@ fn validate_case_plan_binding(
     )?;
     validate_fault_plan(projection, operation, plan)?;
     if projection.execution.resource_lifecycle
-        != expected_resource_lifecycle(projection, operation, plan, target_setup, outcome)
+        != case_plan_resource_lifecycle(projection, operation, plan, target_setup, state)
     {
         return Err(CoreError::new(
             REASON_SCHEMA_INVALID,
@@ -6953,19 +7020,19 @@ fn validate_initial_sandbox_completeness(
     Ok(())
 }
 
-struct FilesystemOracleMaterial<'a> {
+struct FilesystemCandidateExecutionMaterial<'a> {
     operation: &'static generated::Rev2FilesystemCandidateOperationSpec,
     plan: &'static generated::Rev2FilesystemCandidateCasePlanSpec,
     target_setup: &'a FilesystemSetupObject,
     target_initial: &'a FilesystemInitialSandboxObject,
     parent_identity: FilesystemObjectIdentity,
-    authorized_outcome: &'static generated::Rev2FilesystemCandidateAuthorizedOutcomeSpec,
+    target_state: generated::Rev2FilesystemCandidateTargetState,
     slots: Vec<FilesystemEffectSlot>,
 }
 
-fn filesystem_oracle_material<'a>(
+fn filesystem_candidate_execution_material<'a>(
     input: &'a FilesystemCandidateOracleInput,
-) -> Result<FilesystemOracleMaterial<'a>, CoreError> {
+) -> Result<FilesystemCandidateExecutionMaterial<'a>, CoreError> {
     let projection = &input.case_projection;
     let target_candidates_valid = !projection.target_predicate.candidates.is_empty()
         && projection.target_predicate.candidates.len() <= 16
@@ -7211,27 +7278,8 @@ fn filesystem_oracle_material<'a>(
     }
     let target_state = target_state(operation, target_setup.kind)?;
     let plan = generated_case_plan(&projection.case_kind)?;
-    let authorized_outcome = operation_authorized_outcomes(operation)
-        .iter()
-        .find(|outcome| outcome.target_state == target_state)
-        .ok_or_else(|| {
-            CoreError::new(
-                REASON_SCHEMA_INVALID,
-                "filesystem target state has no generated authorized outcome",
-            )
-        })?;
-    validate_generated_authorized_outcome(operation, target_state, authorized_outcome)?;
-    validate_case_plan_binding(
-        projection,
-        operation,
-        plan,
-        target_setup,
-        target_state,
-        authorized_outcome,
-    )?;
-    if authorized_outcome.normalized_slot_states.len() != operation_slots(operation).len()
-        || projection.execution.actors.len() != operation_slots(operation).len()
-    {
+    validate_case_plan_binding(projection, operation, plan, target_setup, target_state)?;
+    if projection.execution.actors.len() != operation_slots(operation).len() {
         return Err(CoreError::new(
             REASON_SCHEMA_INVALID,
             "filesystem operation slot plan is incomplete",
@@ -7239,19 +7287,29 @@ fn filesystem_oracle_material<'a>(
     }
     let mut slots = Vec::with_capacity(operation_slots(operation).len());
     for (index, slot_spec) in operation_slots(operation).iter().enumerate() {
-        let state_spec = &authorized_outcome.normalized_slot_states[index];
         let actor = &projection.execution.actors[index];
-        if state_spec.effect_slot_id != slot_spec.effect_slot_id
-            || actor.slot_id != slot_spec.effect_slot_id
+        if actor.slot_id != slot_spec.effect_slot_id
             || actor.effect_owner != projection.effect_owner_key
         {
             return Err(CoreError::new(
                 REASON_SCHEMA_INVALID,
-                "filesystem execution actor or normalized slot differs from generated order",
+                "filesystem execution actor differs from generated slot order",
             ));
         }
         use generated::Rev2FilesystemCandidateFinalObjectState as State;
-        let final_object_state = match state_spec.final_object_state {
+        use generated::Rev2FilesystemCandidateSlotRole as Role;
+        let normalized_state = match (target_state, slot_spec.role) {
+            (generated::Rev2FilesystemCandidateTargetState::Existing, _) => State::Existing,
+            (generated::Rev2FilesystemCandidateTargetState::LinkEntry, _) => State::LinkEntry,
+            (generated::Rev2FilesystemCandidateTargetState::Missing, Role::TargetWriteIntent) => {
+                State::Proposed
+            }
+            (
+                generated::Rev2FilesystemCandidateTargetState::Missing,
+                Role::TargetListObservation,
+            ) => State::Missing,
+        };
+        let final_object_state = match normalized_state {
             State::Existing => FilesystemFinalObjectState::Existing {
                 identity: target_initial.state.identity.clone().ok_or_else(|| {
                     CoreError::new(REASON_SCHEMA_INVALID, "existing target identity is missing")
@@ -7280,14 +7338,137 @@ fn filesystem_oracle_material<'a>(
             },
         });
     }
-    Ok(FilesystemOracleMaterial {
+    Ok(FilesystemCandidateExecutionMaterial {
         operation,
         plan,
         target_setup,
         target_initial,
         parent_identity,
-        authorized_outcome,
+        target_state,
         slots,
+    })
+}
+
+fn validate_filesystem_candidate_execution_input(
+    input: &FilesystemCandidateOracleInput,
+) -> Result<FilesystemCandidateExecutionMaterial<'_>, CoreError> {
+    let projection_value = serde_json::to_value(&input.case_projection).map_err(schema_error)?;
+    let inventory_value = serde_json::to_value(&input.initial_sandbox).map_err(schema_error)?;
+    let computed_projection_digest = hjcs_digest(
+        FILESYSTEM_EXECUTION_PROJECTION_DIGEST_DOMAIN,
+        &projection_value,
+    )?;
+    let computed_inventory_digest = hjcs_digest(
+        FILESYSTEM_SANDBOX_INVENTORY_DIGEST_DOMAIN,
+        &inventory_value,
+    )?;
+    if input.case_projection_digest != computed_projection_digest
+        || input.initial_inventory_digest != computed_inventory_digest
+    {
+        return Err(CoreError::new(
+            REASON_SCHEMA_INVALID,
+            "filesystem candidate input digest does not bind its complete preimage",
+        ));
+    }
+    filesystem_candidate_execution_material(input)
+}
+
+/// Validate and bind the complete expected-free native candidate input.
+///
+/// This boundary checks the registered case and operation model, target tuple,
+/// initial sandbox realization, actor and authority plans, exact phase and
+/// resource lifecycle, and closed fault plan. It does not instantiate the
+/// shared decision core, evaluate an outcome, or construct oracle output.
+///
+/// @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
+/// The native candidate admits only a digest-bound generated execution
+/// projection and initial-only inventory, independently of expected results.
+pub fn validate_filesystem_candidate_execution(
+    input: FilesystemCandidateOracleInput,
+) -> Result<ValidatedFilesystemCandidateExecution, CoreError> {
+    let (runtime_slots, target_object_id, parent_identity) = {
+        let material = validate_filesystem_candidate_execution_input(&input)?;
+        let runtime_slots = if input.case_projection.input_mutation
+            == FilesystemInputMutation::TargetPathDotDot
+        {
+            Vec::new()
+        } else {
+            material.slots.clone()
+        };
+        (
+            runtime_slots,
+            material.target_setup.object_id.clone(),
+            material.parent_identity.clone(),
+        )
+    };
+    let target_setup_index = input
+        .case_projection
+        .setup
+        .objects
+        .iter()
+        .position(|object| object.object_id == target_object_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "validated filesystem target disappeared from setup",
+            )
+        })?;
+    let target_initial_index = input
+        .initial_sandbox
+        .objects
+        .iter()
+        .position(|object| object.object_id == target_object_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "validated filesystem target disappeared from initial inventory",
+            )
+        })?;
+    Ok(ValidatedFilesystemCandidateExecution {
+        input,
+        runtime_slots,
+        target_setup_index,
+        target_initial_index,
+        parent_identity,
+    })
+}
+
+struct FilesystemOracleMaterial<'a> {
+    operation: &'static generated::Rev2FilesystemCandidateOperationSpec,
+    plan: &'static generated::Rev2FilesystemCandidateCasePlanSpec,
+    target_setup: &'a FilesystemSetupObject,
+    target_initial: &'a FilesystemInitialSandboxObject,
+    parent_identity: FilesystemObjectIdentity,
+    authorized_outcome: &'static generated::Rev2FilesystemCandidateAuthorizedOutcomeSpec,
+    slots: Vec<FilesystemEffectSlot>,
+}
+
+fn filesystem_oracle_material<'a>(
+    input: &'a FilesystemCandidateOracleInput,
+) -> Result<FilesystemOracleMaterial<'a>, CoreError> {
+    let material = validate_filesystem_candidate_execution_input(input)?;
+    let authorized_outcome = operation_authorized_outcomes(material.operation)
+        .iter()
+        .find(|outcome| outcome.target_state == material.target_state)
+        .ok_or_else(|| {
+            CoreError::new(
+                REASON_SCHEMA_INVALID,
+                "filesystem target state has no generated authorized outcome",
+            )
+        })?;
+    validate_generated_authorized_outcome(
+        material.operation,
+        material.target_state,
+        authorized_outcome,
+    )?;
+    Ok(FilesystemOracleMaterial {
+        operation: material.operation,
+        plan: material.plan,
+        target_setup: material.target_setup,
+        target_initial: material.target_initial,
+        parent_identity: material.parent_identity,
+        authorized_outcome,
+        slots: material.slots,
     })
 }
 
@@ -8077,24 +8258,6 @@ fn evaluate_filesystem_candidate(
     core: &Rev2Core,
     input: &FilesystemCandidateOracleInput,
 ) -> Result<FilesystemCandidateOracleOutput, CoreError> {
-    let projection_value = serde_json::to_value(&input.case_projection).map_err(schema_error)?;
-    let inventory_value = serde_json::to_value(&input.initial_sandbox).map_err(schema_error)?;
-    let computed_projection_digest = hjcs_digest(
-        FILESYSTEM_EXECUTION_PROJECTION_DIGEST_DOMAIN,
-        &projection_value,
-    )?;
-    let computed_inventory_digest = hjcs_digest(
-        FILESYSTEM_SANDBOX_INVENTORY_DIGEST_DOMAIN,
-        &inventory_value,
-    )?;
-    if input.case_projection_digest != computed_projection_digest
-        || input.initial_inventory_digest != computed_inventory_digest
-    {
-        return Err(CoreError::new(
-            REASON_SCHEMA_INVALID,
-            "filesystem oracle input digest does not bind its complete preimage",
-        ));
-    }
     let material = filesystem_oracle_material(input)?;
     let malformed = input.case_projection.input_mutation == FilesystemInputMutation::TargetPathDotDot;
     let mut evaluations = Vec::new();
@@ -10116,6 +10279,21 @@ mod tests {
     use proptest::prelude::*;
     use serde_json::json;
 
+    // Compile-time negative assertion: the opaque candidate token must not
+    // acquire a wire constructor through a future derive or blanket impl.
+    const _: fn() = || {
+        trait AmbiguousIfDeserialize<A> {
+            fn marker() {}
+        }
+        impl<T: ?Sized> AmbiguousIfDeserialize<()> for T {}
+        struct ImplementsDeserialize;
+        impl<T: ?Sized + serde::de::DeserializeOwned>
+            AmbiguousIfDeserialize<ImplementsDeserialize> for T
+        {
+        }
+        let _ = <ValidatedFilesystemCandidateExecution as AmbiguousIfDeserialize<_>>::marker;
+    };
+
     const ENV_EDGE: &str = "native-op:ext/os/lib.rs#op_get_env";
     const ENV_SLOT: &str = "native-op:ext/os/lib.rs#op_get_env:effect-slot:0";
     const CWD_EDGE: &str = "native-op:ext/fs/ops.rs#op_fs_chdir";
@@ -11128,12 +11306,8 @@ mod tests {
         let plan = generated_case_plan(&projection.case_kind).unwrap();
         let target = &projection.setup.objects[0];
         let state = target_state(operation, target.kind).unwrap();
-        let outcome = operation_authorized_outcomes(operation)
-            .iter()
-            .find(|outcome| outcome.target_state == state)
-            .unwrap();
         projection.execution.resource_lifecycle =
-            expected_resource_lifecycle(&projection, operation, plan, target, outcome);
+            case_plan_resource_lifecycle(&projection, operation, plan, target, state);
         let initial_sandbox = FilesystemInitialSandboxInventory {
             schema: FILESYSTEM_SANDBOX_INVENTORY_SCHEMA.to_string(),
             phase: FilesystemSandboxPhase::Initial,
@@ -11212,16 +11386,12 @@ mod tests {
         let plan = generated_case_plan(&input.case_projection.case_kind).unwrap();
         let target = &input.case_projection.setup.objects[0];
         let state = target_state(operation, target.kind).unwrap();
-        let outcome = operation_authorized_outcomes(operation)
-            .iter()
-            .find(|outcome| outcome.target_state == state)
-            .unwrap();
-        input.case_projection.execution.resource_lifecycle = expected_resource_lifecycle(
+        input.case_projection.execution.resource_lifecycle = case_plan_resource_lifecycle(
             &input.case_projection,
             operation,
             plan,
             target,
-            outcome,
+            state,
         );
         input.case_projection_digest = hjcs_digest(
             FILESYSTEM_EXECUTION_PROJECTION_DIGEST_DOMAIN,
@@ -11262,16 +11432,12 @@ mod tests {
             .copied()
             .map(filesystem_trace_phase)
             .collect();
-        let outcome = operation_authorized_outcomes(operation)
-            .iter()
-            .find(|outcome| outcome.target_state == state)
-            .unwrap();
-        input.case_projection.execution.resource_lifecycle = expected_resource_lifecycle(
+        input.case_projection.execution.resource_lifecycle = case_plan_resource_lifecycle(
             &input.case_projection,
             operation,
             plan,
             target,
-            outcome,
+            state,
         );
         recompute_filesystem_oracle_input_digests(input);
     }
@@ -11714,16 +11880,12 @@ mod tests {
             }
         };
         let state = target_state(operation, kind).unwrap();
-        let outcome = operation_authorized_outcomes(operation)
-            .iter()
-            .find(|outcome| outcome.target_state == state)
-            .unwrap();
-        projection.execution.resource_lifecycle = expected_resource_lifecycle(
+        projection.execution.resource_lifecycle = case_plan_resource_lifecycle(
             &projection,
             operation,
             plan,
             &projection.setup.objects[0],
-            outcome,
+            state,
         );
         projection
     }
@@ -12154,6 +12316,178 @@ mod tests {
     }
 
     #[test]
+    fn filesystem_candidate_execution_validation_excludes_expected_data() {
+        let input = filesystem_lstat_oracle_input();
+        let wire = serde_json::to_value(&input).unwrap();
+        for field in [
+            "expected",
+            "finalSandbox",
+            "trace",
+            "observedResult",
+            "oracleOutput",
+            "verdict",
+            "differences",
+        ] {
+            let mut extra_top_level = wire.clone();
+            extra_top_level
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), json!({}));
+            assert!(
+                serde_json::from_value::<FilesystemCandidateOracleInput>(extra_top_level).is_err(),
+                "candidate input admitted top-level {field}"
+            );
+
+            let mut extra_projection = wire.clone();
+            extra_projection
+                .get_mut("caseProjection")
+                .and_then(Value::as_object_mut)
+                .unwrap()
+                .insert(field.to_string(), json!({}));
+            assert!(
+                serde_json::from_value::<FilesystemCandidateOracleInput>(extra_projection)
+                    .is_err(),
+                "candidate projection admitted {field}"
+            );
+        }
+
+        let projection_digest = input.case_projection_digest.clone();
+        let inventory_digest = input.initial_inventory_digest.clone();
+        let validated = validate_filesystem_candidate_execution(input).unwrap();
+        assert_eq!(validated.execution_projection_digest(), projection_digest);
+        assert_eq!(validated.initial_inventory_digest(), inventory_digest);
+        assert_eq!(
+            validated.execution_projection().case_id,
+            "filesystem:lstat-sync:lstat-existing"
+        );
+        assert_eq!(validated.runtime_slots().len(), 1);
+        assert_eq!(validated.runtime_slots()[0].capability, "fs:list");
+        assert_eq!(validated.target_setup().object_id, "object:file");
+        assert_eq!(validated.target_initial().object_id, "object:file");
+        assert_eq!(
+            validated.parent_identity().kind,
+            FilesystemObjectIdentityKind::PlatformObject
+        );
+        assert_eq!(validated.parent_capture_facts().captured_umask, 0o077);
+
+        let mkdir = validate_filesystem_candidate_execution(filesystem_mkdir_oracle_input())
+            .unwrap();
+        assert_eq!(mkdir.runtime_slots().len(), 2);
+        assert_eq!(
+            mkdir.runtime_slots()[0].occurrence.final_object_state,
+            FilesystemFinalObjectState::Proposed
+        );
+        assert_eq!(
+            mkdir.runtime_slots()[1].occurrence.final_object_state,
+            FilesystemFinalObjectState::Missing
+        );
+
+        let malformed =
+            validate_filesystem_candidate_execution(filesystem_malformed_oracle_input()).unwrap();
+        assert!(malformed.runtime_slots().is_empty());
+    }
+
+    #[test]
+    fn filesystem_candidate_execution_validation_refuses_binding_drift() {
+        let mut case_plan = filesystem_lstat_oracle_input();
+        case_plan.case_projection.case_plan_digest =
+            "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string();
+        recompute_filesystem_oracle_input_digests(&mut case_plan);
+        assert!(
+            validate_filesystem_candidate_execution(case_plan)
+                .unwrap_err()
+                .message
+                .contains("generated case plan")
+        );
+
+        let mut target_tuple = filesystem_lstat_oracle_input();
+        target_tuple.case_projection.target_predicate.candidates[0].feature_set =
+            "invented-feature-set".to_string();
+        recompute_filesystem_oracle_input_digests(&mut target_tuple);
+        assert!(
+            validate_filesystem_candidate_execution(target_tuple)
+                .unwrap_err()
+                .message
+                .contains("target predicate")
+        );
+
+        let mut actor = filesystem_mkdir_oracle_input();
+        actor.case_projection.execution.actors[1].actor_id =
+            actor.case_projection.execution.actors[0].actor_id.clone();
+        recompute_filesystem_oracle_input_digests(&mut actor);
+        assert!(
+            validate_filesystem_candidate_execution(actor)
+                .unwrap_err()
+                .message
+                .contains("actor binding")
+        );
+
+        let mut authority = filesystem_lstat_oracle_input();
+        authority.case_projection.authority_rows[0].source_id = "case:static:wrong".to_string();
+        recompute_filesystem_oracle_input_digests(&mut authority);
+        assert!(
+            validate_filesystem_candidate_execution(authority)
+                .unwrap_err()
+                .message
+                .contains("authority rows")
+        );
+
+        let mut phases = filesystem_lstat_oracle_input();
+        phases.case_projection.execution.trace_phases.pop();
+        recompute_filesystem_oracle_input_digests(&mut phases);
+        assert!(
+            validate_filesystem_candidate_execution(phases)
+                .unwrap_err()
+                .message
+                .contains("trace phases")
+        );
+
+        let mut lifecycle = filesystem_lstat_oracle_input();
+        lifecycle.case_projection.execution.resource_lifecycle.pop();
+        recompute_filesystem_oracle_input_digests(&mut lifecycle);
+        assert!(
+            validate_filesystem_candidate_execution(lifecycle)
+                .unwrap_err()
+                .message
+                .contains("resource lifecycle")
+        );
+
+        let mut fault = filesystem_revoked_oracle_input();
+        let Some(FilesystemFaultPlan {
+            action: FilesystemFaultAction::AuthorityRevocation {
+                remove_source_ids, ..
+            },
+            ..
+        }) = fault.case_projection.fault_plan.as_mut()
+        else {
+            panic!("revocation fixture must contain a fault plan")
+        };
+        remove_source_ids[0] = "case:session-grant:wrong".to_string();
+        recompute_filesystem_oracle_input_digests(&mut fault);
+        assert!(
+            validate_filesystem_candidate_execution(fault)
+                .unwrap_err()
+                .message
+                .contains("fault plan")
+        );
+
+        let mut inventory = filesystem_lstat_oracle_input();
+        inventory.initial_sandbox.objects[0]
+            .state
+            .metadata
+            .as_mut()
+            .unwrap()
+            .device = "2".to_string();
+        recompute_filesystem_oracle_input_digests(&mut inventory);
+        assert!(
+            validate_filesystem_candidate_execution(inventory)
+                .unwrap_err()
+                .message
+                .contains("device/inode")
+        );
+    }
+
+    #[test]
     fn filesystem_candidate_oracle_independently_evaluates_lstat() {
         let input = filesystem_lstat_oracle_input();
         let core = Rev2Core::embedded().unwrap();
@@ -12460,21 +12794,15 @@ mod tests {
                 .unwrap();
             validate_generated_operation_model(operation).unwrap();
             validate_generated_authorized_outcome(operation, state, outcome).unwrap();
-            validate_case_plan_binding(
-                &projection,
-                operation,
-                plan,
-                target,
-                state,
-                outcome,
-            )
-            .unwrap_or_else(|error| {
+            validate_case_plan_binding(&projection, operation, plan, target, state).unwrap_or_else(
+                |error| {
                 panic!(
                     "{} did not validate: {}",
                     generated_case_kind(plan.case_kind),
                     error.message
                 )
-            });
+                },
+            );
 
             principal_plans.insert(plan.principal_plan);
             authority_plans.insert(plan.authority_plan);
