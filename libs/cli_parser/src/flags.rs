@@ -160,6 +160,22 @@ pub struct CheckFlags {
   pub check_js: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OdenParentAllowlistMode {
+  Generate,
+  Check,
+}
+
+impl OdenParentAllowlistMode {
+  pub fn parse(value: &str) -> Option<Self> {
+    match value {
+      "generate" => Some(Self::Generate),
+      "check" => Some(Self::Check),
+      _ => None,
+    }
+  }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompileFlags {
   pub source_file: String,
@@ -172,10 +188,13 @@ pub struct CompileFlags {
   pub exclude: Vec<String>,
   pub eszip: bool,
   pub self_extracting: bool,
-  /// Internal-only path to the closed Oden parent-capture contract input.
-  /// This is reserved until the compiler can recompute and validate the exact
-  /// entry/VFS/import graph against the generated allowlist.
-  pub oden_parent_capture_contract: Option<String>,
+  /// Internal-only selector for constructing or checking the closed Oden
+  /// parent allowlist. Both modes remain fail-closed until their dedicated
+  /// compiler path is implemented.
+  pub oden_parent_allowlist_mode: Option<OdenParentAllowlistMode>,
+  /// Internal-only path to the per-build Oden parent commitments. This input
+  /// remains fail-closed until branded compilation is implemented.
+  pub oden_parent_instance_commitments: Option<String>,
   /// Bundle the entrypoint with esbuild before embedding it, instead of
   /// shipping the entire node_modules tree. Experimental.
   pub bundle: bool,

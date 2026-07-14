@@ -58,6 +58,7 @@ use std::sync::Arc;
 use args::TaskFlags;
 use deno_config::glob::FilePatterns;
 use deno_core::anyhow::Context;
+use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
 use deno_core::futures::FutureExt;
 use deno_core::unsync::JoinHandle;
@@ -962,10 +963,7 @@ async fn resolve_flags_and_init(
   boot_phase("before clap parse");
   let mut flags =
     match flags_from_vec_with_initial_cwd(args, initial_cwd.clone()) {
-      Ok(flags) => {
-        boot_phase("after clap parse");
-        flags
-      }
+      Ok(flags) => flags,
       Err(err @ clap::Error { .. })
         if err.kind() == clap::error::ErrorKind::DisplayVersion =>
       {
@@ -976,6 +974,9 @@ async fn resolve_flags_and_init(
       }
       Err(err) => exit_for_error(AnyError::from(err), initial_cwd.as_deref()),
     };
+  ensure_oden_parent_reserved_compile_inputs_are_disabled(&flags)?;
+  boot_phase("after clap parse");
+
   // preserve already loaded env variables
   if flags.watch.is_some() {
     WatchEnvTracker::snapshot();
@@ -1110,6 +1111,78 @@ async fn resolve_flags_and_init(
   }
 
   Ok(flags)
+}
+
+// @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
+// Refuse reserved parent inputs before startup reads ambient configuration or
+// initializes tunnels, logging, telemetry, or compilation output.
+fn ensure_oden_parent_reserved_compile_inputs_are_disabled(
+  flags: &Flags,
+) -> Result<(), AnyError> {
+  let DenoSubcommand::Compile(compile_flags) = &flags.subcommand else {
+    return Ok(());
+  };
+
+  if compile_flags.oden_parent_allowlist_mode.is_some() {
+    bail!(
+      "The internal `--_oden-parent-allowlist-mode` selector is reserved but not yet enabled; no standalone or generated output was produced"
+    );
+  }
+  if compile_flags.oden_parent_instance_commitments.is_some() {
+    bail!(
+      "The internal `--_oden-parent-instance-commitments` input is reserved but not yet enabled; no standalone was produced"
+    );
+  }
+  Ok(())
+}
+
+#[cfg(test)]
+mod oden_parent_reserved_compile_input_tests {
+  use super::*;
+
+  fn parse(args: &[&str]) -> Flags {
+    flags_from_vec_with_initial_cwd(
+      args
+        .iter()
+        .map(|arg| std::ffi::OsString::from(*arg))
+        .collect(),
+      None,
+    )
+    .unwrap()
+  }
+
+  #[test]
+  fn ordinary_compile_is_accepted_by_early_guard() {
+    let flags = parse(&["deno", "compile", "main.ts"]);
+    ensure_oden_parent_reserved_compile_inputs_are_disabled(&flags).unwrap();
+  }
+
+  #[test]
+  fn reserved_oden_parent_inputs_are_rejected_by_early_guard() {
+    for mode in ["generate", "check"] {
+      let mode_arg = format!("--_oden-parent-allowlist-mode={mode}");
+      let flags = parse(&["deno", "compile", &mode_arg]);
+      let err = ensure_oden_parent_reserved_compile_inputs_are_disabled(&flags)
+        .unwrap_err();
+      assert_eq!(
+        err.to_string(),
+        "The internal `--_oden-parent-allowlist-mode` selector is reserved but not yet enabled; no standalone or generated output was produced"
+      );
+    }
+
+    let flags = parse(&[
+      "deno",
+      "compile",
+      "--_oden-parent-instance-commitments=parent-commitments.json",
+      "main.ts",
+    ]);
+    let err = ensure_oden_parent_reserved_compile_inputs_are_disabled(&flags)
+      .unwrap_err();
+    assert_eq!(
+      err.to_string(),
+      "The internal `--_oden-parent-instance-commitments` input is reserved but not yet enabled; no standalone was produced"
+    );
+  }
 }
 
 fn init_v8(flags: &Flags) {

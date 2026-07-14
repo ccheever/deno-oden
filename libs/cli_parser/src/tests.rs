@@ -1470,12 +1470,34 @@ fn levenshtein_basics() {
 }
 
 #[test]
-fn compile_parser_accepts_hidden_oden_parent_capture_contract() {
+fn compile_parser_accepts_reserved_oden_parent_allowlist_modes_without_source()
+{
+  for (value, expected) in [
+    ("generate", crate::flags::OdenParentAllowlistMode::Generate),
+    ("check", crate::flags::OdenParentAllowlistMode::Check),
+  ] {
+    let flags = crate::convert::flags_from_vec(svec![
+      "deno",
+      "compile",
+      format!("--_oden-parent-allowlist-mode={value}")
+    ])
+    .unwrap();
+    let crate::flags::DenoSubcommand::Compile(compile_flags) = flags.subcommand
+    else {
+      panic!("expected compile subcommand");
+    };
+    assert_eq!(compile_flags.source_file, "");
+    assert_eq!(compile_flags.oden_parent_allowlist_mode, Some(expected));
+    assert_eq!(compile_flags.oden_parent_instance_commitments, None);
+  }
+}
+
+#[test]
+fn compile_parser_accepts_reserved_oden_parent_instance_commitments() {
   let flags = crate::convert::flags_from_vec(svec![
     "deno",
     "compile",
-    "--_oden-parent-capture-contract",
-    "parent-contract.json",
+    "--_oden-parent-instance-commitments=parent-commitments.json",
     "main.ts"
   ])
   .unwrap();
@@ -1483,14 +1505,95 @@ fn compile_parser_accepts_hidden_oden_parent_capture_contract() {
   else {
     panic!("expected compile subcommand");
   };
+  assert_eq!(compile_flags.source_file, "main.ts");
+  assert_eq!(compile_flags.oden_parent_allowlist_mode, None);
   assert_eq!(
-    compile_flags.oden_parent_capture_contract.as_deref(),
-    Some("parent-contract.json")
+    compile_flags.oden_parent_instance_commitments.as_deref(),
+    Some("parent-commitments.json")
   );
 }
 
 #[test]
-fn compile_parser_hides_oden_parent_capture_contract() {
+fn compile_parser_hides_reserved_oden_parent_args() {
   let help = crate::help::render_help(&crate::defs::COMPILE_SUBCOMMAND);
-  assert!(!help.contains("_oden-parent-capture-contract"));
+  assert!(!help.contains("_oden-parent-allowlist-mode"));
+  assert!(!help.contains("_oden-parent-instance-commitments"));
+}
+
+#[test]
+fn compile_parser_refuses_invalid_reserved_oden_parent_args() {
+  for args in [
+    svec!["deno", "compile"],
+    svec![
+      "deno",
+      "compile",
+      "--_oden-parent-allowlist-mode=generate",
+      "--_oden-parent-allowlist-mode=check"
+    ],
+    svec![
+      "deno",
+      "compile",
+      "--_oden-parent-allowlist-mode=generate",
+      "--_oden-parent-allowlist-mode"
+    ],
+    svec![
+      "deno",
+      "compile",
+      "--_oden-parent-instance-commitments=one.json",
+      "--_oden-parent-instance-commitments=two.json",
+      "main.ts"
+    ],
+    svec!["deno", "compile", "--_oden-parent-allowlist-mode=other"],
+    svec!["deno", "compile", "--_oden-parent-allowlist-mode="],
+    svec![
+      "deno",
+      "compile",
+      "--_oden-parent-allowlist-mode=generate",
+      "--_oden-parent-instance-commitments=parent.json"
+    ],
+    svec![
+      "deno",
+      "compile",
+      "--_oden-parent-instance-commitments=",
+      "main.ts"
+    ],
+    svec![
+      "deno",
+      "compile",
+      "--_oden-parent-allowlist-mode=generate",
+      "main.ts"
+    ],
+    svec![
+      "deno",
+      "compile",
+      "--_oden-parent-instance-commitments=parent.json"
+    ],
+    svec![
+      "deno",
+      "compile",
+      "--_oden-parent-allowlist-mode",
+      "generate"
+    ],
+    svec![
+      "deno",
+      "compile",
+      "--_oden-parent-instance-commitments",
+      "parent.json",
+      "main.ts"
+    ],
+  ] {
+    assert!(crate::convert::flags_from_vec(args).is_err());
+  }
+}
+
+#[test]
+fn compile_parser_refuses_obsolete_oden_parent_capture_contract() {
+  let err = crate::convert::flags_from_vec(svec![
+    "deno",
+    "compile",
+    "--_oden-parent-capture-contract=parent-contract.json",
+    "main.ts"
+  ])
+  .unwrap_err();
+  assert_eq!(err.kind, crate::CliErrorKind::UnknownFlag);
 }

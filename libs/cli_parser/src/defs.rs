@@ -1243,10 +1243,19 @@ pub static COMPILE_SUBCOMMAND: CommandDef = CommandDef {
     ArgDef::new("self-extracting")
       .long("self-extracting")
       .set_true(),
-    ArgDef::new("oden-parent-capture-contract")
-      .long("_oden-parent-capture-contract")
-      .action(ArgAction::Set)
-      .num_args(NumArgs::Exact(1))
+    ArgDef::new("oden-parent-allowlist-mode")
+      .long("_oden-parent-allowlist-mode")
+      .action(ArgAction::Append)
+      .num_args(NumArgs::Optional)
+      .require_equals()
+      .value_name("MODE")
+      .hidden(),
+    ArgDef::new("oden-parent-instance-commitments")
+      .long("_oden-parent-instance-commitments")
+      .action(ArgAction::Append)
+      .num_args(NumArgs::Optional)
+      .require_equals()
+      .value_name("PATH")
       .hidden(),
     ArgDef::new("check")
       .long("check")

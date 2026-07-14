@@ -30,6 +30,7 @@ use crate::args::CompileFlags;
 use crate::args::ConfigFlag;
 use crate::args::DenoSubcommand;
 use crate::args::Flags;
+use crate::args::OdenParentAllowlistMode;
 use crate::args::TypeCheckMode;
 use crate::factory::CliFactory;
 use crate::graph_util::ModuleGraphCreator;
@@ -43,8 +44,9 @@ pub async fn compile(
   flags: Flags,
   compile_flags: CompileFlags,
 ) -> Result<(), AnyError> {
-  ensure_oden_parent_capture_contract_is_disabled(
-    compile_flags.oden_parent_capture_contract.as_deref(),
+  ensure_oden_parent_reserved_compile_inputs_are_disabled(
+    compile_flags.oden_parent_allowlist_mode,
+    compile_flags.oden_parent_instance_commitments.as_deref(),
   )?;
   if let Some(watch_flags) = &flags.watch {
     let no_clear_screen = watch_flags.no_clear_screen;
@@ -71,14 +73,20 @@ pub async fn compile(
 }
 
 // @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
-// The internal input remains mechanically incapable of minting a brand until
+// The internal inputs remain mechanically incapable of minting a brand until
 // the compiler validates the frozen entry/VFS/import graph and allowlist.
-fn ensure_oden_parent_capture_contract_is_disabled(
-  contract_path: Option<&str>,
+fn ensure_oden_parent_reserved_compile_inputs_are_disabled(
+  allowlist_mode: Option<OdenParentAllowlistMode>,
+  instance_commitments_path: Option<&str>,
 ) -> Result<(), AnyError> {
-  if contract_path.is_some() {
+  if allowlist_mode.is_some() {
     bail!(
-      "The internal `--_oden-parent-capture-contract` build input is reserved but not yet enabled; no standalone was produced"
+      "The internal `--_oden-parent-allowlist-mode` selector is reserved but not yet enabled; no standalone was produced"
+    );
+  }
+  if instance_commitments_path.is_some() {
+    bail!(
+      "The internal `--_oden-parent-instance-commitments` input is reserved but not yet enabled; no standalone was produced"
     );
   }
   Ok(())
@@ -656,8 +664,9 @@ pub async fn compile_binary(
   is_desktop: bool,
   watcher_communicator: Option<Arc<WatcherCommunicator>>,
 ) -> Result<PathBuf, AnyError> {
-  ensure_oden_parent_capture_contract_is_disabled(
-    compile_flags.oden_parent_capture_contract.as_deref(),
+  ensure_oden_parent_reserved_compile_inputs_are_disabled(
+    compile_flags.oden_parent_allowlist_mode,
+    compile_flags.oden_parent_instance_commitments.as_deref(),
   )?;
   let factory = if let Some(watcher_communicator) = watcher_communicator.clone()
   {
@@ -1392,15 +1401,38 @@ mod test {
   use crate::util::env::resolve_cwd;
 
   #[test]
-  fn oden_parent_capture_contract_input_is_fail_closed() {
-    ensure_oden_parent_capture_contract_is_disabled(None).unwrap();
-    let err = ensure_oden_parent_capture_contract_is_disabled(Some(
-      "parent-contract.json",
-    ))
+  fn oden_parent_reserved_compile_inputs_are_fail_closed() {
+    ensure_oden_parent_reserved_compile_inputs_are_disabled(None, None)
+      .unwrap();
+
+    let err = ensure_oden_parent_reserved_compile_inputs_are_disabled(
+      Some(OdenParentAllowlistMode::Generate),
+      None,
+    )
     .unwrap_err();
     assert_eq!(
       err.to_string(),
-      "The internal `--_oden-parent-capture-contract` build input is reserved but not yet enabled; no standalone was produced"
+      "The internal `--_oden-parent-allowlist-mode` selector is reserved but not yet enabled; no standalone was produced"
+    );
+
+    let err = ensure_oden_parent_reserved_compile_inputs_are_disabled(
+      Some(OdenParentAllowlistMode::Check),
+      None,
+    )
+    .unwrap_err();
+    assert_eq!(
+      err.to_string(),
+      "The internal `--_oden-parent-allowlist-mode` selector is reserved but not yet enabled; no standalone was produced"
+    );
+
+    let err = ensure_oden_parent_reserved_compile_inputs_are_disabled(
+      None,
+      Some("parent-commitments.json"),
+    )
+    .unwrap_err();
+    assert_eq!(
+      err.to_string(),
+      "The internal `--_oden-parent-instance-commitments` input is reserved but not yet enabled; no standalone was produced"
     );
   }
 
@@ -1426,7 +1458,8 @@ mod test {
         exclude: Default::default(),
         eszip: false,
         self_extracting: false,
-        oden_parent_capture_contract: None,
+        oden_parent_allowlist_mode: None,
+        oden_parent_instance_commitments: None,
         bundle: false,
         app_name: None,
         minify: false,
@@ -1457,7 +1490,8 @@ mod test {
         exclude: Default::default(),
         eszip: true,
         self_extracting: false,
-        oden_parent_capture_contract: None,
+        oden_parent_allowlist_mode: None,
+        oden_parent_instance_commitments: None,
         bundle: false,
         app_name: None,
         minify: false,
@@ -1495,7 +1529,8 @@ mod test {
         no_terminal: false,
         eszip: true,
         self_extracting: false,
-        oden_parent_capture_contract: None,
+        oden_parent_allowlist_mode: None,
+        oden_parent_instance_commitments: None,
         bundle: false,
         app_name: None,
         minify: false,

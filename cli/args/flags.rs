@@ -2404,11 +2404,27 @@ On the first invocation of `deno compile`, Deno will download the relevant binar
           .help_heading(COMPILE_HEADING),
       )
       .arg(
-        Arg::new("oden-parent-capture-contract")
-          .long("_oden-parent-capture-contract")
+        Arg::new("oden-parent-allowlist-mode")
+          .long("_oden-parent-allowlist-mode")
+          .value_name("MODE")
+          .value_parser(["generate", "check"])
+          .action(ArgAction::Append)
+          .num_args(1)
+          .require_equals(true)
+          .conflicts_with("oden-parent-instance-commitments")
+          .conflicts_with("script_arg")
+          .hide(true),
+      )
+      .arg(
+        Arg::new("oden-parent-instance-commitments")
+          .long("_oden-parent-instance-commitments")
           .value_name("PATH")
-          .value_parser(value_parser!(String))
+          .value_parser(clap::builder::NonEmptyStringValueParser::new())
           .value_hint(ValueHint::FilePath)
+          .action(ArgAction::Append)
+          .num_args(1)
+          .require_equals(true)
+          .conflicts_with("oden-parent-allowlist-mode")
           .hide(true),
       )
       .arg(
@@ -2446,7 +2462,10 @@ On the first invocation of `deno compile`, Deno will download the relevant binar
       .arg(env_file_arg())
       .arg(
         script_arg()
-          .required_unless_present("help")
+          .required_unless_present_any([
+            "help",
+            "oden-parent-allowlist-mode",
+          ])
           .trailing_var_arg(true),
       )
   })
@@ -6864,9 +6883,14 @@ fn compile_parse(
     );
   }
 
-  let mut script = matches.remove_many::<String>("script_arg").unwrap();
-  let source_file = script.next().unwrap();
-  let args = script.collect();
+  let (source_file, args) =
+    match matches.remove_many::<String>("script_arg") {
+      Some(mut script) => {
+        let source_file = script.next().unwrap();
+        (source_file, script.collect())
+      }
+      None => (String::new(), Vec::new()),
+    };
   let output = matches.remove_one::<String>("output");
   let target = matches.remove_one::<String>("target");
   flags.watch = watch_arg_parse(matches)?;
@@ -6874,8 +6898,17 @@ fn compile_parse(
   let no_terminal = matches.get_flag("no-terminal");
   let eszip = matches.get_flag("eszip-internal-do-not-use");
   let self_extracting = matches.get_flag("self-extracting");
-  let oden_parent_capture_contract =
-    matches.remove_one::<String>("oden-parent-capture-contract");
+  let oden_parent_allowlist_mode = take_single_reserved_compile_arg(
+    matches,
+    "oden-parent-allowlist-mode",
+    "--_oden-parent-allowlist-mode",
+  )?
+  .map(|value| OdenParentAllowlistMode::parse(&value).unwrap());
+  let oden_parent_instance_commitments = take_single_reserved_compile_arg(
+    matches,
+    "oden-parent-instance-commitments",
+    "--_oden-parent-instance-commitments",
+  )?;
   let bundle = matches.get_flag("bundle");
   let app_name = matches.remove_one::<String>("app-name");
   let minify = matches.get_flag("minify");
@@ -6903,7 +6936,8 @@ fn compile_parse(
     exclude,
     eszip,
     self_extracting,
-    oden_parent_capture_contract,
+    oden_parent_allowlist_mode,
+    oden_parent_instance_commitments,
     bundle,
     app_name,
     minify,
@@ -6911,6 +6945,24 @@ fn compile_parse(
   });
 
   Ok(())
+}
+
+fn take_single_reserved_compile_arg(
+  matches: &mut ArgMatches,
+  id: &str,
+  long_name: &str,
+) -> clap::error::Result<Option<String>> {
+  let Some(mut values) = matches.remove_many::<String>(id) else {
+    return Ok(None);
+  };
+  let value = values.next().unwrap();
+  if values.next().is_some() {
+    return Err(clap::Error::raw(
+      clap::error::ErrorKind::ArgumentConflict,
+      format!("the argument '{long_name}' cannot be used multiple times"),
+    ));
+  }
+  Ok(Some(value))
 }
 
 fn desktop_parse(
@@ -14136,7 +14188,8 @@ mod tests {
           exclude: Default::default(),
           eszip: false,
           self_extracting: false,
-          oden_parent_capture_contract: None,
+          oden_parent_allowlist_mode: None,
+          oden_parent_instance_commitments: None,
           bundle: false,
           app_name: None,
           minify: false,
@@ -14150,30 +14203,137 @@ mod tests {
   }
 
   #[test]
-  fn compile_with_reserved_oden_parent_capture_contract() {
+  fn compile_reserved_oden_parent_args_are_hidden() {
     let mut command = compile_subcommand();
     command.build();
-    let arg = command
-      .get_arguments()
-      .find(|arg| arg.get_id().as_str() == "oden-parent-capture-contract")
-      .unwrap();
-    assert!(arg.is_hide_set());
+    for id in [
+      "oden-parent-allowlist-mode",
+      "oden-parent-instance-commitments",
+    ] {
+      let arg = command
+        .get_arguments()
+        .find(|arg| arg.get_id().as_str() == id)
+        .unwrap();
+      assert!(arg.is_hide_set());
+    }
+  }
 
+  #[test]
+  fn compile_with_reserved_oden_parent_allowlist_mode_without_source() {
+    for (value, expected) in [
+      ("generate", OdenParentAllowlistMode::Generate),
+      ("check", OdenParentAllowlistMode::Check),
+    ] {
+      let flags = flags_from_vec(svec![
+        "deno",
+        "compile",
+        format!("--_oden-parent-allowlist-mode={value}"),
+      ])
+      .unwrap();
+      let DenoSubcommand::Compile(compile_flags) = flags.subcommand else {
+        panic!("expected compile subcommand");
+      };
+      assert_eq!(compile_flags.source_file, "");
+      assert_eq!(compile_flags.oden_parent_allowlist_mode, Some(expected));
+      assert_eq!(compile_flags.oden_parent_instance_commitments, None);
+    }
+  }
+
+  #[test]
+  fn compile_with_reserved_oden_parent_instance_commitments() {
     let flags = flags_from_vec(svec![
       "deno",
       "compile",
-      "--_oden-parent-capture-contract",
-      "parent-contract.json",
+      "--_oden-parent-instance-commitments=parent-commitments.json",
       "main.ts"
     ])
     .unwrap();
     let DenoSubcommand::Compile(compile_flags) = flags.subcommand else {
       panic!("expected compile subcommand");
     };
+    assert_eq!(compile_flags.oden_parent_allowlist_mode, None);
     assert_eq!(
-      compile_flags.oden_parent_capture_contract.as_deref(),
-      Some("parent-contract.json")
+      compile_flags.oden_parent_instance_commitments.as_deref(),
+      Some("parent-commitments.json")
     );
+  }
+
+  #[test]
+  fn compile_reserved_oden_parent_args_refuse_invalid_forms() {
+    for args in [
+      svec!["deno", "compile"],
+      svec![
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate",
+        "--_oden-parent-allowlist-mode=check"
+      ],
+      svec![
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate",
+        "--_oden-parent-allowlist-mode"
+      ],
+      svec![
+        "deno",
+        "compile",
+        "--_oden-parent-instance-commitments=one.json",
+        "--_oden-parent-instance-commitments=two.json",
+        "main.ts"
+      ],
+      svec!["deno", "compile", "--_oden-parent-allowlist-mode=other"],
+      svec!["deno", "compile", "--_oden-parent-allowlist-mode="],
+      svec![
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate",
+        "--_oden-parent-instance-commitments=parent.json"
+      ],
+      svec![
+        "deno",
+        "compile",
+        "--_oden-parent-instance-commitments=",
+        "main.ts"
+      ],
+      svec![
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate",
+        "main.ts"
+      ],
+      svec![
+        "deno",
+        "compile",
+        "--_oden-parent-instance-commitments=parent.json"
+      ],
+      svec![
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode",
+        "generate"
+      ],
+      svec![
+        "deno",
+        "compile",
+        "--_oden-parent-instance-commitments",
+        "parent.json",
+        "main.ts"
+      ],
+    ] {
+      assert!(flags_from_vec(args).is_err());
+    }
+  }
+
+  #[test]
+  fn compile_obsolete_oden_parent_capture_contract_is_unknown() {
+    let err = flags_from_vec(svec![
+      "deno",
+      "compile",
+      "--_oden-parent-capture-contract=parent-contract.json",
+      "main.ts"
+    ])
+    .unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
   }
 
   #[test]
@@ -14245,7 +14405,8 @@ mod tests {
           exclude: Default::default(),
           eszip: false,
           self_extracting: false,
-          oden_parent_capture_contract: None,
+          oden_parent_allowlist_mode: None,
+          oden_parent_instance_commitments: None,
           bundle: false,
           app_name: None,
           minify: false,
@@ -14283,7 +14444,8 @@ mod tests {
           exclude: vec!["exclude.txt".to_string()],
           eszip: false,
           self_extracting: false,
-          oden_parent_capture_contract: None,
+          oden_parent_allowlist_mode: None,
+          oden_parent_instance_commitments: None,
           bundle: false,
           app_name: None,
           minify: false,
@@ -17304,7 +17466,8 @@ Usage: deno lint [OPTIONS] [files]...\n"
           exclude: Default::default(),
           eszip: false,
           self_extracting: false,
-          oden_parent_capture_contract: None,
+          oden_parent_allowlist_mode: None,
+          oden_parent_instance_commitments: None,
           bundle: false,
           app_name: None,
           minify: false,

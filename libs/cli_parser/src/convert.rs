@@ -118,7 +118,7 @@ pub fn convert(result: ParseResult) -> Result<Flags, CliError> {
     Some("doc") => doc_parse(&result, &mut flags),
     Some("task") => task_parse(&result, &mut flags),
     Some("bench") => bench_parse(&result, &mut flags),
-    Some("compile") => compile_parse(&result, &mut flags),
+    Some("compile") => compile_parse(&result, &mut flags)?,
     Some("coverage") => coverage_parse(&result, &mut flags),
     Some("repl") => repl_parse(&result, &mut flags, false),
     Some("install" | "i") => install_parse(&result, &mut flags)?,
@@ -1815,14 +1815,68 @@ fn bench_parse(result: &ParseResult, flags: &mut Flags) {
   });
 }
 
-fn compile_parse(result: &ParseResult, flags: &mut Flags) {
+fn compile_parse(
+  result: &ParseResult,
+  flags: &mut Flags,
+) -> Result<(), CliError> {
   flags.type_check_mode = TypeCheckMode::Local;
   runtime_args_parse(result, flags, true, false, true);
 
-  let source_file = result
-    .get_one("source_file")
-    .map(|s| s.to_string())
-    .unwrap_or_default();
+  let oden_parent_allowlist_mode =
+    single_reserved_compile_value(
+      result,
+      "oden-parent-allowlist-mode",
+      "--_oden-parent-allowlist-mode",
+    )?
+    .map(|value| {
+      OdenParentAllowlistMode::parse(value).ok_or_else(|| {
+        CliError::new(
+          CliErrorKind::InvalidValue,
+          format!(
+            "invalid value '{value}' for '--_oden-parent-allowlist-mode': expected 'generate' or 'check'"
+          ),
+        )
+      })
+    })
+    .transpose()?;
+  let oden_parent_instance_commitments = single_reserved_compile_value(
+    result,
+    "oden-parent-instance-commitments",
+    "--_oden-parent-instance-commitments",
+  )?
+  .map(str::to_string);
+
+  if oden_parent_allowlist_mode.is_some()
+    && oden_parent_instance_commitments.is_some()
+  {
+    return Err(CliError::new(
+      CliErrorKind::InvalidValue,
+      "--_oden-parent-allowlist-mode conflicts with --_oden-parent-instance-commitments",
+    ));
+  }
+
+  let source_file = match result.get_one("source_file") {
+    Some(_) if oden_parent_allowlist_mode.is_some() => {
+      return Err(CliError::new(
+        CliErrorKind::InvalidValue,
+        "--_oden-parent-allowlist-mode does not accept a source file",
+      ));
+    }
+    Some(source_file) => source_file.to_string(),
+    None
+      if oden_parent_allowlist_mode.is_some()
+        && oden_parent_instance_commitments.is_none()
+        && result.trailing.is_empty() =>
+    {
+      String::new()
+    }
+    None => {
+      return Err(CliError::new(
+        CliErrorKind::MissingRequired,
+        "the following required arguments were not provided: <source_file>",
+      ));
+    }
+  };
   let output = result.get_one("output").map(|s| s.to_string());
   let target = result.get_one("target").map(|s| s.to_string());
   let icon = result.get_one("icon").map(|s| s.to_string());
@@ -1857,14 +1911,40 @@ fn compile_parse(result: &ParseResult, flags: &mut Flags) {
     exclude,
     eszip,
     self_extracting,
-    oden_parent_capture_contract: result
-      .get_one("oden-parent-capture-contract")
-      .map(|s| s.to_string()),
+    oden_parent_allowlist_mode,
+    oden_parent_instance_commitments,
     bundle: result.get_bool("bundle"),
     app_name: result.get_one("app-name").map(|s| s.to_string()),
     minify: result.get_bool("minify"),
     exclude_unused_npm: result.get_bool("exclude-unused-npm"),
   });
+
+  Ok(())
+}
+
+fn single_reserved_compile_value<'a>(
+  result: &'a ParseResult,
+  name: &str,
+  long_name: &str,
+) -> Result<Option<&'a str>, CliError> {
+  if result.get_count(name) > 1 {
+    return Err(CliError::new(
+      CliErrorKind::InvalidValue,
+      format!("the argument '{long_name}' cannot be used multiple times"),
+    ));
+  }
+  let Some(values) = result.get_many(name) else {
+    return Ok(None);
+  };
+  match values {
+    [] => Err(CliError::missing_value(long_name)),
+    [value] if value.is_empty() => Err(CliError::missing_value(long_name)),
+    [value] => Ok(Some(value)),
+    _ => Err(CliError::new(
+      CliErrorKind::InvalidValue,
+      format!("the argument '{long_name}' accepted too many values"),
+    )),
+  }
 }
 
 fn coverage_parse(result: &ParseResult, flags: &mut Flags) {
