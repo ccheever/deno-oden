@@ -27,6 +27,7 @@ pub const ODEN_PARENT_CAPTURE_V2_MODULE_SPECIFIER: &str =
 pub const ODEN_PARENT_CAPTURE_V2_PRIMITIVE_ID: &str =
   "oden.filesystem-parent-capture/2";
 pub const ODEN_CAPSEC_REV2_PROFILE: &str = "oden/capsec/2";
+pub const ODEN_PARENT_CAPTURE_V2_ENTRYPOINT_KEY: &str = "repo:src/release.ts";
 
 pub trait DenoRtDeserializable<'a>: Sized {
   fn deserialize(input: &'a [u8]) -> std::io::Result<(&'a [u8], Self)>;
@@ -138,11 +139,8 @@ impl OdenParentCaptureV2Metadata {
     if !is_lower_hex(&self.fork_commit, 40) {
       return Err("metadata fork commit is malformed");
     }
-    if self.entrypoint_key.is_empty()
-      || self.entrypoint_key.len() > 4096
-      || self.entrypoint_key.bytes().any(|byte| byte == 0)
-    {
-      return Err("metadata entrypoint key is malformed");
+    if self.entrypoint_key != ODEN_PARENT_CAPTURE_V2_ENTRYPOINT_KEY {
+      return Err("metadata entrypoint key is not frozen");
     }
     if self.private_module_specifier != ODEN_PARENT_CAPTURE_V2_MODULE_SPECIFIER
     {
@@ -276,7 +274,7 @@ mod oden_parent_capture_v2_metadata_tests {
       "forkCommit": "1".repeat(40),
       "parentBuildMarker": "oden-parent-build-v2",
       "denortBaseImageDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      "entrypointKey": "src/main.ts",
+      "entrypointKey": ODEN_PARENT_CAPTURE_V2_ENTRYPOINT_KEY,
       "entrypointSourceDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       "vfsGraphDigest": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       "privateModuleSpecifier": ODEN_PARENT_CAPTURE_V2_MODULE_SPECIFIER,
@@ -325,6 +323,7 @@ mod oden_parent_capture_v2_metadata_tests {
       ("profile", serde_json::json!("oden/capsec/1.1")),
       ("target", serde_json::json!("x86_64-pc-windows-msvc")),
       ("forkCommit", serde_json::json!("A".repeat(40))),
+      ("entrypointKey", serde_json::json!("repo:src/main.ts")),
       (
         "privateModuleSpecifier",
         serde_json::json!("oden-internal:other"),

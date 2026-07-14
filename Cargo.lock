@@ -2782,6 +2782,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2",
  "sys_traits",
  "thiserror 2.0.12",
  "twox-hash 2.1.2",
