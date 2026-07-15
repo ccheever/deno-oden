@@ -38,6 +38,7 @@ libsui.workspace = true
 log = { workspace = true, features = ["serde"] }
 node_resolver = { workspace = true, features = ["sync"] }
 parking_lot.workspace = true
+ryu-js.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true

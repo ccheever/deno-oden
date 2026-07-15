@@ -2780,6 +2780,7 @@ dependencies = [
  "log",
  "node_resolver",
  "parking_lot",
+ "ryu-js",
  "serde",
  "serde_json",
  "sha2",

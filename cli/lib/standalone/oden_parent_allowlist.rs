@@ -35,6 +35,8 @@ pub const ODEN_PARENT_GENERATED_JSON_PATH: &str =
 pub const ODEN_PARENT_GENERATED_RUST_PATH: &str =
   "fork/deno/cli/lib/standalone/oden_parent_allowlist_generated.rs";
 
+const MAX_IJSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum OdenParentAllowlistError {
   #[error("contract inventory is empty")]
@@ -53,6 +55,8 @@ pub enum OdenParentAllowlistError {
   InvalidDigestDomain,
   #[error("canonical JSON rendering failed: {0}")]
   CanonicalJson(String),
+  #[error("parent projection contains a number outside its I-JSON/JCS range")]
+  InvalidIJsonNumber,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -181,7 +185,12 @@ impl ContractInventory {
   }
 
   pub fn canonical_jcs(&self) -> Result<Vec<u8>, OdenParentAllowlistError> {
-    closed_shape_jcs(&self.rows)
+    // This closed derive-generated shape has no floats, maps, flattening, or
+    // custom serialization that could become lossy while constructing Value.
+    let value = serde_json::to_value(&self.rows).map_err(|error| {
+      OdenParentAllowlistError::CanonicalJson(error.to_string())
+    })?;
+    canonical_value_jcs(&value)
   }
 
   pub fn digest(
@@ -257,7 +266,12 @@ impl OdenParentAllowlist {
   }
 
   pub fn canonical_jcs(&self) -> Result<Vec<u8>, OdenParentAllowlistError> {
-    closed_shape_jcs(self)
+    // This closed derive-generated shape has no floats, maps, flattening, or
+    // custom serialization that could become lossy while constructing Value.
+    let value = serde_json::to_value(self).map_err(|error| {
+      OdenParentAllowlistError::CanonicalJson(error.to_string())
+    })?;
+    canonical_value_jcs(&value)
   }
 
   pub fn digest(
@@ -313,16 +327,84 @@ fn hjcs_digest(
   )))
 }
 
-// This serializer is confined to the closed inventory row/array and allowlist
-// shapes above: object fields are declared in JCS member order, values are
-// strings or the exact safe integer 2, and array order is validated before
-// serialization. Nested maps or general numeric values require a full JCS
-// projector and must not be routed through this helper.
-fn closed_shape_jcs(
-  value: &impl Serialize,
+// This writer accepts only an already-validated JSON value and supplies RFC
+// 8785's recursive UTF-16 member ordering and ECMAScript number rendering.
+// Projection constructors enforce their narrower frozen field ranges. Raw
+// artifact readers and any future typed projection with maps, floats,
+// flattening, or custom serialization must reject duplicate keys and
+// non-finite numbers before constructing Value; serde_json's generic typed
+// conversion is not such a gate.
+fn canonical_value_jcs(
+  value: &serde_json::Value,
 ) -> Result<Vec<u8>, OdenParentAllowlistError> {
-  serde_json::to_vec(value)
-    .map_err(|error| OdenParentAllowlistError::CanonicalJson(error.to_string()))
+  let mut output = String::new();
+  write_parent_jcs(value, &mut output)?;
+  Ok(output.into_bytes())
+}
+
+fn write_parent_jcs(
+  value: &serde_json::Value,
+  output: &mut String,
+) -> Result<(), OdenParentAllowlistError> {
+  use serde_json::Value;
+
+  match value {
+    Value::Null => output.push_str("null"),
+    Value::Bool(value) => {
+      output.push_str(if *value { "true" } else { "false" })
+    }
+    Value::Number(value) => {
+      if let Some(value) = value.as_i64() {
+        if value.unsigned_abs() > MAX_IJSON_SAFE_INTEGER {
+          return Err(OdenParentAllowlistError::InvalidIJsonNumber);
+        }
+        output.push_str(&value.to_string());
+      } else if let Some(value) = value.as_u64() {
+        if value > MAX_IJSON_SAFE_INTEGER {
+          return Err(OdenParentAllowlistError::InvalidIJsonNumber);
+        }
+        output.push_str(&value.to_string());
+      } else {
+        let value = value
+          .as_f64()
+          .filter(|value| value.is_finite())
+          .ok_or(OdenParentAllowlistError::InvalidIJsonNumber)?;
+        output.push_str(ryu_js::Buffer::new().format_finite(value));
+      }
+    }
+    Value::String(value) => {
+      output.push_str(&serde_json::to_string(value).map_err(|error| {
+        OdenParentAllowlistError::CanonicalJson(error.to_string())
+      })?)
+    }
+    Value::Array(values) => {
+      output.push('[');
+      for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+          output.push(',');
+        }
+        write_parent_jcs(value, output)?;
+      }
+      output.push(']');
+    }
+    Value::Object(object) => {
+      output.push('{');
+      let mut keys = object.keys().collect::<Vec<_>>();
+      keys.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
+      for (index, key) in keys.into_iter().enumerate() {
+        if index != 0 {
+          output.push(',');
+        }
+        output.push_str(&serde_json::to_string(key).map_err(|error| {
+          OdenParentAllowlistError::CanonicalJson(error.to_string())
+        })?);
+        output.push(':');
+        write_parent_jcs(&object[key], output)?;
+      }
+      output.push('}');
+    }
+  }
+  Ok(())
 }
 
 fn validate_digest_domain(
@@ -535,6 +617,61 @@ mod tests {
          pub const ODEN_PARENT_ALLOWLIST_DIGEST: &str = \"{digest}\";\n"
       )
       .into_bytes()
+    );
+  }
+
+  #[test]
+  fn nested_jcs_uses_utf16_key_order_and_ecmascript_numbers() {
+    let value = serde_json::json!({
+      "\u{e000}": {"z": 1, "a": true},
+      "😀": "supplementary",
+      "€": "euro",
+      "ö": "o-diaeresis",
+      "1": "one",
+      "\r": "carriage-return",
+    });
+    assert_eq!(
+      canonical_value_jcs(&value).unwrap(),
+      "{\"\\r\":\"carriage-return\",\"1\":\"one\",\"ö\":\"o-diaeresis\",\"€\":\"euro\",\"😀\":\"supplementary\",\"\u{e000}\":{\"a\":true,\"z\":1}}"
+        .as_bytes()
+    );
+
+    let string = "\"\\\u{0008}\t\n\u{000c}\r\u{0000}\u{2028}\u{2029}😀";
+    assert_eq!(
+      canonical_value_jcs(&serde_json::json!([string, 3, 1, 2])).unwrap(),
+      "[\"\\\"\\\\\\b\\t\\n\\f\\r\\u0000\u{2028}\u{2029}😀\",3,1,2]".as_bytes()
+    );
+
+    assert_eq!(
+      canonical_value_jcs(&serde_json::json!([
+        333333333.33333329,
+        1E30,
+        4.50,
+        2e-3,
+        0.000000000000000000000000001,
+        -0.0,
+        -1,
+      ]))
+      .unwrap(),
+      "[333333333.3333333,1e+30,4.5,0.002,1e-27,0,-1]".as_bytes()
+    );
+    for value in [
+      serde_json::json!(9_007_199_254_740_992_u64),
+      serde_json::json!(-9_007_199_254_740_992_i64),
+    ] {
+      assert_eq!(
+        canonical_value_jcs(&value),
+        Err(OdenParentAllowlistError::InvalidIJsonNumber)
+      );
+    }
+    assert_eq!(
+      canonical_value_jcs(&serde_json::json!(MAX_IJSON_SAFE_INTEGER)).unwrap(),
+      MAX_IJSON_SAFE_INTEGER.to_string().as_bytes()
+    );
+    assert_eq!(
+      canonical_value_jcs(&serde_json::json!(-9_007_199_254_740_991_i64))
+        .unwrap(),
+      b"-9007199254740991"
     );
   }
 }
