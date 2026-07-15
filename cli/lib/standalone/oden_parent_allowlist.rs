@@ -3,9 +3,10 @@
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
 // This first fail-closed slice keeps the reviewed contract inventories and
 // parent-allowlist rendering as exact raw-byte and domain-separated canonical-
-// JSON projections. It intentionally exposes no allowlist constructor until
-// the domain-bound configuration, VFS, static-edge, and HBYTES projectors land;
-// generated outputs and later image/evidence authority are absent as well.
+// JSON projections. It intentionally exposes no allowlist constructor while
+// the VFS/static-edge projectors, generator, and startup recomputation gates
+// remain absent; generated outputs and later image/evidence authority are
+// absent as well.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -39,6 +40,8 @@ pub const ODEN_PARENT_UNSTABLE_CONFIG_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-unstable-config:2";
 pub const ODEN_PARENT_OTEL_CONFIG_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-otel-config:2";
+pub const ODEN_PARENT_IMPORT_ATTRIBUTES_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-import-attributes:2";
 pub const ODEN_PARENT_ENTRYPOINT_SOURCE_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-entrypoint-source:2";
 pub const ODEN_PARENT_SYNTHETIC_MODULE_SOURCE_DIGEST_DOMAIN: &str =
@@ -86,6 +89,8 @@ pub enum OdenParentAllowlistError {
   NonDefaultUnstableConfig,
   #[error("parent OTEL configuration is not exactly all-disabled")]
   NonDefaultOtelConfig,
+  #[error("duplicate decoded import-attribute key: {0}")]
+  DuplicateImportAttribute(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -181,6 +186,59 @@ define_hjcs_digest_type!(OdenParentStandaloneConfigurationDigest);
 define_hjcs_digest_type!(OdenParentWorkspaceResolverDigest);
 define_hjcs_digest_type!(OdenParentUnstableConfigDigest);
 define_hjcs_digest_type!(OdenParentOtelConfigDigest);
+define_hjcs_digest_type!(OdenParentImportAttributesDigest);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OdenParentObservedImportAttribute<'a> {
+  pub key: &'a str,
+  pub value: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct OdenParentImportAttributes(
+  serde_json::Map<String, serde_json::Value>,
+);
+
+impl OdenParentImportAttributes {
+  /// Consumes direct, decoded strict-AST observations while duplicate keys are
+  /// still visible. A parser-produced map or generic JSON object is ineligible
+  /// because either may already have overwritten a duplicate decoded key. The
+  /// adapter must refuse unknown attribute sets or values rather than omit or
+  /// map them to an empty object.
+  pub fn from_observed_pairs(
+    attributes: &[OdenParentObservedImportAttribute<'_>],
+  ) -> Result<Self, OdenParentAllowlistError> {
+    let mut object = serde_json::Map::new();
+    for attribute in attributes {
+      if object
+        .insert(
+          attribute.key.to_string(),
+          serde_json::Value::String(attribute.value.to_string()),
+        )
+        .is_some()
+      {
+        return Err(OdenParentAllowlistError::DuplicateImportAttribute(
+          attribute.key.to_string(),
+        ));
+      }
+    }
+    Ok(Self(object))
+  }
+
+  pub fn canonical_jcs(&self) -> Result<Vec<u8>, OdenParentAllowlistError> {
+    canonical_value_jcs(&serde_json::Value::Object(self.0.clone()))
+  }
+
+  pub fn digest(
+    &self,
+  ) -> Result<OdenParentImportAttributesDigest, OdenParentAllowlistError> {
+    Ok(OdenParentImportAttributesDigest(hjcs_digest(
+      ODEN_PARENT_IMPORT_ATTRIBUTES_DIGEST_DOMAIN,
+      &self.canonical_jcs()?,
+    )?))
+  }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ContractFile<'a> {
@@ -893,6 +951,77 @@ mod tests {
       .map(|(actual, _)| actual)
       .collect::<std::collections::HashSet<_>>();
     assert_eq!(digests.len(), vectors.len());
+  }
+
+  #[test]
+  fn import_attributes_are_complete_utf16_sorted_and_domain_bound() {
+    let empty = OdenParentImportAttributes::from_observed_pairs(&[]).unwrap();
+    assert_eq!(empty.canonical_jcs().unwrap(), b"{}");
+    assert_eq!(
+      empty.digest().unwrap().as_str(),
+      "sha256-pQu6gFhNGdfrlk8npWVB1g5yzOEBfC2d-LaLn8riE4E"
+    );
+
+    let attributes = [
+      OdenParentObservedImportAttribute {
+        key: "\u{e000}",
+        value: "private-use",
+      },
+      OdenParentObservedImportAttribute {
+        key: "😀",
+        value: "supplementary",
+      },
+      OdenParentObservedImportAttribute {
+        key: "€",
+        value: "euro",
+      },
+      OdenParentObservedImportAttribute {
+        key: "ö",
+        value: "o-diaeresis",
+      },
+      OdenParentObservedImportAttribute {
+        key: "type",
+        value: "json",
+      },
+      OdenParentObservedImportAttribute {
+        key: "1",
+        value: "one",
+      },
+      OdenParentObservedImportAttribute {
+        key: "\r",
+        value: "quote:\" backslash:\\ nul:\u{0000}",
+      },
+    ];
+    let projection =
+      OdenParentImportAttributes::from_observed_pairs(&attributes).unwrap();
+    assert_eq!(
+      projection.canonical_jcs().unwrap(),
+      "{\"\\r\":\"quote:\\\" backslash:\\\\ nul:\\u0000\",\"1\":\"one\",\"type\":\"json\",\"ö\":\"o-diaeresis\",\"€\":\"euro\",\"😀\":\"supplementary\",\"\u{e000}\":\"private-use\"}"
+        .as_bytes()
+    );
+
+    let mut reversed = attributes;
+    reversed.reverse();
+    let reversed =
+      OdenParentImportAttributes::from_observed_pairs(&reversed).unwrap();
+    assert_eq!(projection.canonical_jcs(), reversed.canonical_jcs());
+    assert_eq!(projection.digest(), reversed.digest());
+
+    assert_eq!(
+      OdenParentImportAttributes::from_observed_pairs(&[
+        OdenParentObservedImportAttribute {
+          key: "a",
+          value: "first",
+        },
+        OdenParentObservedImportAttribute {
+          key: "a",
+          value: "second",
+        },
+      ]),
+      Err(OdenParentAllowlistError::DuplicateImportAttribute(
+        "a".to_string()
+      ))
+    );
   }
 
   #[test]
