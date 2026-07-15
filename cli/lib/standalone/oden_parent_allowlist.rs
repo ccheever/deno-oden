@@ -24,6 +24,16 @@ pub const ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_INVENTORY_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-source-closure-contract-inventory:2";
 pub const ODEN_PARENT_RELEASE_CONTRACT_INVENTORY_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-release-contract-inventory:2";
+pub const ODEN_PARENT_ENTRYPOINT_SOURCE_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-entrypoint-source:2";
+pub const ODEN_PARENT_SYNTHETIC_MODULE_SOURCE_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-synthetic-module-source:2";
+pub const ODEN_PARENT_VFS_ORIGINAL_BYTES_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-vfs-original-bytes:2";
+pub const ODEN_PARENT_VFS_EMITTED_BYTES_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-vfs-emitted-bytes:2";
+pub const ODEN_PARENT_VFS_SOURCE_MAP_BYTES_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-vfs-source-map-bytes:2";
 pub const ODEN_PARENT_ENTRYPOINT_KEY: &str = "repo:src/release.ts";
 pub const ODEN_PARENT_PRIMITIVE_ID: &str = "oden.filesystem-parent-capture/2";
 pub const ODEN_PARENT_PRIVATE_MODULE_SPECIFIER: &str =
@@ -94,6 +104,45 @@ impl CanonicalSha256Digest {
     &self.0
   }
 }
+
+macro_rules! define_hbytes_digest {
+  ($name:ident, $domain:ident) => {
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+    #[serde(transparent)]
+    pub struct $name(CanonicalSha256Digest);
+
+    impl $name {
+      pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(framed_sha256_digest($domain, bytes))
+      }
+
+      pub fn as_str(&self) -> &str {
+        self.0.as_str()
+      }
+    }
+  };
+}
+
+define_hbytes_digest!(
+  OdenParentEntrypointSourceDigest,
+  ODEN_PARENT_ENTRYPOINT_SOURCE_DIGEST_DOMAIN
+);
+define_hbytes_digest!(
+  OdenParentSyntheticModuleSourceDigest,
+  ODEN_PARENT_SYNTHETIC_MODULE_SOURCE_DIGEST_DOMAIN
+);
+define_hbytes_digest!(
+  OdenParentVfsOriginalBytesDigest,
+  ODEN_PARENT_VFS_ORIGINAL_BYTES_DIGEST_DOMAIN
+);
+define_hbytes_digest!(
+  OdenParentVfsEmittedBytesDigest,
+  ODEN_PARENT_VFS_EMITTED_BYTES_DIGEST_DOMAIN
+);
+define_hbytes_digest!(
+  OdenParentVfsSourceMapBytesDigest,
+  ODEN_PARENT_VFS_SOURCE_MAP_BYTES_DIGEST_DOMAIN
+);
 
 #[derive(Clone, Copy, Debug)]
 pub struct ContractFile<'a> {
@@ -205,12 +254,12 @@ impl ContractInventory {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OdenParentAllowlistDigests {
   capture_contract_digest: CanonicalSha256Digest,
-  entrypoint_source_digest: CanonicalSha256Digest,
+  entrypoint_source_digest: OdenParentEntrypointSourceDigest,
   release_contract_digest: CanonicalSha256Digest,
   source_closure_contract_digest: CanonicalSha256Digest,
   standalone_configuration_digest: CanonicalSha256Digest,
   static_import_edge_digest: CanonicalSha256Digest,
-  synthetic_module_source_digest: CanonicalSha256Digest,
+  synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest,
   vfs_graph_digest: CanonicalSha256Digest,
 }
 
@@ -223,7 +272,7 @@ pub struct OdenParentAllowlist {
   #[serde(rename = "entrypointKey")]
   entrypoint_key: &'static str,
   #[serde(rename = "entrypointSourceDigest")]
-  entrypoint_source_digest: CanonicalSha256Digest,
+  entrypoint_source_digest: OdenParentEntrypointSourceDigest,
   #[serde(rename = "parentPrimitiveId")]
   parent_primitive_id: &'static str,
   #[serde(rename = "privateModuleSpecifier")]
@@ -239,7 +288,7 @@ pub struct OdenParentAllowlist {
   #[serde(rename = "staticImportEdgeDigest")]
   static_import_edge_digest: CanonicalSha256Digest,
   #[serde(rename = "syntheticModuleSourceDigest")]
-  synthetic_module_source_digest: CanonicalSha256Digest,
+  synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest,
   #[serde(rename = "vfsGraphDigest")]
   vfs_graph_digest: CanonicalSha256Digest,
 }
@@ -317,14 +366,18 @@ fn hjcs_digest(
   canonical_jcs: &[u8],
 ) -> Result<CanonicalSha256Digest, OdenParentAllowlistError> {
   validate_digest_domain(domain)?;
+  Ok(framed_sha256_digest(domain, canonical_jcs))
+}
+
+fn framed_sha256_digest(domain: &str, bytes: &[u8]) -> CanonicalSha256Digest {
   let mut hasher = Sha256::new();
   hasher.update(domain.as_bytes());
   hasher.update([0]);
-  hasher.update(canonical_jcs);
-  Ok(CanonicalSha256Digest(format!(
+  hasher.update(bytes);
+  CanonicalSha256Digest(format!(
     "sha256-{}",
     URL_SAFE_NO_PAD.encode(hasher.finalize())
-  )))
+  ))
 }
 
 // This writer accepts only an already-validated JSON value and supplies RFC
@@ -451,7 +504,9 @@ mod tests {
   fn test_allowlist() -> OdenParentAllowlist {
     OdenParentAllowlist::new(OdenParentAllowlistDigests {
       capture_contract_digest: zero_digest("captureContractDigest"),
-      entrypoint_source_digest: zero_digest("entrypointSourceDigest"),
+      entrypoint_source_digest: OdenParentEntrypointSourceDigest(zero_digest(
+        "entrypointSourceDigest",
+      )),
       release_contract_digest: zero_digest("releaseContractDigest"),
       source_closure_contract_digest: zero_digest(
         "sourceClosureContractDigest",
@@ -460,8 +515,8 @@ mod tests {
         "standaloneConfigurationDigest",
       ),
       static_import_edge_digest: zero_digest("staticImportEdgeDigest"),
-      synthetic_module_source_digest: zero_digest(
-        "syntheticModuleSourceDigest",
+      synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest(
+        zero_digest("syntheticModuleSourceDigest"),
       ),
       vfs_graph_digest: zero_digest("vfsGraphDigest"),
     })
@@ -515,6 +570,51 @@ mod tests {
       hjcs_digest("oden\0test", jcs),
       Err(OdenParentAllowlistError::InvalidDigestDomain)
     );
+  }
+
+  #[test]
+  fn hbytes_wrappers_bind_exact_raw_bytes_to_distinct_literal_domains() {
+    let bytes = b"abc";
+    let vectors = [
+      (
+        OdenParentEntrypointSourceDigest::from_bytes(bytes)
+          .as_str()
+          .to_string(),
+        "sha256-Gz80-ugkSnF9eX_ClTKpFACYBemRqjY3agHjlIxdtBk",
+      ),
+      (
+        OdenParentSyntheticModuleSourceDigest::from_bytes(bytes)
+          .as_str()
+          .to_string(),
+        "sha256-BO7B__WMBq831KL6Xpd0uNBG9yYG3o5KbS7KLe1LeFA",
+      ),
+      (
+        OdenParentVfsOriginalBytesDigest::from_bytes(bytes)
+          .as_str()
+          .to_string(),
+        "sha256-Xa9ES5m9VrGE5rvE9rqtIXNgaKE7xBh7GWag5b2fCOQ",
+      ),
+      (
+        OdenParentVfsEmittedBytesDigest::from_bytes(bytes)
+          .as_str()
+          .to_string(),
+        "sha256-f96yONRjpIVsMqCulsTZmpUxEgwM5ndvVHiKh8ml13w",
+      ),
+      (
+        OdenParentVfsSourceMapBytesDigest::from_bytes(bytes)
+          .as_str()
+          .to_string(),
+        "sha256-PeoQea76eSnl2DojUMCEd4CgzXAAgdf2NBQncr9t1S4",
+      ),
+    ];
+    for (actual, expected) in &vectors {
+      assert_eq!(actual.as_str(), *expected);
+    }
+    let digests = vectors
+      .iter()
+      .map(|(actual, _)| actual)
+      .collect::<std::collections::HashSet<_>>();
+    assert_eq!(digests.len(), vectors.len());
   }
 
   #[test]
