@@ -4,9 +4,9 @@
 // This first fail-closed slice keeps the reviewed contract inventories and
 // parent-allowlist rendering as exact raw-byte and domain-separated canonical-
 // JSON projections. It intentionally exposes no allowlist constructor while
-// the VFS/static-edge projectors, generator, and startup recomputation gates
-// remain absent; generated outputs and later image/evidence authority are
-// absent as well.
+// the VFS projector, compiler adapters, generator, and startup recomputation
+// gates remain absent; generated outputs and later image/evidence authority
+// are absent as well.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -42,6 +42,10 @@ pub const ODEN_PARENT_OTEL_CONFIG_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-otel-config:2";
 pub const ODEN_PARENT_IMPORT_ATTRIBUTES_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-import-attributes:2";
+pub const ODEN_PARENT_STATIC_IMPORT_EDGE_SCHEMA: &str =
+  "oden/capsec-filesystem-parent-static-import-edge/2";
+pub const ODEN_PARENT_STATIC_IMPORT_EDGE_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-static-import-edge:2";
 pub const ODEN_PARENT_ENTRYPOINT_SOURCE_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-entrypoint-source:2";
 pub const ODEN_PARENT_SYNTHETIC_MODULE_SOURCE_DIGEST_DOMAIN: &str =
@@ -91,6 +95,8 @@ pub enum OdenParentAllowlistError {
   NonDefaultOtelConfig,
   #[error("duplicate decoded import-attribute key: {0}")]
   DuplicateImportAttribute(String),
+  #[error("invalid parent static import edge: {0}")]
+  InvalidStaticImportEdge(&'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -187,6 +193,17 @@ define_hjcs_digest_type!(OdenParentWorkspaceResolverDigest);
 define_hjcs_digest_type!(OdenParentUnstableConfigDigest);
 define_hjcs_digest_type!(OdenParentOtelConfigDigest);
 define_hjcs_digest_type!(OdenParentImportAttributesDigest);
+define_hjcs_digest_type!(OdenParentStaticImportEdgeDigest);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum OdenParentVfsDependencyKind {
+  #[serde(rename = "static-import")]
+  StaticImport,
+  #[serde(rename = "static-export")]
+  StaticExport,
+  #[serde(rename = "dynamic-import")]
+  DynamicImport,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OdenParentObservedImportAttribute<'a> {
@@ -238,6 +255,181 @@ impl OdenParentImportAttributes {
       &self.canonical_jcs()?,
     )?))
   }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OdenParentStaticImportEdgeObservation<'a> {
+  pub entrypoint_source_bytes: &'a [u8],
+  pub synthetic_module_source_bytes: &'a [u8],
+  pub dependency_ordinal: u64,
+  pub occurrence_count: u64,
+  pub kind: OdenParentVfsDependencyKind,
+  pub raw_specifier: &'a str,
+  pub resolved_specifier: &'a str,
+  pub referrer_key: &'a str,
+  pub import_attributes: &'a OdenParentImportAttributes,
+  pub source_byte_start: u64,
+  pub source_byte_end: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OdenParentStaticImportEdge {
+  dependency_ordinal: u64,
+  entrypoint_source_digest: OdenParentEntrypointSourceDigest,
+  import_attributes: OdenParentImportAttributes,
+  kind: OdenParentVfsDependencyKind,
+  occurrence_count: u64,
+  raw_specifier: &'static str,
+  referrer_key: &'static str,
+  resolved_specifier: &'static str,
+  schema: &'static str,
+  source_byte_end: u64,
+  source_byte_start: u64,
+  synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest,
+}
+
+impl OdenParentStaticImportEdge {
+  /// Projects already-observed parser facts. This pure boundary does not prove
+  /// parser ordinal/occurrence provenance or that synthetic bytes came from
+  /// the future checked source constant; those remain adapter/integration
+  /// gates and cannot be replaced by this constructor succeeding.
+  pub fn from_observation(
+    observation: OdenParentStaticImportEdgeObservation<'_>,
+  ) -> Result<Self, OdenParentAllowlistError> {
+    if observation.dependency_ordinal != 0 {
+      return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+        "dependency ordinal is not zero",
+      ));
+    }
+    if observation.occurrence_count != 1 {
+      return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+        "occurrence count is not one",
+      ));
+    }
+    if observation.kind != OdenParentVfsDependencyKind::StaticImport {
+      return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+        "dependency kind is not static-import",
+      ));
+    }
+    if observation.raw_specifier != ODEN_PARENT_PRIVATE_MODULE_SPECIFIER {
+      return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+        "raw specifier is not the private module",
+      ));
+    }
+    if observation.resolved_specifier != ODEN_PARENT_PRIVATE_MODULE_SPECIFIER {
+      return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+        "resolved specifier is not the private module",
+      ));
+    }
+    if observation.referrer_key != ODEN_PARENT_ENTRYPOINT_KEY {
+      return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+        "referrer is not the parent entrypoint",
+      ));
+    }
+    if !observation.import_attributes.0.is_empty() {
+      return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+        "import attributes are not empty",
+      ));
+    }
+    if observation.synthetic_module_source_bytes.is_empty()
+      || !observation.synthetic_module_source_bytes.is_ascii()
+    {
+      return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+        "synthetic module source is not nonempty ASCII",
+      ));
+    }
+    if observation
+      .entrypoint_source_bytes
+      .starts_with(b"\xef\xbb\xbf")
+      || std::str::from_utf8(observation.entrypoint_source_bytes).is_err()
+    {
+      return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+        "entrypoint source is not BOM-free UTF-8",
+      ));
+    }
+    validate_static_import_edge_range(&observation)?;
+
+    Ok(Self {
+      dependency_ordinal: 0,
+      entrypoint_source_digest: OdenParentEntrypointSourceDigest::from_bytes(
+        observation.entrypoint_source_bytes,
+      ),
+      import_attributes: observation.import_attributes.clone(),
+      kind: OdenParentVfsDependencyKind::StaticImport,
+      occurrence_count: 1,
+      raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      referrer_key: ODEN_PARENT_ENTRYPOINT_KEY,
+      resolved_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      schema: ODEN_PARENT_STATIC_IMPORT_EDGE_SCHEMA,
+      source_byte_end: observation.source_byte_end,
+      source_byte_start: observation.source_byte_start,
+      synthetic_module_source_digest:
+        OdenParentSyntheticModuleSourceDigest::from_bytes(
+          observation.synthetic_module_source_bytes,
+        ),
+    })
+  }
+
+  pub fn canonical_jcs(&self) -> Result<Vec<u8>, OdenParentAllowlistError> {
+    // The only map is the validated duplicate-free attributes object; all
+    // remaining fields are closed derive-generated scalar projections.
+    let value = serde_json::to_value(self).map_err(|error| {
+      OdenParentAllowlistError::CanonicalJson(error.to_string())
+    })?;
+    canonical_value_jcs(&value)
+  }
+
+  pub fn digest(
+    &self,
+  ) -> Result<OdenParentStaticImportEdgeDigest, OdenParentAllowlistError> {
+    Ok(OdenParentStaticImportEdgeDigest(hjcs_digest(
+      ODEN_PARENT_STATIC_IMPORT_EDGE_DIGEST_DOMAIN,
+      &self.canonical_jcs()?,
+    )?))
+  }
+}
+
+fn validate_static_import_edge_range(
+  observation: &OdenParentStaticImportEdgeObservation<'_>,
+) -> Result<(), OdenParentAllowlistError> {
+  if observation.source_byte_start > MAX_IJSON_SAFE_INTEGER
+    || observation.source_byte_end > MAX_IJSON_SAFE_INTEGER
+    || observation.source_byte_end <= observation.source_byte_start
+  {
+    return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+      "source byte range is not a nonempty safe-integer range",
+    ));
+  }
+  let start = usize::try_from(observation.source_byte_start).map_err(|_| {
+    OdenParentAllowlistError::InvalidStaticImportEdge(
+      "source byte start does not fit usize",
+    )
+  })?;
+  let end = usize::try_from(observation.source_byte_end).map_err(|_| {
+    OdenParentAllowlistError::InvalidStaticImportEdge(
+      "source byte end does not fit usize",
+    )
+  })?;
+  let bytes = observation.entrypoint_source_bytes;
+  if start == 0 || end >= bytes.len() {
+    return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+      "source byte range is out of bounds or lacks delimiters",
+    ));
+  }
+  if &bytes[start..end] != observation.raw_specifier.as_bytes() {
+    return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+      "source byte range does not equal the raw specifier",
+    ));
+  }
+  let opening = bytes[start - 1];
+  let closing = bytes[end];
+  if opening != closing || !matches!(opening, b'\'' | b'"' | b'`') {
+    return Err(OdenParentAllowlistError::InvalidStaticImportEdge(
+      "source byte range is not payload-only between matching delimiters",
+    ));
+  }
+  Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -583,7 +775,7 @@ struct OdenParentAllowlistDigests {
   release_contract_digest: CanonicalSha256Digest,
   source_closure_contract_digest: CanonicalSha256Digest,
   standalone_configuration_digest: OdenParentStandaloneConfigurationDigest,
-  static_import_edge_digest: CanonicalSha256Digest,
+  static_import_edge_digest: OdenParentStaticImportEdgeDigest,
   synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest,
   vfs_graph_digest: CanonicalSha256Digest,
 }
@@ -611,7 +803,7 @@ pub struct OdenParentAllowlist {
   #[serde(rename = "standaloneConfigurationDigest")]
   standalone_configuration_digest: OdenParentStandaloneConfigurationDigest,
   #[serde(rename = "staticImportEdgeDigest")]
-  static_import_edge_digest: CanonicalSha256Digest,
+  static_import_edge_digest: OdenParentStaticImportEdgeDigest,
   #[serde(rename = "syntheticModuleSourceDigest")]
   synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest,
   #[serde(rename = "vfsGraphDigest")]
@@ -821,6 +1013,10 @@ mod tests {
 
   const ZERO_DIGEST: &str =
     "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const STATIC_IMPORT_ENTRYPOINT_SOURCE: &[u8] =
+    b"import capture from \"oden-internal:filesystem-parent-capture-v2\";\n";
+  const STATIC_IMPORT_SYNTHETIC_SOURCE: &[u8] =
+    b"export const capture = () => {};\n";
 
   fn zero_digest(field: &'static str) -> CanonicalSha256Digest {
     CanonicalSha256Digest::parse(field, ZERO_DIGEST).unwrap()
@@ -837,6 +1033,39 @@ mod tests {
     .unwrap()
   }
 
+  fn empty_import_attributes() -> OdenParentImportAttributes {
+    OdenParentImportAttributes::from_observed_pairs(&[]).unwrap()
+  }
+
+  fn valid_static_import_edge_observation<'a>(
+    entrypoint_source_bytes: &'a [u8],
+    synthetic_module_source_bytes: &'a [u8],
+    import_attributes: &'a OdenParentImportAttributes,
+  ) -> OdenParentStaticImportEdgeObservation<'a> {
+    OdenParentStaticImportEdgeObservation {
+      entrypoint_source_bytes,
+      synthetic_module_source_bytes,
+      dependency_ordinal: 0,
+      occurrence_count: 1,
+      kind: OdenParentVfsDependencyKind::StaticImport,
+      raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      resolved_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      referrer_key: ODEN_PARENT_ENTRYPOINT_KEY,
+      import_attributes,
+      source_byte_start: 21,
+      source_byte_end: 63,
+    }
+  }
+
+  fn assert_invalid_static_import_edge(
+    observation: OdenParentStaticImportEdgeObservation<'_>,
+  ) {
+    assert!(matches!(
+      OdenParentStaticImportEdge::from_observation(observation),
+      Err(OdenParentAllowlistError::InvalidStaticImportEdge(_))
+    ));
+  }
+
   fn test_allowlist() -> OdenParentAllowlist {
     OdenParentAllowlist::new(OdenParentAllowlistDigests {
       capture_contract_digest: zero_digest("captureContractDigest"),
@@ -850,7 +1079,9 @@ mod tests {
       standalone_configuration_digest: OdenParentStandaloneConfigurationDigest(
         zero_digest("standaloneConfigurationDigest"),
       ),
-      static_import_edge_digest: zero_digest("staticImportEdgeDigest"),
+      static_import_edge_digest: OdenParentStaticImportEdgeDigest(zero_digest(
+        "staticImportEdgeDigest",
+      )),
       synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest(
         zero_digest("syntheticModuleSourceDigest"),
       ),
@@ -1022,6 +1253,177 @@ mod tests {
         "a".to_string()
       ))
     );
+  }
+
+  #[test]
+  fn static_import_edge_has_exact_preimage_and_digest() {
+    let attributes = empty_import_attributes();
+    let edge = OdenParentStaticImportEdge::from_observation(
+      valid_static_import_edge_observation(
+        STATIC_IMPORT_ENTRYPOINT_SOURCE,
+        STATIC_IMPORT_SYNTHETIC_SOURCE,
+        &attributes,
+      ),
+    )
+    .unwrap();
+
+    assert_eq!(
+      edge.entrypoint_source_digest.as_str(),
+      "sha256-eZBxibEvt5Bi1O2dNl_Ttk_26zeBlhoKBakZTbamdA0"
+    );
+    assert_eq!(
+      edge.synthetic_module_source_digest.as_str(),
+      "sha256-xBUQjNLZYqER5vYD8QVKwk_tJBf9DD9WJz6bR11oDZ8"
+    );
+    assert_eq!(
+      edge.canonical_jcs().unwrap(),
+      br#"{"dependencyOrdinal":0,"entrypointSourceDigest":"sha256-eZBxibEvt5Bi1O2dNl_Ttk_26zeBlhoKBakZTbamdA0","importAttributes":{},"kind":"static-import","occurrenceCount":1,"rawSpecifier":"oden-internal:filesystem-parent-capture-v2","referrerKey":"repo:src/release.ts","resolvedSpecifier":"oden-internal:filesystem-parent-capture-v2","schema":"oden/capsec-filesystem-parent-static-import-edge/2","sourceByteEnd":63,"sourceByteStart":21,"syntheticModuleSourceDigest":"sha256-xBUQjNLZYqER5vYD8QVKwk_tJBf9DD9WJz6bR11oDZ8"}"#
+    );
+    assert_eq!(
+      edge.digest().unwrap().as_str(),
+      "sha256-V2c7iG2eHyx9Cp61T6S9nOq-FM6AXQwjpcxYuIRxn-A"
+    );
+  }
+
+  #[test]
+  fn static_import_edge_refuses_every_nonfrozen_parser_fact() {
+    let empty = empty_import_attributes();
+    let nonempty = OdenParentImportAttributes::from_observed_pairs(&[
+      OdenParentObservedImportAttribute {
+        key: "type",
+        value: "json",
+      },
+    ])
+    .unwrap();
+
+    macro_rules! assert_rejected {
+      ($field:ident, $value:expr) => {{
+        let mut observation = valid_static_import_edge_observation(
+          STATIC_IMPORT_ENTRYPOINT_SOURCE,
+          STATIC_IMPORT_SYNTHETIC_SOURCE,
+          &empty,
+        );
+        observation.$field = $value;
+        assert_invalid_static_import_edge(observation);
+      }};
+    }
+
+    assert_rejected!(dependency_ordinal, 1);
+    assert_rejected!(occurrence_count, 0);
+    assert_rejected!(occurrence_count, 2);
+    assert_rejected!(kind, OdenParentVfsDependencyKind::StaticExport);
+    assert_rejected!(kind, OdenParentVfsDependencyKind::DynamicImport);
+    assert_rejected!(raw_specifier, "./capture.ts");
+    assert_rejected!(resolved_specifier, "repo:src/capture.ts");
+    assert_rejected!(referrer_key, "repo:src/not-release.ts");
+
+    let mut observation = valid_static_import_edge_observation(
+      STATIC_IMPORT_ENTRYPOINT_SOURCE,
+      STATIC_IMPORT_SYNTHETIC_SOURCE,
+      &empty,
+    );
+    observation.import_attributes = &nonempty;
+    assert_invalid_static_import_edge(observation);
+  }
+
+  #[test]
+  fn static_import_edge_refuses_unsafe_or_inexact_byte_ranges() {
+    let attributes = empty_import_attributes();
+
+    macro_rules! assert_rejected_range {
+      ($start:expr, $end:expr) => {{
+        let mut observation = valid_static_import_edge_observation(
+          STATIC_IMPORT_ENTRYPOINT_SOURCE,
+          STATIC_IMPORT_SYNTHETIC_SOURCE,
+          &attributes,
+        );
+        observation.source_byte_start = $start;
+        observation.source_byte_end = $end;
+        assert_invalid_static_import_edge(observation);
+      }};
+    }
+
+    assert_rejected_range!(0, 42);
+    assert_rejected_range!(21, 21);
+    assert_rejected_range!(63, 21);
+    assert_rejected_range!(22, 63);
+    assert_rejected_range!(21, 62);
+    assert_rejected_range!(21, STATIC_IMPORT_ENTRYPOINT_SOURCE.len() as u64);
+    assert_rejected_range!(MAX_IJSON_SAFE_INTEGER + 1, MAX_IJSON_SAFE_INTEGER);
+    assert_rejected_range!(21, MAX_IJSON_SAFE_INTEGER + 1);
+
+    let mismatched_delimiters =
+      b"import capture from \"oden-internal:filesystem-parent-capture-v2';\n";
+    assert_invalid_static_import_edge(valid_static_import_edge_observation(
+      mismatched_delimiters,
+      STATIC_IMPORT_SYNTHETIC_SOURCE,
+      &attributes,
+    ));
+
+    let unsupported_delimiters =
+      b"import capture from #oden-internal:filesystem-parent-capture-v2#;\n";
+    assert_invalid_static_import_edge(valid_static_import_edge_observation(
+      unsupported_delimiters,
+      STATIC_IMPORT_SYNTHETIC_SOURCE,
+      &attributes,
+    ));
+
+    let escaped_spelling =
+      b"import capture from \"oden-internal:filesystem-parent-capture-v\\x32\";\n";
+    assert_invalid_static_import_edge(valid_static_import_edge_observation(
+      escaped_spelling,
+      STATIC_IMPORT_SYNTHETIC_SOURCE,
+      &attributes,
+    ));
+  }
+
+  #[test]
+  fn static_import_edge_uses_byte_offsets_and_refuses_invalid_sources() {
+    let attributes = empty_import_attributes();
+    let multibyte_prefix = "const é = 1;\nimport capture from \"oden-internal:filesystem-parent-capture-v2\";\n";
+    let bytes = multibyte_prefix.as_bytes();
+    let start = bytes
+      .windows(ODEN_PARENT_PRIVATE_MODULE_SPECIFIER.len())
+      .position(|window| {
+        window == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER.as_bytes()
+      })
+      .unwrap();
+    let end = start + ODEN_PARENT_PRIVATE_MODULE_SPECIFIER.len();
+    let mut observation = valid_static_import_edge_observation(
+      bytes,
+      STATIC_IMPORT_SYNTHETIC_SOURCE,
+      &attributes,
+    );
+    observation.source_byte_start = start as u64;
+    observation.source_byte_end = end as u64;
+    let edge =
+      OdenParentStaticImportEdge::from_observation(observation).unwrap();
+    assert_eq!(edge.source_byte_start, start as u64);
+    assert_ne!(start, multibyte_prefix[..start].chars().count());
+
+    let bom_source =
+      [b"\xef\xbb\xbf".as_slice(), STATIC_IMPORT_ENTRYPOINT_SOURCE].concat();
+    assert_invalid_static_import_edge(valid_static_import_edge_observation(
+      &bom_source,
+      STATIC_IMPORT_SYNTHETIC_SOURCE,
+      &attributes,
+    ));
+
+    let invalid_utf8 =
+      [b"\xff".as_slice(), STATIC_IMPORT_ENTRYPOINT_SOURCE].concat();
+    assert_invalid_static_import_edge(valid_static_import_edge_observation(
+      &invalid_utf8,
+      STATIC_IMPORT_SYNTHETIC_SOURCE,
+      &attributes,
+    ));
+
+    for synthetic in [b"".as_slice(), "é".as_bytes(), b"\xff".as_slice()] {
+      assert_invalid_static_import_edge(valid_static_import_edge_observation(
+        STATIC_IMPORT_ENTRYPOINT_SOURCE,
+        synthetic,
+        &attributes,
+      ));
+    }
   }
 
   #[test]
