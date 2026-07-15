@@ -9,10 +9,15 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use deno_runtime::deno_telemetry::OtelConfig;
+use deno_runtime::deno_telemetry::OtelConsoleConfig;
 use serde::Serialize;
 use sha2::Digest as _;
 use sha2::Sha256;
 use thiserror::Error;
+
+use crate::args::UnstableConfig;
+use crate::standalone::binary::SerializedWorkspaceResolver;
 
 pub const ODEN_PARENT_ALLOWLIST_SCHEMA: &str =
   "oden/capsec-filesystem-parent-standalone-allowlist/2";
@@ -24,6 +29,16 @@ pub const ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_INVENTORY_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-source-closure-contract-inventory:2";
 pub const ODEN_PARENT_RELEASE_CONTRACT_INVENTORY_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-release-contract-inventory:2";
+pub const ODEN_PARENT_STANDALONE_CONFIGURATION_SCHEMA: &str =
+  "oden/capsec-filesystem-parent-standalone-configuration/2";
+pub const ODEN_PARENT_STANDALONE_CONFIGURATION_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-standalone-configuration:2";
+pub const ODEN_PARENT_WORKSPACE_RESOLVER_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-workspace-resolver:2";
+pub const ODEN_PARENT_UNSTABLE_CONFIG_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-unstable-config:2";
+pub const ODEN_PARENT_OTEL_CONFIG_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-otel-config:2";
 pub const ODEN_PARENT_ENTRYPOINT_SOURCE_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-entrypoint-source:2";
 pub const ODEN_PARENT_SYNTHETIC_MODULE_SOURCE_DIGEST_DOMAIN: &str =
@@ -67,6 +82,10 @@ pub enum OdenParentAllowlistError {
   CanonicalJson(String),
   #[error("parent projection contains a number outside its I-JSON/JCS range")]
   InvalidIJsonNumber,
+  #[error("parent unstable configuration is not exactly all-disabled")]
+  NonDefaultUnstableConfig,
+  #[error("parent OTEL configuration is not exactly all-disabled")]
+  NonDefaultOtelConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -143,6 +162,25 @@ define_hbytes_digest!(
   OdenParentVfsSourceMapBytesDigest,
   ODEN_PARENT_VFS_SOURCE_MAP_BYTES_DIGEST_DOMAIN
 );
+
+macro_rules! define_hjcs_digest_type {
+  ($name:ident) => {
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+    #[serde(transparent)]
+    pub struct $name(CanonicalSha256Digest);
+
+    impl $name {
+      pub fn as_str(&self) -> &str {
+        self.0.as_str()
+      }
+    }
+  };
+}
+
+define_hjcs_digest_type!(OdenParentStandaloneConfigurationDigest);
+define_hjcs_digest_type!(OdenParentWorkspaceResolverDigest);
+define_hjcs_digest_type!(OdenParentUnstableConfigDigest);
+define_hjcs_digest_type!(OdenParentOtelConfigDigest);
 
 #[derive(Clone, Copy, Debug)]
 pub struct ContractFile<'a> {
@@ -250,6 +288,235 @@ impl ContractInventory {
   }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OdenParentStandaloneConfiguration {
+  app_name: &'static str,
+  app_version: Option<&'static str>,
+  bundle: bool,
+  ca_data_digest: Option<CanonicalSha256Digest>,
+  ca_stores: Option<Vec<&'static str>>,
+  cached_only: bool,
+  certificate: Option<&'static str>,
+  code_cache_enabled: bool,
+  config_file: &'static str,
+  cwd: &'static str,
+  denort: &'static str,
+  embedded_args: Vec<&'static str>,
+  entrypoint_key: &'static str,
+  env_files: Vec<&'static str>,
+  error_reporting_url: Option<&'static str>,
+  eszip: bool,
+  exclude: Vec<&'static str>,
+  exclude_unused_npm: bool,
+  frozen: bool,
+  icon: Option<&'static str>,
+  ignored_tls_certificate_errors: Vec<&'static str>,
+  import_map_override: Option<&'static str>,
+  include: Vec<&'static str>,
+  instance_commitments: &'static str,
+  location: Option<&'static str>,
+  lock_file: &'static str,
+  log_level: Option<&'static str>,
+  minify: bool,
+  node_modules_mode: &'static str,
+  no_prompt: bool,
+  no_terminal: bool,
+  no_update_check: bool,
+  npmrc_override: Option<&'static str>,
+  otel_config_digest: OdenParentOtelConfigDigest,
+  output: &'static str,
+  permissions: &'static str,
+  preload_modules: Vec<&'static str>,
+  release_base_url: Option<&'static str>,
+  require_modules: Vec<&'static str>,
+  schema: &'static str,
+  seed: Option<u64>,
+  self_extracting: bool,
+  source_file: &'static str,
+  subcommand: &'static str,
+  target: Option<&'static str>,
+  type_check: &'static str,
+  unstable_config_digest: OdenParentUnstableConfigDigest,
+  unstable_features: Vec<&'static str>,
+  v8_flags: Vec<&'static str>,
+  vfs_case_sensitivity: &'static str,
+  vendor: bool,
+  watch: bool,
+  workspace_resolver_digest: OdenParentWorkspaceResolverDigest,
+}
+
+impl OdenParentStandaloneConfiguration {
+  pub fn from_effective(
+    workspace_resolver: &SerializedWorkspaceResolver,
+    unstable_config: &UnstableConfig,
+    otel_config: &OtelConfig,
+  ) -> Result<Self, OdenParentAllowlistError> {
+    let unstable_config_digest = unstable_config_digest(unstable_config)?;
+    let otel_config_digest = otel_config_digest(otel_config)?;
+    let workspace_resolver_digest =
+      workspace_resolver_digest(workspace_resolver)?;
+
+    Ok(Self {
+      app_name: "oden",
+      app_version: None,
+      bundle: false,
+      ca_data_digest: None,
+      ca_stores: None,
+      cached_only: false,
+      certificate: None,
+      code_cache_enabled: true,
+      config_file: "$REPOSITORY/deno.json",
+      cwd: "$REPOSITORY",
+      denort: "$DENORT",
+      embedded_args: Vec::new(),
+      entrypoint_key: ODEN_PARENT_ENTRYPOINT_KEY,
+      env_files: Vec::new(),
+      error_reporting_url: None,
+      eszip: false,
+      exclude: Vec::new(),
+      exclude_unused_npm: false,
+      frozen: true,
+      icon: None,
+      ignored_tls_certificate_errors: Vec::new(),
+      import_map_override: None,
+      include: Vec::new(),
+      instance_commitments: "$INSTANCE",
+      location: None,
+      lock_file: "$REPOSITORY/deno.lock",
+      log_level: None,
+      minify: false,
+      node_modules_mode: "none",
+      no_prompt: true,
+      no_terminal: false,
+      no_update_check: true,
+      npmrc_override: None,
+      otel_config_digest,
+      output: "$OUTPUT",
+      permissions: "all",
+      preload_modules: Vec::new(),
+      release_base_url: None,
+      require_modules: Vec::new(),
+      schema: ODEN_PARENT_STANDALONE_CONFIGURATION_SCHEMA,
+      seed: None,
+      self_extracting: false,
+      source_file: "$REPOSITORY/src/release.ts",
+      subcommand: "compile",
+      target: None,
+      type_check: "none",
+      unstable_config_digest,
+      unstable_features: Vec::new(),
+      v8_flags: Vec::new(),
+      vfs_case_sensitivity: "target-default",
+      vendor: false,
+      watch: false,
+      workspace_resolver_digest,
+    })
+  }
+
+  pub fn canonical_jcs(&self) -> Result<Vec<u8>, OdenParentAllowlistError> {
+    // The closed configuration contains neither floats nor maps and uses only
+    // derive-generated serialization, so this explicit conversion cannot
+    // erase a non-finite value or duplicate member.
+    let value = serde_json::to_value(self).map_err(|error| {
+      OdenParentAllowlistError::CanonicalJson(error.to_string())
+    })?;
+    canonical_value_jcs(&value)
+  }
+
+  pub fn digest(
+    &self,
+  ) -> Result<OdenParentStandaloneConfigurationDigest, OdenParentAllowlistError>
+  {
+    Ok(OdenParentStandaloneConfigurationDigest(hjcs_digest(
+      ODEN_PARENT_STANDALONE_CONFIGURATION_DIGEST_DOMAIN,
+      &self.canonical_jcs()?,
+    )?))
+  }
+}
+
+fn workspace_resolver_jcs(
+  workspace_resolver: &SerializedWorkspaceResolver,
+) -> Result<Vec<u8>, OdenParentAllowlistError> {
+  // All dynamic objects are typed string-keyed maps, which guarantee unique
+  // decoded keys; nested package-json values are already serde_json::Value.
+  let value = serde_json::to_value(workspace_resolver).map_err(|error| {
+    OdenParentAllowlistError::CanonicalJson(error.to_string())
+  })?;
+  canonical_value_jcs(&value)
+}
+
+fn workspace_resolver_digest(
+  workspace_resolver: &SerializedWorkspaceResolver,
+) -> Result<OdenParentWorkspaceResolverDigest, OdenParentAllowlistError> {
+  Ok(OdenParentWorkspaceResolverDigest(hjcs_digest(
+    ODEN_PARENT_WORKSPACE_RESOLVER_DIGEST_DOMAIN,
+    &workspace_resolver_jcs(workspace_resolver)?,
+  )?))
+}
+
+fn unstable_config_jcs(
+  unstable_config: &UnstableConfig,
+) -> Result<Vec<u8>, OdenParentAllowlistError> {
+  let expected = UnstableConfig {
+    legacy_flag_enabled: false,
+    detect_cjs: false,
+    lazy_dynamic_imports: false,
+    raw_imports: false,
+    sloppy_imports: false,
+    npm_lazy_caching: false,
+    tsgo: false,
+    features: Vec::new(),
+  };
+  if unstable_config != &expected {
+    return Err(OdenParentAllowlistError::NonDefaultUnstableConfig);
+  }
+  let value = serde_json::to_value(unstable_config).map_err(|error| {
+    OdenParentAllowlistError::CanonicalJson(error.to_string())
+  })?;
+  canonical_value_jcs(&value)
+}
+
+fn unstable_config_digest(
+  unstable_config: &UnstableConfig,
+) -> Result<OdenParentUnstableConfigDigest, OdenParentAllowlistError> {
+  Ok(OdenParentUnstableConfigDigest(hjcs_digest(
+    ODEN_PARENT_UNSTABLE_CONFIG_DIGEST_DOMAIN,
+    &unstable_config_jcs(unstable_config)?,
+  )?))
+}
+
+fn otel_config_jcs(
+  otel_config: &OtelConfig,
+) -> Result<Vec<u8>, OdenParentAllowlistError> {
+  let expected = OtelConfig {
+    tracing_enabled: false,
+    metrics_enabled: false,
+    console: OtelConsoleConfig::Ignore,
+    deterministic_prefix: None,
+    propagators: std::collections::HashSet::new(),
+  };
+  let expected = serde_json::to_value(expected).map_err(|error| {
+    OdenParentAllowlistError::CanonicalJson(error.to_string())
+  })?;
+  let value = serde_json::to_value(otel_config).map_err(|error| {
+    OdenParentAllowlistError::CanonicalJson(error.to_string())
+  })?;
+  if value != expected {
+    return Err(OdenParentAllowlistError::NonDefaultOtelConfig);
+  }
+  canonical_value_jcs(&value)
+}
+
+fn otel_config_digest(
+  otel_config: &OtelConfig,
+) -> Result<OdenParentOtelConfigDigest, OdenParentAllowlistError> {
+  Ok(OdenParentOtelConfigDigest(hjcs_digest(
+    ODEN_PARENT_OTEL_CONFIG_DIGEST_DOMAIN,
+    &otel_config_jcs(otel_config)?,
+  )?))
+}
+
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OdenParentAllowlistDigests {
@@ -257,7 +524,7 @@ struct OdenParentAllowlistDigests {
   entrypoint_source_digest: OdenParentEntrypointSourceDigest,
   release_contract_digest: CanonicalSha256Digest,
   source_closure_contract_digest: CanonicalSha256Digest,
-  standalone_configuration_digest: CanonicalSha256Digest,
+  standalone_configuration_digest: OdenParentStandaloneConfigurationDigest,
   static_import_edge_digest: CanonicalSha256Digest,
   synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest,
   vfs_graph_digest: CanonicalSha256Digest,
@@ -284,7 +551,7 @@ pub struct OdenParentAllowlist {
   #[serde(rename = "sourceClosureContractDigest")]
   source_closure_contract_digest: CanonicalSha256Digest,
   #[serde(rename = "standaloneConfigurationDigest")]
-  standalone_configuration_digest: CanonicalSha256Digest,
+  standalone_configuration_digest: OdenParentStandaloneConfigurationDigest,
   #[serde(rename = "staticImportEdgeDigest")]
   static_import_edge_digest: CanonicalSha256Digest,
   #[serde(rename = "syntheticModuleSourceDigest")]
@@ -501,6 +768,17 @@ mod tests {
     CanonicalSha256Digest::parse(field, ZERO_DIGEST).unwrap()
   }
 
+  fn minimal_workspace_resolver() -> SerializedWorkspaceResolver {
+    serde_json::from_value(serde_json::json!({
+      "catalogs": {},
+      "import_map": null,
+      "jsr_pkgs": [],
+      "package_jsons": {},
+      "pkg_json_resolution": "Enabled",
+    }))
+    .unwrap()
+  }
+
   fn test_allowlist() -> OdenParentAllowlist {
     OdenParentAllowlist::new(OdenParentAllowlistDigests {
       capture_contract_digest: zero_digest("captureContractDigest"),
@@ -511,8 +789,8 @@ mod tests {
       source_closure_contract_digest: zero_digest(
         "sourceClosureContractDigest",
       ),
-      standalone_configuration_digest: zero_digest(
-        "standaloneConfigurationDigest",
+      standalone_configuration_digest: OdenParentStandaloneConfigurationDigest(
+        zero_digest("standaloneConfigurationDigest"),
       ),
       static_import_edge_digest: zero_digest("staticImportEdgeDigest"),
       synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest(
@@ -615,6 +893,186 @@ mod tests {
       .map(|(actual, _)| actual)
       .collect::<std::collections::HashSet<_>>();
     assert_eq!(digests.len(), vectors.len());
+  }
+
+  #[test]
+  fn standalone_configuration_has_exact_nested_and_outer_preimages() {
+    let workspace_resolver = minimal_workspace_resolver();
+    let unstable_config = UnstableConfig::default();
+    let otel_config = OtelConfig::default();
+
+    assert_eq!(
+      workspace_resolver_jcs(&workspace_resolver).unwrap(),
+      br#"{"catalogs":{},"import_map":null,"jsr_pkgs":[],"package_jsons":{},"pkg_json_resolution":"Enabled"}"#
+    );
+    assert_eq!(
+      workspace_resolver_digest(&workspace_resolver)
+        .unwrap()
+        .as_str(),
+      "sha256-5tnJCOwbbNhY6XztrtzCsCyFtVVEI52Ql9ZfPT_RzpA"
+    );
+    assert_eq!(
+      unstable_config_jcs(&unstable_config).unwrap(),
+      br#"{"detect_cjs":false,"features":[],"lazy_dynamic_imports":false,"legacy_flag_enabled":false,"npm_lazy_caching":false,"raw_imports":false,"sloppy_imports":false,"tsgo":false}"#
+    );
+    assert_eq!(
+      unstable_config_digest(&unstable_config).unwrap().as_str(),
+      "sha256-3bm9CFAujFyBxa0mC_ZuV0ohi2GzVki7a_ChzijHkcA"
+    );
+    assert_eq!(
+      otel_config_jcs(&otel_config).unwrap(),
+      br#"{"console":"Ignore","deterministic_prefix":null,"metrics_enabled":false,"propagators":[],"tracing_enabled":false}"#
+    );
+    assert_eq!(
+      otel_config_digest(&otel_config).unwrap().as_str(),
+      "sha256-5VucB53YhCjW9oYT5iPoCaq2ABFWi5lCs3QPFeObpDM"
+    );
+
+    let configuration = OdenParentStandaloneConfiguration::from_effective(
+      &workspace_resolver,
+      &unstable_config,
+      &otel_config,
+    )
+    .unwrap();
+    let expected = br#"{"appName":"oden","appVersion":null,"bundle":false,"caDataDigest":null,"caStores":null,"cachedOnly":false,"certificate":null,"codeCacheEnabled":true,"configFile":"$REPOSITORY/deno.json","cwd":"$REPOSITORY","denort":"$DENORT","embeddedArgs":[],"entrypointKey":"repo:src/release.ts","envFiles":[],"errorReportingUrl":null,"eszip":false,"exclude":[],"excludeUnusedNpm":false,"frozen":true,"icon":null,"ignoredTlsCertificateErrors":[],"importMapOverride":null,"include":[],"instanceCommitments":"$INSTANCE","location":null,"lockFile":"$REPOSITORY/deno.lock","logLevel":null,"minify":false,"noPrompt":true,"noTerminal":false,"noUpdateCheck":true,"nodeModulesMode":"none","npmrcOverride":null,"otelConfigDigest":"sha256-5VucB53YhCjW9oYT5iPoCaq2ABFWi5lCs3QPFeObpDM","output":"$OUTPUT","permissions":"all","preloadModules":[],"releaseBaseUrl":null,"requireModules":[],"schema":"oden/capsec-filesystem-parent-standalone-configuration/2","seed":null,"selfExtracting":false,"sourceFile":"$REPOSITORY/src/release.ts","subcommand":"compile","target":null,"typeCheck":"none","unstableConfigDigest":"sha256-3bm9CFAujFyBxa0mC_ZuV0ohi2GzVki7a_ChzijHkcA","unstableFeatures":[],"v8Flags":[],"vendor":false,"vfsCaseSensitivity":"target-default","watch":false,"workspaceResolverDigest":"sha256-5tnJCOwbbNhY6XztrtzCsCyFtVVEI52Ql9ZfPT_RzpA"}"#;
+    assert_eq!(configuration.canonical_jcs().unwrap(), expected);
+    assert_eq!(
+      serde_json::from_slice::<serde_json::Value>(expected)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .len(),
+      53
+    );
+    assert_eq!(
+      configuration.digest().unwrap().as_str(),
+      "sha256-x9M9FXwQ28M8pffL0_q_JClOqFv8mzGLNvR1FGYNe6g"
+    );
+  }
+
+  #[test]
+  fn standalone_configuration_refuses_every_nondefault_unstable_field() {
+    let workspace_resolver = minimal_workspace_resolver();
+    let otel_config = OtelConfig::default();
+    let cases = [
+      UnstableConfig {
+        legacy_flag_enabled: true,
+        ..Default::default()
+      },
+      UnstableConfig {
+        detect_cjs: true,
+        ..Default::default()
+      },
+      UnstableConfig {
+        lazy_dynamic_imports: true,
+        ..Default::default()
+      },
+      UnstableConfig {
+        raw_imports: true,
+        ..Default::default()
+      },
+      UnstableConfig {
+        sloppy_imports: true,
+        ..Default::default()
+      },
+      UnstableConfig {
+        npm_lazy_caching: true,
+        ..Default::default()
+      },
+      UnstableConfig {
+        tsgo: true,
+        ..Default::default()
+      },
+      UnstableConfig {
+        features: vec!["kv".to_string()],
+        ..Default::default()
+      },
+    ];
+    for unstable_config in cases {
+      assert_eq!(
+        OdenParentStandaloneConfiguration::from_effective(
+          &workspace_resolver,
+          &unstable_config,
+          &otel_config,
+        ),
+        Err(OdenParentAllowlistError::NonDefaultUnstableConfig)
+      );
+    }
+  }
+
+  #[test]
+  fn standalone_configuration_refuses_every_nondefault_otel_field() {
+    use deno_runtime::deno_telemetry::OtelPropagators;
+
+    let workspace_resolver = minimal_workspace_resolver();
+    let unstable_config = UnstableConfig::default();
+    let mut tracing = OtelConfig::default();
+    tracing.tracing_enabled = true;
+    let mut metrics = OtelConfig::default();
+    metrics.metrics_enabled = true;
+    let mut capture = OtelConfig::default();
+    capture.console = OtelConsoleConfig::Capture;
+    let mut replace = OtelConfig::default();
+    replace.console = OtelConsoleConfig::Replace;
+    let mut deterministic_prefix = OtelConfig::default();
+    deterministic_prefix.deterministic_prefix = Some(0);
+    let mut trace_context = OtelConfig::default();
+    trace_context
+      .propagators
+      .insert(OtelPropagators::TraceContext);
+    let mut baggage = OtelConfig::default();
+    baggage.propagators.insert(OtelPropagators::Baggage);
+    let mut none = OtelConfig::default();
+    none.propagators.insert(OtelPropagators::None);
+
+    for otel_config in [
+      tracing,
+      metrics,
+      capture,
+      replace,
+      deterministic_prefix,
+      trace_context,
+      baggage,
+      none,
+    ] {
+      assert_eq!(
+        OdenParentStandaloneConfiguration::from_effective(
+          &workspace_resolver,
+          &unstable_config,
+          &otel_config,
+        ),
+        Err(OdenParentAllowlistError::NonDefaultOtelConfig)
+      );
+    }
+  }
+
+  #[test]
+  fn standalone_configuration_binds_the_actual_workspace_projection() {
+    let minimal = minimal_workspace_resolver();
+    let catalogued: SerializedWorkspaceResolver =
+      serde_json::from_value(serde_json::json!({
+        "catalogs": { "release": { "example": "jsr:@scope/example@1.0.0" } },
+        "import_map": null,
+        "jsr_pkgs": [],
+        "package_jsons": {},
+        "pkg_json_resolution": "Enabled",
+      }))
+      .unwrap();
+    let unstable_config = UnstableConfig::default();
+    let otel_config = OtelConfig::default();
+    let minimal = OdenParentStandaloneConfiguration::from_effective(
+      &minimal,
+      &unstable_config,
+      &otel_config,
+    )
+    .unwrap();
+    let catalogued = OdenParentStandaloneConfiguration::from_effective(
+      &catalogued,
+      &unstable_config,
+      &otel_config,
+    )
+    .unwrap();
+    assert_ne!(minimal.digest().unwrap(), catalogued.digest().unwrap());
   }
 
   #[test]
