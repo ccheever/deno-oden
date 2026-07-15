@@ -4,14 +4,17 @@
 // This first fail-closed slice keeps the reviewed contract inventories and
 // parent-allowlist rendering as exact raw-byte and domain-separated canonical-
 // JSON projections. It intentionally exposes no allowlist constructor while
-// the VFS projector, compiler adapters, generator, and startup recomputation
-// gates remain absent; generated outputs and later image/evidence authority
-// are absent as well.
+// the compiler adapters, generator, and startup recomputation gates remain
+// absent; generated outputs and later image/evidence authority are absent as
+// well.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use deno_runtime::deno_node::is_builtin_node_module;
 use deno_runtime::deno_telemetry::OtelConfig;
 use deno_runtime::deno_telemetry::OtelConsoleConfig;
+use deno_semver::jsr::JsrPackageNvReference;
+use deno_semver::jsr::JsrPackageReqReference;
 use serde::Serialize;
 use sha2::Digest as _;
 use sha2::Sha256;
@@ -40,6 +43,10 @@ pub const ODEN_PARENT_UNSTABLE_CONFIG_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-unstable-config:2";
 pub const ODEN_PARENT_OTEL_CONFIG_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-otel-config:2";
+pub const ODEN_PARENT_VFS_GRAPH_SCHEMA: &str =
+  "oden/capsec-filesystem-parent-vfs-graph/2";
+pub const ODEN_PARENT_VFS_GRAPH_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-parent-vfs-graph:2";
 pub const ODEN_PARENT_IMPORT_ATTRIBUTES_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-parent-import-attributes:2";
 pub const ODEN_PARENT_STATIC_IMPORT_EDGE_SCHEMA: &str =
@@ -97,6 +104,43 @@ pub enum OdenParentAllowlistError {
   DuplicateImportAttribute(String),
   #[error("invalid parent static import edge: {0}")]
   InvalidStaticImportEdge(&'static str),
+  #[error("invalid parent VFS {role} key: {key}")]
+  InvalidVfsKey { role: &'static str, key: String },
+  #[error("invalid parent VFS module {key}: {reason}")]
+  InvalidVfsModule { key: String, reason: &'static str },
+  #[error("invalid parent VFS dependency in {module}: {reason}")]
+  InvalidVfsDependency {
+    module: String,
+    reason: &'static str,
+  },
+  #[error("duplicate parent VFS {collection} key: {key}")]
+  DuplicateVfsKey {
+    collection: &'static str,
+    key: String,
+  },
+  #[error("parent VFS key occurs as both a module and file: {0}")]
+  AmbiguousVfsKey(String),
+  #[error(
+    "duplicate parent VFS dependency coordinates in {module}: {source_byte_start}..{source_byte_end}"
+  )]
+  DuplicateVfsDependencyCoordinates {
+    module: String,
+    source_byte_start: u64,
+    source_byte_end: u64,
+  },
+  #[error("parent VFS entrypoint module is missing")]
+  MissingVfsEntrypoint,
+  #[error("unresolved parent VFS dependency from {module}: {resolved_key}")]
+  UnresolvedVfsDependency {
+    module: String,
+    resolved_key: String,
+  },
+  #[error("unreachable parent VFS module: {0}")]
+  UnreachableVfsModule(String),
+  #[error("unreachable parent VFS file: {0}")]
+  UnreachableVfsFile(String),
+  #[error("invalid parent VFS private edge: {0}")]
+  InvalidVfsPrivateEdge(&'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -194,6 +238,15 @@ define_hjcs_digest_type!(OdenParentUnstableConfigDigest);
 define_hjcs_digest_type!(OdenParentOtelConfigDigest);
 define_hjcs_digest_type!(OdenParentImportAttributesDigest);
 define_hjcs_digest_type!(OdenParentStaticImportEdgeDigest);
+define_hjcs_digest_type!(OdenParentVfsGraphDigest);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum OdenParentVfsMediaType {
+  TypeScript,
+  JavaScript,
+  Json,
+  Wasm,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum OdenParentVfsDependencyKind {
@@ -203,6 +256,16 @@ pub enum OdenParentVfsDependencyKind {
   StaticExport,
   #[serde(rename = "dynamic-import")]
   DynamicImport,
+}
+
+impl OdenParentVfsDependencyKind {
+  fn as_serialized_str(self) -> &'static str {
+    match self {
+      Self::StaticImport => "static-import",
+      Self::StaticExport => "static-export",
+      Self::DynamicImport => "dynamic-import",
+    }
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,6 +318,699 @@ impl OdenParentImportAttributes {
       &self.canonical_jcs()?,
     )?))
   }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OdenParentVfsDependencyObservation<'a> {
+  pub kind: OdenParentVfsDependencyKind,
+  pub raw_specifier: &'a str,
+  pub resolved_key: &'a str,
+  pub source_byte_start: u64,
+  pub source_byte_end: u64,
+  pub import_attributes: &'a [OdenParentObservedImportAttribute<'a>],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OdenParentVfsModuleObservation<'a> {
+  pub key: &'a str,
+  pub media_type: OdenParentVfsMediaType,
+  pub original_bytes: &'a [u8],
+  pub emitted_bytes: &'a [u8],
+  pub source_map_bytes: Option<&'a [u8]>,
+  pub dependencies: &'a [OdenParentVfsDependencyObservation<'a>],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OdenParentVfsFileObservation<'a> {
+  pub key: &'a str,
+  pub executable: bool,
+  pub original_bytes: &'a [u8],
+  pub emitted_bytes: &'a [u8],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OdenParentVfsDependencyRow {
+  import_attributes_digest: OdenParentImportAttributesDigest,
+  kind: OdenParentVfsDependencyKind,
+  raw_specifier: String,
+  resolved_key: String,
+  source_byte_end: u64,
+  source_byte_start: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OdenParentVfsModuleRow {
+  dependencies: Vec<OdenParentVfsDependencyRow>,
+  emitted_byte_digest: OdenParentVfsEmittedBytesDigest,
+  key: String,
+  media_type: OdenParentVfsMediaType,
+  original_byte_digest: OdenParentVfsOriginalBytesDigest,
+  source_map_digest: Option<OdenParentVfsSourceMapBytesDigest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OdenParentVfsFileRow {
+  emitted_byte_digest: OdenParentVfsEmittedBytesDigest,
+  executable: bool,
+  key: String,
+  kind: &'static str,
+  original_byte_digest: OdenParentVfsOriginalBytesDigest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OdenParentVfsGraph {
+  entrypoint_key: &'static str,
+  files: Vec<OdenParentVfsFileRow>,
+  modules: Vec<OdenParentVfsModuleRow>,
+  schema: &'static str,
+}
+
+impl OdenParentVfsGraph {
+  /// Projects caller-independent digest rows from exact observed byte slices.
+  /// The compiler adapter remains responsible for proving that observations
+  /// came from the pinned parser, resolver, lock, and serialized stores; this
+  /// constructor cannot authenticate that provenance merely from copied
+  /// values.
+  pub fn from_observations(
+    modules: &[OdenParentVfsModuleObservation<'_>],
+    files: &[OdenParentVfsFileObservation<'_>],
+  ) -> Result<Self, OdenParentAllowlistError> {
+    let mut module_rows = modules
+      .iter()
+      .map(project_vfs_module)
+      .collect::<Result<Vec<_>, _>>()?;
+    let mut file_rows = files
+      .iter()
+      .map(project_vfs_file)
+      .collect::<Result<Vec<_>, _>>()?;
+
+    module_rows
+      .sort_by(|left, right| left.key.as_bytes().cmp(right.key.as_bytes()));
+    file_rows
+      .sort_by(|left, right| left.key.as_bytes().cmp(right.key.as_bytes()));
+    refuse_duplicate_vfs_keys(
+      module_rows.iter().map(|row| row.key.as_str()),
+      "module",
+    )?;
+    refuse_duplicate_vfs_keys(
+      file_rows.iter().map(|row| row.key.as_str()),
+      "file",
+    )?;
+    refuse_ambiguous_vfs_keys(&module_rows, &file_rows)?;
+    validate_vfs_graph_links(&module_rows, &file_rows)?;
+
+    Ok(Self {
+      entrypoint_key: ODEN_PARENT_ENTRYPOINT_KEY,
+      files: file_rows,
+      modules: module_rows,
+      schema: ODEN_PARENT_VFS_GRAPH_SCHEMA,
+    })
+  }
+
+  pub fn canonical_jcs(&self) -> Result<Vec<u8>, OdenParentAllowlistError> {
+    // Projection rows are closed derive-generated shapes. The only dynamic
+    // object, import attributes, has already been reduced to its typed digest.
+    let value = serde_json::to_value(self).map_err(|error| {
+      OdenParentAllowlistError::CanonicalJson(error.to_string())
+    })?;
+    canonical_value_jcs(&value)
+  }
+
+  pub fn digest(
+    &self,
+  ) -> Result<OdenParentVfsGraphDigest, OdenParentAllowlistError> {
+    Ok(OdenParentVfsGraphDigest(hjcs_digest(
+      ODEN_PARENT_VFS_GRAPH_DIGEST_DOMAIN,
+      &self.canonical_jcs()?,
+    )?))
+  }
+}
+
+fn project_vfs_module(
+  observation: &OdenParentVfsModuleObservation<'_>,
+) -> Result<OdenParentVfsModuleRow, OdenParentAllowlistError> {
+  validate_vfs_module_key(observation.key)?;
+  if observation.key == ODEN_PARENT_ENTRYPOINT_KEY
+    && observation.media_type != OdenParentVfsMediaType::TypeScript
+  {
+    return Err(OdenParentAllowlistError::InvalidVfsModule {
+      key: observation.key.to_string(),
+      reason: "entrypoint media type is not TypeScript",
+    });
+  }
+  if observation.media_type != OdenParentVfsMediaType::Wasm
+    && std::str::from_utf8(observation.original_bytes).is_err()
+  {
+    return Err(OdenParentAllowlistError::InvalidVfsModule {
+      key: observation.key.to_string(),
+      reason: "textual original bytes are not UTF-8",
+    });
+  }
+  if matches!(
+    observation.media_type,
+    OdenParentVfsMediaType::Json | OdenParentVfsMediaType::Wasm
+  ) && !observation.dependencies.is_empty()
+  {
+    return Err(OdenParentAllowlistError::InvalidVfsModule {
+      key: observation.key.to_string(),
+      reason: "Json and Wasm modules cannot contain dependency rows",
+    });
+  }
+
+  let mut dependencies = observation
+    .dependencies
+    .iter()
+    .map(|dependency| {
+      project_vfs_dependency(
+        observation.key,
+        observation.original_bytes,
+        dependency,
+      )
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+  dependencies.sort_by(compare_vfs_dependencies);
+  for pair in dependencies.windows(2) {
+    if pair[0].source_byte_start == pair[1].source_byte_start
+      && pair[0].source_byte_end == pair[1].source_byte_end
+    {
+      return Err(
+        OdenParentAllowlistError::DuplicateVfsDependencyCoordinates {
+          module: observation.key.to_string(),
+          source_byte_start: pair[1].source_byte_start,
+          source_byte_end: pair[1].source_byte_end,
+        },
+      );
+    }
+  }
+
+  Ok(OdenParentVfsModuleRow {
+    dependencies,
+    emitted_byte_digest: OdenParentVfsEmittedBytesDigest::from_bytes(
+      observation.emitted_bytes,
+    ),
+    key: observation.key.to_string(),
+    media_type: observation.media_type,
+    original_byte_digest: OdenParentVfsOriginalBytesDigest::from_bytes(
+      observation.original_bytes,
+    ),
+    source_map_digest: observation
+      .source_map_bytes
+      .map(OdenParentVfsSourceMapBytesDigest::from_bytes),
+  })
+}
+
+fn project_vfs_dependency(
+  module_key: &str,
+  original_bytes: &[u8],
+  observation: &OdenParentVfsDependencyObservation<'_>,
+) -> Result<OdenParentVfsDependencyRow, OdenParentAllowlistError> {
+  if observation.raw_specifier.is_empty()
+    || observation.raw_specifier.contains('\0')
+  {
+    return Err(OdenParentAllowlistError::InvalidVfsDependency {
+      module: module_key.to_string(),
+      reason: "raw specifier is empty or contains NUL",
+    });
+  }
+  validate_vfs_dependency_key(observation.resolved_key)?;
+  validate_vfs_raw_resolved_relationship(module_key, observation)?;
+  validate_vfs_dependency_range(module_key, original_bytes, observation)?;
+  let import_attributes = OdenParentImportAttributes::from_observed_pairs(
+    observation.import_attributes,
+  )?;
+
+  Ok(OdenParentVfsDependencyRow {
+    import_attributes_digest: import_attributes.digest()?,
+    kind: observation.kind,
+    raw_specifier: observation.raw_specifier.to_string(),
+    resolved_key: observation.resolved_key.to_string(),
+    source_byte_end: observation.source_byte_end,
+    source_byte_start: observation.source_byte_start,
+  })
+}
+
+fn validate_vfs_raw_resolved_relationship(
+  module_key: &str,
+  observation: &OdenParentVfsDependencyObservation<'_>,
+) -> Result<(), OdenParentAllowlistError> {
+  let invalid = |reason| OdenParentAllowlistError::InvalidVfsDependency {
+    module: module_key.to_string(),
+    reason,
+  };
+  let raw = observation.raw_specifier;
+
+  if raw == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+    || observation.resolved_key == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+  {
+    if module_key != ODEN_PARENT_ENTRYPOINT_KEY
+      || observation.kind != OdenParentVfsDependencyKind::StaticImport
+      || raw != ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+      || observation.resolved_key != ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+      || !observation.import_attributes.is_empty()
+    {
+      return Err(invalid(
+        "private edge is not the exact entrypoint static import",
+      ));
+    }
+    return Ok(());
+  }
+
+  if raw.starts_with("node:") || observation.resolved_key.starts_with("node:") {
+    if raw != observation.resolved_key || !validate_node_vfs_key(raw) {
+      return Err(invalid(
+        "node builtin raw and resolved specifiers are not identical",
+      ));
+    }
+    return Ok(());
+  }
+
+  if raw.starts_with("jsr:") {
+    if !validate_jsr_raw_resolved_relationship(raw, observation.resolved_key) {
+      return Err(invalid(
+        "JSR request and exact resolved key are not a matching canonical package/version pair",
+      ));
+    }
+    return Ok(());
+  }
+
+  if has_explicit_specifier_scheme(raw) {
+    return Err(invalid(
+      "raw specifier uses a forbidden or unknown explicit scheme",
+    ));
+  }
+  Ok(())
+}
+
+fn has_explicit_specifier_scheme(specifier: &str) -> bool {
+  let Some(colon) = specifier.find(':') else {
+    return false;
+  };
+  let scheme = &specifier[..colon];
+  let mut bytes = scheme.bytes();
+  matches!(bytes.next(), Some(first) if first.is_ascii_alphabetic())
+    && bytes.all(|byte| {
+      byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
+    })
+}
+
+fn validate_vfs_dependency_range(
+  module_key: &str,
+  original_bytes: &[u8],
+  observation: &OdenParentVfsDependencyObservation<'_>,
+) -> Result<(), OdenParentAllowlistError> {
+  let invalid = |reason| OdenParentAllowlistError::InvalidVfsDependency {
+    module: module_key.to_string(),
+    reason,
+  };
+  if observation.source_byte_start > MAX_IJSON_SAFE_INTEGER
+    || observation.source_byte_end > MAX_IJSON_SAFE_INTEGER
+    || observation.source_byte_end <= observation.source_byte_start
+  {
+    return Err(invalid(
+      "source byte range is not a nonempty safe-integer range",
+    ));
+  }
+  let start = usize::try_from(observation.source_byte_start)
+    .map_err(|_| invalid("source byte start does not fit usize"))?;
+  let end = usize::try_from(observation.source_byte_end)
+    .map_err(|_| invalid("source byte end does not fit usize"))?;
+  if start == 0 || end >= original_bytes.len() {
+    return Err(invalid(
+      "source byte range is out of bounds or lacks adjacent delimiters",
+    ));
+  }
+  let payload = &original_bytes[start..end];
+  if payload != observation.raw_specifier.as_bytes() {
+    return Err(invalid(
+      "source byte range does not equal the raw specifier",
+    ));
+  }
+  let opening = original_bytes[start - 1];
+  let closing = original_bytes[end];
+  if opening != closing || !matches!(opening, b'\'' | b'"' | b'`') {
+    return Err(invalid(
+      "source byte range is not payload-only between matching delimiters",
+    ));
+  }
+  if payload.contains(&opening) {
+    return Err(invalid(
+      "module specifier payload contains its unescaped delimiter",
+    ));
+  }
+  if payload.contains(&b'\\') {
+    return Err(invalid("module specifier payload contains an escape"));
+  }
+  if opening == b'`' && payload.windows(2).any(|window| window == b"${") {
+    return Err(invalid("template module specifier contains interpolation"));
+  }
+  Ok(())
+}
+
+fn compare_vfs_dependencies(
+  left: &OdenParentVfsDependencyRow,
+  right: &OdenParentVfsDependencyRow,
+) -> std::cmp::Ordering {
+  left
+    .source_byte_start
+    .cmp(&right.source_byte_start)
+    .then_with(|| left.source_byte_end.cmp(&right.source_byte_end))
+    // `kind` is a string-valued tuple component, so compare its serialized raw
+    // bytes: dynamic-import < static-export < static-import.
+    .then_with(|| {
+      left
+        .kind
+        .as_serialized_str()
+        .as_bytes()
+        .cmp(right.kind.as_serialized_str().as_bytes())
+    })
+    .then_with(|| {
+      left
+        .raw_specifier
+        .as_bytes()
+        .cmp(right.raw_specifier.as_bytes())
+    })
+    .then_with(|| {
+      left
+        .resolved_key
+        .as_bytes()
+        .cmp(right.resolved_key.as_bytes())
+    })
+}
+
+fn project_vfs_file(
+  observation: &OdenParentVfsFileObservation<'_>,
+) -> Result<OdenParentVfsFileRow, OdenParentAllowlistError> {
+  validate_vfs_file_key(observation.key)?;
+  Ok(OdenParentVfsFileRow {
+    emitted_byte_digest: OdenParentVfsEmittedBytesDigest::from_bytes(
+      observation.emitted_bytes,
+    ),
+    executable: observation.executable,
+    key: observation.key.to_string(),
+    kind: "file",
+    original_byte_digest: OdenParentVfsOriginalBytesDigest::from_bytes(
+      observation.original_bytes,
+    ),
+  })
+}
+
+fn refuse_duplicate_vfs_keys<'a>(
+  keys: impl Iterator<Item = &'a str>,
+  collection: &'static str,
+) -> Result<(), OdenParentAllowlistError> {
+  let mut previous: Option<&str> = None;
+  for key in keys {
+    if previous == Some(key) {
+      return Err(OdenParentAllowlistError::DuplicateVfsKey {
+        collection,
+        key: key.to_string(),
+      });
+    }
+    previous = Some(key);
+  }
+  Ok(())
+}
+
+fn refuse_ambiguous_vfs_keys(
+  modules: &[OdenParentVfsModuleRow],
+  files: &[OdenParentVfsFileRow],
+) -> Result<(), OdenParentAllowlistError> {
+  let mut module_index = 0;
+  let mut file_index = 0;
+  while module_index < modules.len() && file_index < files.len() {
+    match modules[module_index]
+      .key
+      .as_bytes()
+      .cmp(files[file_index].key.as_bytes())
+    {
+      std::cmp::Ordering::Less => module_index += 1,
+      std::cmp::Ordering::Greater => file_index += 1,
+      std::cmp::Ordering::Equal => {
+        return Err(OdenParentAllowlistError::AmbiguousVfsKey(
+          modules[module_index].key.clone(),
+        ));
+      }
+    }
+  }
+  Ok(())
+}
+
+fn validate_vfs_graph_links(
+  modules: &[OdenParentVfsModuleRow],
+  files: &[OdenParentVfsFileRow],
+) -> Result<(), OdenParentAllowlistError> {
+  let entrypoint_index = vfs_module_index(modules, ODEN_PARENT_ENTRYPOINT_KEY)
+    .ok_or(OdenParentAllowlistError::MissingVfsEntrypoint)?;
+
+  for module in modules {
+    for dependency in &module.dependencies {
+      if is_terminal_vfs_dependency_key(&dependency.resolved_key) {
+        continue;
+      }
+      if vfs_module_index(modules, &dependency.resolved_key).is_none()
+        && vfs_file_index(files, &dependency.resolved_key).is_none()
+      {
+        return Err(OdenParentAllowlistError::UnresolvedVfsDependency {
+          module: module.key.clone(),
+          resolved_key: dependency.resolved_key.clone(),
+        });
+      }
+    }
+  }
+
+  let mut reachable_modules = vec![false; modules.len()];
+  let mut reachable_files = vec![false; files.len()];
+  let mut pending = vec![entrypoint_index];
+  while let Some(module_index) = pending.pop() {
+    if std::mem::replace(&mut reachable_modules[module_index], true) {
+      continue;
+    }
+    for dependency in &modules[module_index].dependencies {
+      if let Some(dependency_index) =
+        vfs_module_index(modules, &dependency.resolved_key)
+        && !reachable_modules[dependency_index]
+      {
+        pending.push(dependency_index);
+      } else if let Some(file_index) =
+        vfs_file_index(files, &dependency.resolved_key)
+      {
+        reachable_files[file_index] = true;
+      }
+    }
+  }
+  if let Some((_, module)) = reachable_modules
+    .iter()
+    .zip(modules)
+    .find(|(reachable, _)| !**reachable)
+  {
+    return Err(OdenParentAllowlistError::UnreachableVfsModule(
+      module.key.clone(),
+    ));
+  }
+  if let Some((_, file)) = reachable_files
+    .iter()
+    .zip(files)
+    .find(|(reachable, _)| !**reachable)
+  {
+    return Err(OdenParentAllowlistError::UnreachableVfsFile(
+      file.key.clone(),
+    ));
+  }
+  let private_edge_count = modules
+    .iter()
+    .flat_map(|module| &module.dependencies)
+    .filter(|dependency| {
+      dependency.resolved_key == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+    })
+    .count();
+  if private_edge_count != 1 {
+    return Err(OdenParentAllowlistError::InvalidVfsPrivateEdge(
+      "private edge does not occur exactly once",
+    ));
+  }
+  if modules[entrypoint_index]
+    .dependencies
+    .first()
+    .is_none_or(|dependency| {
+      dependency.resolved_key != ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+    })
+  {
+    return Err(OdenParentAllowlistError::InvalidVfsPrivateEdge(
+      "private edge is not the entrypoint's first sorted dependency",
+    ));
+  }
+  Ok(())
+}
+
+fn vfs_module_index(
+  modules: &[OdenParentVfsModuleRow],
+  key: &str,
+) -> Option<usize> {
+  modules
+    .binary_search_by(|module| module.key.as_bytes().cmp(key.as_bytes()))
+    .ok()
+}
+
+fn vfs_file_index(files: &[OdenParentVfsFileRow], key: &str) -> Option<usize> {
+  files
+    .binary_search_by(|file| file.key.as_bytes().cmp(key.as_bytes()))
+    .ok()
+}
+
+fn is_terminal_vfs_dependency_key(key: &str) -> bool {
+  key == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER || key.starts_with("node:")
+}
+
+fn validate_vfs_module_key(key: &str) -> Result<(), OdenParentAllowlistError> {
+  if validate_repo_vfs_key(key) || validate_jsr_vfs_key(key) {
+    Ok(())
+  } else {
+    Err(invalid_vfs_key("module", key))
+  }
+}
+
+fn validate_vfs_file_key(key: &str) -> Result<(), OdenParentAllowlistError> {
+  if validate_repo_vfs_key(key) {
+    Ok(())
+  } else {
+    Err(invalid_vfs_key("file", key))
+  }
+}
+
+fn validate_vfs_dependency_key(
+  key: &str,
+) -> Result<(), OdenParentAllowlistError> {
+  if key == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+    || validate_repo_vfs_key(key)
+    || validate_jsr_vfs_key(key)
+    || validate_node_vfs_key(key)
+  {
+    Ok(())
+  } else {
+    Err(invalid_vfs_key("dependency", key))
+  }
+}
+
+fn invalid_vfs_key(role: &'static str, key: &str) -> OdenParentAllowlistError {
+  OdenParentAllowlistError::InvalidVfsKey {
+    role,
+    key: key.to_string(),
+  }
+}
+
+fn validate_repo_vfs_key(key: &str) -> bool {
+  let Some(path) = key.strip_prefix("repo:") else {
+    return false;
+  };
+  !path.contains('%')
+    && !matches!(
+      path,
+      ODEN_PARENT_GENERATED_JSON_PATH | ODEN_PARENT_GENERATED_RUST_PATH
+    )
+    && validate_contract_path(path).is_ok()
+}
+
+fn validate_jsr_vfs_key(key: &str) -> bool {
+  if key.is_empty() || key.contains(['\0', '%']) {
+    return false;
+  }
+  let Ok(reference) = JsrPackageNvReference::from_str(key) else {
+    return false;
+  };
+  if reference.to_string() != key
+    || !validate_jsr_package_name(reference.nv().name.as_str())
+  {
+    return false;
+  }
+  let Some(path) = reference.sub_path() else {
+    return false;
+  };
+  !path.is_empty() && validate_contract_path(path).is_ok()
+}
+
+fn validate_jsr_package_name(name: &str) -> bool {
+  fn valid_component(component: &str) -> bool {
+    !component.is_empty()
+      && !matches!(component, "." | "..")
+      && !component.contains(['@', '/', '\\', '\0', '%'])
+      && component.bytes().all(|byte| {
+        byte.is_ascii_lowercase()
+          || byte.is_ascii_digit()
+          || matches!(byte, b'-' | b'_' | b'.' | b'~')
+      })
+  }
+
+  if let Some(scoped) = name.strip_prefix('@') {
+    let mut components = scoped.split('/');
+    let Some(scope) = components.next() else {
+      return false;
+    };
+    let Some(package) = components.next() else {
+      return false;
+    };
+    components.next().is_none()
+      && valid_component(scope)
+      && valid_component(package)
+  } else {
+    valid_component(name)
+  }
+}
+
+fn validate_jsr_raw_specifier(specifier: &str) -> bool {
+  if specifier.contains(['\0', '%']) {
+    return false;
+  }
+  let Ok(reference) = JsrPackageReqReference::from_str(specifier) else {
+    return false;
+  };
+  if reference.to_string() != specifier
+    || !validate_jsr_package_name(reference.req().name.as_str())
+    || reference.req().version_req.tag().is_some()
+  {
+    return false;
+  }
+  match reference.sub_path() {
+    Some(path) => !path.is_empty() && validate_contract_path(path).is_ok(),
+    None => true,
+  }
+}
+
+fn validate_jsr_raw_resolved_relationship(raw: &str, resolved: &str) -> bool {
+  if !validate_jsr_raw_specifier(raw) || !validate_jsr_vfs_key(resolved) {
+    return false;
+  }
+  let Ok(request) = JsrPackageReqReference::from_str(raw) else {
+    return false;
+  };
+  let Ok(exact) = JsrPackageNvReference::from_str(resolved) else {
+    return false;
+  };
+  if request.req().name != exact.nv().name {
+    return false;
+  }
+  if let Ok(raw_exact) = JsrPackageNvReference::from_str(raw)
+    && raw_exact.to_string() == raw
+  {
+    return raw_exact.nv().version == exact.nv().version;
+  }
+  let version_req = &request.req().version_req;
+  if version_req.version_text().contains('+') {
+    return false;
+  }
+  version_req.matches(&exact.nv().version)
+}
+
+fn validate_node_vfs_key(key: &str) -> bool {
+  let Some(module_name) = key.strip_prefix("node:") else {
+    return false;
+  };
+  !module_name.is_empty()
+    && !module_name.contains(['\0', '%'])
+    && is_builtin_node_module(module_name)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -777,7 +1533,7 @@ struct OdenParentAllowlistDigests {
   standalone_configuration_digest: OdenParentStandaloneConfigurationDigest,
   static_import_edge_digest: OdenParentStaticImportEdgeDigest,
   synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest,
-  vfs_graph_digest: CanonicalSha256Digest,
+  vfs_graph_digest: OdenParentVfsGraphDigest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -807,7 +1563,7 @@ pub struct OdenParentAllowlist {
   #[serde(rename = "syntheticModuleSourceDigest")]
   synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest,
   #[serde(rename = "vfsGraphDigest")]
-  vfs_graph_digest: CanonicalSha256Digest,
+  vfs_graph_digest: OdenParentVfsGraphDigest,
 }
 
 impl OdenParentAllowlist {
@@ -1017,6 +1773,15 @@ mod tests {
     b"import capture from \"oden-internal:filesystem-parent-capture-v2\";\n";
   const STATIC_IMPORT_SYNTHETIC_SOURCE: &[u8] =
     b"export const capture = () => {};\n";
+  const VFS_ENTRYPOINT_SOURCE: &[u8] = b"import \"oden-internal:filesystem-parent-capture-v2\";\nconst dep = import(\"./dep.ts\");\nexport * from \"node:fs\";\nconst tool = import(\"../assets/tool.sh\");\n";
+  const VFS_DEPENDENCY_SOURCE: &[u8] = b"export const dep: number = 1;\n";
+  const VFS_EMPTY_ATTRIBUTES: &[OdenParentObservedImportAttribute<'static>] =
+    &[];
+  const VFS_PHASE_ATTRIBUTES: &[OdenParentObservedImportAttribute<'static>] =
+    &[OdenParentObservedImportAttribute {
+      key: "phase",
+      value: "runtime",
+    }];
 
   fn zero_digest(field: &'static str) -> CanonicalSha256Digest {
     CanonicalSha256Digest::parse(field, ZERO_DIGEST).unwrap()
@@ -1066,6 +1831,108 @@ mod tests {
     ));
   }
 
+  fn exact_vfs_dependencies() -> [OdenParentVfsDependencyObservation<'static>; 4]
+  {
+    // Deliberately reverse source order. The projection must own the normative
+    // tuple sort rather than inherit graph traversal order.
+    [
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::DynamicImport,
+        raw_specifier: "../assets/tool.sh",
+        resolved_key: "repo:assets/tool.sh",
+        source_byte_start: 131,
+        source_byte_end: 148,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticExport,
+        raw_specifier: "node:fs",
+        resolved_key: "node:fs",
+        source_byte_start: 100,
+        source_byte_end: 107,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::DynamicImport,
+        raw_specifier: "./dep.ts",
+        resolved_key: "repo:src/dep.ts",
+        source_byte_start: 73,
+        source_byte_end: 81,
+        import_attributes: VFS_PHASE_ATTRIBUTES,
+      },
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        resolved_key: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        source_byte_start: 8,
+        source_byte_end: 50,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+    ]
+  }
+
+  fn exact_vfs_modules<'a>(
+    dependencies: &'a [OdenParentVfsDependencyObservation<'a>],
+  ) -> [OdenParentVfsModuleObservation<'a>; 2] {
+    // Deliberately reverse raw-key order.
+    [
+      OdenParentVfsModuleObservation {
+        key: ODEN_PARENT_ENTRYPOINT_KEY,
+        media_type: OdenParentVfsMediaType::TypeScript,
+        original_bytes: VFS_ENTRYPOINT_SOURCE,
+        emitted_bytes: b"// emitted entry\n",
+        source_map_bytes: None,
+        dependencies,
+      },
+      OdenParentVfsModuleObservation {
+        key: "repo:src/dep.ts",
+        media_type: OdenParentVfsMediaType::TypeScript,
+        original_bytes: VFS_DEPENDENCY_SOURCE,
+        emitted_bytes: b"export const dep = 1;\n",
+        source_map_bytes: Some(b"{}"),
+        dependencies: &[],
+      },
+    ]
+  }
+
+  fn exact_vfs_files() -> [OdenParentVfsFileObservation<'static>; 1] {
+    [OdenParentVfsFileObservation {
+      key: "repo:assets/tool.sh",
+      executable: true,
+      original_bytes: b"#!/bin/sh\n",
+      emitted_bytes: b"#!/bin/sh\n",
+    }]
+  }
+
+  fn minimal_entrypoint_module<'a>(
+    original_bytes: &'a [u8],
+    media_type: OdenParentVfsMediaType,
+    dependencies: &'a [OdenParentVfsDependencyObservation<'a>],
+  ) -> OdenParentVfsModuleObservation<'a> {
+    OdenParentVfsModuleObservation {
+      key: ODEN_PARENT_ENTRYPOINT_KEY,
+      media_type,
+      original_bytes,
+      emitted_bytes: original_bytes,
+      source_map_bytes: None,
+      dependencies,
+    }
+  }
+
+  fn assert_invalid_vfs_dependency(
+    module_source: &[u8],
+    dependency: &OdenParentVfsDependencyObservation<'_>,
+  ) {
+    assert!(matches!(
+      project_vfs_dependency(
+        ODEN_PARENT_ENTRYPOINT_KEY,
+        module_source,
+        dependency,
+      ),
+      Err(OdenParentAllowlistError::InvalidVfsDependency { .. })
+    ));
+  }
+
   fn test_allowlist() -> OdenParentAllowlist {
     OdenParentAllowlist::new(OdenParentAllowlistDigests {
       capture_contract_digest: zero_digest("captureContractDigest"),
@@ -1085,7 +1952,7 @@ mod tests {
       synthetic_module_source_digest: OdenParentSyntheticModuleSourceDigest(
         zero_digest("syntheticModuleSourceDigest"),
       ),
-      vfs_graph_digest: zero_digest("vfsGraphDigest"),
+      vfs_graph_digest: OdenParentVfsGraphDigest(zero_digest("vfsGraphDigest")),
     })
   }
 
@@ -1253,6 +2120,890 @@ mod tests {
         "a".to_string()
       ))
     );
+  }
+
+  #[test]
+  fn vfs_graph_has_exact_closed_preimage_and_domain_bound_digest() {
+    let dependencies = exact_vfs_dependencies();
+    let modules = exact_vfs_modules(&dependencies);
+    let graph =
+      OdenParentVfsGraph::from_observations(&modules, &exact_vfs_files())
+        .unwrap();
+
+    assert_eq!(
+      graph.canonical_jcs().unwrap(),
+      br#"{"entrypointKey":"repo:src/release.ts","files":[{"emittedByteDigest":"sha256-MhZ4XV-h7I_D7gZb98mlhyrc5zzF3q3zHyV9fE_P0X4","executable":true,"key":"repo:assets/tool.sh","kind":"file","originalByteDigest":"sha256-6-ebFsIF1KFwWJhZGebLtbu-_CMaWvqU-dcBU8dM_e8"}],"modules":[{"dependencies":[],"emittedByteDigest":"sha256-nfpQ0yntYLuoJ0X65xhTGY8yBnQZVgoCTYPoxegN2Ws","key":"repo:src/dep.ts","mediaType":"TypeScript","originalByteDigest":"sha256-c_nPEQEXgCXGlhYKk114yr0iR_XmrQFeGBuan8msWrg","sourceMapDigest":"sha256-UdlnEIsiMmLbbsUPuVPeqVEqVHeJrhTUnQ5RdIdVZUQ"},{"dependencies":[{"importAttributesDigest":"sha256-pQu6gFhNGdfrlk8npWVB1g5yzOEBfC2d-LaLn8riE4E","kind":"static-import","rawSpecifier":"oden-internal:filesystem-parent-capture-v2","resolvedKey":"oden-internal:filesystem-parent-capture-v2","sourceByteEnd":50,"sourceByteStart":8},{"importAttributesDigest":"sha256-LNypBtkDUvfqsc4BKMRI__a4SXiw-D8L7fRfJd9MBIQ","kind":"dynamic-import","rawSpecifier":"./dep.ts","resolvedKey":"repo:src/dep.ts","sourceByteEnd":81,"sourceByteStart":73},{"importAttributesDigest":"sha256-pQu6gFhNGdfrlk8npWVB1g5yzOEBfC2d-LaLn8riE4E","kind":"static-export","rawSpecifier":"node:fs","resolvedKey":"node:fs","sourceByteEnd":107,"sourceByteStart":100},{"importAttributesDigest":"sha256-pQu6gFhNGdfrlk8npWVB1g5yzOEBfC2d-LaLn8riE4E","kind":"dynamic-import","rawSpecifier":"../assets/tool.sh","resolvedKey":"repo:assets/tool.sh","sourceByteEnd":148,"sourceByteStart":131}],"emittedByteDigest":"sha256-2kKiuC56y-MQrKKlmKKUEKWtKzhNIymeA9vKrI9XZbY","key":"repo:src/release.ts","mediaType":"TypeScript","originalByteDigest":"sha256-hFUU7XRIPpCzeE4xlbBzKini2ENmDGIyrLTDgjt5QxI","sourceMapDigest":null}],"schema":"oden/capsec-filesystem-parent-vfs-graph/2"}"#
+    );
+    assert_eq!(
+      graph.digest().unwrap().as_str(),
+      "sha256-rkWftckU7n9GjIPFTkA1krB6BY8WcZ-zoOPw2a-MiPw"
+    );
+  }
+
+  #[test]
+  fn vfs_graph_sorts_observations_and_dependency_kind_by_raw_spelling() {
+    let mut dependencies = exact_vfs_dependencies();
+    let modules = exact_vfs_modules(&dependencies);
+    let graph =
+      OdenParentVfsGraph::from_observations(&modules, &exact_vfs_files())
+        .unwrap();
+
+    dependencies.reverse();
+    let mut modules = exact_vfs_modules(&dependencies);
+    modules.reverse();
+    let permuted =
+      OdenParentVfsGraph::from_observations(&modules, &exact_vfs_files())
+        .unwrap();
+    assert_eq!(graph.canonical_jcs(), permuted.canonical_jcs());
+    assert_eq!(graph.digest(), permuted.digest());
+
+    let attributes_digest = empty_import_attributes().digest().unwrap();
+    let row = |kind| OdenParentVfsDependencyRow {
+      import_attributes_digest: attributes_digest.clone(),
+      kind,
+      raw_specifier: "same".to_string(),
+      resolved_key: "repo:same.ts".to_string(),
+      source_byte_end: 2,
+      source_byte_start: 1,
+    };
+    let mut rows = vec![
+      row(OdenParentVfsDependencyKind::StaticImport),
+      row(OdenParentVfsDependencyKind::DynamicImport),
+      row(OdenParentVfsDependencyKind::StaticExport),
+    ];
+    rows.sort_by(compare_vfs_dependencies);
+    assert_eq!(
+      rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+      vec![
+        OdenParentVfsDependencyKind::DynamicImport,
+        OdenParentVfsDependencyKind::StaticExport,
+        OdenParentVfsDependencyKind::StaticImport,
+      ]
+    );
+  }
+
+  #[test]
+  fn vfs_keys_accept_only_closed_canonical_namespaces() {
+    for key in [
+      "repo:src/release.ts",
+      "repo:src/é.ts",
+      "jsr:@scope/pkg@1.2.3/mod.ts",
+      "jsr:pkg@1.2.3/mod.ts",
+      "jsr:@scope/pkg@1.2.3-beta.1+build.2/mod.ts",
+    ] {
+      validate_vfs_module_key(key).unwrap();
+    }
+    validate_vfs_file_key("repo:assets/tool.sh").unwrap();
+    for key in [
+      "repo:src/dep.ts",
+      "jsr:@scope/pkg@1.2.3/mod.ts",
+      "node:fs",
+      "node:assert/strict",
+      ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+    ] {
+      validate_vfs_dependency_key(key).unwrap();
+    }
+
+    for key in [
+      "",
+      "repo:",
+      "repo:/absolute.ts",
+      "repo:src//empty.ts",
+      "repo:src/./dot.ts",
+      "repo:src/../escape.ts",
+      "repo:src\\windows.ts",
+      "repo:src/%2e%2e/escape.ts",
+      "repo:generated/capsec/rev2/filesystem-parent-standalone-allowlist.json",
+      "repo:fork/deno/cli/lib/standalone/oden_parent_allowlist_generated.rs",
+      "npm:pkg@1.0.0",
+      "https://example.test/mod.ts",
+      "data:text/javascript,export{}",
+      "blob:https://example.test/id",
+      "oden-internal:other",
+      "node:fs",
+      ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+    ] {
+      assert!(matches!(
+        validate_vfs_module_key(key),
+        Err(OdenParentAllowlistError::InvalidVfsKey { role: "module", .. })
+      ));
+    }
+    for key in [
+      "jsr:@scope/pkg@1.2.3/mod.ts",
+      "node:fs",
+      ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+    ] {
+      assert!(matches!(
+        validate_vfs_file_key(key),
+        Err(OdenParentAllowlistError::InvalidVfsKey { role: "file", .. })
+      ));
+    }
+    for key in [
+      "node:not-a-deno-builtin",
+      "node:",
+      "node:%66s",
+      "npm:pkg@1.0.0",
+      "http://example.test/mod.ts",
+      "oden-internal:filesystem-parent-capture-v1",
+    ] {
+      assert!(matches!(
+        validate_vfs_dependency_key(key),
+        Err(OdenParentAllowlistError::InvalidVfsKey {
+          role: "dependency",
+          ..
+        })
+      ));
+    }
+
+    for path in [
+      ODEN_PARENT_GENERATED_JSON_PATH,
+      ODEN_PARENT_GENERATED_RUST_PATH,
+    ] {
+      let key = format!("repo:{path}");
+      assert!(matches!(
+        validate_vfs_module_key(&key),
+        Err(OdenParentAllowlistError::InvalidVfsKey { role: "module", .. })
+      ));
+      assert!(matches!(
+        validate_vfs_file_key(&key),
+        Err(OdenParentAllowlistError::InvalidVfsKey { role: "file", .. })
+      ));
+      assert!(matches!(
+        validate_vfs_dependency_key(&key),
+        Err(OdenParentAllowlistError::InvalidVfsKey {
+          role: "dependency",
+          ..
+        })
+      ));
+    }
+  }
+
+  #[test]
+  fn vfs_jsr_keys_refuse_malformed_or_noncanonical_components() {
+    for key in [
+      "jsr:@scope/pkg@1.2.3",
+      "jsr:@scope/pkg@1/mod.ts",
+      "jsr:@scope/pkg@v1.2.3/mod.ts",
+      "jsr:@scope/pkg@^1.2.3/mod.ts",
+      "jsr:@scope/pkg@latest/mod.ts",
+      "jsr:scope/pkg@1.2.3/mod.ts",
+      "jsr:@scope/extra/pkg@1.2.3/mod.ts",
+      "jsr:@/pkg@1.2.3/mod.ts",
+      "jsr:@scope/@1.2.3/mod.ts",
+      "jsr:@scope/pkg%2fextra@1.2.3/mod.ts",
+      "jsr:@scope/pkg@1.2.3/%2e%2e/mod.ts",
+      "jsr:@scope/pkg@1.2.3/../mod.ts",
+      "jsr:@scope/pkg@1.2.3/a//b.ts",
+      "jsr:@scope/pkg@1.2.3/a\\b.ts",
+      "jsr:@scope/pkg\0@1.2.3/mod.ts",
+      "jsr:@scope/pkg@1.2.3/mod\0.ts",
+      "jsr:@scope/pkg name@1.2.3/mod.ts",
+      "jsr:@scope/pkg?query@1.2.3/mod.ts",
+      "jsr:@scope/pkg:colon@1.2.3/mod.ts",
+      "jsr:@Scope/pkg@1.2.3/mod.ts",
+    ] {
+      assert!(matches!(
+        validate_vfs_module_key(key),
+        Err(OdenParentAllowlistError::InvalidVfsKey { role: "module", .. })
+      ));
+    }
+  }
+
+  #[test]
+  fn vfs_dependencies_require_exact_safe_payload_byte_ranges() {
+    let source = b"import \"./dep.ts\";\n";
+    let valid = OdenParentVfsDependencyObservation {
+      kind: OdenParentVfsDependencyKind::StaticImport,
+      raw_specifier: "./dep.ts",
+      resolved_key: "repo:src/dep.ts",
+      source_byte_start: 8,
+      source_byte_end: 16,
+      import_attributes: VFS_EMPTY_ATTRIBUTES,
+    };
+    project_vfs_dependency(ODEN_PARENT_ENTRYPOINT_KEY, source, &valid).unwrap();
+
+    for (start, end) in [
+      (0, 8),
+      (8, 8),
+      (16, 8),
+      (9, 16),
+      (8, 15),
+      (8, source.len() as u64),
+      (MAX_IJSON_SAFE_INTEGER + 1, MAX_IJSON_SAFE_INTEGER + 1),
+      (8, MAX_IJSON_SAFE_INTEGER + 1),
+    ] {
+      let dependency = OdenParentVfsDependencyObservation {
+        source_byte_start: start,
+        source_byte_end: end,
+        ..valid
+      };
+      assert_invalid_vfs_dependency(source, &dependency);
+    }
+
+    for raw_specifier in ["", "./dep\0.ts", "./other.ts"] {
+      let dependency = OdenParentVfsDependencyObservation {
+        raw_specifier,
+        ..valid
+      };
+      assert_invalid_vfs_dependency(source, &dependency);
+    }
+
+    let mismatched = b"import './dep.ts\";\n";
+    assert_invalid_vfs_dependency(mismatched, &valid);
+    let unsupported = b"import #./dep.ts#;\n";
+    assert_invalid_vfs_dependency(unsupported, &valid);
+
+    let interior_delimiter = b"import \"a\"b\";\n";
+    let interior_delimiter_dependency = OdenParentVfsDependencyObservation {
+      raw_specifier: "a\"b",
+      source_byte_start: 8,
+      source_byte_end: 11,
+      ..valid
+    };
+    assert_invalid_vfs_dependency(
+      interior_delimiter,
+      &interior_delimiter_dependency,
+    );
+
+    let escaped = br#"import "./\x64ep.ts";"#;
+    let escaped_dependency = OdenParentVfsDependencyObservation {
+      raw_specifier: r"./\x64ep.ts",
+      source_byte_start: 8,
+      source_byte_end: 19,
+      ..valid
+    };
+    assert_invalid_vfs_dependency(escaped, &escaped_dependency);
+
+    let interpolated = b"import(`./${name}.ts`);";
+    let interpolated_dependency = OdenParentVfsDependencyObservation {
+      kind: OdenParentVfsDependencyKind::DynamicImport,
+      raw_specifier: "./${name}.ts",
+      source_byte_start: 8,
+      source_byte_end: 20,
+      ..valid
+    };
+    assert_invalid_vfs_dependency(interpolated, &interpolated_dependency);
+
+    let multibyte = "import \"./é.ts\";\n".as_bytes();
+    let multibyte_dependency = OdenParentVfsDependencyObservation {
+      raw_specifier: "./é.ts",
+      source_byte_start: 8,
+      source_byte_end: 15,
+      ..valid
+    };
+    project_vfs_dependency(
+      ODEN_PARENT_ENTRYPOINT_KEY,
+      multibyte,
+      &multibyte_dependency,
+    )
+    .unwrap();
+  }
+
+  #[test]
+  fn vfs_modules_refuse_nontext_and_noncode_dependency_rows() {
+    let dependency = OdenParentVfsDependencyObservation {
+      kind: OdenParentVfsDependencyKind::StaticImport,
+      raw_specifier: "./dep.ts",
+      resolved_key: "repo:src/dep.ts",
+      source_byte_start: 8,
+      source_byte_end: 16,
+      import_attributes: VFS_EMPTY_ATTRIBUTES,
+    };
+    for media_type in
+      [OdenParentVfsMediaType::Json, OdenParentVfsMediaType::Wasm]
+    {
+      let module = OdenParentVfsModuleObservation {
+        key: "repo:src/noncode",
+        media_type,
+        original_bytes: b"import \"./dep.ts\";\n",
+        emitted_bytes: b"",
+        source_map_bytes: None,
+        dependencies: std::slice::from_ref(&dependency),
+      };
+      assert!(matches!(
+        project_vfs_module(&module),
+        Err(OdenParentAllowlistError::InvalidVfsModule { .. })
+      ));
+    }
+
+    for media_type in [
+      OdenParentVfsMediaType::TypeScript,
+      OdenParentVfsMediaType::JavaScript,
+      OdenParentVfsMediaType::Json,
+    ] {
+      let module = OdenParentVfsModuleObservation {
+        key: "repo:src/non-utf8",
+        media_type,
+        original_bytes: &[0xff],
+        emitted_bytes: b"",
+        source_map_bytes: None,
+        dependencies: &[],
+      };
+      assert!(matches!(
+        project_vfs_module(&module),
+        Err(OdenParentAllowlistError::InvalidVfsModule { .. })
+      ));
+    }
+
+    for media_type in [
+      OdenParentVfsMediaType::TypeScript,
+      OdenParentVfsMediaType::JavaScript,
+      OdenParentVfsMediaType::Json,
+    ] {
+      project_vfs_module(&OdenParentVfsModuleObservation {
+        key: "repo:src/text",
+        media_type,
+        original_bytes: b"{}",
+        emitted_bytes: b"{}",
+        source_map_bytes: None,
+        dependencies: &[],
+      })
+      .unwrap();
+    }
+    project_vfs_module(&OdenParentVfsModuleObservation {
+      key: "repo:src/module.wasm",
+      media_type: OdenParentVfsMediaType::Wasm,
+      original_bytes: &[0xff],
+      emitted_bytes: &[0xff],
+      source_map_bytes: None,
+      dependencies: &[],
+    })
+    .unwrap();
+  }
+
+  #[test]
+  fn vfs_media_types_have_exact_closed_serialized_spellings() {
+    assert_eq!(
+      [
+        OdenParentVfsMediaType::TypeScript,
+        OdenParentVfsMediaType::JavaScript,
+        OdenParentVfsMediaType::Json,
+        OdenParentVfsMediaType::Wasm,
+      ]
+      .map(|media_type| serde_json::to_string(&media_type).unwrap()),
+      [
+        r#""TypeScript""#,
+        r#""JavaScript""#,
+        r#""Json""#,
+        r#""Wasm""#,
+      ]
+    );
+  }
+
+  #[test]
+  fn vfs_graph_refuses_duplicate_ambiguous_or_incomplete_topology() {
+    let entrypoint =
+      minimal_entrypoint_module(b"", OdenParentVfsMediaType::TypeScript, &[]);
+    assert!(matches!(
+      OdenParentVfsGraph::from_observations(&[entrypoint, entrypoint], &[]),
+      Err(OdenParentAllowlistError::DuplicateVfsKey {
+        collection: "module",
+        ..
+      })
+    ));
+
+    let file = OdenParentVfsFileObservation {
+      key: "repo:asset",
+      executable: false,
+      original_bytes: b"asset",
+      emitted_bytes: b"asset",
+    };
+    assert!(matches!(
+      OdenParentVfsGraph::from_observations(&[entrypoint], &[file, file]),
+      Err(OdenParentAllowlistError::DuplicateVfsKey {
+        collection: "file",
+        ..
+      })
+    ));
+    let ambiguous_file = OdenParentVfsFileObservation {
+      key: ODEN_PARENT_ENTRYPOINT_KEY,
+      ..file
+    };
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[entrypoint], &[ambiguous_file]),
+      Err(OdenParentAllowlistError::AmbiguousVfsKey(
+        ODEN_PARENT_ENTRYPOINT_KEY.to_string()
+      ))
+    );
+
+    let missing = OdenParentVfsModuleObservation {
+      key: "repo:src/other.ts",
+      ..entrypoint
+    };
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[missing], &[]),
+      Err(OdenParentAllowlistError::MissingVfsEntrypoint)
+    );
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[entrypoint, missing], &[]),
+      Err(OdenParentAllowlistError::UnreachableVfsModule(
+        "repo:src/other.ts".to_string()
+      ))
+    );
+
+    let source = b"import \"./missing.ts\";\n";
+    let unresolved_dependency = OdenParentVfsDependencyObservation {
+      kind: OdenParentVfsDependencyKind::StaticImport,
+      raw_specifier: "./missing.ts",
+      resolved_key: "repo:src/missing.ts",
+      source_byte_start: 8,
+      source_byte_end: 20,
+      import_attributes: VFS_EMPTY_ATTRIBUTES,
+    };
+    let unresolved = minimal_entrypoint_module(
+      source,
+      OdenParentVfsMediaType::TypeScript,
+      std::slice::from_ref(&unresolved_dependency),
+    );
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[unresolved], &[]),
+      Err(OdenParentAllowlistError::UnresolvedVfsDependency {
+        module: ODEN_PARENT_ENTRYPOINT_KEY.to_string(),
+        resolved_key: "repo:src/missing.ts".to_string(),
+      })
+    );
+  }
+
+  #[test]
+  fn vfs_graph_requires_every_nonmodule_file_to_be_reached() {
+    let source = b"import \"oden-internal:filesystem-parent-capture-v2\";\nimport \"./asset\";\n";
+    let dependencies = [
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        resolved_key: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        source_byte_start: 8,
+        source_byte_end: 50,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: "./asset",
+        resolved_key: "repo:asset",
+        source_byte_start: 61,
+        source_byte_end: 68,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+    ];
+    let entrypoint = minimal_entrypoint_module(
+      source,
+      OdenParentVfsMediaType::TypeScript,
+      &dependencies,
+    );
+    let file = OdenParentVfsFileObservation {
+      key: "repo:asset",
+      executable: false,
+      original_bytes: b"asset",
+      emitted_bytes: b"asset",
+    };
+    OdenParentVfsGraph::from_observations(&[entrypoint], &[file]).unwrap();
+
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[entrypoint], &[]),
+      Err(OdenParentAllowlistError::UnresolvedVfsDependency {
+        module: ODEN_PARENT_ENTRYPOINT_KEY.to_string(),
+        resolved_key: "repo:asset".to_string(),
+      })
+    );
+
+    let private_only = minimal_entrypoint_module(
+      b"import \"oden-internal:filesystem-parent-capture-v2\";\n",
+      OdenParentVfsMediaType::TypeScript,
+      std::slice::from_ref(&dependencies[0]),
+    );
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[private_only], &[file]),
+      Err(OdenParentAllowlistError::UnreachableVfsFile(
+        "repo:asset".to_string()
+      ))
+    );
+  }
+
+  #[test]
+  fn vfs_graph_refuses_duplicate_coordinates_and_attributes() {
+    let source = b"import \"./dep.ts\";\n";
+    let dependency = OdenParentVfsDependencyObservation {
+      kind: OdenParentVfsDependencyKind::StaticImport,
+      raw_specifier: "./dep.ts",
+      resolved_key: "repo:src/dep.ts",
+      source_byte_start: 8,
+      source_byte_end: 16,
+      import_attributes: VFS_EMPTY_ATTRIBUTES,
+    };
+    let duplicate = OdenParentVfsDependencyObservation {
+      kind: OdenParentVfsDependencyKind::DynamicImport,
+      ..dependency
+    };
+    let dependencies = [dependency, duplicate];
+    let entrypoint = minimal_entrypoint_module(
+      source,
+      OdenParentVfsMediaType::TypeScript,
+      &dependencies,
+    );
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[entrypoint], &[]),
+      Err(
+        OdenParentAllowlistError::DuplicateVfsDependencyCoordinates {
+          module: ODEN_PARENT_ENTRYPOINT_KEY.to_string(),
+          source_byte_start: 8,
+          source_byte_end: 16,
+        }
+      )
+    );
+
+    let duplicate_attributes = [
+      OdenParentObservedImportAttribute {
+        key: "type",
+        value: "json",
+      },
+      OdenParentObservedImportAttribute {
+        key: "type",
+        value: "bytes",
+      },
+    ];
+    let dependency = OdenParentVfsDependencyObservation {
+      import_attributes: &duplicate_attributes,
+      ..dependency
+    };
+    let entrypoint = minimal_entrypoint_module(
+      source,
+      OdenParentVfsMediaType::TypeScript,
+      std::slice::from_ref(&dependency),
+    );
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[entrypoint], &[]),
+      Err(OdenParentAllowlistError::DuplicateImportAttribute(
+        "type".to_string()
+      ))
+    );
+  }
+
+  #[test]
+  fn vfs_graph_treats_only_node_and_exact_private_keys_as_terminal_leaves() {
+    let source = b"import \"oden-internal:filesystem-parent-capture-v2\";\nimport \"node:fs\";\n";
+    let dependencies = [
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        resolved_key: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        source_byte_start: 8,
+        source_byte_end: 50,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: "node:fs",
+        resolved_key: "node:fs",
+        source_byte_start: 61,
+        source_byte_end: 68,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+    ];
+    let entrypoint = minimal_entrypoint_module(
+      source,
+      OdenParentVfsMediaType::TypeScript,
+      &dependencies,
+    );
+    OdenParentVfsGraph::from_observations(&[entrypoint], &[]).unwrap();
+  }
+
+  #[test]
+  fn vfs_graph_requires_private_edge_to_sort_first() {
+    let source = b"import \"node:fs\";\nimport \"oden-internal:filesystem-parent-capture-v2\";\n";
+    let dependencies = [
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: "node:fs",
+        resolved_key: "node:fs",
+        source_byte_start: 8,
+        source_byte_end: 15,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        resolved_key: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        source_byte_start: 26,
+        source_byte_end: 68,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+    ];
+    let entrypoint = minimal_entrypoint_module(
+      source,
+      OdenParentVfsMediaType::TypeScript,
+      &dependencies,
+    );
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[entrypoint], &[]),
+      Err(OdenParentAllowlistError::InvalidVfsPrivateEdge(
+        "private edge is not the entrypoint's first sorted dependency"
+      ))
+    );
+  }
+
+  #[test]
+  fn vfs_graph_requires_one_exact_private_entrypoint_edge() {
+    let missing =
+      minimal_entrypoint_module(b"", OdenParentVfsMediaType::TypeScript, &[]);
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[missing], &[]),
+      Err(OdenParentAllowlistError::InvalidVfsPrivateEdge(
+        "private edge does not occur exactly once"
+      ))
+    );
+
+    let source = b"import \"oden-internal:filesystem-parent-capture-v2\";\nimport \"oden-internal:filesystem-parent-capture-v2\";\n";
+    let private_edge =
+      |source_byte_start, source_byte_end| OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        resolved_key: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        source_byte_start,
+        source_byte_end,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      };
+    let dependencies = [private_edge(8, 50), private_edge(61, 103)];
+    let duplicate = minimal_entrypoint_module(
+      source,
+      OdenParentVfsMediaType::TypeScript,
+      &dependencies,
+    );
+    assert_eq!(
+      OdenParentVfsGraph::from_observations(&[duplicate], &[]),
+      Err(OdenParentAllowlistError::InvalidVfsPrivateEdge(
+        "private edge does not occur exactly once"
+      ))
+    );
+
+    let nonempty_attributes = [OdenParentObservedImportAttribute {
+      key: "type",
+      value: "json",
+    }];
+    for (module, kind, raw, resolved, attributes) in [
+      (
+        "repo:src/other.ts",
+        OdenParentVfsDependencyKind::StaticImport,
+        ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        VFS_EMPTY_ATTRIBUTES,
+      ),
+      (
+        ODEN_PARENT_ENTRYPOINT_KEY,
+        OdenParentVfsDependencyKind::DynamicImport,
+        ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        VFS_EMPTY_ATTRIBUTES,
+      ),
+      (
+        ODEN_PARENT_ENTRYPOINT_KEY,
+        OdenParentVfsDependencyKind::StaticImport,
+        "./capture.ts",
+        ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        VFS_EMPTY_ATTRIBUTES,
+      ),
+      (
+        ODEN_PARENT_ENTRYPOINT_KEY,
+        OdenParentVfsDependencyKind::StaticImport,
+        ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        "repo:src/capture.ts",
+        VFS_EMPTY_ATTRIBUTES,
+      ),
+      (
+        ODEN_PARENT_ENTRYPOINT_KEY,
+        OdenParentVfsDependencyKind::StaticImport,
+        ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        &nonempty_attributes,
+      ),
+    ] {
+      let source = format!("import \"{raw}\";\n");
+      let dependency = OdenParentVfsDependencyObservation {
+        kind,
+        raw_specifier: raw,
+        resolved_key: resolved,
+        source_byte_start: 8,
+        source_byte_end: (8 + raw.len()) as u64,
+        import_attributes: attributes,
+      };
+      assert!(matches!(
+        project_vfs_dependency(module, source.as_bytes(), &dependency),
+        Err(OdenParentAllowlistError::InvalidVfsDependency { .. })
+      ));
+    }
+
+    let dependency = private_edge(8, 50);
+    let javascript = minimal_entrypoint_module(
+      b"import \"oden-internal:filesystem-parent-capture-v2\";\n",
+      OdenParentVfsMediaType::JavaScript,
+      std::slice::from_ref(&dependency),
+    );
+    assert!(matches!(
+      OdenParentVfsGraph::from_observations(&[javascript], &[]),
+      Err(OdenParentAllowlistError::InvalidVfsModule { .. })
+    ));
+  }
+
+  #[test]
+  fn vfs_dependencies_refuse_raw_scheme_laundering() {
+    for raw in ["./dep.ts", "alias", "#mapped"] {
+      let source = format!("import \"{raw}\";\n");
+      let dependency = OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: raw,
+        resolved_key: "repo:src/dep.ts",
+        source_byte_start: 8,
+        source_byte_end: (8 + raw.len()) as u64,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      };
+      project_vfs_dependency(
+        ODEN_PARENT_ENTRYPOINT_KEY,
+        source.as_bytes(),
+        &dependency,
+      )
+      .unwrap();
+    }
+
+    let jsr_raw = "jsr:@scope/pkg@^1.2.3/mod.ts";
+    let source = format!("import \"{jsr_raw}\";\n");
+    let jsr = OdenParentVfsDependencyObservation {
+      kind: OdenParentVfsDependencyKind::StaticImport,
+      raw_specifier: jsr_raw,
+      resolved_key: "jsr:@scope/pkg@1.2.4/mod.ts",
+      source_byte_start: 8,
+      source_byte_end: (8 + jsr_raw.len()) as u64,
+      import_attributes: VFS_EMPTY_ATTRIBUTES,
+    };
+    project_vfs_dependency(ODEN_PARENT_ENTRYPOINT_KEY, source.as_bytes(), &jsr)
+      .unwrap();
+
+    let jsr_build_raw = "jsr:@scope/pkg@1.2.3+build.a/mod.ts";
+    let source = format!("import \"{jsr_build_raw}\";\n");
+    let jsr_build = OdenParentVfsDependencyObservation {
+      kind: OdenParentVfsDependencyKind::StaticImport,
+      raw_specifier: jsr_build_raw,
+      resolved_key: "jsr:@scope/pkg@1.2.3+build.a/mod.ts",
+      source_byte_start: 8,
+      source_byte_end: (8 + jsr_build_raw.len()) as u64,
+      import_attributes: VFS_EMPTY_ATTRIBUTES,
+    };
+    project_vfs_dependency(
+      ODEN_PARENT_ENTRYPOINT_KEY,
+      source.as_bytes(),
+      &jsr_build,
+    )
+    .unwrap();
+
+    for raw in [
+      "npm:pkg@1.0.0",
+      "http://example.test/mod.ts",
+      "https://example.test/mod.ts",
+      "data:text/javascript,export{}",
+      "blob:https://example.test/id",
+      "file:///tmp/mod.ts",
+      "repo:src/dep.ts",
+      "custom:dep",
+      "oden-internal:other",
+      "jsr:@scope/pkg@latest/mod.ts",
+    ] {
+      let source = format!("import \"{raw}\";\n");
+      let dependency = OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: raw,
+        resolved_key: "repo:src/dep.ts",
+        source_byte_start: 8,
+        source_byte_end: (8 + raw.len()) as u64,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      };
+      assert!(matches!(
+        project_vfs_dependency(
+          ODEN_PARENT_ENTRYPOINT_KEY,
+          source.as_bytes(),
+          &dependency,
+        ),
+        Err(OdenParentAllowlistError::InvalidVfsDependency { .. })
+      ));
+    }
+
+    for (raw, resolved) in [
+      ("node:fs", "repo:src/dep.ts"),
+      ("./dep.ts", "node:fs"),
+      ("jsr:@scope/pkg@1.2.3/mod.ts", "repo:src/dep.ts"),
+      (
+        "jsr:@scope/pkg@^1.2.3/mod.ts",
+        "jsr:@other/pkg@1.2.4/mod.ts",
+      ),
+      (
+        "jsr:@scope/pkg@^1.2.3/mod.ts",
+        "jsr:@scope/pkg@2.0.0/mod.ts",
+      ),
+      (
+        "jsr:@scope/pkg@1.2.3+build.a/mod.ts",
+        "jsr:@scope/pkg@1.2.3+build.b/mod.ts",
+      ),
+      (
+        "jsr:@scope/pkg@1.2.3/mod.ts",
+        "jsr:@scope/pkg@1.2.3+build.a/mod.ts",
+      ),
+      (
+        "jsr:@scope/pkg@^1.2.3+build.a/mod.ts",
+        "jsr:@scope/pkg@1.2.3+build.a/mod.ts",
+      ),
+    ] {
+      let source = format!("import \"{raw}\";\n");
+      let dependency = OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: raw,
+        resolved_key: resolved,
+        source_byte_start: 8,
+        source_byte_end: (8 + raw.len()) as u64,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      };
+      assert!(matches!(
+        project_vfs_dependency(
+          ODEN_PARENT_ENTRYPOINT_KEY,
+          source.as_bytes(),
+          &dependency,
+        ),
+        Err(OdenParentAllowlistError::InvalidVfsDependency { .. })
+      ));
+    }
+  }
+
+  #[test]
+  fn vfs_graph_accepts_reachable_exact_jsr_module_keys() {
+    let source = b"import \"oden-internal:filesystem-parent-capture-v2\";\nimport \"jsr:@scope/pkg@1.2.3/mod.ts\";\n";
+    let dependencies = [
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        resolved_key: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        source_byte_start: 8,
+        source_byte_end: 50,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+      OdenParentVfsDependencyObservation {
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: "jsr:@scope/pkg@1.2.3/mod.ts",
+        resolved_key: "jsr:@scope/pkg@1.2.3/mod.ts",
+        source_byte_start: 61,
+        source_byte_end: 88,
+        import_attributes: VFS_EMPTY_ATTRIBUTES,
+      },
+    ];
+    let entrypoint = minimal_entrypoint_module(
+      source,
+      OdenParentVfsMediaType::TypeScript,
+      &dependencies,
+    );
+    let jsr = OdenParentVfsModuleObservation {
+      key: "jsr:@scope/pkg@1.2.3/mod.ts",
+      media_type: OdenParentVfsMediaType::JavaScript,
+      original_bytes: b"export {};\n",
+      emitted_bytes: b"export {};\n",
+      source_map_bytes: None,
+      dependencies: &[],
+    };
+    OdenParentVfsGraph::from_observations(&[entrypoint, jsr], &[]).unwrap();
   }
 
   #[test]
