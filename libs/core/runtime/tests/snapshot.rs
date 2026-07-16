@@ -122,6 +122,107 @@ fn test_from_snapshot() {
     .unwrap();
 }
 
+// @ref LLP 0019#private-v8-brand-and-disabled-until-frozen-invocation-trigger [tests] —
+// prove the exact builtin export remains uniformly inert across snapshot restore
+#[test]
+fn oden_filesystem_parent_capture_is_snapshot_visible_and_refusal_only() {
+  const OP_NAME: &str = "op_oden_filesystem_parent_capture_v2";
+  const PROBE: &str = r#"
+import { op_oden_filesystem_parent_capture_v2 as capture } from "ext:core/ops";
+
+let trapCount = 0;
+const metaHandler = new Proxy(Object.create(null), {
+  get() {
+    trapCount++;
+    throw new Error("argument inspected");
+  },
+});
+const poison = new Proxy(Object.create(null), metaHandler);
+const revoked = Proxy.revocable(Object.create(null), {});
+revoked.revoke();
+
+async function fingerprint(brand, request) {
+  try {
+    await capture(brand, request);
+  } catch (error) {
+    if (typeof error !== "object" || error === null) {
+      throw new Error("non-Error refusal");
+    }
+    return `${error.name}\u0000${error.message}`;
+  }
+  throw new Error("capture unexpectedly succeeded");
+}
+
+const cases = [
+  [undefined, undefined],
+  [Symbol("wrong"), poison],
+  [poison, revoked.proxy],
+  [revoked.proxy, poison],
+];
+const expected = "Error\u0000Oden filesystem parent capture is unavailable";
+for (let pass = 0; pass < 2; pass++) {
+  for (const args of cases) {
+    const actual = await fingerprint(...args);
+    if (actual !== expected) throw new Error("distinguishing refusal");
+  }
+  await Promise.resolve();
+}
+if (trapCount !== 0) throw new Error(`argument traps fired: ${trapCount}`);
+
+const fingerprintKey = "__oden_parent_capture_refusal_fingerprint";
+if (
+  globalThis[fingerprintKey] !== undefined &&
+  globalThis[fingerprintKey] !== expected
+) {
+  throw new Error("snapshot refusal changed");
+}
+globalThis[fingerprintKey] = expected;
+"#;
+
+  fn evaluate_probe(runtime: &mut JsRuntime, specifier: &str) {
+    let id =
+      futures::executor::block_on(runtime.load_side_es_module_from_code(
+        &ModuleSpecifier::parse(specifier).unwrap(),
+        PROBE,
+      ))
+      .unwrap();
+    let evaluation = runtime.mod_evaluate(id);
+    futures::executor::block_on(runtime.run_event_loop(Default::default()))
+      .unwrap();
+    futures::executor::block_on(evaluation).unwrap();
+  }
+
+  let declarations: Vec<_> = crate::ops_builtin::BUILTIN_OPS
+    .iter()
+    .filter(|declaration| declaration.name == OP_NAME)
+    .collect();
+  assert_eq!(declarations.len(), 1, "capture op must be one core builtin");
+  assert!(
+    declarations[0].is_async,
+    "capture op must preserve the non-async fn -> Result<impl Future> declaration shape"
+  );
+  assert_eq!(
+    declarations[0].arg_count, 3,
+    "capture op must take the op2 promise id plus two raw V8 arguments"
+  );
+
+  let mut snapshot_runtime = JsRuntimeForSnapshot::new(Default::default());
+  evaluate_probe(
+    &mut snapshot_runtime,
+    "ext:///oden_parent_capture_before_snapshot.js",
+  );
+  let snapshot = Box::leak(snapshot_runtime.snapshot());
+
+  let mut restored_runtime = JsRuntime::new(RuntimeOptions {
+    startup_snapshot: Some(snapshot),
+    ..Default::default()
+  });
+  evaluate_probe(
+    &mut restored_runtime,
+    "ext:///oden_parent_capture_after_snapshot.js",
+  );
+}
+
 /// Smoke test for create_snapshot.
 #[test]
 fn test_snapshot_creator() {

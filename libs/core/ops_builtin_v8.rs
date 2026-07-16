@@ -1624,3 +1624,27 @@ pub fn op_immediate_check(scope: &mut v8::PinScope, make_ref: bool) {
     }
   }
 }
+
+/// Refusal-only snapshot-visible shell for the sealed Oden filesystem-parent
+/// capture primitive. The eventual armed implementation must compare and
+/// consume its exact V8 brand before it may inspect the raw request or
+/// construct the operation future. This checkpoint has no brand or capture
+/// state, so it inspects neither argument: every call takes the same eager
+/// outer refusal and no future is constructed.
+/// @ref LLP 0019#private-v8-brand-and-disabled-until-frozen-invocation-trigger [implements]
+#[op2]
+#[allow(
+  clippy::unnecessary_wraps,
+  reason = "the op2 Result is the uniform inert refusal"
+)]
+pub fn op_oden_filesystem_parent_capture_v2(
+  _brand: v8::Local<v8::Value>,
+  _request: v8::Local<v8::Value>,
+) -> Result<
+  impl std::future::Future<Output = Result<(), JsErrorBox>> + use<>,
+  JsErrorBox,
+> {
+  Result::<std::future::Ready<Result<(), JsErrorBox>>, _>::Err(
+    JsErrorBox::generic("Oden filesystem parent capture is unavailable"),
+  )
+}

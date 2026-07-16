@@ -118,6 +118,7 @@ builtin_ops! {
   ops_builtin_v8::op_drain_pending_rejections,
   ops_builtin_v8::op_oden_schedule_context,
   ops_builtin_v8::op_oden_callback_context,
+  ops_builtin_v8::op_oden_filesystem_parent_capture_v2,
   ops_builtin_v8::op_compile_function,
   ops_builtin_v8::op_eval_context,
   ops_builtin_v8::op_encode,
