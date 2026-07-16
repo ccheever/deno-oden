@@ -1,12 +1,12 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
-// This first fail-closed slice keeps the reviewed contract inventories and
-// parent-allowlist rendering as exact raw-byte and domain-separated canonical-
-// JSON projections. It intentionally exposes no allowlist constructor while
-// the compiler adapters, generator, and startup recomputation gates remain
-// absent; generated outputs and later image/evidence authority are absent as
-// well.
+// This fail-closed slice keeps the reviewed contract inventories and parent-
+// allowlist construction/rendering as exact raw-byte and domain-separated
+// canonical-JSON projections. The constructor is pure and derives every digest
+// from typed inputs; compiler adapters, generator execution, startup
+// recomputation, generated outputs, and later image/evidence authority remain
+// absent.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -104,6 +104,8 @@ pub enum OdenParentAllowlistError {
   DuplicateImportAttribute(String),
   #[error("invalid parent static import edge: {0}")]
   InvalidStaticImportEdge(&'static str),
+  #[error("inconsistent parent allowlist inputs: {0}")]
+  InconsistentAllowlistInputs(&'static str),
   #[error("invalid parent VFS {role} key: {key}")]
   InvalidVfsKey { role: &'static str, key: String },
   #[error("invalid parent VFS module {key}: {reason}")]
@@ -429,6 +431,38 @@ impl OdenParentVfsGraph {
       modules: module_rows,
       schema: ODEN_PARENT_VFS_GRAPH_SCHEMA,
     })
+  }
+
+  fn require_static_import_edge(
+    &self,
+    edge: &OdenParentStaticImportEdge,
+  ) -> Result<(), OdenParentAllowlistError> {
+    let inconsistent = || {
+      OdenParentAllowlistError::InconsistentAllowlistInputs(
+        "static edge does not equal the VFS entrypoint private dependency",
+      )
+    };
+    let entrypoint_index =
+      vfs_module_index(&self.modules, ODEN_PARENT_ENTRYPOINT_KEY)
+        .ok_or_else(inconsistent)?;
+    let entrypoint = &self.modules[entrypoint_index];
+    let dependency =
+      entrypoint.dependencies.first().ok_or_else(inconsistent)?;
+    if entrypoint.original_byte_digest
+      != edge.entrypoint_vfs_original_byte_digest
+      || edge.dependency_ordinal != 0
+      || edge.occurrence_count != 1
+      || dependency.kind != edge.kind
+      || dependency.raw_specifier != edge.raw_specifier
+      || dependency.resolved_key != edge.resolved_specifier
+      || dependency.source_byte_start != edge.source_byte_start
+      || dependency.source_byte_end != edge.source_byte_end
+      || dependency.import_attributes_digest
+        != edge.import_attributes.digest()?
+    {
+      return Err(inconsistent());
+    }
+    Ok(())
   }
 
   pub fn canonical_jcs(&self) -> Result<Vec<u8>, OdenParentAllowlistError> {
@@ -1033,6 +1067,8 @@ pub struct OdenParentStaticImportEdgeObservation<'a> {
 pub struct OdenParentStaticImportEdge {
   dependency_ordinal: u64,
   entrypoint_source_digest: OdenParentEntrypointSourceDigest,
+  #[serde(skip_serializing)]
+  entrypoint_vfs_original_byte_digest: OdenParentVfsOriginalBytesDigest,
   import_attributes: OdenParentImportAttributes,
   kind: OdenParentVfsDependencyKind,
   occurrence_count: u64,
@@ -1111,6 +1147,10 @@ impl OdenParentStaticImportEdge {
       entrypoint_source_digest: OdenParentEntrypointSourceDigest::from_bytes(
         observation.entrypoint_source_bytes,
       ),
+      entrypoint_vfs_original_byte_digest:
+        OdenParentVfsOriginalBytesDigest::from_bytes(
+          observation.entrypoint_source_bytes,
+        ),
       import_attributes: observation.import_attributes.clone(),
       kind: OdenParentVfsDependencyKind::StaticImport,
       occurrence_count: 1,
@@ -1566,7 +1606,58 @@ pub struct OdenParentAllowlist {
   vfs_graph_digest: OdenParentVfsGraphDigest,
 }
 
+/// Complete typed inputs to the pure allowlist projection.
+///
+/// This value carries no caller-authored digest string, target, fork, engine,
+/// image, execution, signing, or evidence field. Constructing an allowlist is
+/// not compiler, generator, startup, or release authority.
+#[derive(Clone, Copy, Debug)]
+pub struct OdenParentAllowlistInputs<'a> {
+  pub capture_contract: &'a ContractInventory,
+  pub source_closure_contract: &'a ContractInventory,
+  pub release_contract: &'a ContractInventory,
+  pub configuration: &'a OdenParentStandaloneConfiguration,
+  pub vfs_graph: &'a OdenParentVfsGraph,
+  pub static_import_edge: &'a OdenParentStaticImportEdge,
+}
+
 impl OdenParentAllowlist {
+  pub fn from_inputs(
+    inputs: OdenParentAllowlistInputs<'_>,
+  ) -> Result<Self, OdenParentAllowlistError> {
+    inputs
+      .vfs_graph
+      .require_static_import_edge(inputs.static_import_edge)?;
+    Ok(Self {
+      capture_contract_digest: inputs
+        .capture_contract
+        .digest(ContractInventoryKind::Capture)?,
+      engine_provenance_schema: 2,
+      entrypoint_key: ODEN_PARENT_ENTRYPOINT_KEY,
+      entrypoint_source_digest: inputs
+        .static_import_edge
+        .entrypoint_source_digest
+        .clone(),
+      parent_primitive_id: ODEN_PARENT_PRIMITIVE_ID,
+      private_module_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      profile: ODEN_PARENT_PROFILE,
+      release_contract_digest: inputs
+        .release_contract
+        .digest(ContractInventoryKind::Release)?,
+      schema: ODEN_PARENT_ALLOWLIST_SCHEMA,
+      source_closure_contract_digest: inputs
+        .source_closure_contract
+        .digest(ContractInventoryKind::SourceClosure)?,
+      standalone_configuration_digest: inputs.configuration.digest()?,
+      static_import_edge_digest: inputs.static_import_edge.digest()?,
+      synthetic_module_source_digest: inputs
+        .static_import_edge
+        .synthetic_module_source_digest
+        .clone(),
+      vfs_graph_digest: inputs.vfs_graph.digest()?,
+    })
+  }
+
   #[cfg(test)]
   fn new(digests: OdenParentAllowlistDigests) -> Self {
     Self {
@@ -1982,6 +2073,32 @@ mod tests {
       inventory.canonical_jcs().unwrap(),
       br#"[{"byteDigest":"sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU","path":"a"},{"byteDigest":"sha256-ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0","path":"b"}]"#
     );
+
+    let same_inventory = ContractInventory::from_files(&[ContractFile {
+      path: "same",
+      bytes: b"same-bytes",
+    }])
+    .unwrap();
+    assert_eq!(
+      same_inventory.canonical_jcs().unwrap(),
+      br#"[{"byteDigest":"sha256-etVQn6waG-Slmuh5WUaIQNKAi6sbPNVnZzMZSqgu8zg","path":"same"}]"#
+    );
+    for (kind, expected) in [
+      (
+        ContractInventoryKind::Capture,
+        "sha256-VczDRRJw8Sqsnf2rJH0cS4c85UQdjaj-o19EJjM4IIo",
+      ),
+      (
+        ContractInventoryKind::SourceClosure,
+        "sha256-IIZQIdyiQ3xm1J2IOCWXrNXPvKJDBGmFSXyoQtI2YxE",
+      ),
+      (
+        ContractInventoryKind::Release,
+        "sha256-315XYsExIIxHce003s1dd5F4L7oI89UW4Z7gh0Czw9o",
+      ),
+    ] {
+      assert_eq!(same_inventory.digest(kind).unwrap().as_str(), expected);
+    }
   }
 
   #[test]
@@ -3422,6 +3539,377 @@ mod tests {
         Err(OdenParentAllowlistError::InvalidSha256Digest { .. })
       ));
     }
+  }
+
+  #[test]
+  fn production_allowlist_constructor_derives_only_typed_input_digests() {
+    let capture = ContractInventory::from_files(&[ContractFile {
+      path: "capture",
+      bytes: b"capture-v1",
+    }])
+    .unwrap();
+    let source_closure = ContractInventory::from_files(&[ContractFile {
+      path: "source-closure",
+      bytes: b"source-closure-v1",
+    }])
+    .unwrap();
+    let release = ContractInventory::from_files(&[ContractFile {
+      path: "release",
+      bytes: b"release-v1",
+    }])
+    .unwrap();
+    let workspace_resolver = minimal_workspace_resolver();
+    let configuration = OdenParentStandaloneConfiguration::from_effective(
+      &workspace_resolver,
+      &UnstableConfig::default(),
+      &OtelConfig::default(),
+    )
+    .unwrap();
+    let attributes = empty_import_attributes();
+    let mut static_import_edge_observation =
+      valid_static_import_edge_observation(
+        VFS_ENTRYPOINT_SOURCE,
+        STATIC_IMPORT_SYNTHETIC_SOURCE,
+        &attributes,
+      );
+    static_import_edge_observation.source_byte_start = 8;
+    static_import_edge_observation.source_byte_end = 50;
+    let static_import_edge = OdenParentStaticImportEdge::from_observation(
+      static_import_edge_observation,
+    )
+    .unwrap();
+    let dependencies = exact_vfs_dependencies();
+    let modules = exact_vfs_modules(&dependencies);
+    let files = exact_vfs_files();
+    let vfs_graph =
+      OdenParentVfsGraph::from_observations(&modules, &files).unwrap();
+
+    let mut mismatched_entrypoint_source = VFS_ENTRYPOINT_SOURCE.to_vec();
+    let declaration = mismatched_entrypoint_source
+      .windows(b"const dep".len())
+      .position(|window| window == b"const dep")
+      .unwrap();
+    mismatched_entrypoint_source[declaration + 6] = b'D';
+    let mut mismatched_edge_observation = valid_static_import_edge_observation(
+      &mismatched_entrypoint_source,
+      STATIC_IMPORT_SYNTHETIC_SOURCE,
+      &attributes,
+    );
+    mismatched_edge_observation.source_byte_start = 8;
+    mismatched_edge_observation.source_byte_end = 50;
+    let mismatched_static_import_edge =
+      OdenParentStaticImportEdge::from_observation(mismatched_edge_observation)
+        .unwrap();
+    assert!(matches!(
+      OdenParentAllowlist::from_inputs(OdenParentAllowlistInputs {
+        capture_contract: &capture,
+        source_closure_contract: &source_closure,
+        release_contract: &release,
+        configuration: &configuration,
+        vfs_graph: &vfs_graph,
+        static_import_edge: &mismatched_static_import_edge,
+      }),
+      Err(OdenParentAllowlistError::InconsistentAllowlistInputs(_))
+    ));
+
+    let construct =
+      |capture_contract: &ContractInventory,
+       source_closure_contract: &ContractInventory,
+       release_contract: &ContractInventory,
+       configuration: &OdenParentStandaloneConfiguration,
+       vfs_graph: &OdenParentVfsGraph,
+       static_import_edge: &OdenParentStaticImportEdge| {
+        OdenParentAllowlist::from_inputs(OdenParentAllowlistInputs {
+          capture_contract,
+          source_closure_contract,
+          release_contract,
+          configuration,
+          vfs_graph,
+          static_import_edge,
+        })
+        .unwrap()
+      };
+    let allowlist = construct(
+      &capture,
+      &source_closure,
+      &release,
+      &configuration,
+      &vfs_graph,
+      &static_import_edge,
+    );
+
+    assert_eq!(
+      allowlist.capture_contract_digest,
+      capture.digest(ContractInventoryKind::Capture).unwrap()
+    );
+    assert_eq!(
+      allowlist.source_closure_contract_digest,
+      source_closure
+        .digest(ContractInventoryKind::SourceClosure)
+        .unwrap()
+    );
+    assert_eq!(
+      allowlist.release_contract_digest,
+      release.digest(ContractInventoryKind::Release).unwrap()
+    );
+    assert_ne!(
+      capture.digest(ContractInventoryKind::Capture).unwrap(),
+      capture
+        .digest(ContractInventoryKind::SourceClosure)
+        .unwrap()
+    );
+    assert_ne!(
+      release.digest(ContractInventoryKind::Release).unwrap(),
+      release.digest(ContractInventoryKind::Capture).unwrap()
+    );
+    assert_ne!(
+      source_closure
+        .digest(ContractInventoryKind::SourceClosure)
+        .unwrap(),
+      source_closure
+        .digest(ContractInventoryKind::Release)
+        .unwrap()
+    );
+    assert_eq!(
+      allowlist.entrypoint_source_digest,
+      static_import_edge.entrypoint_source_digest
+    );
+    assert_eq!(
+      allowlist.synthetic_module_source_digest,
+      static_import_edge.synthetic_module_source_digest
+    );
+    assert_eq!(
+      allowlist.static_import_edge_digest,
+      static_import_edge.digest().unwrap()
+    );
+    assert_eq!(
+      allowlist.standalone_configuration_digest,
+      configuration.digest().unwrap()
+    );
+    assert_eq!(allowlist.vfs_graph_digest, vfs_graph.digest().unwrap());
+    let allowlist_value = serde_json::from_slice::<serde_json::Value>(
+      &allowlist.canonical_jcs().unwrap(),
+    )
+    .unwrap();
+    let allowlist_object = allowlist_value.as_object().unwrap();
+    assert_eq!(allowlist_object.len(), 14);
+    for (field, expected) in [
+      ("schema", ODEN_PARENT_ALLOWLIST_SCHEMA),
+      ("profile", ODEN_PARENT_PROFILE),
+      ("entrypointKey", ODEN_PARENT_ENTRYPOINT_KEY),
+      ("parentPrimitiveId", ODEN_PARENT_PRIMITIVE_ID),
+      (
+        "privateModuleSpecifier",
+        ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      ),
+    ] {
+      assert_eq!(
+        allowlist_object.get(field).and_then(|value| value.as_str()),
+        Some(expected)
+      );
+    }
+    assert_eq!(
+      allowlist_object
+        .get("engineProvenanceSchema")
+        .and_then(|value| value.as_u64()),
+      Some(2)
+    );
+    assert_eq!(allowlist.render_json_file().unwrap().last(), Some(&b'\n'));
+    assert_eq!(
+      allowlist.render_rust_module().unwrap(),
+      allowlist.render_rust_module().unwrap()
+    );
+
+    let assert_only_fields_change =
+      |left: &OdenParentAllowlist,
+       right: &OdenParentAllowlist,
+       fields: &[&str]| {
+        let mut left_value = serde_json::to_value(left)
+          .unwrap()
+          .as_object()
+          .unwrap()
+          .clone();
+        let mut right_value = serde_json::to_value(right)
+          .unwrap()
+          .as_object()
+          .unwrap()
+          .clone();
+        for field in fields {
+          assert_ne!(left_value.get(*field), right_value.get(*field));
+          left_value.remove(*field);
+          right_value.remove(*field);
+        }
+        assert_eq!(left_value, right_value);
+        assert_ne!(left.digest().unwrap(), right.digest().unwrap());
+      };
+
+    let changed_capture = ContractInventory::from_files(&[ContractFile {
+      path: "capture",
+      bytes: b"capture-v2",
+    }])
+    .unwrap();
+    let changed_source_closure =
+      ContractInventory::from_files(&[ContractFile {
+        path: "source-closure",
+        bytes: b"source-closure-v2",
+      }])
+      .unwrap();
+    let changed_release = ContractInventory::from_files(&[ContractFile {
+      path: "release",
+      bytes: b"release-v2",
+    }])
+    .unwrap();
+    assert_only_fields_change(
+      &allowlist,
+      &construct(
+        &changed_capture,
+        &source_closure,
+        &release,
+        &configuration,
+        &vfs_graph,
+        &static_import_edge,
+      ),
+      &["captureContractDigest"],
+    );
+    assert_only_fields_change(
+      &allowlist,
+      &construct(
+        &capture,
+        &changed_source_closure,
+        &release,
+        &configuration,
+        &vfs_graph,
+        &static_import_edge,
+      ),
+      &["sourceClosureContractDigest"],
+    );
+    assert_only_fields_change(
+      &allowlist,
+      &construct(
+        &capture,
+        &source_closure,
+        &changed_release,
+        &configuration,
+        &vfs_graph,
+        &static_import_edge,
+      ),
+      &["releaseContractDigest"],
+    );
+
+    let changed_workspace_resolver: SerializedWorkspaceResolver =
+      serde_json::from_value(serde_json::json!({
+        "catalogs": { "release": { "example": "jsr:@scope/example@1.0.0" } },
+        "import_map": null,
+        "jsr_pkgs": [],
+        "package_jsons": {},
+        "pkg_json_resolution": "Enabled",
+      }))
+      .unwrap();
+    let changed_configuration =
+      OdenParentStandaloneConfiguration::from_effective(
+        &changed_workspace_resolver,
+        &UnstableConfig::default(),
+        &OtelConfig::default(),
+      )
+      .unwrap();
+    assert_only_fields_change(
+      &allowlist,
+      &construct(
+        &capture,
+        &source_closure,
+        &release,
+        &changed_configuration,
+        &vfs_graph,
+        &static_import_edge,
+      ),
+      &["standaloneConfigurationDigest"],
+    );
+
+    let mut changed_files = exact_vfs_files();
+    changed_files[0].emitted_bytes = b"#!/bin/sh\n# changed\n";
+    let changed_vfs_graph =
+      OdenParentVfsGraph::from_observations(&modules, &changed_files).unwrap();
+    assert_only_fields_change(
+      &allowlist,
+      &construct(
+        &capture,
+        &source_closure,
+        &release,
+        &configuration,
+        &changed_vfs_graph,
+        &static_import_edge,
+      ),
+      &["vfsGraphDigest"],
+    );
+
+    let mut changed_synthetic_observation =
+      valid_static_import_edge_observation(
+        VFS_ENTRYPOINT_SOURCE,
+        b"export const capture = (request) => request;\n",
+        &attributes,
+      );
+    changed_synthetic_observation.source_byte_start = 8;
+    changed_synthetic_observation.source_byte_end = 50;
+    let changed_synthetic_edge = OdenParentStaticImportEdge::from_observation(
+      changed_synthetic_observation,
+    )
+    .unwrap();
+    assert_only_fields_change(
+      &allowlist,
+      &construct(
+        &capture,
+        &source_closure,
+        &release,
+        &configuration,
+        &vfs_graph,
+        &changed_synthetic_edge,
+      ),
+      &["staticImportEdgeDigest", "syntheticModuleSourceDigest"],
+    );
+
+    let mut changed_entrypoint_source = VFS_ENTRYPOINT_SOURCE.to_vec();
+    let declaration = changed_entrypoint_source
+      .windows(b"const dep".len())
+      .position(|window| window == b"const dep")
+      .unwrap();
+    changed_entrypoint_source[declaration + 6] = b'D';
+    let mut changed_entrypoint_observation =
+      valid_static_import_edge_observation(
+        &changed_entrypoint_source,
+        STATIC_IMPORT_SYNTHETIC_SOURCE,
+        &attributes,
+      );
+    changed_entrypoint_observation.source_byte_start = 8;
+    changed_entrypoint_observation.source_byte_end = 50;
+    let changed_entrypoint_edge = OdenParentStaticImportEdge::from_observation(
+      changed_entrypoint_observation,
+    )
+    .unwrap();
+    let changed_dependencies = exact_vfs_dependencies();
+    let mut changed_modules = exact_vfs_modules(&changed_dependencies);
+    changed_modules
+      .iter_mut()
+      .find(|module| module.key == ODEN_PARENT_ENTRYPOINT_KEY)
+      .unwrap()
+      .original_bytes = &changed_entrypoint_source;
+    let changed_entrypoint_vfs_graph =
+      OdenParentVfsGraph::from_observations(&changed_modules, &files).unwrap();
+    assert_only_fields_change(
+      &allowlist,
+      &construct(
+        &capture,
+        &source_closure,
+        &release,
+        &configuration,
+        &changed_entrypoint_vfs_graph,
+        &changed_entrypoint_edge,
+      ),
+      &[
+        "entrypointSourceDigest",
+        "staticImportEdgeDigest",
+        "vfsGraphDigest",
+      ],
+    );
   }
 
   #[test]
