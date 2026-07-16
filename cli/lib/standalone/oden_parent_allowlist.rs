@@ -90,6 +90,13 @@ pub const ODEN_PARENT_GENERATED_JSON_PATH: &str =
   "generated/capsec/rev2/filesystem-parent-standalone-allowlist.json";
 pub const ODEN_PARENT_GENERATED_RUST_PATH: &str =
   "fork/deno/cli/lib/standalone/oden_parent_allowlist_generated.rs";
+pub const ODEN_PARENT_TARGET_POLICY_GENERATED_RUST_PATH: &str =
+  "fork/deno/cli/lib/standalone/oden_parent_target_policy_generated.rs";
+pub const ODEN_PARENT_GENERATED_PATHS: [&str; 3] = [
+  ODEN_PARENT_GENERATED_JSON_PATH,
+  ODEN_PARENT_GENERATED_RUST_PATH,
+  ODEN_PARENT_TARGET_POLICY_GENERATED_RUST_PATH,
+];
 
 const MAX_IJSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
@@ -988,11 +995,14 @@ fn validate_repo_vfs_key(key: &str) -> bool {
     return false;
   };
   !path.contains('%')
-    && !matches!(
-      path,
-      ODEN_PARENT_GENERATED_JSON_PATH | ODEN_PARENT_GENERATED_RUST_PATH
-    )
+    && !is_oden_parent_generated_path(path)
     && validate_contract_path(path).is_ok()
+}
+
+fn is_oden_parent_generated_path(path: &str) -> bool {
+  ODEN_PARENT_GENERATED_PATHS
+    .iter()
+    .any(|generated_path| path.eq_ignore_ascii_case(generated_path))
 }
 
 fn validate_jsr_vfs_key(key: &str) -> bool {
@@ -1326,10 +1336,7 @@ impl ContractInventory {
     let mut previous: Option<&str> = None;
     for file in files {
       validate_contract_path(file.path)?;
-      if matches!(
-        file.path,
-        ODEN_PARENT_GENERATED_JSON_PATH | ODEN_PARENT_GENERATED_RUST_PATH
-      ) {
+      if is_oden_parent_generated_path(file.path) {
         return Err(OdenParentAllowlistError::GeneratedOutputMember(
           file.path.to_string(),
         ));
@@ -2373,6 +2380,7 @@ mod tests {
       "repo:src/%2e%2e/escape.ts",
       "repo:generated/capsec/rev2/filesystem-parent-standalone-allowlist.json",
       "repo:fork/deno/cli/lib/standalone/oden_parent_allowlist_generated.rs",
+      "repo:fork/deno/cli/lib/standalone/oden_parent_target_policy_generated.rs",
       "npm:pkg@1.0.0",
       "https://example.test/mod.ts",
       "data:text/javascript,export{}",
@@ -2413,26 +2421,25 @@ mod tests {
       ));
     }
 
-    for path in [
-      ODEN_PARENT_GENERATED_JSON_PATH,
-      ODEN_PARENT_GENERATED_RUST_PATH,
-    ] {
-      let key = format!("repo:{path}");
-      assert!(matches!(
-        validate_vfs_module_key(&key),
-        Err(OdenParentAllowlistError::InvalidVfsKey { role: "module", .. })
-      ));
-      assert!(matches!(
-        validate_vfs_file_key(&key),
-        Err(OdenParentAllowlistError::InvalidVfsKey { role: "file", .. })
-      ));
-      assert!(matches!(
-        validate_vfs_dependency_key(&key),
-        Err(OdenParentAllowlistError::InvalidVfsKey {
-          role: "dependency",
-          ..
-        })
-      ));
+    for path in ODEN_PARENT_GENERATED_PATHS {
+      for path in [path.to_string(), path.to_ascii_uppercase()] {
+        let key = format!("repo:{path}");
+        assert!(matches!(
+          validate_vfs_module_key(&key),
+          Err(OdenParentAllowlistError::InvalidVfsKey { role: "module", .. })
+        ));
+        assert!(matches!(
+          validate_vfs_file_key(&key),
+          Err(OdenParentAllowlistError::InvalidVfsKey { role: "file", .. })
+        ));
+        assert!(matches!(
+          validate_vfs_dependency_key(&key),
+          Err(OdenParentAllowlistError::InvalidVfsKey {
+            role: "dependency",
+            ..
+          })
+        ));
+      }
     }
   }
 
@@ -3543,16 +3550,16 @@ mod tests {
         Err(OdenParentAllowlistError::InvalidContractPath(_))
       ));
     }
-    for path in [
-      ODEN_PARENT_GENERATED_JSON_PATH,
-      ODEN_PARENT_GENERATED_RUST_PATH,
-    ] {
-      assert_eq!(
-        ContractInventory::from_files(&[ContractFile { path, bytes: b"x" }]),
-        Err(OdenParentAllowlistError::GeneratedOutputMember(
-          path.to_string()
-        ))
-      );
+    for path in ODEN_PARENT_GENERATED_PATHS {
+      for path in [path.to_string(), path.to_ascii_uppercase()] {
+        assert_eq!(
+          ContractInventory::from_files(&[ContractFile {
+            path: &path,
+            bytes: b"x",
+          }]),
+          Err(OdenParentAllowlistError::GeneratedOutputMember(path))
+        );
+      }
     }
     for files in [
       [

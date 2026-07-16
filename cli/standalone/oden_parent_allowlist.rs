@@ -4,7 +4,7 @@
 // These generator-side slices freeze the exact capture and source-closure
 // contract memberships and a dormant descriptor-anchored retained-file
 // loader. Release membership, allowlist construction, generate/check
-// execution, and both generated outputs remain absent, so neither reserved
+// execution, and all three generated outputs remain absent, so neither reserved
 // mode gains authority or an output path.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -28,10 +28,14 @@ use std::path::Path;
 use deno_lib::standalone::oden_parent_allowlist::ContractFile;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use deno_lib::standalone::oden_parent_allowlist::ContractInventory;
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+#[cfg(test)]
 use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_GENERATED_JSON_PATH;
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
+use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_GENERATED_PATHS;
+#[cfg(test)]
 use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_GENERATED_RUST_PATH;
+#[cfg(test)]
+use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_TARGET_POLICY_GENERATED_RUST_PATH;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistError;
 
@@ -397,8 +401,9 @@ fn validate_retained_contract_paths(
         ));
       }
     }
-    if path.eq_ignore_ascii_case(ODEN_PARENT_GENERATED_JSON_PATH)
-      || path.eq_ignore_ascii_case(ODEN_PARENT_GENERATED_RUST_PATH)
+    if ODEN_PARENT_GENERATED_PATHS
+      .iter()
+      .any(|generated_path| path.eq_ignore_ascii_case(generated_path))
     {
       return Err(OdenParentRetainedContractError::GeneratedOutputMember(
         path.to_string(),
@@ -750,11 +755,15 @@ mod tests {
     assert_prevalidated(&["ok", "../escape"]);
     assert_prevalidated(&[ODEN_PARENT_GENERATED_JSON_PATH]);
     assert_prevalidated(&[ODEN_PARENT_GENERATED_RUST_PATH]);
+    assert_prevalidated(&[ODEN_PARENT_TARGET_POLICY_GENERATED_RUST_PATH]);
     assert_prevalidated(&[
       "GENERATED/CAPSEC/REV2/FILESYSTEM-PARENT-STANDALONE-ALLOWLIST.JSON",
     ]);
     assert_prevalidated(&[
       "FORK/DENO/CLI/LIB/STANDALONE/ODEN_PARENT_ALLOWLIST_GENERATED.RS",
+    ]);
+    assert_prevalidated(&[
+      "FORK/DENO/CLI/LIB/STANDALONE/ODEN_PARENT_TARGET_POLICY_GENERATED.RS",
     ]);
     assert_prevalidated(&["unicode/\u{212a}.txt"]);
 
@@ -1024,8 +1033,9 @@ mod tests {
       assert!(path
         .split('/')
         .all(|part| part.len() <= ODEN_PARENT_CONTRACT_COMPONENT_MAX_BYTES));
-      assert_ne!(*path, ODEN_PARENT_GENERATED_JSON_PATH);
-      assert_ne!(*path, ODEN_PARENT_GENERATED_RUST_PATH);
+      assert!(!ODEN_PARENT_GENERATED_PATHS
+        .iter()
+        .any(|generated_path| path.eq_ignore_ascii_case(generated_path)));
     }
 
     for pair in paths.windows(2) {
