@@ -1,9 +1,9 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
-// These generator-side slices freeze the exact capture and source-closure
-// contract memberships and a dormant descriptor-anchored retained-file
-// loader. Release membership, allowlist construction, generate/check
+// These generator-side slices freeze the exact capture, source-closure, and
+// release contract memberships and a dormant descriptor-anchored retained-file
+// loader. Six release definitions, allowlist construction, generate/check
 // execution, and all three generated outputs remain absent, so neither reserved
 // mode gains authority or an output path.
 
@@ -104,6 +104,47 @@ pub(crate) const ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS: &[&str] = &[
   "src/capsec/rev2_filesystem_source_closure_static_fixture.ts",
   "src/capsec/rev2_filesystem_startup_analysis.ts",
   "src/capsec/rev2_filesystem_startup_manifest.ts",
+];
+
+/// Parent-root-relative definitions that comprise the release contract.
+///
+/// The complete reviewed membership is fixed even while six schema members are
+/// intentionally absent. Any future retained load must refuse that partial
+/// repository state before it can form a candidate inventory.
+#[allow(dead_code)]
+pub(crate) const ODEN_PARENT_RELEASE_CONTRACT_PATHS: &[&str] = &[
+  ".github/workflows/release.yml",
+  "Cargo.lock",
+  "Cargo.toml",
+  "LICENSE",
+  "deno.json",
+  "deno.lock",
+  "fork/deno/cli/lib/standalone/oden_parent_allowlist.rs",
+  "fork/deno/cli/standalone/oden_parent_allowlist.rs",
+  "release-signing.json",
+  "release.json",
+  "rust-toolchain.toml",
+  "schemas/release/build-metadata.schema.json",
+  "schemas/release/engine-provenance.schema.json",
+  "schemas/release/release-metadata.schema.json",
+  "schemas/release/release-signing.schema.json",
+  "schemas/release/rustsec-audit.schema.json",
+  "schemas/release/third-party-components.schema.json",
+  "schemas/release/third-party-notices-approval.schema.json",
+  "schemas/release/third-party-notices-header.schema.json",
+  "scripts/install.sh",
+  "scripts/release/build-artifact.ts",
+  "scripts/release/checksums.ts",
+  "scripts/release/engine-provenance.ts",
+  "scripts/release/metadata.ts",
+  "scripts/release/preflight.ts",
+  "scripts/release/rust-audit.ts",
+  "scripts/release/signing.ts",
+  "scripts/release/third-party-notices.ts",
+  "scripts/verify-fork.sh",
+  "security/rustsec-ignores.json",
+  "src/release.ts",
+  "third_party/components.json",
 ];
 
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
@@ -633,7 +674,8 @@ where
 
 /// Dormant Linux/macOS-only loader for one already reviewed literal path
 /// inventory. Its returned bytes are not source authentication or authority;
-/// the absent release list and constructor keep both modes fail-closed.
+/// missing release definitions and absent mode handlers keep both modes
+/// fail-closed.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(dead_code)]
 fn load_retained_contract_files(
@@ -674,6 +716,12 @@ mod tests {
     assert_handwritten_rust_authorities(
       ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS,
     );
+  }
+
+  #[test]
+  fn release_contract_paths_are_closed_sorted_literals() {
+    assert_closed_sorted_literals(ODEN_PARENT_RELEASE_CONTRACT_PATHS, 32);
+    assert_handwritten_rust_authorities(ODEN_PARENT_RELEASE_CONTRACT_PATHS);
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
