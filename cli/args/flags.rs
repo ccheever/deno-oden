@@ -1054,6 +1054,18 @@ pub fn flags_from_vec_with_initial_cwd(
   args: Vec<OsString>,
   initial_cwd: Option<PathBuf>,
 ) -> clap::error::Result<Flags> {
+  let parent_allowlist_raw_selector_present = args.iter().skip(1).any(|arg| {
+    let bytes = arg.as_encoded_bytes();
+    bytes == b"--_oden-parent-allowlist-mode"
+      || bytes.starts_with(b"--_oden-parent-allowlist-mode=")
+  });
+  let exact_parent_allowlist_raw_invocation = args.len() == 3
+    && args[1] == "compile"
+    && matches!(
+      args[2].as_encoded_bytes(),
+      b"--_oden-parent-allowlist-mode=generate"
+        | b"--_oden-parent-allowlist-mode=check"
+    );
   // Strip a trailing `\r` from each argument so that a shebang in a script
   // saved with CRLF line endings (e.g. `#!/usr/bin/env -S deno run -A\r`)
   // doesn't poison the final shebang argument with a stray carriage return.
@@ -1135,6 +1147,21 @@ pub fn flags_from_vec_with_initial_cwd(
         }
         _ => e,
       })?;
+
+  // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph
+  // [implements] — Clap exclusivity covers arguments parsed as compile
+  // options. This raw-argv check also closes inherited globals before
+  // `compile` and reserved spellings that trailing-var-arg parsing would
+  // otherwise reinterpret as a source or embedded script argument.
+  if matches.subcommand_matches("compile").is_some()
+    && parent_allowlist_raw_selector_present
+    && !exact_parent_allowlist_raw_invocation
+  {
+    return Err(clap::Error::raw(
+      clap::error::ErrorKind::ArgumentConflict,
+      "the argument '--_oden-parent-allowlist-mode=<MODE>' must be the lone compile argument",
+    ));
+  }
 
   let mut flags = Flags {
     initial_cwd,
@@ -2403,6 +2430,10 @@ On the first invocation of `deno compile`, Deno will download the relevant binar
           .action(ArgAction::SetTrue)
           .help_heading(COMPILE_HEADING),
       )
+      // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph
+      // [implements] — The reserved selector admits only its exact lone
+      // invocation; every positional, compile, and inherited global argument
+      // conflicts before any compiler path can observe it.
       .arg(
         Arg::new("oden-parent-allowlist-mode")
           .long("_oden-parent-allowlist-mode")
@@ -2411,8 +2442,7 @@ On the first invocation of `deno compile`, Deno will download the relevant binar
           .action(ArgAction::Append)
           .num_args(1)
           .require_equals(true)
-          .conflicts_with("oden-parent-instance-commitments")
-          .conflicts_with("script_arg")
+          .exclusive(true)
           .hide(true),
       )
       .arg(
@@ -14216,6 +14246,11 @@ mod tests {
         .unwrap();
       assert!(arg.is_hide_set());
     }
+    let allowlist_mode = command
+      .get_arguments()
+      .find(|arg| arg.get_id().as_str() == "oden-parent-allowlist-mode")
+      .unwrap();
+    assert!(allowlist_mode.is_exclusive_set());
   }
 
   #[test]
@@ -14236,6 +14271,55 @@ mod tests {
       assert_eq!(compile_flags.source_file, "");
       assert_eq!(compile_flags.oden_parent_allowlist_mode, Some(expected));
       assert_eq!(compile_flags.oden_parent_instance_commitments, None);
+    }
+  }
+
+  #[test]
+  fn compile_reserved_oden_parent_allowlist_mode_refuses_other_user_arguments()
+  {
+    let conflicting_argument_sets: &[&[&str]] = &[
+      &["main.ts"],
+      &["--output", "oden"],
+      &["--target", "x86_64-unknown-linux-gnu"],
+      &["--config", "deno.json"],
+      &["--no-config"],
+      &["--include", "data.txt"],
+      &["--exclude", "data.txt"],
+      &["--bundle"],
+      &["--watch"],
+      &["--no-check"],
+      &["--allow-all"],
+      &["--cached-only"],
+      &["--v8-flags=--expose-gc"],
+      &["--quiet"],
+      &["--_oden-parent-instance-commitments=parent.json"],
+      &["--", "script-argument"],
+    ];
+
+    for mode in ["generate", "check"] {
+      for conflicting_arguments in conflicting_argument_sets {
+        let mut args: Vec<OsString> = svec![
+          "deno",
+          "compile",
+          format!("--_oden-parent-allowlist-mode={mode}"),
+        ];
+        args.extend(conflicting_arguments.iter().map(OsString::from));
+        let err = flags_from_vec(args).unwrap_err();
+        assert_eq!(
+          err.kind(),
+          clap::error::ErrorKind::ArgumentConflict,
+          "mode {mode} unexpectedly admitted {conflicting_arguments:?}: {err}"
+        );
+      }
+
+      let err = flags_from_vec(svec![
+        "deno",
+        "--quiet",
+        "compile",
+        format!("--_oden-parent-allowlist-mode={mode}"),
+      ])
+      .unwrap_err();
+      assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
   }
 
@@ -14283,6 +14367,28 @@ mod tests {
       ],
       svec!["deno", "compile", "--_oden-parent-allowlist-mode=other"],
       svec!["deno", "compile", "--_oden-parent-allowlist-mode="],
+      svec![
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate\r"
+      ],
+      svec![
+        "deno",
+        "compile\r",
+        "--_oden-parent-allowlist-mode=generate"
+      ],
+      svec![
+        "deno",
+        "compile",
+        "main.ts",
+        "--_oden-parent-allowlist-mode=generate"
+      ],
+      svec![
+        "deno",
+        "compile",
+        "--",
+        "--_oden-parent-allowlist-mode=check"
+      ],
       svec![
         "deno",
         "compile",
