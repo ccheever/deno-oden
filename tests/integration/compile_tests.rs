@@ -1,5 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::process::Command;
+
 use test_util as util;
 use test_util::eprintln;
 use test_util::test;
@@ -7,6 +9,44 @@ use util::TestContext;
 use util::TestContextBuilder;
 use util::assert_not_contains;
 use util::testdata_path;
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [test] —
+// Reserved-family dispatch happens before startup instrumentation, logging, or
+// either general entrypoint.
+#[test]
+fn oden_parent_allowlist_raw_dispatch_is_output_free() {
+  fn assert_refused(executable: &std::path::Path, args: &[&str]) {
+    let output = Command::new(executable)
+      .env("DENO_STARTUP_PHASES", "1")
+      .args(args)
+      .output()
+      .unwrap();
+    assert_eq!(output.status.code(), Some(76), "{args:?}");
+    assert_eq!(output.stdout, b"", "{args:?}");
+    assert_eq!(output.stderr, b"", "{args:?}");
+  }
+
+  let deno = util::deno_exe_path();
+  assert_refused(
+    deno.as_path(),
+    &["compile", "--_oden-parent-allowlist-mode=generate"],
+  );
+  assert_refused(
+    deno.as_path(),
+    &["compile", "--_oden-parent-allowlist-mode=check"],
+  );
+  assert_refused(
+    deno.as_path(),
+    &["run", "--_ODEN-PARENT-ALLOWLIST-MODE=generate"],
+  );
+
+  let denort = util::denort_exe_path();
+  assert_refused(denort.as_path(), &["--_oden-parent-allowlist-mode=check"]);
+  assert_refused(
+    denort.as_path(),
+    &["program-arg", "--_oden-parent-allowlist-mode=generate"],
+  );
+}
 
 #[test]
 fn compile_basic() {

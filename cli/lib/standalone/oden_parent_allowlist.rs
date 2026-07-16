@@ -8,6 +8,9 @@
 // recomputation, generated outputs, and later image/evidence authority remain
 // absent.
 
+use std::ffi::OsStr;
+use std::ffi::OsString;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use deno_runtime::deno_node::is_builtin_node_module;
@@ -97,6 +100,98 @@ pub const ODEN_PARENT_GENERATED_PATHS: [&str; 3] = [
   ODEN_PARENT_GENERATED_RUST_PATH,
   ODEN_PARENT_TARGET_POLICY_GENERATED_RUST_PATH,
 ];
+pub const ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE: i32 = 76;
+
+const ODEN_PARENT_ALLOWLIST_RESERVED_PREFIX: &[u8; 29] =
+  b"--_oden-parent-allowlist-mode";
+const ODEN_PARENT_ALLOWLIST_GENERATE_ARG: &[u8] =
+  b"--_oden-parent-allowlist-mode=generate";
+const ODEN_PARENT_ALLOWLIST_CHECK_ARG: &[u8] =
+  b"--_oden-parent-allowlist-mode=check";
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Classify the unmodified native argv units before any general CLI or Oden/Deno
+// initialization. Exact mode vectors remain fail-closed at their entrypoints
+// until the separately frozen role decoder and handler are implemented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OdenParentAllowlistRawDispatch {
+  Absent,
+  Generate,
+  Check,
+  Refuse,
+}
+
+pub fn classify_oden_parent_allowlist_raw_argv(
+  args: &[OsString],
+) -> OdenParentAllowlistRawDispatch {
+  if args.len() == 3 && os_str_eq_ascii(&args[1], b"compile") {
+    if os_str_eq_ascii(&args[2], ODEN_PARENT_ALLOWLIST_GENERATE_ARG) {
+      return OdenParentAllowlistRawDispatch::Generate;
+    }
+    if os_str_eq_ascii(&args[2], ODEN_PARENT_ALLOWLIST_CHECK_ARG) {
+      return OdenParentAllowlistRawDispatch::Check;
+    }
+  }
+
+  if args
+    .iter()
+    .skip(1)
+    .any(|arg| os_str_is_oden_parent_allowlist_reserved_family(arg))
+  {
+    OdenParentAllowlistRawDispatch::Refuse
+  } else {
+    OdenParentAllowlistRawDispatch::Absent
+  }
+}
+
+#[cfg(unix)]
+fn os_str_eq_ascii(value: &OsStr, expected: &[u8]) -> bool {
+  use std::os::unix::ffi::OsStrExt;
+
+  value.as_bytes() == expected
+}
+
+#[cfg(windows)]
+fn os_str_eq_ascii(value: &OsStr, expected: &[u8]) -> bool {
+  use std::os::windows::ffi::OsStrExt;
+
+  value
+    .encode_wide()
+    .eq(expected.iter().copied().map(u16::from))
+}
+
+#[cfg(unix)]
+fn os_str_is_oden_parent_allowlist_reserved_family(value: &OsStr) -> bool {
+  use std::os::unix::ffi::OsStrExt;
+
+  let units = value.as_bytes();
+  units.len() >= ODEN_PARENT_ALLOWLIST_RESERVED_PREFIX.len()
+    && units
+      .iter()
+      .take(ODEN_PARENT_ALLOWLIST_RESERVED_PREFIX.len())
+      .zip(ODEN_PARENT_ALLOWLIST_RESERVED_PREFIX)
+      .all(|(&actual, &expected)| actual.to_ascii_lowercase() == expected)
+}
+
+#[cfg(windows)]
+fn os_str_is_oden_parent_allowlist_reserved_family(value: &OsStr) -> bool {
+  use std::os::windows::ffi::OsStrExt;
+
+  let mut units = value.encode_wide();
+  ODEN_PARENT_ALLOWLIST_RESERVED_PREFIX
+    .iter()
+    .copied()
+    .all(|expected| {
+      units.next().is_some_and(|actual| {
+        let folded = if actual >= u16::from(b'A') && actual <= u16::from(b'Z') {
+          actual + u16::from(b'a' - b'A')
+        } else {
+          actual
+        };
+        folded == u16::from(expected)
+      })
+    })
+}
 
 const MAX_IJSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
@@ -1902,6 +1997,8 @@ fn validate_contract_path(path: &str) -> Result<(), OdenParentAllowlistError> {
 
 #[cfg(test)]
 mod tests {
+  use std::ffi::OsString;
+
   use super::*;
 
   const ZERO_DIGEST: &str =
@@ -1917,6 +2014,179 @@ mod tests {
       key: "phase",
       value: "runtime",
     }];
+
+  fn raw_argv<const N: usize>(args: [&str; N]) -> Vec<OsString> {
+    args.into_iter().map(OsString::from).collect()
+  }
+
+  #[test]
+  fn raw_allowlist_dispatch_admits_only_the_two_exact_vectors() {
+    for (selector, expected) in [
+      (
+        "--_oden-parent-allowlist-mode=generate",
+        OdenParentAllowlistRawDispatch::Generate,
+      ),
+      (
+        "--_oden-parent-allowlist-mode=check",
+        OdenParentAllowlistRawDispatch::Check,
+      ),
+    ] {
+      assert_eq!(
+        classify_oden_parent_allowlist_raw_argv(&raw_argv([
+          "arbitrary-argv-zero",
+          "compile",
+          selector,
+        ])),
+        expected,
+      );
+    }
+
+    for args in [
+      raw_argv(["deno", "compile", "--_oden-parent-allowlist-mode"]),
+      raw_argv(["deno", "compile", "--_oden-parent-allowlist-mode=other"]),
+      raw_argv(["deno", "compile", "--_ODEN-PARENT-ALLOWLIST-MODE=generate"]),
+      raw_argv([
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate\r",
+      ]),
+      raw_argv([
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate\n",
+      ]),
+      raw_argv(["deno", "Compile", "--_oden-parent-allowlist-mode=generate"]),
+      raw_argv([
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate-suffix",
+      ]),
+      raw_argv([
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode-extension=generate",
+      ]),
+      raw_argv(["deno", "--", "--_oden-parent-allowlist-mode=generate"]),
+      raw_argv(["deno", "--quiet", "--_oden-parent-allowlist-mode=generate"]),
+      raw_argv([
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode",
+        "generate",
+      ]),
+      raw_argv([
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate",
+        "--_oden-parent-allowlist-mode=generate",
+      ]),
+      raw_argv([
+        "deno",
+        "compile",
+        "src/main.ts",
+        "--_oden-parent-allowlist-mode=generate",
+      ]),
+      raw_argv([
+        "deno",
+        "compile",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--_oden-parent-allowlist-mode=generate",
+      ]),
+      raw_argv([
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate",
+        "src/main.ts",
+      ]),
+    ] {
+      assert_eq!(
+        classify_oden_parent_allowlist_raw_argv(&args),
+        OdenParentAllowlistRawDispatch::Refuse,
+        "{args:?}",
+      );
+    }
+  }
+
+  #[test]
+  fn raw_allowlist_dispatch_ignores_argv_zero_and_unrelated_arguments() {
+    for args in [
+      raw_argv(["deno"]),
+      raw_argv(["deno", "run", "src/main.ts"]),
+      raw_argv([
+        "--_oden-parent-allowlist-mode=generate",
+        "run",
+        "src/main.ts",
+      ]),
+      raw_argv(["deno", "compile", "--x_oden-parent-allowlist-mode=generate"]),
+    ] {
+      assert_eq!(
+        classify_oden_parent_allowlist_raw_argv(&args),
+        OdenParentAllowlistRawDispatch::Absent,
+        "{args:?}",
+      );
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn raw_allowlist_dispatch_scans_non_utf8_native_units_without_loss() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut reserved = ODEN_PARENT_ALLOWLIST_RESERVED_PREFIX.to_vec();
+    reserved.push(0xff);
+    assert_eq!(
+      classify_oden_parent_allowlist_raw_argv(&[
+        OsString::from("deno"),
+        OsString::from_vec(reserved),
+      ]),
+      OdenParentAllowlistRawDispatch::Refuse,
+    );
+
+    let mut unrelated = ODEN_PARENT_ALLOWLIST_RESERVED_PREFIX.to_vec();
+    unrelated[2] = 0xff;
+    assert_eq!(
+      classify_oden_parent_allowlist_raw_argv(&[
+        OsString::from("deno"),
+        OsString::from_vec(unrelated),
+      ]),
+      OdenParentAllowlistRawDispatch::Absent,
+    );
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn raw_allowlist_dispatch_scans_non_unicode_wide_units_without_loss() {
+    use std::os::windows::ffi::OsStringExt;
+
+    let mut reserved = ODEN_PARENT_ALLOWLIST_RESERVED_PREFIX
+      .iter()
+      .copied()
+      .map(u16::from)
+      .collect::<Vec<_>>();
+    reserved.push(0xd800);
+    assert_eq!(
+      classify_oden_parent_allowlist_raw_argv(&[
+        OsString::from("deno"),
+        OsString::from_wide(&reserved),
+      ]),
+      OdenParentAllowlistRawDispatch::Refuse,
+    );
+
+    let mut unrelated = ODEN_PARENT_ALLOWLIST_RESERVED_PREFIX
+      .iter()
+      .copied()
+      .map(u16::from)
+      .collect::<Vec<_>>();
+    unrelated[2] = 0x0100;
+    assert_eq!(
+      classify_oden_parent_allowlist_raw_argv(&[
+        OsString::from("deno"),
+        OsString::from_wide(&unrelated),
+      ]),
+      OdenParentAllowlistRawDispatch::Absent,
+    );
+  }
 
   fn zero_digest(field: &'static str) -> CanonicalSha256Digest {
     CanonicalSha256Digest::parse(field, ZERO_DIGEST).unwrap()
