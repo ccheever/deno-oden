@@ -12,8 +12,8 @@ pub mod worker;
 
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [tests] --
 // Cargo does not build `build.rs` as a test target. Include it only in this
-// library test harness so its dormant authenticated-commit grammar vectors run
-// under the ordinary `deno_lib` test command.
+// library test harness so its authenticated-commit grammar and selection
+// vectors run under the ordinary `deno_lib` test command.
 #[cfg(test)]
 #[allow(dead_code, reason = "test-only build-script module")]
 #[path = "build.rs"]
