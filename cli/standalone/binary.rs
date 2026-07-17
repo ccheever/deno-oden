@@ -12,6 +12,7 @@ use std::fs::File;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use capacity_builder::BytesAppendable;
 use deno_ast::MediaType;
@@ -48,6 +49,13 @@ use deno_lib::standalone::binary::SerializedWorkspaceResolver;
 use deno_lib::standalone::binary::SerializedWorkspaceResolverImportMap;
 use deno_lib::standalone::binary::SpecifierDataStore;
 use deno_lib::standalone::binary::SpecifierId;
+use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ENTRYPOINT_KEY;
+use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_PRIVATE_MODULE_SPECIFIER;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistError;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentImportAttributes;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentObservedImportAttribute as OdenParentProjectedImportAttribute;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentStaticImportEdge;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentStaticImportEdgeObservation;
 use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsDependencyKind;
 use deno_lib::standalone::virtual_fs::BuiltVfs;
 use deno_lib::standalone::virtual_fs::DENO_COMPILE_GLOBAL_NODE_MODULES_DIR_NAME;
@@ -321,6 +329,15 @@ struct OdenParentObservedRuntimeDependency {
   import_attributes: Vec<OdenParentObservedImportAttribute>,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OdenParentReleaseEntrypointCandidate {
+  entrypoint_specifier: ModuleSpecifier,
+  original_bytes: Arc<[u8]>,
+  runtime_dependencies: Vec<OdenParentObservedRuntimeDependency>,
+  static_import_edge: OdenParentStaticImportEdge,
+}
+
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 enum OdenParentRuntimeDependencyObservationError {
   #[error("invalid original module bytes: {0}")]
@@ -339,6 +356,16 @@ enum OdenParentRuntimeDependencyObservationError {
   GraphMismatch(String),
   #[error("deno_graph contains an unmatched dependency occurrence: {0}")]
   GraphLeftover(String),
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+enum OdenParentReleaseEntrypointCandidateError {
+  #[error("invalid release entrypoint graph fact: {0}")]
+  InvalidGraph(&'static str),
+  #[error(transparent)]
+  RuntimeDependency(#[from] OdenParentRuntimeDependencyObservationError),
+  #[error(transparent)]
+  StaticImportEdge(#[from] OdenParentAllowlistError),
 }
 
 #[derive(Debug)]
@@ -1071,15 +1098,191 @@ fn observe_oden_parent_runtime_dependencies(
   Ok(observations)
 }
 
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
+// Bind only the graph-owned release-entry bytes and exact private edge.
+#[allow(dead_code)]
+fn observe_oden_parent_release_entrypoint_candidate(
+  graph: &ModuleGraph,
+  entrypoint: &ModuleSpecifier,
+) -> Result<
+  OdenParentReleaseEntrypointCandidate,
+  OdenParentReleaseEntrypointCandidateError,
+> {
+  if entrypoint.scheme() != "file"
+    || entrypoint.query().is_some()
+    || entrypoint.fragment().is_some()
+  {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint is not one query-free and fragment-free file URL",
+    ));
+  }
+  if !graph.roots.contains(entrypoint) {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint is not an exact graph root",
+    ));
+  }
+  if graph.redirects.contains_key(entrypoint)
+    || graph.resolve(entrypoint) != entrypoint
+  {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint is redirected or aliased",
+    ));
+  }
+  let module = graph
+    .try_get(entrypoint)
+    .map_err(|_| {
+      OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "entrypoint module failed to load",
+      )
+    })?
+    .ok_or(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint module is absent",
+    ))?;
+  let deno_graph::Module::Js(module) = module else {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint is not a JavaScript-family graph module",
+    ));
+  };
+  if module.specifier != *entrypoint {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint module specifier differs from the exact graph root",
+    ));
+  }
+  if module.media_type != MediaType::TypeScript || module.is_script {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint is not one exact ESM TypeScript module",
+    ));
+  }
+  let original_bytes = module.source.try_get_original_bytes().ok_or(
+    OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint graph source does not retain its original bytes",
+    ),
+  )?;
+  let runtime_dependencies = observe_oden_parent_runtime_dependencies(
+    &module.specifier,
+    module.media_type,
+    original_bytes.as_ref(),
+    &module.dependencies,
+  )?;
+  if original_bytes.len() != 278 {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint original-byte length is not 278",
+    ));
+  }
+  let [private_dependency, main_dependency] = runtime_dependencies.as_slice()
+  else {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint does not have exactly two runtime dependencies",
+    ));
+  };
+  let private_occurrence_count = runtime_dependencies
+    .iter()
+    .filter(|dependency| {
+      dependency.raw_specifier == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+        || dependency.resolved_specifier.as_str()
+          == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+    })
+    .count();
+  if private_occurrence_count != 1 {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "private dependency does not occur exactly once",
+    ));
+  }
+  if private_dependency.kind != OdenParentVfsDependencyKind::StaticImport
+    || private_dependency.raw_specifier != ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+    || private_dependency.resolved_specifier.as_str()
+      != ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+    || private_dependency.source_byte_start != 121
+    || private_dependency.source_byte_end != 163
+    || !private_dependency.import_attributes.is_empty()
+  {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "dependency ordinal zero is not the exact private static import",
+    ));
+  }
+  if graph
+    .redirects
+    .contains_key(&private_dependency.resolved_specifier)
+    || graph.resolve(&private_dependency.resolved_specifier)
+      != &private_dependency.resolved_specifier
+  {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "private dependency resolved specifier is not graph-final",
+    ));
+  }
+  let expected_main_specifier = entrypoint.join("./main.ts").map_err(|_| {
+    OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "entrypoint cannot resolve the fixed main dependency",
+    )
+  })?;
+  if main_dependency.kind != OdenParentVfsDependencyKind::StaticImport
+    || main_dependency.raw_specifier != "./main.ts"
+    || main_dependency.resolved_specifier != expected_main_specifier
+    || main_dependency.source_byte_start != 188
+    || main_dependency.source_byte_end != 197
+    || !main_dependency.import_attributes.is_empty()
+  {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "dependency ordinal one is not the exact main static import",
+    ));
+  }
+  if graph
+    .redirects
+    .contains_key(&main_dependency.resolved_specifier)
+    || graph.resolve(&main_dependency.resolved_specifier)
+      != &main_dependency.resolved_specifier
+  {
+    return Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+      "main dependency resolved specifier is not graph-final",
+    ));
+  }
+
+  let projected_attributes = private_dependency
+    .import_attributes
+    .iter()
+    .map(|attribute| OdenParentProjectedImportAttribute {
+      key: attribute.key.as_str(),
+      value: attribute.value.as_str(),
+    })
+    .collect::<Vec<_>>();
+  let import_attributes =
+    OdenParentImportAttributes::from_observed_pairs(&projected_attributes)?;
+  let static_import_edge = OdenParentStaticImportEdge::from_observation(
+    OdenParentStaticImportEdgeObservation {
+      entrypoint_source_bytes: original_bytes.as_ref(),
+      dependency_ordinal: 0,
+      occurrence_count: private_occurrence_count as u64,
+      kind: private_dependency.kind,
+      raw_specifier: private_dependency.raw_specifier.as_str(),
+      resolved_specifier: private_dependency.resolved_specifier.as_str(),
+      referrer_key: ODEN_PARENT_ENTRYPOINT_KEY,
+      import_attributes: &import_attributes,
+      source_byte_start: private_dependency.source_byte_start,
+      source_byte_end: private_dependency.source_byte_end,
+    },
+  )?;
+
+  Ok(OdenParentReleaseEntrypointCandidate {
+    entrypoint_specifier: entrypoint.clone(),
+    original_bytes,
+    runtime_dependencies,
+    static_import_edge,
+  })
+}
+
 #[cfg(test)]
 mod oden_parent_runtime_dependency_observer_tests {
   use std::collections::HashMap;
 
+  use deno_graph::BuildOptions;
+  use deno_graph::GraphKind;
   use deno_graph::Import;
   use deno_graph::Position;
   use deno_graph::PositionRange;
   use deno_graph::Range;
   use deno_graph::ResolutionResolved;
+  use deno_graph::source::MemoryLoader;
+  use deno_graph::source::Source;
 
   use super::*;
 
@@ -1094,6 +1297,122 @@ mod oden_parent_runtime_dependency_observer_tests {
     "  Deno.exit(await main(Deno.args));\n",
     "}\n",
   );
+
+  #[derive(Clone, Copy)]
+  enum ReleaseGraphDependencyRedirect {
+    None,
+    Private,
+    Main,
+  }
+
+  fn release_graph(
+    entrypoint_text: &str,
+    entrypoint_source: &[u8],
+  ) -> (ModuleGraph, ModuleSpecifier) {
+    release_graph_with_dependency_redirect(
+      entrypoint_text,
+      entrypoint_source,
+      ReleaseGraphDependencyRedirect::None,
+    )
+  }
+
+  fn release_graph_with_dependency_redirect(
+    entrypoint_text: &str,
+    entrypoint_source: &[u8],
+    redirect: ReleaseGraphDependencyRedirect,
+  ) -> (ModuleGraph, ModuleSpecifier) {
+    let entrypoint = ModuleSpecifier::parse(entrypoint_text).unwrap();
+    let main_specifier = entrypoint.join("./main.ts").unwrap();
+    let redirected_main_specifier =
+      entrypoint.join("./redirected-main.ts").unwrap();
+    let extra_specifier = entrypoint.join("./x").unwrap();
+    let private_specifier =
+      ModuleSpecifier::parse(ODEN_PARENT_PRIVATE_MODULE_SPECIFIER).unwrap();
+    let redirected_private_specifier = ModuleSpecifier::parse(
+      "oden-internal:filesystem-parent-capture-v2-redirected",
+    )
+    .unwrap();
+    let module_source =
+      |specifier: &ModuleSpecifier, content: &[u8], javascript_header: bool| {
+        (
+          specifier.to_string(),
+          Source::Module {
+            specifier: specifier.to_string(),
+            maybe_headers: javascript_header.then(|| {
+              vec![(
+                "content-type".to_string(),
+                "application/javascript".to_string(),
+              )]
+            }),
+            content: content.to_vec(),
+          },
+        )
+      };
+    let mut sources = vec![
+      module_source(&entrypoint, entrypoint_source, false),
+      module_source(&extra_specifier, b"export default null;\n", true),
+    ];
+    if matches!(redirect, ReleaseGraphDependencyRedirect::Main) {
+      sources.push((
+        main_specifier.to_string(),
+        Source::Redirect(redirected_main_specifier.to_string()),
+      ));
+      sources.push(module_source(
+        &redirected_main_specifier,
+        b"export async function main() { return 0; }\n",
+        false,
+      ));
+    } else {
+      sources.push(module_source(
+        &main_specifier,
+        b"export async function main() { return 0; }\n",
+        false,
+      ));
+    }
+    if matches!(redirect, ReleaseGraphDependencyRedirect::Private) {
+      sources.push((
+        private_specifier.to_string(),
+        Source::Redirect(redirected_private_specifier.to_string()),
+      ));
+      sources.push(module_source(
+        &redirected_private_specifier,
+        b"export default null;\n",
+        true,
+      ));
+    } else {
+      sources.push(module_source(
+        &private_specifier,
+        b"export default null;\n",
+        true,
+      ));
+    }
+    let loader = MemoryLoader::new(sources, Vec::new());
+    let mut graph = ModuleGraph::new(GraphKind::CodeOnly);
+    deno_core::futures::executor::block_on(graph.build(
+      vec![entrypoint.clone()],
+      Vec::new(),
+      &loader,
+      BuildOptions::default(),
+    ));
+    (graph, entrypoint)
+  }
+
+  fn exact_line(code: &str, byte_length_with_lf: usize) -> String {
+    assert!(code.is_ascii());
+    assert!(code.len() < byte_length_with_lf);
+    format!(
+      "{code}{}\n",
+      " ".repeat(byte_length_with_lf - code.len() - 1)
+    )
+  }
+
+  fn utf16le_source(source: &str) -> Vec<u8> {
+    let mut bytes = vec![0xff, 0xfe];
+    for unit in source.encode_utf16() {
+      bytes.extend(unit.to_le_bytes());
+    }
+    bytes
+  }
 
   #[derive(Clone)]
   struct TestGraphOccurrence<'a> {
@@ -1294,6 +1613,303 @@ mod oden_parent_runtime_dependency_observer_tests {
     );
     assert_eq!(observed[0].source_byte_start, 121);
     assert_eq!(observed[0].source_byte_end, 163);
+  }
+
+  #[test]
+  fn oden_parent_release_entrypoint_candidate_binds_graph_bytes_and_edge() {
+    let (graph, entrypoint) = release_graph(
+      "file:///repo/src/release.ts",
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+    assert!(graph.valid().is_ok());
+    let graph_original_bytes = match graph.get(&entrypoint).unwrap() {
+      deno_graph::Module::Js(module) => {
+        module.source.try_get_original_bytes().unwrap()
+      }
+      _ => unreachable!(),
+    };
+
+    let first =
+      observe_oden_parent_release_entrypoint_candidate(&graph, &entrypoint)
+        .unwrap();
+    let second =
+      observe_oden_parent_release_entrypoint_candidate(&graph, &entrypoint)
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.entrypoint_specifier, entrypoint);
+    assert!(Arc::ptr_eq(&first.original_bytes, &graph_original_bytes));
+    assert_eq!(
+      first.original_bytes.as_ref(),
+      RELEASE_ENTRY_SOURCE.as_bytes()
+    );
+    assert_eq!(first.runtime_dependencies.len(), 2);
+    assert_eq!(
+      first.runtime_dependencies[0].raw_specifier,
+      ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+    );
+    assert_eq!(first.runtime_dependencies[0].source_byte_start, 121);
+    assert_eq!(first.runtime_dependencies[0].source_byte_end, 163);
+    assert_eq!(
+      first.runtime_dependencies[1].resolved_specifier,
+      entrypoint.join("./main.ts").unwrap()
+    );
+    assert_eq!(first.runtime_dependencies[1].source_byte_start, 188);
+    assert_eq!(first.runtime_dependencies[1].source_byte_end, 197);
+    assert_eq!(first.static_import_edge.canonical_jcs().unwrap().len(), 514);
+    assert_eq!(
+      first.static_import_edge.digest().unwrap().as_str(),
+      "sha256-QjCXbnZVWa11HTOJYfKV-tIL5iuvi2tuqLDEpi8MTG0"
+    );
+  }
+
+  #[test]
+  fn oden_parent_release_entrypoint_candidate_refuses_graph_identity_and_media()
+  {
+    let (graph, entrypoint) = release_graph(
+      "file:///repo/src/release.ts",
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+
+    let mut missing_root = graph.clone();
+    missing_root.roots.clear();
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &missing_root,
+        &entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "entrypoint is not an exact graph root"
+      ))
+    ));
+
+    let mut self_redirected = graph.clone();
+    self_redirected
+      .redirects
+      .insert(entrypoint.clone(), entrypoint.clone());
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &self_redirected,
+        &entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "entrypoint is redirected or aliased"
+      ))
+    ));
+
+    let mut redirected = graph;
+    redirected
+      .redirects
+      .insert(entrypoint.clone(), entrypoint.join("./main.ts").unwrap());
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &redirected,
+        &entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "entrypoint is redirected or aliased"
+      ))
+    ));
+
+    let (javascript_graph, javascript_entrypoint) = release_graph(
+      "file:///repo/src/release.js",
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &javascript_graph,
+        &javascript_entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "entrypoint is not one exact ESM TypeScript module"
+      ))
+    ));
+
+    let (direct_graph, direct_entrypoint) = release_graph(
+      "file:///repo/src/release.ts",
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+    let private_specifier =
+      ModuleSpecifier::parse(ODEN_PARENT_PRIVATE_MODULE_SPECIFIER).unwrap();
+    let mut self_redirected_private = direct_graph.clone();
+    self_redirected_private
+      .redirects
+      .insert(private_specifier.clone(), private_specifier);
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &self_redirected_private,
+        &direct_entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "private dependency resolved specifier is not graph-final"
+      ))
+    ));
+
+    let main_specifier = direct_entrypoint.join("./main.ts").unwrap();
+    let mut self_redirected_main = direct_graph;
+    self_redirected_main
+      .redirects
+      .insert(main_specifier.clone(), main_specifier);
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &self_redirected_main,
+        &direct_entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "main dependency resolved specifier is not graph-final"
+      ))
+    ));
+  }
+
+  #[test]
+  fn oden_parent_release_entrypoint_candidate_refuses_dependency_redirects() {
+    let (private_graph, private_entrypoint) =
+      release_graph_with_dependency_redirect(
+        "file:///repo/src/release.ts",
+        RELEASE_ENTRY_SOURCE.as_bytes(),
+        ReleaseGraphDependencyRedirect::Private,
+      );
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &private_graph,
+        &private_entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "private dependency resolved specifier is not graph-final"
+      ))
+    ));
+
+    let (main_graph, main_entrypoint) = release_graph_with_dependency_redirect(
+      "file:///repo/src/release.ts",
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+      ReleaseGraphDependencyRedirect::Main,
+    );
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &main_graph,
+        &main_entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "main dependency resolved specifier is not graph-final"
+      ))
+    ));
+  }
+
+  #[test]
+  fn oden_parent_release_entrypoint_candidate_refuses_ineligible_original_bytes()
+   {
+    let bom_source =
+      [b"\xef\xbb\xbf".as_slice(), RELEASE_ENTRY_SOURCE.as_bytes()].concat();
+    let (bom_graph, bom_entrypoint) =
+      release_graph("file:///repo/src/release.ts", &bom_source);
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &bom_graph,
+        &bom_entrypoint,
+      ),
+      Err(
+        OdenParentReleaseEntrypointCandidateError::RuntimeDependency(
+          OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(_)
+        )
+      )
+    ));
+
+    let utf16_source = utf16le_source(RELEASE_ENTRY_SOURCE);
+    let (utf16_graph, utf16_entrypoint) =
+      release_graph("file:///repo/src/release.ts", &utf16_source);
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &utf16_graph,
+        &utf16_entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "entrypoint graph source does not retain its original bytes"
+      ))
+    ));
+  }
+
+  #[test]
+  fn oden_parent_release_entrypoint_candidate_refuses_dependency_shape_changes()
+  {
+    let private_line = concat!(
+      "import capture from \"",
+      "oden-internal:filesystem-parent-capture-v2",
+      "\";\n",
+    );
+    let main_line = "import { main } from \"./main.ts\";\n";
+
+    let missing_private = RELEASE_ENTRY_SOURCE.replace(
+      private_line,
+      &exact_line("// private import removed", private_line.len()),
+    );
+    assert_eq!(missing_private.len(), 278);
+    let (missing_graph, missing_entrypoint) =
+      release_graph("file:///repo/src/release.ts", missing_private.as_bytes());
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &missing_graph,
+        &missing_entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "entrypoint does not have exactly two runtime dependencies"
+      ))
+    ));
+
+    let extra_dependency = RELEASE_ENTRY_SOURCE.replace(
+      "void capture;\n",
+      &exact_line("import \"./x\";", "void capture;\n".len()),
+    );
+    assert_eq!(extra_dependency.len(), 278);
+    let (extra_graph, extra_entrypoint) =
+      release_graph("file:///repo/src/release.ts", extra_dependency.as_bytes());
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &extra_graph,
+        &extra_entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "entrypoint does not have exactly two runtime dependencies"
+      ))
+    ));
+
+    let reordered = RELEASE_ENTRY_SOURCE.replacen(
+      &format!("{private_line}{main_line}"),
+      &format!("{main_line}{private_line}"),
+      1,
+    );
+    assert_eq!(reordered.len(), 278);
+    let (reordered_graph, reordered_entrypoint) =
+      release_graph("file:///repo/src/release.ts", reordered.as_bytes());
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &reordered_graph,
+        &reordered_entrypoint,
+      ),
+      Err(OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+        "dependency ordinal zero is not the exact private static import"
+      ))
+    ));
+
+    let computed = RELEASE_ENTRY_SOURCE.replace(
+      private_line,
+      &exact_line(
+        "const capture = await import(globalThis.__oden_specifier);",
+        private_line.len(),
+      ),
+    );
+    assert_eq!(computed.len(), 278);
+    let (computed_graph, computed_entrypoint) =
+      release_graph("file:///repo/src/release.ts", computed.as_bytes());
+    assert!(matches!(
+      observe_oden_parent_release_entrypoint_candidate(
+        &computed_graph,
+        &computed_entrypoint,
+      ),
+      Err(
+        OdenParentReleaseEntrypointCandidateError::RuntimeDependency(
+          OdenParentRuntimeDependencyObservationError::UnsupportedAst(_)
+        )
+      )
+    ));
   }
 
   #[test]
