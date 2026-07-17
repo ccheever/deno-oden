@@ -476,6 +476,20 @@ struct RetainedContractFiles {
   inventory: ContractInventory,
 }
 
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Compose only the exact three dormant byte inventories without producing an
+// allowlist, generated output, or raw-dispatch capability.
+/// Owned byte snapshots of the three reviewed literal inventories. This
+/// composition is not a coherent repository snapshot or release authority and
+/// has no rendering or output behavior.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+struct RetainedContractByteBundle {
+  capture: RetainedContractFiles,
+  source_closure: RetainedContractFiles,
+  release: RetainedContractFiles,
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl RetainedContractFiles {
   #[allow(dead_code)]
@@ -784,12 +798,59 @@ fn load_retained_contract_files(
   )
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn load_retained_contract_byte_bundle_with<O>(
+  mut open_root: O,
+) -> Result<RetainedContractByteBundle, OdenParentRetainedContractError>
+where
+  O: FnMut() -> Result<RetainedRepositoryRoot, OdenParentRetainedContractError>,
+{
+  let capture = load_retained_contract_files_with(
+    ODEN_PARENT_CAPTURE_CONTRACT_PATHS,
+    ODEN_PARENT_RETAINED_CONTRACT_FILE_LIMITS,
+    || open_root(),
+    |_| {},
+  )?;
+  let source_closure = load_retained_contract_files_with(
+    ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS,
+    ODEN_PARENT_RETAINED_CONTRACT_FILE_LIMITS,
+    || open_root(),
+    |_| {},
+  )?;
+  let release = load_retained_contract_files_with(
+    ODEN_PARENT_RELEASE_CONTRACT_PATHS,
+    ODEN_PARENT_RETAINED_CONTRACT_FILE_LIMITS,
+    || open_root(),
+    |_| {},
+  )?;
+
+  Ok(RetainedContractByteBundle {
+    capture,
+    source_closure,
+    release,
+  })
+}
+
+/// Dormant, output-free composition of the exact three retained inventories.
+/// Its owned bytes and inventory rows confer no repository, build, or release
+/// authority and are not connected to either raw dispatch mode.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+fn load_retained_contract_byte_bundle(
+) -> Result<RetainedContractByteBundle, OdenParentRetainedContractError> {
+  load_retained_contract_byte_bundle_with(
+    RetainedRepositoryRoot::open_current,
+  )
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   use std::cell::Cell;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use std::os::unix::fs::MetadataExt;
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   use std::os::unix::fs::PermissionsExt;
 
@@ -1066,6 +1127,256 @@ mod tests {
       || RetainedRepositoryRoot::open_path(root),
       post_read_hook,
     )
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn retained_fixture_bytes(snapshot: &str, path: &str) -> Vec<u8> {
+    format!("{snapshot} retained snapshot for {path}\n").into_bytes()
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn materialize_retained_contract_tree(root: &Path, snapshot: &str) {
+    for path in ODEN_PARENT_CAPTURE_CONTRACT_PATHS
+      .iter()
+      .chain(ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS)
+      .chain(ODEN_PARENT_RELEASE_CONTRACT_PATHS)
+    {
+      let destination = root.join(path);
+      if destination.exists() {
+        continue;
+      }
+      std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+      std::fs::write(destination, retained_fixture_bytes(snapshot, path))
+        .unwrap();
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn load_bundle_from_test_root(
+    root: &Path,
+  ) -> Result<RetainedContractByteBundle, OdenParentRetainedContractError> {
+    load_retained_contract_byte_bundle_with(|| {
+      RetainedRepositoryRoot::open_path(root)
+    })
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn assert_retained_partition(
+    retained: &RetainedContractFiles,
+    expected_paths: &[&str],
+    expected_snapshot: &str,
+  ) {
+    let file_paths = retained
+      .files
+      .iter()
+      .map(|file| file.path.as_str())
+      .collect::<Vec<_>>();
+    assert_eq!(file_paths, expected_paths);
+    let inventory_paths = retained
+      .inventory()
+      .rows()
+      .iter()
+      .map(|row| row.path())
+      .collect::<Vec<_>>();
+    assert_eq!(inventory_paths, expected_paths);
+
+    for (file, expected_path) in
+      retained.files.iter().zip(expected_paths.iter().copied())
+    {
+      let expected_bytes =
+        retained_fixture_bytes(expected_snapshot, expected_path);
+      assert_eq!(file.bytes, expected_bytes);
+      let row = retained
+        .inventory()
+        .rows()
+        .iter()
+        .find(|row| row.path() == expected_path)
+        .unwrap();
+      assert_eq!(
+        row.byte_digest().as_str(),
+        raw_sha256_digest(&expected_bytes).as_str()
+      );
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn assert_generated_paths_absent(root: &Path) {
+    for path in ODEN_PARENT_GENERATED_PATHS {
+      match std::fs::symlink_metadata(root.join(path)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => panic!("unexpected output {path}"),
+        Err(error) => panic!("failed to inspect {path}: {error}"),
+      }
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  struct GeneratedPathSentinel {
+    path: String,
+    bytes: Vec<u8>,
+    device: u64,
+    inode: u64,
+    mode: u32,
+    links: u64,
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn seed_generated_path_sentinels(
+    root: &Path,
+  ) -> Vec<GeneratedPathSentinel> {
+    ODEN_PARENT_GENERATED_PATHS
+      .iter()
+      .enumerate()
+      .map(|(index, path)| {
+        let destination = root.join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        let bytes = format!("sentinel-{index}\n").into_bytes();
+        std::fs::write(&destination, &bytes).unwrap();
+        let metadata = std::fs::symlink_metadata(&destination).unwrap();
+        assert!(metadata.file_type().is_file());
+        GeneratedPathSentinel {
+          path: path.to_string(),
+          bytes,
+          device: metadata.dev(),
+          inode: metadata.ino(),
+          mode: metadata.mode(),
+          links: metadata.nlink(),
+        }
+      })
+      .collect()
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn assert_generated_path_sentinels_unchanged(
+    root: &Path,
+    sentinels: &[GeneratedPathSentinel],
+  ) {
+    for sentinel in sentinels {
+      let destination = root.join(&sentinel.path);
+      let metadata = std::fs::symlink_metadata(&destination).unwrap();
+      assert!(metadata.file_type().is_file());
+      assert_eq!(metadata.dev(), sentinel.device);
+      assert_eq!(metadata.ino(), sentinel.inode);
+      assert_eq!(metadata.mode(), sentinel.mode);
+      assert_eq!(metadata.nlink(), sentinel.links);
+      assert_eq!(std::fs::read(destination).unwrap(), sentinel.bytes);
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn retained_bundle_preserves_exact_partitions_order_and_owned_snapshots() {
+    let capture_root = tempfile::tempdir().unwrap();
+    let source_closure_root = tempfile::tempdir().unwrap();
+    let release_root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(capture_root.path(), "capture-root");
+    materialize_retained_contract_tree(
+      source_closure_root.path(),
+      "source-closure-root",
+    );
+    materialize_retained_contract_tree(release_root.path(), "release-root");
+
+    let mut roots = [
+      capture_root.path(),
+      source_closure_root.path(),
+      release_root.path(),
+    ]
+    .into_iter();
+    let bundle = load_retained_contract_byte_bundle_with(|| {
+      RetainedRepositoryRoot::open_path(roots.next().unwrap())
+    })
+    .unwrap();
+    assert!(roots.next().is_none());
+    assert_retained_partition(
+      &bundle.capture,
+      ODEN_PARENT_CAPTURE_CONTRACT_PATHS,
+      "capture-root",
+    );
+    assert_retained_partition(
+      &bundle.source_closure,
+      ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS,
+      "source-closure-root",
+    );
+    assert_retained_partition(
+      &bundle.release,
+      ODEN_PARENT_RELEASE_CONTRACT_PATHS,
+      "release-root",
+    );
+
+    let shared_path = ODEN_PARENT_CAPTURE_CONTRACT_PATHS[0];
+    assert!(ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS.contains(&shared_path));
+    assert!(ODEN_PARENT_RELEASE_CONTRACT_PATHS.contains(&shared_path));
+    for root in [
+      capture_root.path(),
+      source_closure_root.path(),
+      release_root.path(),
+    ] {
+      std::fs::write(root.join(shared_path), b"later tree bytes\n").unwrap();
+    }
+
+    assert_retained_partition(
+      &bundle.capture,
+      ODEN_PARENT_CAPTURE_CONTRACT_PATHS,
+      "capture-root",
+    );
+    assert_retained_partition(
+      &bundle.source_closure,
+      ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS,
+      "source-closure-root",
+    );
+    assert_retained_partition(
+      &bundle.release,
+      ODEN_PARENT_RELEASE_CONTRACT_PATHS,
+      "release-root",
+    );
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn retained_bundle_refuses_a_missing_member_in_each_partition() {
+    for missing_path in [
+      "schemas/capsec/rev2/filesystem-candidate-arena.schema.json",
+      "schemas/capsec/rev2/filesystem-linked-image-manifest.schema.json",
+      "release.json",
+    ] {
+      let root = tempfile::tempdir().unwrap();
+      materialize_retained_contract_tree(root.path(), "missing-member-root");
+      std::fs::remove_file(root.path().join(missing_path)).unwrap();
+      let sentinels = seed_generated_path_sentinels(root.path());
+
+      let result = load_bundle_from_test_root(root.path());
+      assert!(matches!(
+        result,
+        Err(OdenParentRetainedContractError::OpenComponent {
+          ref path,
+          ..
+        }) if path == missing_path
+      ));
+      assert_generated_path_sentinels_unchanged(
+        root.path(),
+        &sentinels,
+      );
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn retained_bundle_has_no_generated_output_behavior() {
+    let absent_root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(absent_root.path(), "absent-root");
+    assert_generated_paths_absent(absent_root.path());
+    load_bundle_from_test_root(absent_root.path()).unwrap();
+    assert_generated_paths_absent(absent_root.path());
+
+    let sentinel_root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(sentinel_root.path(), "sentinel-root");
+    let sentinels = seed_generated_path_sentinels(sentinel_root.path());
+
+    load_bundle_from_test_root(sentinel_root.path()).unwrap();
+    assert_generated_path_sentinels_unchanged(
+      sentinel_root.path(),
+      &sentinels,
+    );
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
