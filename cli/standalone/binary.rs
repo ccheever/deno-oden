@@ -338,6 +338,48 @@ struct OdenParentReleaseEntrypointCandidate {
   static_import_edge: OdenParentStaticImportEdge,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OdenParentOrdinaryEsmMediaType {
+  JavaScript,
+  TypeScript,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OdenParentOrdinaryEsmDependencyTargetKind {
+  JavaScript,
+  TypeScript,
+  Json,
+  Wasm,
+  NodeBuiltin,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OdenParentGraphRedirectHop {
+  requested_specifier: ModuleSpecifier,
+  redirected_specifier: ModuleSpecifier,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OdenParentOrdinaryEsmRuntimeDependencyCandidate {
+  observation: OdenParentObservedRuntimeDependency,
+  redirect_chain: Vec<OdenParentGraphRedirectHop>,
+  graph_final_specifier: ModuleSpecifier,
+  target_kind: OdenParentOrdinaryEsmDependencyTargetKind,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OdenParentOrdinaryEsmGraphModuleCandidate {
+  graph_final_module_specifier: ModuleSpecifier,
+  media_type: OdenParentOrdinaryEsmMediaType,
+  original_bytes: Arc<[u8]>,
+  runtime_dependencies: Vec<OdenParentOrdinaryEsmRuntimeDependencyCandidate>,
+}
+
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 enum OdenParentRuntimeDependencyObservationError {
   #[error("invalid original module bytes: {0}")]
@@ -366,6 +408,14 @@ enum OdenParentReleaseEntrypointCandidateError {
   RuntimeDependency(#[from] OdenParentRuntimeDependencyObservationError),
   #[error(transparent)]
   StaticImportEdge(#[from] OdenParentAllowlistError),
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+enum OdenParentOrdinaryEsmGraphModuleCandidateError {
+  #[error("invalid ordinary ESM graph fact: {0}")]
+  InvalidGraph(&'static str),
+  #[error(transparent)]
+  RuntimeDependency(#[from] OdenParentRuntimeDependencyObservationError),
 }
 
 #[derive(Debug)]
@@ -1098,6 +1148,330 @@ fn observe_oden_parent_runtime_dependencies(
   Ok(observations)
 }
 
+fn project_oden_parent_graph_redirect_chain(
+  graph: &ModuleGraph,
+  start: &ModuleSpecifier,
+) -> Result<
+  (Vec<OdenParentGraphRedirectHop>, ModuleSpecifier),
+  OdenParentOrdinaryEsmGraphModuleCandidateError,
+> {
+  let mut seen = HashSet::new();
+  let mut current = start.clone();
+  seen.insert(current.clone());
+  let mut redirect_chain = Vec::new();
+  while let Some(next) = graph.redirects.get(&current) {
+    if !seen.insert(next.clone()) {
+      return Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency redirect chain contains a self redirect or cycle",
+        ),
+      );
+    }
+    redirect_chain.push(OdenParentGraphRedirectHop {
+      requested_specifier: current,
+      redirected_specifier: next.clone(),
+    });
+    current = next.clone();
+  }
+  if graph.resolve(start) != &current {
+    return Err(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "independent dependency redirect walk differs from graph resolution",
+      ),
+    );
+  }
+  Ok((redirect_chain, current))
+}
+
+fn oden_parent_is_candidate_jsr_redirect_chain(
+  redirect_chain: &[OdenParentGraphRedirectHop],
+) -> bool {
+  let [hop] = redirect_chain else {
+    return false;
+  };
+  hop.requested_specifier.scheme() == "jsr"
+    && hop.requested_specifier.query().is_none()
+    && hop.requested_specifier.fragment().is_none()
+    && hop.redirected_specifier.scheme() == "https"
+    && hop.redirected_specifier.host_str() == Some("jsr.io")
+    && hop.redirected_specifier.username().is_empty()
+    && hop.redirected_specifier.password().is_none()
+    && hop.redirected_specifier.port().is_none()
+    && hop.redirected_specifier.query().is_none()
+    && hop.redirected_specifier.fragment().is_none()
+}
+
+fn oden_parent_graph_final_has_candidate_jsr_request(
+  graph: &ModuleGraph,
+  graph_final_specifier: &ModuleSpecifier,
+) -> bool {
+  graph.redirects.keys().any(|request| {
+    request.scheme() == "jsr"
+      && project_oden_parent_graph_redirect_chain(graph, request)
+        .ok()
+        .is_some_and(|(redirect_chain, candidate_final)| {
+          candidate_final == *graph_final_specifier
+            && oden_parent_is_candidate_jsr_redirect_chain(&redirect_chain)
+        })
+  })
+}
+
+fn oden_parent_ordinary_esm_dependency_target_kind(
+  target: &deno_graph::Module,
+  graph_final_specifier: &ModuleSpecifier,
+) -> Result<
+  OdenParentOrdinaryEsmDependencyTargetKind,
+  OdenParentOrdinaryEsmGraphModuleCandidateError,
+> {
+  if target.specifier() != graph_final_specifier {
+    return Err(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency target module specifier differs from graph-final specifier",
+      ),
+    );
+  }
+  match target {
+    deno_graph::Module::Js(target) => {
+      if target.is_script {
+        return Err(
+          OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+            "dependency target is a script rather than ESM",
+          ),
+        );
+      }
+      match target.media_type {
+        MediaType::JavaScript => {
+          Ok(OdenParentOrdinaryEsmDependencyTargetKind::JavaScript)
+        }
+        MediaType::TypeScript => {
+          Ok(OdenParentOrdinaryEsmDependencyTargetKind::TypeScript)
+        }
+        _ => Err(
+          OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+            "dependency JavaScript-family target has an unadmitted media type",
+          ),
+        ),
+      }
+    }
+    deno_graph::Module::Json(target)
+      if target.media_type == MediaType::Json =>
+    {
+      Ok(OdenParentOrdinaryEsmDependencyTargetKind::Json)
+    }
+    deno_graph::Module::Wasm(_) => {
+      Ok(OdenParentOrdinaryEsmDependencyTargetKind::Wasm)
+    }
+    deno_graph::Module::Node(target) => {
+      let exact_specifier = format!("node:{}", target.module_name);
+      if target.module_name.is_empty()
+        || graph_final_specifier.query().is_some()
+        || graph_final_specifier.fragment().is_some()
+        || graph_final_specifier.as_str() != exact_specifier
+      {
+        return Err(
+          OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+            "dependency target is not an exact node builtin leaf",
+          ),
+        );
+      }
+      Ok(OdenParentOrdinaryEsmDependencyTargetKind::NodeBuiltin)
+    }
+    deno_graph::Module::Json(_)
+    | deno_graph::Module::Npm(_)
+    | deno_graph::Module::External(_) => Err(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency target graph module kind is not admitted",
+      ),
+    ),
+  }
+}
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
+// Retain only one graph-final ordinary ESM module candidate and its exact edges.
+#[allow(dead_code)]
+fn observe_oden_parent_ordinary_esm_graph_module_candidate(
+  graph: &ModuleGraph,
+  module_specifier: &ModuleSpecifier,
+) -> Result<
+  OdenParentOrdinaryEsmGraphModuleCandidate,
+  OdenParentOrdinaryEsmGraphModuleCandidateError,
+> {
+  if graph.graph_kind() != deno_graph::GraphKind::CodeOnly {
+    return Err(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module graph is not CodeOnly",
+      ),
+    );
+  }
+  if module_specifier.query().is_some()
+    || module_specifier.fragment().is_some()
+  {
+    return Err(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module specifier has a query or fragment",
+      ),
+    );
+  }
+  if graph.redirects.contains_key(module_specifier)
+    || graph.resolve(module_specifier) != module_specifier
+  {
+    return Err(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module specifier is redirected or aliased rather than graph-final",
+      ),
+    );
+  }
+  let input_scheme_is_admitted = module_specifier.scheme() == "file"
+    || (module_specifier.scheme() == "https"
+      && oden_parent_graph_final_has_candidate_jsr_request(
+        graph,
+        module_specifier,
+      ));
+  if !input_scheme_is_admitted {
+    return Err(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module specifier is neither a direct file nor a candidate JSR registry target",
+      ),
+    );
+  }
+
+  let module = graph
+    .try_get(module_specifier)
+    .map_err(|_| {
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module graph target failed to load",
+      )
+    })?
+    .ok_or(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module graph target is absent",
+      ),
+    )?;
+  let deno_graph::Module::Js(module) = module else {
+    return Err(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module graph target is not JavaScript-family",
+      ),
+    );
+  };
+  if module.specifier != *module_specifier {
+    return Err(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module row specifier differs from supplied graph-final specifier",
+      ),
+    );
+  }
+  if module.is_script {
+    return Err(
+      OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module graph target is a script rather than ESM",
+      ),
+    );
+  }
+  let media_type = match module.media_type {
+    MediaType::JavaScript => OdenParentOrdinaryEsmMediaType::JavaScript,
+    MediaType::TypeScript => OdenParentOrdinaryEsmMediaType::TypeScript,
+    _ => {
+      return Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "module graph target is not JavaScript or TypeScript",
+        ),
+      );
+    }
+  };
+  let original_bytes = module.source.try_get_original_bytes().ok_or(
+    OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+      "module graph source does not retain its original bytes",
+    ),
+  )?;
+  let observed_runtime_dependencies =
+    observe_oden_parent_runtime_dependencies(
+      &module.specifier,
+      module.media_type,
+      original_bytes.as_ref(),
+      &module.dependencies,
+    )?;
+
+  let mut runtime_dependencies =
+    Vec::with_capacity(observed_runtime_dependencies.len());
+  for observation in observed_runtime_dependencies {
+    let (redirect_chain, graph_final_specifier) =
+      project_oden_parent_graph_redirect_chain(
+        graph,
+        &observation.resolved_specifier,
+      )?;
+    if observation.raw_specifier == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+      || observation.resolved_specifier.as_str()
+        == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+      || graph_final_specifier.as_str()
+        == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+      || redirect_chain.iter().any(|hop| {
+        hop.requested_specifier.as_str()
+          == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+          || hop.redirected_specifier.as_str()
+            == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+      })
+    {
+      return Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "ordinary module depends on the private Oden internal target",
+        ),
+      );
+    }
+    if graph_final_specifier.query().is_some()
+      || graph_final_specifier.fragment().is_some()
+    {
+      return Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency graph-final specifier has a query or fragment",
+        ),
+      );
+    }
+    let candidate_jsr_redirect =
+      oden_parent_is_candidate_jsr_redirect_chain(&redirect_chain);
+    let admitted_direct_scheme = redirect_chain.is_empty()
+      && matches!(graph_final_specifier.scheme(), "file" | "node");
+    if !admitted_direct_scheme && !candidate_jsr_redirect {
+      return Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency is not a direct file/node target or candidate JSR redirect chain",
+        ),
+      );
+    }
+    let target = graph
+      .try_get(&graph_final_specifier)
+      .map_err(|_| {
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency graph-final target failed to load",
+        )
+      })?
+      .ok_or(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency graph-final target is absent",
+        ),
+      )?;
+    let target_kind = oden_parent_ordinary_esm_dependency_target_kind(
+      target,
+      &graph_final_specifier,
+    )?;
+    runtime_dependencies.push(
+      OdenParentOrdinaryEsmRuntimeDependencyCandidate {
+        observation,
+        redirect_chain,
+        graph_final_specifier,
+        target_kind,
+      },
+    );
+  }
+
+  Ok(OdenParentOrdinaryEsmGraphModuleCandidate {
+    graph_final_module_specifier: module_specifier.clone(),
+    media_type,
+    original_bytes,
+    runtime_dependencies,
+  })
+}
+
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
 // Bind only the graph-owned release-entry bytes and exact private edge.
 #[allow(dead_code)]
@@ -1397,6 +1771,53 @@ mod oden_parent_runtime_dependency_observer_tests {
     (graph, entrypoint)
   }
 
+  type TestModuleSource = (String, Source<String, Vec<u8>>);
+
+  fn test_module_source(
+    specifier: &str,
+    content: &[u8],
+    content_type: Option<&str>,
+  ) -> TestModuleSource {
+    (
+      specifier.to_string(),
+      Source::Module {
+        specifier: specifier.to_string(),
+        maybe_headers: content_type.map(|content_type| {
+          vec![("content-type".to_string(), content_type.to_string())]
+        }),
+        content: content.to_vec(),
+      },
+    )
+  }
+
+  fn ordinary_esm_graph(
+    graph_kind: GraphKind,
+    module_specifier: &str,
+    module_source: &[u8],
+    module_content_type: Option<&str>,
+    mut dependency_sources: Vec<TestModuleSource>,
+    skip_dynamic_deps: bool,
+  ) -> (ModuleGraph, ModuleSpecifier) {
+    let module_specifier = ModuleSpecifier::parse(module_specifier).unwrap();
+    dependency_sources.push(test_module_source(
+      module_specifier.as_str(),
+      module_source,
+      module_content_type,
+    ));
+    let loader = MemoryLoader::new(dependency_sources, Vec::new());
+    let mut graph = ModuleGraph::new(graph_kind);
+    deno_core::futures::executor::block_on(graph.build(
+      vec![module_specifier.clone()],
+      Vec::new(),
+      &loader,
+      BuildOptions {
+        skip_dynamic_deps,
+        ..Default::default()
+      },
+    ));
+    (graph, module_specifier)
+  }
+
   fn exact_line(code: &str, byte_length_with_lf: usize) -> String {
     assert!(code.is_ascii());
     assert!(code.len() < byte_length_with_lf);
@@ -1613,6 +2034,607 @@ mod oden_parent_runtime_dependency_observer_tests {
     );
     assert_eq!(observed[0].source_byte_start, 121);
     assert_eq!(observed[0].source_byte_end, 163);
+  }
+
+  #[test]
+  fn oden_parent_ordinary_esm_candidate_retains_ts_js_edges_and_graph_bytes() {
+    let source = concat!(
+      "import \"./dep.ts\";\n",
+      "export { value } from \"./export.js\";\n",
+      "const dynamic = import(\"./dynamic.ts\");\n",
+      "import { readFile } from \"node:fs\";\n",
+    );
+    let (graph, module_specifier) = ordinary_esm_graph(
+      GraphKind::CodeOnly,
+      "file:///repo/src/ordinary.ts",
+      source.as_bytes(),
+      None,
+      vec![
+        test_module_source(
+          "file:///repo/src/dep.ts",
+          b"export const dep = 1;\n",
+          None,
+        ),
+        test_module_source(
+          "file:///repo/src/export.js",
+          b"export const value = 2;\n",
+          Some("application/javascript"),
+        ),
+        test_module_source(
+          "file:///repo/src/dynamic.ts",
+          b"export const dynamic = 3;\n",
+          None,
+        ),
+      ],
+      false,
+    );
+    let graph_original_bytes = match graph.get(&module_specifier).unwrap() {
+      deno_graph::Module::Js(module) => {
+        module.source.try_get_original_bytes().unwrap()
+      }
+      _ => unreachable!(),
+    };
+
+    let first = observe_oden_parent_ordinary_esm_graph_module_candidate(
+      &graph,
+      &module_specifier,
+    )
+    .unwrap();
+    let second = observe_oden_parent_ordinary_esm_graph_module_candidate(
+      &graph,
+      &module_specifier,
+    )
+    .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(
+      first.graph_final_module_specifier,
+      ModuleSpecifier::parse("file:///repo/src/ordinary.ts").unwrap()
+    );
+    assert_eq!(first.media_type, OdenParentOrdinaryEsmMediaType::TypeScript);
+    assert!(Arc::ptr_eq(&first.original_bytes, &graph_original_bytes));
+    assert_eq!(first.original_bytes.as_ref(), source.as_bytes());
+    assert_eq!(first.runtime_dependencies.len(), 4);
+    assert_eq!(
+      first
+        .runtime_dependencies
+        .iter()
+        .map(|dependency| dependency.observation.kind)
+        .collect::<Vec<_>>(),
+      vec![
+        OdenParentVfsDependencyKind::StaticImport,
+        OdenParentVfsDependencyKind::StaticExport,
+        OdenParentVfsDependencyKind::DynamicImport,
+        OdenParentVfsDependencyKind::StaticImport,
+      ]
+    );
+    let expected = [
+      (
+        "./dep.ts",
+        "file:///repo/src/dep.ts",
+        OdenParentOrdinaryEsmDependencyTargetKind::TypeScript,
+      ),
+      (
+        "./export.js",
+        "file:///repo/src/export.js",
+        OdenParentOrdinaryEsmDependencyTargetKind::JavaScript,
+      ),
+      (
+        "./dynamic.ts",
+        "file:///repo/src/dynamic.ts",
+        OdenParentOrdinaryEsmDependencyTargetKind::TypeScript,
+      ),
+      (
+        "node:fs",
+        "node:fs",
+        OdenParentOrdinaryEsmDependencyTargetKind::NodeBuiltin,
+      ),
+    ];
+    for (dependency, (raw, graph_final, target_kind)) in
+      first.runtime_dependencies.iter().zip(expected)
+    {
+      assert_eq!(dependency.observation.raw_specifier, raw);
+      assert_eq!(dependency.graph_final_specifier.as_str(), graph_final);
+      assert_eq!(dependency.target_kind, target_kind);
+      assert!(dependency.redirect_chain.is_empty());
+      let full_start = double_quoted_start(source, raw);
+      assert_eq!(
+        dependency.observation.source_byte_start,
+        (full_start + 1) as u64
+      );
+      assert_eq!(
+        dependency.observation.source_byte_end,
+        (full_start + 1 + raw.len()) as u64
+      );
+    }
+
+    let javascript_source = "import \"./dep.js\";\nexport const root = 1;\n";
+    let (javascript_graph, javascript_specifier) = ordinary_esm_graph(
+      GraphKind::CodeOnly,
+      "file:///repo/src/ordinary.js",
+      javascript_source.as_bytes(),
+      Some("application/javascript"),
+      vec![test_module_source(
+        "file:///repo/src/dep.js",
+        b"export const dep = 1;\n",
+        Some("application/javascript"),
+      )],
+      false,
+    );
+    let javascript =
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &javascript_graph,
+        &javascript_specifier,
+      )
+      .unwrap();
+    assert_eq!(
+      javascript.media_type,
+      OdenParentOrdinaryEsmMediaType::JavaScript
+    );
+  }
+
+  #[tokio::test]
+  async fn oden_parent_ordinary_esm_candidate_retains_candidate_jsr_redirect()
+  {
+    use deno_graph::packages::JsrPackageInfo;
+    use deno_graph::packages::JsrPackageInfoVersion;
+    use deno_graph::packages::JsrPackageVersionInfo;
+    use deno_semver::Version;
+
+    let root = ModuleSpecifier::parse("file:///repo/src/jsr-user.ts").unwrap();
+    let source = "import \"jsr:@package/foo@1.0.0\";\n";
+    let final_specifier = ModuleSpecifier::parse(
+      "https://jsr.io/@package/foo/1.0.0/mod.ts",
+    )
+    .unwrap();
+    let mut loader = MemoryLoader::default();
+    loader.add_source_with_text(&root, source);
+    loader.add_jsr_package_info(
+      "@package/foo",
+      &JsrPackageInfo {
+        versions: HashMap::from([(
+          Version::parse_standard("1.0.0").unwrap(),
+          JsrPackageInfoVersion::default(),
+        )]),
+        latest: None,
+      },
+    );
+    loader.add_jsr_version_info(
+      "@package/foo",
+      "1.0.0",
+      &JsrPackageVersionInfo {
+        exports: deno_core::serde_json::json!({ ".": "./mod.ts" }),
+        ..Default::default()
+      },
+    );
+    loader.add_source_with_text(
+      &final_specifier,
+      "export const packageValue = 1;\n",
+    );
+    let mut graph = ModuleGraph::new(GraphKind::CodeOnly);
+    graph
+      .build(
+        vec![root.clone()],
+        Vec::new(),
+        &loader,
+        BuildOptions::default(),
+      )
+      .await;
+
+    let candidate = observe_oden_parent_ordinary_esm_graph_module_candidate(
+      &graph, &root,
+    )
+    .unwrap();
+    let [dependency] = candidate.runtime_dependencies.as_slice() else {
+      panic!("expected exactly one JSR dependency")
+    };
+    assert_eq!(
+      dependency.observation.resolved_specifier.as_str(),
+      "jsr:@package/foo@1.0.0"
+    );
+    assert_eq!(dependency.redirect_chain.len(), 1);
+    assert_eq!(
+      dependency.redirect_chain[0].requested_specifier,
+      dependency.observation.resolved_specifier
+    );
+    assert_eq!(
+      dependency.redirect_chain[0].redirected_specifier,
+      final_specifier
+    );
+    assert_eq!(dependency.graph_final_specifier, final_specifier);
+    assert_eq!(
+      dependency.target_kind,
+      OdenParentOrdinaryEsmDependencyTargetKind::TypeScript
+    );
+
+    let registry_module =
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &graph,
+        &final_specifier,
+      )
+      .unwrap();
+    assert_eq!(
+      registry_module.graph_final_module_specifier,
+      final_specifier
+    );
+    assert_eq!(
+      registry_module.media_type,
+      OdenParentOrdinaryEsmMediaType::TypeScript
+    );
+    assert_eq!(
+      registry_module.original_bytes.as_ref(),
+      b"export const packageValue = 1;\n"
+    );
+    assert!(registry_module.runtime_dependencies.is_empty());
+
+    let request_specifier = dependency.observation.resolved_specifier.clone();
+    let mut wrong_host = graph.clone();
+    wrong_host.redirects.insert(
+      request_specifier.clone(),
+      ModuleSpecifier::parse("https://example.com/mod.ts").unwrap(),
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &wrong_host,
+        &root,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency is not a direct file/node target or candidate JSR redirect chain"
+      ))
+    ));
+
+    let mut second_registry_redirect = graph;
+    second_registry_redirect.redirects.insert(
+      final_specifier,
+      ModuleSpecifier::parse("https://jsr.io/@package/foo/1.0.0/other.ts")
+        .unwrap(),
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &second_registry_redirect,
+        &root,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency is not a direct file/node target or candidate JSR redirect chain"
+      ))
+    ));
+  }
+
+  #[test]
+  fn oden_parent_ordinary_esm_candidate_refuses_graph_modes_and_redirect_loops()
+  {
+    let source = "import \"./dep.ts\";\nexport const root = 1;\n";
+    let dependency_specifier =
+      ModuleSpecifier::parse("file:///repo/src/dep.ts").unwrap();
+    let (all_graph, all_specifier) = ordinary_esm_graph(
+      GraphKind::All,
+      "file:///repo/src/all.ts",
+      source.as_bytes(),
+      None,
+      vec![test_module_source(
+        "file:///repo/src/dep.ts",
+        b"export const dep = 1;\n",
+        None,
+      )],
+      false,
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &all_graph,
+        &all_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module graph is not CodeOnly"
+      ))
+    ));
+
+    let (graph, module_specifier) = ordinary_esm_graph(
+      GraphKind::CodeOnly,
+      "file:///repo/src/ordinary.ts",
+      source.as_bytes(),
+      None,
+      vec![test_module_source(
+        "file:///repo/src/dep.ts",
+        b"export const dep = 1;\n",
+        None,
+      )],
+      false,
+    );
+    let mut self_redirected_input = graph.clone();
+    self_redirected_input
+      .redirects
+      .insert(module_specifier.clone(), module_specifier.clone());
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &self_redirected_input,
+        &module_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module specifier is redirected or aliased rather than graph-final"
+      ))
+    ));
+
+    let mut self_redirected_dependency = graph.clone();
+    self_redirected_dependency
+      .redirects
+      .insert(dependency_specifier.clone(), dependency_specifier.clone());
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &self_redirected_dependency,
+        &module_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency redirect chain contains a self redirect or cycle"
+      ))
+    ));
+
+    let alternate =
+      ModuleSpecifier::parse("file:///repo/src/alternate.ts").unwrap();
+    let mut cyclic_dependency = graph;
+    cyclic_dependency
+      .redirects
+      .insert(dependency_specifier.clone(), alternate.clone());
+    cyclic_dependency
+      .redirects
+      .insert(alternate, dependency_specifier);
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &cyclic_dependency,
+        &module_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency redirect chain contains a self redirect or cycle"
+      ))
+    ));
+  }
+
+  #[test]
+  fn oden_parent_ordinary_esm_candidate_refuses_missing_error_and_url_suffixes()
+  {
+    let dynamic_source =
+      "void import(\"./missing.ts\");\nexport const root = 1;\n";
+    let (missing_graph, missing_specifier) = ordinary_esm_graph(
+      GraphKind::CodeOnly,
+      "file:///repo/src/missing-user.ts",
+      dynamic_source.as_bytes(),
+      None,
+      Vec::new(),
+      true,
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &missing_graph,
+        &missing_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency graph-final target is absent"
+      ))
+    ));
+
+    let error_source = "import \"./error.ts\";\nexport const root = 1;\n";
+    let error_dependency = "file:///repo/src/error.ts";
+    let error_entry: TestModuleSource = (
+      error_dependency.to_string(),
+      Source::Err(Arc::new(deno_error::JsErrorBox::generic(
+        "fixture load error",
+      ))),
+    );
+    let (error_graph, error_specifier) = ordinary_esm_graph(
+      GraphKind::CodeOnly,
+      "file:///repo/src/error-user.ts",
+      error_source.as_bytes(),
+      None,
+      vec![error_entry],
+      false,
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &error_graph,
+        &error_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency graph-final target failed to load"
+      ))
+    ));
+
+    let mut query_input = error_specifier.clone();
+    query_input.set_query(Some("candidate=1"));
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &error_graph,
+        &query_input,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module specifier has a query or fragment"
+      ))
+    ));
+    let mut fragment_input = error_specifier;
+    fragment_input.set_fragment(Some("candidate"));
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &error_graph,
+        &fragment_input,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module specifier has a query or fragment"
+      ))
+    ));
+
+    let query_source =
+      "import \"./dep.ts?candidate=1\";\nexport const root = 1;\n";
+    let (query_graph, query_specifier) = ordinary_esm_graph(
+      GraphKind::CodeOnly,
+      "file:///repo/src/query-user.ts",
+      query_source.as_bytes(),
+      None,
+      vec![test_module_source(
+        "file:///repo/src/dep.ts?candidate=1",
+        b"export const dep = 1;\n",
+        None,
+      )],
+      false,
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &query_graph,
+        &query_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency graph-final specifier has a query or fragment"
+      ))
+    ));
+  }
+
+  #[test]
+  fn oden_parent_ordinary_esm_candidate_refuses_scripts_media_and_missing_original()
+  {
+    let (script_graph, script_specifier) = ordinary_esm_graph(
+      GraphKind::CodeOnly,
+      "file:///repo/src/script.js",
+      b"globalThis.value = 1;\n",
+      Some("application/javascript"),
+      Vec::new(),
+      false,
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &script_graph,
+        &script_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module graph target is a script rather than ESM"
+      ))
+    ));
+
+    let (jsx_graph, jsx_specifier) = ordinary_esm_graph(
+      GraphKind::CodeOnly,
+      "file:///repo/src/module.jsx",
+      b"export default <div />;\n",
+      Some("text/jsx"),
+      Vec::new(),
+      false,
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &jsx_graph,
+        &jsx_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module graph target is not JavaScript or TypeScript"
+      ))
+    ));
+
+    let utf16_source = utf16le_source("export const value = 1;\n");
+    let (decoded_graph, decoded_specifier) = ordinary_esm_graph(
+      GraphKind::CodeOnly,
+      "file:///repo/src/decoded.ts",
+      &utf16_source,
+      None,
+      Vec::new(),
+      false,
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &decoded_graph,
+        &decoded_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "module graph source does not retain its original bytes"
+      ))
+    ));
+
+    let dependency_script_source =
+      "import \"./script-dep.js\";\nexport const root = 1;\n";
+    let (dependency_script_graph, dependency_script_specifier) =
+      ordinary_esm_graph(
+        GraphKind::CodeOnly,
+        "file:///repo/src/dependency-script-user.ts",
+        dependency_script_source.as_bytes(),
+        None,
+        vec![test_module_source(
+          "file:///repo/src/script-dep.js",
+          b"globalThis.value = 1;\n",
+          Some("application/javascript"),
+        )],
+        false,
+      );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &dependency_script_graph,
+        &dependency_script_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency target is a script rather than ESM"
+      ))
+    ));
+  }
+
+  #[test]
+  fn oden_parent_ordinary_esm_candidate_refuses_private_and_preserves_entrypoint_adapter()
+  {
+    let (graph, entrypoint) = release_graph(
+      "file:///repo/src/release.ts",
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &graph,
+        &entrypoint,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "ordinary module depends on the private Oden internal target"
+      ))
+    ));
+    assert!(
+      observe_oden_parent_release_entrypoint_candidate(&graph, &entrypoint)
+        .is_ok()
+    );
+  }
+
+  #[test]
+  fn oden_parent_ordinary_esm_candidate_refuses_unjustified_schemes_and_external_targets()
+  {
+    for module_specifier in [
+      "https://example.com/direct.ts",
+      "data:text/javascript,export%20default%201",
+      "blob:https://example.com/00000000-0000-0000-0000-000000000000",
+      "npm:package@1.0.0",
+    ] {
+      let graph = ModuleGraph::new(GraphKind::CodeOnly);
+      let module_specifier = ModuleSpecifier::parse(module_specifier).unwrap();
+      assert!(matches!(
+        observe_oden_parent_ordinary_esm_graph_module_candidate(
+          &graph,
+          &module_specifier,
+        ),
+        Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "module specifier is neither a direct file nor a candidate JSR registry target"
+        ))
+      ));
+    }
+
+    let source =
+      "import \"https://example.com/external.ts\";\nexport const root = 1;\n";
+    let external_source: TestModuleSource = (
+      "https://example.com/external.ts".to_string(),
+      Source::External("https://example.com/external.ts".to_string()),
+    );
+    let (graph, module_specifier) = ordinary_esm_graph(
+      GraphKind::CodeOnly,
+      "file:///repo/src/external-user.ts",
+      source.as_bytes(),
+      None,
+      vec![external_source],
+      false,
+    );
+    assert!(matches!(
+      observe_oden_parent_ordinary_esm_graph_module_candidate(
+        &graph,
+        &module_specifier,
+      ),
+      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+        "dependency is not a direct file/node target or candidate JSR redirect chain"
+      ))
+    ));
   }
 
   #[test]
