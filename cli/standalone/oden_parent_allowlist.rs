@@ -203,7 +203,7 @@ pub(crate) const ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS: &[&str] = &[
 
 /// Parent-root-relative definitions that comprise the release contract.
 ///
-/// The complete reviewed membership is fixed even while three schema members are
+/// The complete reviewed membership is fixed even while two schema members are
 /// intentionally absent. Any future retained load must refuse that partial
 /// repository state before it can form a candidate inventory.
 #[allow(dead_code)]
