@@ -98,6 +98,16 @@ use crate::util::v8::init_v8_flags;
 pub use oden_capsec_filesystem_candidate::maybe_run_oden_capsec_filesystem_candidate;
 pub use oden_capsec_filesystem_supervisor::maybe_run_oden_capsec_filesystem_supervisor;
 
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Expose only a refusal code to the binary entrypoint. The private role decision
+// cannot activate a mode or escape this root crate.
+#[doc(hidden)]
+pub fn oden_parent_allowlist_refusal_exit_code_for_raw_dispatch(
+  dispatch: deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch,
+) -> i32 {
+  standalone::refusal_exit_code_for_oden_parent_allowlist_dispatch(dispatch)
+}
+
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

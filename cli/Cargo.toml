@@ -25,6 +25,12 @@ harness = false
 
 [features]
 default = ["upgrade", "__vendored_zlib_ng"]
+# @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
+# Keep authoring root-private; only the embedded shape propagates to deno_lib.
+__oden_parent_allowlist_authoring = []
+__oden_parent_allowlist_embedded = [
+  "deno_lib/__oden_parent_allowlist_embedded",
+]
 # A feature that enables heap profiling with dhat on Linux.
 # 1. Compile with `cargo build --profile=release-with-debug --features=dhat-heap`
 # 2. Run the executable. It will output a dhat-heap.json file.

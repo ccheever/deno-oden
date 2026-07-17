@@ -112,7 +112,7 @@ const ODEN_PARENT_ALLOWLIST_CHECK_ARG: &[u8] =
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
 // Classify the unmodified native argv units before any general CLI or Oden/Deno
 // initialization. Exact mode vectors remain fail-closed at their entrypoints
-// until the separately frozen role decoder and handler are implemented.
+// until the separately frozen handler and admission authority are implemented.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OdenParentAllowlistRawDispatch {
   Absent,

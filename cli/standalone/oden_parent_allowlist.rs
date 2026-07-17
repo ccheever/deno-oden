@@ -3,7 +3,7 @@
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
 // These generator-side slices freeze the exact capture, source-closure, and
 // release contract memberships and a dormant descriptor-anchored retained-file
-// loader. Six release definitions, allowlist construction, generate/check
+// loader. Five release definitions, allowlist construction, generate/check
 // execution, and all three generated outputs remain absent, so neither reserved
 // mode gains authority or an output path.
 
@@ -38,6 +38,101 @@ use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_GENERATED_RUST_PATH
 use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_TARGET_POLICY_GENERATED_RUST_PATH;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistError;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch;
+use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE;
+
+const ODEN_PARENT_ALLOWLIST_AUTHORING_FEATURE: &str =
+  "__oden_parent_allowlist_authoring";
+const ODEN_PARENT_ALLOWLIST_EMBEDDED_FEATURE: &str =
+  "__oden_parent_allowlist_embedded";
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Decode only the compile-time role shape. Even eligible rows remain pure,
+// output-free refusals until the separate handler and admission authority exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OdenParentAllowlistRoleDecision {
+  GenerateEligible,
+  CheckEligible,
+  Refuse,
+}
+
+#[derive(Clone, Copy)]
+struct OdenParentAllowlistCompiledRoleFacts<'a> {
+  supported_os: bool,
+  authoring: bool,
+  embedded: bool,
+  root_feature_inventory: &'a str,
+}
+
+fn decode_oden_parent_allowlist_role(
+  dispatch: OdenParentAllowlistRawDispatch,
+  facts: OdenParentAllowlistCompiledRoleFacts<'_>,
+) -> OdenParentAllowlistRoleDecision {
+  if !facts.supported_os
+    || !root_feature_inventory_matches_role_bits(facts)
+  {
+    return OdenParentAllowlistRoleDecision::Refuse;
+  }
+
+  match (dispatch, facts.authoring, facts.embedded) {
+    (OdenParentAllowlistRawDispatch::Generate, true, false) => {
+      OdenParentAllowlistRoleDecision::GenerateEligible
+    }
+    (OdenParentAllowlistRawDispatch::Check, false, true) => {
+      OdenParentAllowlistRoleDecision::CheckEligible
+    }
+    _ => OdenParentAllowlistRoleDecision::Refuse,
+  }
+}
+
+fn root_feature_inventory_matches_role_bits(
+  facts: OdenParentAllowlistCompiledRoleFacts<'_>,
+) -> bool {
+  let mut previous = None;
+  let mut inventory_authoring = false;
+  let mut inventory_embedded = false;
+
+  for feature in facts.root_feature_inventory.split(',') {
+    if feature.is_empty()
+      || previous.is_some_and(|previous: &str| {
+        previous.as_bytes() >= feature.as_bytes()
+      })
+    {
+      return false;
+    }
+    inventory_authoring |= feature == ODEN_PARENT_ALLOWLIST_AUTHORING_FEATURE;
+    inventory_embedded |= feature == ODEN_PARENT_ALLOWLIST_EMBEDDED_FEATURE;
+    previous = Some(feature);
+  }
+
+  inventory_authoring == facts.authoring
+    && inventory_embedded == facts.embedded
+}
+
+fn compiled_oden_parent_allowlist_role_facts(
+) -> OdenParentAllowlistCompiledRoleFacts<'static> {
+  OdenParentAllowlistCompiledRoleFacts {
+    supported_os: cfg!(any(target_os = "linux", target_os = "macos")),
+    authoring: cfg!(feature = "__oden_parent_allowlist_authoring"),
+    embedded: cfg!(feature = "__oden_parent_allowlist_embedded"),
+    root_feature_inventory: env!("ODEN_REV2_BUILD_CARGO_FEATURES"),
+  }
+}
+
+pub(crate) fn refusal_exit_code_for_oden_parent_allowlist_dispatch(
+  dispatch: OdenParentAllowlistRawDispatch,
+) -> i32 {
+  match decode_oden_parent_allowlist_role(
+    dispatch,
+    compiled_oden_parent_allowlist_role_facts(),
+  ) {
+    OdenParentAllowlistRoleDecision::GenerateEligible
+    | OdenParentAllowlistRoleDecision::CheckEligible
+    | OdenParentAllowlistRoleDecision::Refuse => {
+      ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE
+    }
+  }
+}
 
 /// Parent-root-relative definitions that comprise the capture contract.
 ///
@@ -108,7 +203,7 @@ pub(crate) const ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS: &[&str] = &[
 
 /// Parent-root-relative definitions that comprise the release contract.
 ///
-/// The complete reviewed membership is fixed even while six schema members are
+/// The complete reviewed membership is fixed even while five schema members are
 /// intentionally absent. Any future retained load must refuse that partial
 /// repository state before it can form a candidate inventory.
 #[allow(dead_code)]
@@ -700,6 +795,237 @@ mod tests {
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   use deno_lib::standalone::oden_parent_allowlist::raw_sha256_digest;
+
+  fn role_facts(
+    supported_os: bool,
+    authoring: bool,
+    embedded: bool,
+    root_feature_inventory: &str,
+  ) -> OdenParentAllowlistCompiledRoleFacts<'_> {
+    OdenParentAllowlistCompiledRoleFacts {
+      supported_os,
+      authoring,
+      embedded,
+      root_feature_inventory,
+    }
+  }
+
+  #[test]
+  fn role_decoder_matches_the_supported_os_matrix() {
+    use OdenParentAllowlistRawDispatch as Dispatch;
+    use OdenParentAllowlistRoleDecision as Decision;
+
+    let rows = [
+      (
+        role_facts(true, false, false, "default"),
+        Decision::Refuse,
+        Decision::Refuse,
+      ),
+      (
+        role_facts(
+          true,
+          true,
+          false,
+          "__oden_parent_allowlist_authoring,default",
+        ),
+        Decision::GenerateEligible,
+        Decision::Refuse,
+      ),
+      (
+        role_facts(
+          true,
+          false,
+          true,
+          "__oden_parent_allowlist_embedded,__vendored_zlib_ng,default,upgrade",
+        ),
+        Decision::Refuse,
+        Decision::CheckEligible,
+      ),
+      (
+        role_facts(
+          true,
+          true,
+          true,
+          "__oden_parent_allowlist_authoring,__oden_parent_allowlist_embedded",
+        ),
+        Decision::Refuse,
+        Decision::Refuse,
+      ),
+    ];
+
+    for (facts, generate, check) in rows {
+      assert_eq!(
+        decode_oden_parent_allowlist_role(Dispatch::Generate, facts),
+        generate
+      );
+      assert_eq!(
+        decode_oden_parent_allowlist_role(Dispatch::Check, facts),
+        check
+      );
+    }
+  }
+
+  #[test]
+  fn role_decoder_unsupported_os_overrides_every_role_shape() {
+    use OdenParentAllowlistRawDispatch as Dispatch;
+    use OdenParentAllowlistRoleDecision as Decision;
+
+    for facts in [
+      role_facts(false, false, false, "default"),
+      role_facts(
+        false,
+        true,
+        false,
+        "__oden_parent_allowlist_authoring",
+      ),
+      role_facts(
+        false,
+        false,
+        true,
+        "__oden_parent_allowlist_embedded",
+      ),
+      role_facts(
+        false,
+        true,
+        true,
+        "__oden_parent_allowlist_authoring,__oden_parent_allowlist_embedded",
+      ),
+    ] {
+      assert_eq!(
+        decode_oden_parent_allowlist_role(Dispatch::Generate, facts),
+        Decision::Refuse
+      );
+      assert_eq!(
+        decode_oden_parent_allowlist_role(Dispatch::Check, facts),
+        Decision::Refuse
+      );
+    }
+  }
+
+  #[test]
+  fn role_decoder_requires_exact_bidirectional_role_token_joins() {
+    use OdenParentAllowlistRawDispatch as Dispatch;
+    use OdenParentAllowlistRoleDecision as Decision;
+
+    for facts in [
+      role_facts(true, true, false, "default"),
+      role_facts(
+        true,
+        false,
+        false,
+        "__oden_parent_allowlist_authoring,default",
+      ),
+      role_facts(true, false, true, "default"),
+      role_facts(
+        true,
+        false,
+        false,
+        "__oden_parent_allowlist_embedded,default",
+      ),
+    ] {
+      assert_eq!(
+        decode_oden_parent_allowlist_role(Dispatch::Generate, facts),
+        Decision::Refuse
+      );
+      assert_eq!(
+        decode_oden_parent_allowlist_role(Dispatch::Check, facts),
+        Decision::Refuse
+      );
+    }
+  }
+
+  #[test]
+  fn role_decoder_uses_exact_canonical_inventory_tokens() {
+    use OdenParentAllowlistRawDispatch as Dispatch;
+    use OdenParentAllowlistRoleDecision as Decision;
+
+    for inventory in [
+      "",
+      ",__oden_parent_allowlist_authoring",
+      "__oden_parent_allowlist_authoring,",
+      "__oden_parent_allowlist_authoring,,default",
+      "__oden_parent_allowlist_authoring,__oden_parent_allowlist_authoring",
+      "default,__oden_parent_allowlist_authoring",
+      "__ODEN_PARENT_ALLOWLIST_AUTHORING,default",
+      "__oden_parent_allowlist_authoring ,default",
+      "__oden_parent_allowlist_authoring-suffix,default",
+      "prefix-__oden_parent_allowlist_authoring,default",
+    ] {
+      assert_eq!(
+        decode_oden_parent_allowlist_role(
+          Dispatch::Generate,
+          role_facts(true, true, false, inventory),
+        ),
+        Decision::Refuse,
+        "inventory {inventory:?} must refuse",
+      );
+    }
+
+    assert_eq!(
+      decode_oden_parent_allowlist_role(
+        Dispatch::Generate,
+        role_facts(
+          true,
+          true,
+          false,
+          "__oden_parent_allowlist_authoring,__vendored_zlib_ng,default,upgrade",
+        ),
+      ),
+      Decision::GenerateEligible,
+    );
+  }
+
+  #[test]
+  fn role_decoder_never_treats_absent_or_refuse_as_eligible() {
+    use OdenParentAllowlistRawDispatch as Dispatch;
+    use OdenParentAllowlistRoleDecision as Decision;
+
+    for dispatch in [Dispatch::Absent, Dispatch::Refuse] {
+      assert_eq!(
+        decode_oden_parent_allowlist_role(
+          dispatch,
+          role_facts(
+            true,
+            true,
+            false,
+            "__oden_parent_allowlist_authoring,default",
+          ),
+        ),
+        Decision::Refuse,
+      );
+      assert_eq!(
+        decode_oden_parent_allowlist_role(
+          dispatch,
+          role_facts(true, false, true, "__oden_parent_allowlist_embedded"),
+        ),
+        Decision::Refuse,
+      );
+    }
+  }
+
+  #[test]
+  fn compiled_role_marker_matches_both_cfg_bits() {
+    assert!(root_feature_inventory_matches_role_bits(
+      compiled_oden_parent_allowlist_role_facts()
+    ));
+  }
+
+  #[test]
+  fn role_wrapper_is_refusal_only_for_every_dispatch() {
+    for dispatch in [
+      OdenParentAllowlistRawDispatch::Absent,
+      OdenParentAllowlistRawDispatch::Generate,
+      OdenParentAllowlistRawDispatch::Check,
+      OdenParentAllowlistRawDispatch::Refuse,
+    ] {
+      assert_eq!(
+        crate::oden_parent_allowlist_refusal_exit_code_for_raw_dispatch(
+          dispatch
+        ),
+        ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE,
+      );
+    }
+  }
 
   #[test]
   fn capture_contract_paths_are_closed_sorted_literals() {

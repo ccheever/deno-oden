@@ -8,13 +8,21 @@ pub fn main() {
   let args = std::env::args_os().collect::<Vec<_>>();
   // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
   // This is the first Oden/Deno application branch. The exact modes remain
-  // output-free refusals until the compile-time role decoder and dedicated
-  // handler are implemented.
-  match deno_lib::standalone::oden_parent_allowlist::classify_oden_parent_allowlist_raw_argv(&args) {
+  // output-free refusals until the dedicated handler and admission authority
+  // are implemented.
+  let oden_parent_allowlist_dispatch =
+    deno_lib::standalone::oden_parent_allowlist::classify_oden_parent_allowlist_raw_argv(&args);
+  match oden_parent_allowlist_dispatch {
     deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch::Absent => {}
     deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch::Generate
-    | deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch::Check
-    | deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch::Refuse => {
+    | deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch::Check => {
+      std::process::exit(
+        deno::oden_parent_allowlist_refusal_exit_code_for_raw_dispatch(
+          oden_parent_allowlist_dispatch,
+        ),
+      );
+    }
+    deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch::Refuse => {
       std::process::exit(
         deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE,
       );

@@ -19,6 +19,13 @@ doc = false
 [lib]
 path = "./lib.rs"
 
+[features]
+# @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
+# denort has no authoring role and keeps its reserved-family path scan-only.
+__oden_parent_allowlist_embedded = [
+  "deno_lib/__oden_parent_allowlist_embedded",
+]
+
 [[test]]
 name = "integration"
 path = "integration_tests_runner.rs"
