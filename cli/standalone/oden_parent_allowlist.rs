@@ -3,7 +3,7 @@
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
 // These generator-side slices freeze the exact capture, source-closure, and
 // release contract memberships and a dormant descriptor-anchored retained-file
-// loader. Four release definitions, allowlist construction, generate/check
+// loader. Three release definitions, allowlist construction, generate/check
 // execution, and all three generated outputs remain absent, so neither reserved
 // mode gains authority or an output path.
 
@@ -203,7 +203,7 @@ pub(crate) const ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS: &[&str] = &[
 
 /// Parent-root-relative definitions that comprise the release contract.
 ///
-/// The complete reviewed membership is fixed even while four schema members are
+/// The complete reviewed membership is fixed even while three schema members are
 /// intentionally absent. Any future retained load must refuse that partial
 /// repository state before it can form a candidate inventory.
 #[allow(dead_code)]
