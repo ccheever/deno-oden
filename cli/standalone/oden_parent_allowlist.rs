@@ -19,12 +19,20 @@ use std::os::fd::AsRawFd;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::fd::FromRawFd;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::fd::IntoRawFd;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::fd::RawFd;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::path::PathBuf;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::sync::Arc;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use deno_ast::ModuleSpecifier;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use deno_lib::standalone::oden_parent_allowlist::ContractFile;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -33,6 +41,8 @@ use deno_lib::standalone::oden_parent_allowlist::ContractInventory;
 use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlist;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistInputs;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use deno_lib::standalone::oden_parent_allowlist::OdenParentRepoVfsKey;
 #[cfg(test)]
 use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_GENERATED_JSON_PATH;
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
@@ -298,8 +308,33 @@ enum OdenParentRetainedContractError {
     #[source]
     source: std::io::Error,
   },
+  #[error("failed to read the current directory during retained-root {phase}: {source}")]
+  ReadCurrentDirectory {
+    phase: &'static str,
+    #[source]
+    source: std::io::Error,
+  },
+  #[error("current directory is not absolute: {0:?}")]
+  CurrentDirectoryNotAbsolute(PathBuf),
+  #[error("current directory changed during retained-root {phase}: {before:?} then {after:?}")]
+  CurrentDirectoryChanged {
+    phase: &'static str,
+    before: PathBuf,
+    after: PathBuf,
+  },
+  #[error("current directory does not name retained root during {phase}: expected {expected:?}, observed {observed:?}")]
+  CurrentDirectoryDoesNotNameRoot {
+    phase: &'static str,
+    expected: PathBuf,
+    observed: PathBuf,
+  },
+  #[cfg(test)]
+  #[error("test retained-root path is not absolute: {0:?}")]
+  TestRootNotAbsolute(PathBuf),
   #[error("retained repository root is not a directory")]
   RootNotDirectory,
+  #[error("retained repository root name no longer identifies its held descriptor: {0}")]
+  RootNameChanged(String),
   #[error("failed to open {component:?} while resolving {path:?}: {source}")]
   OpenComponent {
     path: String,
@@ -350,6 +385,61 @@ enum OdenParentRetainedContractError {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, thiserror::Error)]
+enum OdenParentDirectRepoSourceError {
+  #[error("retained-root descriptor operation failed: {0}")]
+  RetainedDescriptor(#[from] OdenParentRetainedContractError),
+  #[error("invalid direct repository file URL: {0}")]
+  InvalidFileUrl(&'static str),
+  #[error("direct repository file URL {specifier} is not a strict descendant of retained root {root:?}")]
+  OutsideRetainedRoot { specifier: String, root: PathBuf },
+  #[error("direct repository file path is not exact UTF-8")]
+  NonUtf8RelativePath,
+  #[error("direct repository VFS key construction failed: {0}")]
+  RepoKey(#[from] OdenParentAllowlistError),
+  #[error("failed to enumerate retained directory {directory:?}: {source}")]
+  EnumerateDirectory {
+    directory: String,
+    #[source]
+    source: std::io::Error,
+  },
+  #[error("retained directory {0:?} returned a non-NUL-terminated entry name")]
+  MalformedDirectoryEntry(String),
+  #[error("retained directory {directory:?} contains {matches} exact raw entries named {component:?}, expected one")]
+  InvalidExactComponentCount {
+    directory: String,
+    component: String,
+    matches: usize,
+  },
+  #[error("direct repository path component is not a directory: {0}")]
+  ComponentNotDirectory(String),
+  #[error("direct repository source is not a regular file: {0}")]
+  NotRegularFile(String),
+  #[error("direct repository source must have exactly one link: {path} has {links}")]
+  InvalidLinkCount { path: String, links: u64 },
+  #[error("direct repository source size differs from supplied candidate bytes: {path} expected {expected}, descriptor has {actual}")]
+  SizeMismatch {
+    path: String,
+    expected: u64,
+    actual: i64,
+  },
+  #[error("failed to read direct repository source {path:?}: {source}")]
+  ReadFile {
+    path: String,
+    #[source]
+    source: std::io::Error,
+  },
+  #[error("direct repository source ended before supplied candidate bytes at offset {offset}: {path}")]
+  UnexpectedEof { path: String, offset: u64 },
+  #[error("direct repository source differs from supplied candidate bytes at offset {offset}: {path}")]
+  ByteMismatch { path: String, offset: u64 },
+  #[error("direct repository source has bytes after the exact supplied candidate-byte length: {0}")]
+  TrailingBytes(String),
+  #[error("retained descriptor changed while reading direct repository source {member}: {descriptor}")]
+  DescriptorChanged { member: String, descriptor: String },
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DescriptorSnapshot {
   device: u64,
@@ -367,6 +457,27 @@ struct DescriptorSnapshot {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl DescriptorSnapshot {
+  fn from_stat(stat: libc::stat) -> Self {
+    let (modified_seconds, modified_nanoseconds) =
+      (stat.st_mtime as i64, stat.st_mtime_nsec as i64);
+    let (changed_seconds, changed_nanoseconds) =
+      (stat.st_ctime as i64, stat.st_ctime_nsec as i64);
+
+    Self {
+      device: stat.st_dev as u64,
+      inode: stat.st_ino as u64,
+      mode: stat.st_mode as u32,
+      links: stat.st_nlink as u64,
+      size: stat.st_size as i64,
+      modified_seconds,
+      modified_nanoseconds,
+      changed_seconds,
+      changed_nanoseconds,
+      #[cfg(target_os = "macos")]
+      generation: stat.st_gen,
+    }
+  }
+
   fn capture(
     descriptor: &File,
     path: &str,
@@ -382,24 +493,38 @@ impl DescriptorSnapshot {
     }
     // SAFETY: a successful `fstat` initialized the complete value.
     let stat = unsafe { stat.assume_init() };
-    let (modified_seconds, modified_nanoseconds) =
-      (stat.st_mtime as i64, stat.st_mtime_nsec as i64);
-    let (changed_seconds, changed_nanoseconds) =
-      (stat.st_ctime as i64, stat.st_ctime_nsec as i64);
+    Ok(Self::from_stat(stat))
+  }
 
-    Ok(Self {
-      device: stat.st_dev as u64,
-      inode: stat.st_ino as u64,
-      mode: stat.st_mode as u32,
-      links: stat.st_nlink as u64,
-      size: stat.st_size as i64,
-      modified_seconds,
-      modified_nanoseconds,
-      changed_seconds,
-      changed_nanoseconds,
-      #[cfg(target_os = "macos")]
-      generation: stat.st_gen,
-    })
+  fn capture_named_path_no_follow(
+    path: &Path,
+  ) -> Result<Self, OdenParentRetainedContractError> {
+    let encoded_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+      OdenParentRetainedContractError::InspectDescriptor {
+        path: path.to_string_lossy().into_owned(),
+        source: std::io::Error::from(std::io::ErrorKind::InvalidInput),
+      }
+    })?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `encoded_path` is NUL-terminated, `stat` is writable storage for
+    // one platform stat value, and AT_SYMLINK_NOFOLLOW prevents a final-name
+    // symlink from being treated as the held repository directory.
+    if unsafe {
+      libc::fstatat(
+        libc::AT_FDCWD,
+        encoded_path.as_ptr(),
+        stat.as_mut_ptr(),
+        libc::AT_SYMLINK_NOFOLLOW,
+      )
+    } != 0
+    {
+      return Err(OdenParentRetainedContractError::InspectDescriptor {
+        path: path.to_string_lossy().into_owned(),
+        source: std::io::Error::last_os_error(),
+      });
+    }
+    // SAFETY: successful `fstatat` initialized the complete value.
+    Ok(Self::from_stat(unsafe { stat.assume_init() }))
   }
 
   fn is_directory(&self) -> bool {
@@ -413,29 +538,34 @@ impl DescriptorSnapshot {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 struct RetainedRepositoryRoot {
+  path: PathBuf,
   descriptor: File,
   snapshot: DescriptorSnapshot,
+  requires_current_name: bool,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl RetainedRepositoryRoot {
   fn open_current() -> Result<Self, OdenParentRetainedContractError> {
-    Self::open_path(Path::new("."))
-  }
-
-  fn open_path(path: &Path) -> Result<Self, OdenParentRetainedContractError> {
-    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-      OdenParentRetainedContractError::OpenRoot {
-        source: std::io::Error::from(std::io::ErrorKind::InvalidInput),
+    let before = std::env::current_dir().map_err(|source| {
+      OdenParentRetainedContractError::ReadCurrentDirectory {
+        phase: "before",
+        source,
       }
     })?;
+    if !before.is_absolute() {
+      return Err(
+        OdenParentRetainedContractError::CurrentDirectoryNotAbsolute(before),
+      );
+    }
+    let literal_current = CString::new(".").expect("literal dot has no NUL");
     let flags = libc::O_RDONLY
       | libc::O_DIRECTORY
       | libc::O_NOFOLLOW
       | libc::O_CLOEXEC;
-    // SAFETY: `path` is NUL-terminated for the call; successful `open`
-    // returns one new descriptor owned by this function.
-    let raw_descriptor = unsafe { libc::open(path.as_ptr(), flags) };
+    // SAFETY: the literal `.` is NUL-terminated for the call; successful
+    // `open` returns one new descriptor owned by this function.
+    let raw_descriptor = unsafe { libc::open(literal_current.as_ptr(), flags) };
     if raw_descriptor < 0 {
       return Err(OdenParentRetainedContractError::OpenRoot {
         source: std::io::Error::last_os_error(),
@@ -447,10 +577,141 @@ impl RetainedRepositoryRoot {
     if !snapshot.is_directory() {
       return Err(OdenParentRetainedContractError::RootNotDirectory);
     }
-    Ok(Self {
+    let after = std::env::current_dir().map_err(|source| {
+      OdenParentRetainedContractError::ReadCurrentDirectory {
+        phase: "after",
+        source,
+      }
+    })?;
+    if !after.is_absolute() {
+      return Err(
+        OdenParentRetainedContractError::CurrentDirectoryNotAbsolute(after),
+      );
+    }
+    if before.as_os_str().as_bytes() != after.as_os_str().as_bytes() {
+      return Err(OdenParentRetainedContractError::CurrentDirectoryChanged {
+        phase: "open",
+        before,
+        after,
+      });
+    }
+    let root = Self {
+      path: before,
       descriptor,
       snapshot,
-    })
+      requires_current_name: true,
+    };
+    root.require_current_and_named_paths_stable("initial reconciliation")?;
+    Ok(root)
+  }
+
+  #[cfg(test)]
+  fn open_test_absolute(
+    path: &Path,
+  ) -> Result<Self, OdenParentRetainedContractError> {
+    if !path.is_absolute() {
+      return Err(OdenParentRetainedContractError::TestRootNotAbsolute(
+        path.to_path_buf(),
+      ));
+    }
+    let encoded_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+      OdenParentRetainedContractError::OpenRoot {
+        source: std::io::Error::from(std::io::ErrorKind::InvalidInput),
+      }
+    })?;
+    let flags = libc::O_RDONLY
+      | libc::O_DIRECTORY
+      | libc::O_NOFOLLOW
+      | libc::O_CLOEXEC;
+    // SAFETY: `encoded_path` is NUL-terminated for the call; successful `open`
+    // returns one new descriptor owned by this function.
+    let raw_descriptor = unsafe { libc::open(encoded_path.as_ptr(), flags) };
+    if raw_descriptor < 0 {
+      return Err(OdenParentRetainedContractError::OpenRoot {
+        source: std::io::Error::last_os_error(),
+      });
+    }
+    // SAFETY: successful `open` returned a new uniquely owned descriptor.
+    let descriptor = unsafe { File::from_raw_fd(raw_descriptor) };
+    let snapshot = DescriptorSnapshot::capture(&descriptor, ".")?;
+    if !snapshot.is_directory() {
+      return Err(OdenParentRetainedContractError::RootNotDirectory);
+    }
+    let root = Self {
+      path: path.to_path_buf(),
+      descriptor,
+      snapshot,
+      requires_current_name: false,
+    };
+    root.require_current_and_named_paths_stable("test reconciliation")?;
+    Ok(root)
+  }
+
+  fn require_current_and_named_paths_stable(
+    &self,
+    phase: &'static str,
+  ) -> Result<(), OdenParentRetainedContractError> {
+    let before = if self.requires_current_name {
+      let before = std::env::current_dir().map_err(|source| {
+        OdenParentRetainedContractError::ReadCurrentDirectory {
+          phase,
+          source,
+        }
+      })?;
+      if before.as_os_str().as_bytes() != self.path.as_os_str().as_bytes() {
+        return Err(
+          OdenParentRetainedContractError::CurrentDirectoryDoesNotNameRoot {
+            phase,
+            expected: self.path.clone(),
+            observed: before,
+          },
+        );
+      }
+      let literal_current =
+        DescriptorSnapshot::capture_named_path_no_follow(Path::new("."))?;
+      if literal_current != self.snapshot {
+        return Err(OdenParentRetainedContractError::RootNameChanged(
+          "literal .".to_string(),
+        ));
+      }
+      Some(before)
+    } else {
+      None
+    };
+
+    let absolute =
+      DescriptorSnapshot::capture_named_path_no_follow(&self.path)?;
+    if absolute != self.snapshot {
+      return Err(OdenParentRetainedContractError::RootNameChanged(
+        self.path.to_string_lossy().into_owned(),
+      ));
+    }
+
+    if let Some(before) = before {
+      let after = std::env::current_dir().map_err(|source| {
+        OdenParentRetainedContractError::ReadCurrentDirectory {
+          phase,
+          source,
+        }
+      })?;
+      if before.as_os_str().as_bytes() != after.as_os_str().as_bytes() {
+        return Err(OdenParentRetainedContractError::CurrentDirectoryChanged {
+          phase,
+          before,
+          after,
+        });
+      }
+      if after.as_os_str().as_bytes() != self.path.as_os_str().as_bytes() {
+        return Err(
+          OdenParentRetainedContractError::CurrentDirectoryDoesNotNameRoot {
+            phase,
+            expected: self.path.clone(),
+            observed: after,
+          },
+        );
+      }
+    }
+    Ok(())
   }
 
   fn require_stable(
@@ -471,6 +732,44 @@ struct HeldDirectory {
   path: String,
   descriptor: File,
   snapshot: DescriptorSnapshot,
+}
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Bind one canonical repository key and caller-supplied candidate Arc to the
+// exact retained no-follow direct file, without constructing a VFS row.
+/// Candidate-only direct-file identity. This proves only the retained lexical
+/// root, exact file descriptor identity/mode, and equality with one supplied
+/// candidate byte allocation during this observation. It does not prove graph
+/// provenance or authenticate a Git tree, graph reachability, emitted bytes/
+/// maps, serialized stores, JSR identity, configuration, allowlist output,
+/// compiler activation, or release authority. Process-wide concurrent cwd
+/// mutation is unsupported: observed changes refuse, but an away-and-back ABA
+/// is not transactionally excluded and remains for activation/process-wide
+/// locking. There is no production caller. This wrapper opens the root only
+/// when observation begins, not before graph build; later binary integration
+/// must acquire and retain the root before graph construction and bind the
+/// graph-owned Arc separately.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+#[derive(Debug)]
+struct OdenParentDirectRepoSourceCandidate {
+  key: OdenParentRepoVfsKey,
+  specifier: ModuleSpecifier,
+  original_bytes: Arc<[u8]>,
+  executable: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct OdenParentDirectRepoSourceRead<'a> {
+  root: &'a RetainedRepositoryRoot,
+  key: OdenParentRepoVfsKey,
+  specifier: ModuleSpecifier,
+  original_bytes: Arc<[u8]>,
+  executable: bool,
+  path: String,
+  descriptor: File,
+  snapshot: DescriptorSnapshot,
+  held_directories: Vec<HeldDirectory>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -646,6 +945,568 @@ fn require_descriptor_stable(
     });
   }
   Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct OdenParentDirectoryStream {
+  raw: *mut libc::DIR,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl OdenParentDirectoryStream {
+  fn from_descriptor(
+    descriptor: File,
+    directory: &str,
+  ) -> Result<Self, OdenParentDirectRepoSourceError> {
+    let raw_descriptor = descriptor.into_raw_fd();
+    // SAFETY: `raw_descriptor` is a uniquely owned independent directory
+    // description. On success fdopendir assumes ownership; on failure this
+    // function closes it below.
+    let raw = unsafe { libc::fdopendir(raw_descriptor) };
+    if raw.is_null() {
+      let source = std::io::Error::last_os_error();
+      // SAFETY: fdopendir failed and therefore did not take ownership.
+      unsafe { libc::close(raw_descriptor) };
+      return Err(OdenParentDirectRepoSourceError::EnumerateDirectory {
+        directory: directory.to_string(),
+        source,
+      });
+    }
+    Ok(Self { raw })
+  }
+
+  fn close(
+    mut self,
+    directory: &str,
+  ) -> Result<(), OdenParentDirectRepoSourceError> {
+    let raw = std::mem::replace(&mut self.raw, std::ptr::null_mut());
+    // SAFETY: `raw` is the live stream uniquely owned by this value. closedir
+    // closes both the stream and its independent descriptor.
+    if unsafe { libc::closedir(raw) } != 0 {
+      return Err(OdenParentDirectRepoSourceError::EnumerateDirectory {
+        directory: directory.to_string(),
+        source: std::io::Error::last_os_error(),
+      });
+    }
+    Ok(())
+  }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for OdenParentDirectoryStream {
+  fn drop(&mut self) {
+    if !self.raw.is_null() {
+      // SAFETY: a non-null pointer is the still-live stream uniquely owned by
+      // this value. Drop is only the error-path fallback; successful scans
+      // call `close` and require its result.
+      unsafe { libc::closedir(self.raw) };
+      self.raw = std::ptr::null_mut();
+    }
+  }
+}
+
+#[cfg(target_os = "linux")]
+fn clear_oden_parent_readdir_errno() {
+  // SAFETY: libc exposes the calling thread's writable errno cell.
+  unsafe { *libc::__errno_location() = 0 };
+}
+
+#[cfg(target_os = "macos")]
+fn clear_oden_parent_readdir_errno() {
+  // SAFETY: libc exposes the calling thread's writable errno cell.
+  unsafe { *libc::__error() = 0 };
+}
+
+#[cfg(target_os = "linux")]
+fn oden_parent_readdir_errno() -> libc::c_int {
+  // SAFETY: libc exposes the calling thread's readable errno cell.
+  unsafe { *libc::__errno_location() }
+}
+
+#[cfg(target_os = "macos")]
+fn oden_parent_readdir_errno() -> libc::c_int {
+  // SAFETY: libc exposes the calling thread's readable errno cell.
+  unsafe { *libc::__error() }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn fixed_array_length<T, const N: usize>(_: *const [T; N]) -> usize {
+  N
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn oden_parent_dirent_name(
+  entry: *const libc::dirent,
+  directory: &str,
+) -> Result<Vec<u8>, OdenParentDirectRepoSourceError> {
+  // SAFETY: the caller guarantees the fixed d_reclen header is accessible.
+  let record_length_pointer =
+    unsafe { std::ptr::addr_of!((*entry).d_reclen) };
+  // SAFETY: readdir supplied a record containing d_reclen; unaligned access
+  // avoids creating a full-size dirent reference for a short Linux record.
+  let record_length =
+    unsafe { std::ptr::read_unaligned(record_length_pointer) } as usize;
+  let name_offset = std::mem::offset_of!(libc::dirent, d_name);
+  let Some(record_name_bytes) = record_length.checked_sub(name_offset) else {
+    return Err(
+      OdenParentDirectRepoSourceError::MalformedDirectoryEntry(
+        directory.to_string(),
+      ),
+    );
+  };
+  // SAFETY: only the field address is formed; the slice below is separately
+  // capped to the record and declared-array bounds.
+  let name_array_pointer = unsafe { std::ptr::addr_of!((*entry).d_name) };
+  let bound = record_name_bytes.min(fixed_array_length(name_array_pointer));
+  // SAFETY: `bound` is capped by both this record's d_reclen bytes after the
+  // d_name offset and the platform declaration's fixed array capacity.
+  let name = unsafe {
+    std::slice::from_raw_parts(name_array_pointer.cast::<u8>(), bound)
+  };
+  let Some(name_end) = name.iter().position(|unit| *unit == 0) else {
+    return Err(
+      OdenParentDirectRepoSourceError::MalformedDirectoryEntry(
+        directory.to_string(),
+      ),
+    );
+  };
+  Ok(name[..name_end].to_vec())
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn oden_parent_dirent_name(
+  entry: *const libc::dirent,
+  directory: &str,
+) -> Result<Vec<u8>, OdenParentDirectRepoSourceError> {
+  // SAFETY: the caller guarantees both fixed header fields are accessible.
+  let record_length_pointer =
+    unsafe { std::ptr::addr_of!((*entry).d_reclen) };
+  // SAFETY: same fixed-header guarantee as d_reclen.
+  let name_length_pointer =
+    unsafe { std::ptr::addr_of!((*entry).d_namlen) };
+  // SAFETY: readdir supplied a record containing both fixed header fields;
+  // unaligned reads avoid creating a full-size dirent reference.
+  let record_length =
+    unsafe { std::ptr::read_unaligned(record_length_pointer) } as usize;
+  // SAFETY: same fixed-header guarantee as d_reclen above.
+  let name_length =
+    unsafe { std::ptr::read_unaligned(name_length_pointer) } as usize;
+  // SAFETY: only the field address is formed; the slice below is separately
+  // capped to the record and declared-array bounds.
+  let name_array_pointer = unsafe { std::ptr::addr_of!((*entry).d_name) };
+  let capacity = fixed_array_length(name_array_pointer);
+  let name_offset = std::mem::offset_of!(libc::dirent, d_name);
+  let Some(record_name_bytes) = record_length.checked_sub(name_offset) else {
+    return Err(
+      OdenParentDirectRepoSourceError::MalformedDirectoryEntry(
+        directory.to_string(),
+      ),
+    );
+  };
+  let Some(terminated_length) = name_length.checked_add(1) else {
+    return Err(
+      OdenParentDirectRepoSourceError::MalformedDirectoryEntry(
+        directory.to_string(),
+      ),
+    );
+  };
+  if name_length >= capacity || terminated_length > record_name_bytes {
+    return Err(
+      OdenParentDirectRepoSourceError::MalformedDirectoryEntry(
+        directory.to_string(),
+      ),
+    );
+  }
+  // SAFETY: `terminated_length` is within both d_reclen's record bytes and
+  // the declared fixed d_name capacity.
+  let name = unsafe {
+    std::slice::from_raw_parts(
+      name_array_pointer.cast::<u8>(),
+      terminated_length,
+    )
+  };
+  if name[name_length] != 0 || name[..name_length].contains(&0) {
+    return Err(
+      OdenParentDirectRepoSourceError::MalformedDirectoryEntry(
+        directory.to_string(),
+      ),
+    );
+  }
+  Ok(name[..name_length].to_vec())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn require_exact_directory_component(
+  directory: &File,
+  expected_snapshot: &DescriptorSnapshot,
+  directory_path: &str,
+  member_path: &str,
+  component: &str,
+) -> Result<(), OdenParentDirectRepoSourceError> {
+  let scan_flags = libc::O_RDONLY
+    | libc::O_DIRECTORY
+    | libc::O_NOFOLLOW
+    | libc::O_CLOEXEC;
+  // Opening `.` relative to the held directory creates an independent open
+  // file description. A dup is ineligible because it shares directory offset.
+  let scan_descriptor = open_component(
+    directory.as_raw_fd(),
+    member_path,
+    ".",
+    scan_flags,
+  )?;
+  let scan_snapshot =
+    DescriptorSnapshot::capture(&scan_descriptor, directory_path)?;
+  if &scan_snapshot != expected_snapshot {
+    return Err(OdenParentDirectRepoSourceError::DescriptorChanged {
+      member: member_path.to_string(),
+      descriptor: directory_path.to_string(),
+    });
+  }
+  let stream =
+    OdenParentDirectoryStream::from_descriptor(scan_descriptor, directory_path)?;
+  let scan_result = (|| {
+    let mut matches = 0_usize;
+    loop {
+      clear_oden_parent_readdir_errno();
+      // SAFETY: `stream.raw` is a live uniquely owned DIR. Each returned
+      // pointer is inspected only until the next readdir call.
+      let entry = unsafe { libc::readdir(stream.raw) };
+      if entry.is_null() {
+        let errno = oden_parent_readdir_errno();
+        if errno != 0 {
+          return Err(OdenParentDirectRepoSourceError::EnumerateDirectory {
+            directory: directory_path.to_string(),
+            source: std::io::Error::from_raw_os_error(errno),
+          });
+        }
+        break;
+      }
+      // SAFETY: readdir returned a record with its fixed header accessible.
+      // The helper copies only record-bounded name bytes before the next
+      // readdir; d_type is intentionally ignored.
+      let name = unsafe { oden_parent_dirent_name(entry, directory_path) }?;
+      if name == component.as_bytes() {
+        matches = matches.saturating_add(1);
+      }
+    }
+    Ok(matches)
+  })();
+  let close_result = stream.close(directory_path);
+  let matches = match scan_result {
+    Ok(matches) => matches,
+    Err(error) => {
+      let _ = close_result;
+      return Err(error);
+    }
+  };
+  close_result?;
+  if matches != 1 {
+    return Err(
+      OdenParentDirectRepoSourceError::InvalidExactComponentCount {
+        directory: directory_path.to_string(),
+        component: component.to_string(),
+        matches,
+      },
+    );
+  }
+  Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn direct_repo_relative_path_and_key(
+  root: &RetainedRepositoryRoot,
+  specifier: &ModuleSpecifier,
+) -> Result<(String, OdenParentRepoVfsKey), OdenParentDirectRepoSourceError> {
+  if specifier.scheme() != "file" {
+    return Err(OdenParentDirectRepoSourceError::InvalidFileUrl(
+      "scheme is not file",
+    ));
+  }
+  if specifier.host_str().is_some() {
+    return Err(OdenParentDirectRepoSourceError::InvalidFileUrl(
+      "URL has a host",
+    ));
+  }
+  if !specifier.username().is_empty()
+    || specifier.password().is_some()
+    || specifier.port().is_some()
+  {
+    return Err(OdenParentDirectRepoSourceError::InvalidFileUrl(
+      "URL has userinfo or a port",
+    ));
+  }
+  if specifier.query().is_some() || specifier.fragment().is_some() {
+    return Err(OdenParentDirectRepoSourceError::InvalidFileUrl(
+      "URL has a query or fragment",
+    ));
+  }
+  let decoded_path = specifier.to_file_path().map_err(|_| {
+    OdenParentDirectRepoSourceError::InvalidFileUrl(
+      "URL cannot be decoded as an absolute platform path",
+    )
+  })?;
+  if !decoded_path.is_absolute() {
+    return Err(OdenParentDirectRepoSourceError::InvalidFileUrl(
+      "decoded path is not absolute",
+    ));
+  }
+  let round_trip = ModuleSpecifier::from_file_path(&decoded_path).map_err(|_| {
+    OdenParentDirectRepoSourceError::InvalidFileUrl(
+      "decoded path cannot be encoded as a file URL",
+    )
+  })?;
+  if round_trip.as_str().as_bytes() != specifier.as_str().as_bytes() {
+    return Err(OdenParentDirectRepoSourceError::InvalidFileUrl(
+      "URL spelling is not the byte-exact path round trip",
+    ));
+  }
+  let relative_path = decoded_path.strip_prefix(&root.path).map_err(|_| {
+    OdenParentDirectRepoSourceError::OutsideRetainedRoot {
+      specifier: specifier.to_string(),
+      root: root.path.clone(),
+    }
+  })?;
+  if relative_path.as_os_str().is_empty() {
+    return Err(OdenParentDirectRepoSourceError::OutsideRetainedRoot {
+      specifier: specifier.to_string(),
+      root: root.path.clone(),
+    });
+  }
+  let relative_path = relative_path
+    .to_str()
+    .ok_or(OdenParentDirectRepoSourceError::NonUtf8RelativePath)?
+    .to_string();
+  let key =
+    OdenParentRepoVfsKey::from_repository_relative_path(&relative_path)?;
+  Ok((relative_path, key))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_oden_parent_direct_repo_source<'a>(
+  root: &'a RetainedRepositoryRoot,
+  specifier: &ModuleSpecifier,
+  original_bytes: Arc<[u8]>,
+) -> Result<OdenParentDirectRepoSourceRead<'a>, OdenParentDirectRepoSourceError>
+{
+  root.require_stable("<direct-source-entry>")?;
+  root.require_current_and_named_paths_stable("candidate entry")?;
+  let (path, key) = direct_repo_relative_path_and_key(root, specifier)?;
+  let components = path.split('/').collect::<Vec<_>>();
+  let (file_name, directory_components) = components
+    .split_last()
+    .expect("typed repository key path has at least one component");
+  let directory_flags = libc::O_RDONLY
+    | libc::O_DIRECTORY
+    | libc::O_NOFOLLOW
+    | libc::O_CLOEXEC;
+  let mut held_directories: Vec<HeldDirectory> =
+    Vec::with_capacity(directory_components.len());
+  let mut directory_path = String::new();
+  for component in directory_components {
+    let (parent_descriptor, parent_snapshot, parent_path) =
+      match held_directories.last() {
+        Some(directory) => (
+          &directory.descriptor,
+          &directory.snapshot,
+          directory.path.as_str(),
+        ),
+        None => (&root.descriptor, &root.snapshot, "."),
+      };
+    require_exact_directory_component(
+      parent_descriptor,
+      parent_snapshot,
+      parent_path,
+      &path,
+      component,
+    )?;
+    if !directory_path.is_empty() {
+      directory_path.push('/');
+    }
+    directory_path.push_str(component);
+    let descriptor = open_component(
+      parent_descriptor.as_raw_fd(),
+      &path,
+      component,
+      directory_flags,
+    )?;
+    let snapshot = DescriptorSnapshot::capture(&descriptor, &directory_path)?;
+    if !snapshot.is_directory() {
+      return Err(
+        OdenParentDirectRepoSourceError::ComponentNotDirectory(
+          directory_path,
+        ),
+      );
+    }
+    held_directories.push(HeldDirectory {
+      path: directory_path.clone(),
+      descriptor,
+      snapshot,
+    });
+  }
+
+  let (parent_descriptor, parent_snapshot, parent_path) =
+    match held_directories.last() {
+      Some(directory) => (
+        &directory.descriptor,
+        &directory.snapshot,
+        directory.path.as_str(),
+      ),
+      None => (&root.descriptor, &root.snapshot, "."),
+    };
+  require_exact_directory_component(
+    parent_descriptor,
+    parent_snapshot,
+    parent_path,
+    &path,
+    file_name,
+  )?;
+  let file_flags = libc::O_RDONLY
+    | libc::O_NONBLOCK
+    | libc::O_NOFOLLOW
+    | libc::O_CLOEXEC;
+  let mut descriptor = open_component(
+    parent_descriptor.as_raw_fd(),
+    &path,
+    file_name,
+    file_flags,
+  )?;
+  let snapshot = DescriptorSnapshot::capture(&descriptor, &path)?;
+  if !snapshot.is_regular_file() {
+    return Err(OdenParentDirectRepoSourceError::NotRegularFile(path));
+  }
+  if snapshot.links != 1 {
+    return Err(OdenParentDirectRepoSourceError::InvalidLinkCount {
+      path,
+      links: snapshot.links,
+    });
+  }
+  let expected_size = original_bytes.len() as u64;
+  if snapshot.size < 0 || snapshot.size as u64 != expected_size {
+    return Err(OdenParentDirectRepoSourceError::SizeMismatch {
+      path,
+      expected: expected_size,
+      actual: snapshot.size,
+    });
+  }
+
+  let mut offset = 0_usize;
+  let mut buffer = [0_u8; 8_192];
+  while offset < original_bytes.len() {
+    let remaining = original_bytes.len() - offset;
+    let chunk_length = remaining.min(buffer.len());
+    let read_length = descriptor
+      .read(&mut buffer[..chunk_length])
+      .map_err(|source| OdenParentDirectRepoSourceError::ReadFile {
+        path: path.clone(),
+        source,
+      })?;
+    if read_length == 0 {
+      return Err(OdenParentDirectRepoSourceError::UnexpectedEof {
+        path,
+        offset: offset as u64,
+      });
+    }
+    let expected = &original_bytes[offset..offset + read_length];
+    if buffer[..read_length] != *expected {
+      let mismatch = buffer[..read_length]
+        .iter()
+        .zip(expected)
+        .position(|(actual, expected)| actual != expected)
+        .expect("unequal slices have a mismatching byte");
+      return Err(OdenParentDirectRepoSourceError::ByteMismatch {
+        path,
+        offset: (offset + mismatch) as u64,
+      });
+    }
+    offset += read_length;
+  }
+  let mut trailing = [0_u8; 1];
+  let trailing_length = descriptor.read(&mut trailing).map_err(|source| {
+    OdenParentDirectRepoSourceError::ReadFile {
+      path: path.clone(),
+      source,
+    }
+  })?;
+  if trailing_length != 0 {
+    return Err(OdenParentDirectRepoSourceError::TrailingBytes(path));
+  }
+  let executable = snapshot.mode & 0o111 != 0;
+
+  Ok(OdenParentDirectRepoSourceRead {
+    root,
+    key,
+    specifier: specifier.clone(),
+    original_bytes,
+    executable,
+    path,
+    descriptor,
+    snapshot,
+    held_directories,
+  })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn finish_oden_parent_direct_repo_source(
+  read: OdenParentDirectRepoSourceRead<'_>,
+) -> Result<OdenParentDirectRepoSourceCandidate, OdenParentDirectRepoSourceError>
+{
+  let actual = DescriptorSnapshot::capture(&read.descriptor, &read.path)?;
+  if actual != read.snapshot {
+    return Err(OdenParentDirectRepoSourceError::DescriptorChanged {
+      member: read.path.clone(),
+      descriptor: read.path,
+    });
+  }
+  for directory in read.held_directories.iter().rev() {
+    let actual = DescriptorSnapshot::capture(&directory.descriptor, &directory.path)?;
+    if actual != directory.snapshot {
+      return Err(OdenParentDirectRepoSourceError::DescriptorChanged {
+        member: read.path.clone(),
+        descriptor: directory.path.clone(),
+      });
+    }
+  }
+  read.root.require_stable(&read.path)?;
+  read
+    .root
+    .require_current_and_named_paths_stable("candidate terminal")?;
+  Ok(OdenParentDirectRepoSourceCandidate {
+    key: read.key,
+    specifier: read.specifier,
+    original_bytes: read.original_bytes,
+    executable: read.executable,
+  })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+fn observe_oden_parent_direct_repo_source_candidate(
+  specifier: &ModuleSpecifier,
+  original_bytes: Arc<[u8]>,
+) -> Result<OdenParentDirectRepoSourceCandidate, OdenParentDirectRepoSourceError>
+{
+  let root = RetainedRepositoryRoot::open_current()?;
+  let read =
+    read_oden_parent_direct_repo_source(&root, specifier, original_bytes)?;
+  finish_oden_parent_direct_repo_source(read)
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn observe_oden_parent_direct_repo_source_from_test_root<H>(
+  root_path: &Path,
+  specifier: &ModuleSpecifier,
+  original_bytes: Arc<[u8]>,
+  post_read_hook: H,
+) -> Result<OdenParentDirectRepoSourceCandidate, OdenParentDirectRepoSourceError>
+where
+  H: FnOnce(),
+{
+  let root = RetainedRepositoryRoot::open_test_absolute(root_path)?;
+  let read =
+    read_oden_parent_direct_repo_source(&root, specifier, original_bytes)?;
+  post_read_hook();
+  finish_oden_parent_direct_repo_source(read)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1198,6 +2059,505 @@ mod tests {
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn direct_file_specifier(path: &Path) -> ModuleSpecifier {
+    ModuleSpecifier::from_file_path(path).unwrap()
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn observe_direct_from_test_root(
+    root: &Path,
+    specifier: &ModuleSpecifier,
+    bytes: Arc<[u8]>,
+  ) -> Result<
+    OdenParentDirectRepoSourceCandidate,
+    OdenParentDirectRepoSourceError,
+  > {
+    observe_oden_parent_direct_repo_source_from_test_root(
+      root,
+      specifier,
+      bytes,
+      || {},
+    )
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn direct_repo_source_accepts_exact_key_arc_mode_and_zero_bytes() {
+    let current = std::env::current_dir().unwrap();
+    let retained_current = RetainedRepositoryRoot::open_current().unwrap();
+    assert_eq!(
+      retained_current.path.as_os_str().as_bytes(),
+      current.as_os_str().as_bytes()
+    );
+    retained_current
+      .require_current_and_named_paths_stable("test terminal")
+      .unwrap();
+    assert!(matches!(
+      RetainedRepositoryRoot::open_test_absolute(Path::new(".")),
+      Err(OdenParentRetainedContractError::TestRootNotAbsolute(_))
+    ));
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("bin")).unwrap();
+    let executable_path = root.path().join("bin/tool");
+    std::fs::write(&executable_path, b"exact candidate bytes").unwrap();
+    std::fs::set_permissions(
+      &executable_path,
+      std::fs::Permissions::from_mode(0o751),
+    )
+    .unwrap();
+    let specifier = direct_file_specifier(&executable_path);
+    let supplied: Arc<[u8]> = Arc::from(&b"exact candidate bytes"[..]);
+    let candidate = observe_direct_from_test_root(
+      root.path(),
+      &specifier,
+      supplied.clone(),
+    )
+    .unwrap();
+    assert_eq!(candidate.key.as_str(), "repo:bin/tool");
+    assert_eq!(candidate.specifier, specifier);
+    assert!(Arc::ptr_eq(&candidate.original_bytes, &supplied));
+    assert!(candidate.executable);
+
+    let empty_path = root.path().join("empty");
+    std::fs::write(&empty_path, []).unwrap();
+    std::fs::set_permissions(
+      &empty_path,
+      std::fs::Permissions::from_mode(0o640),
+    )
+    .unwrap();
+    let empty: Arc<[u8]> = Arc::from(&b""[..]);
+    let candidate = observe_direct_from_test_root(
+      root.path(),
+      &direct_file_specifier(&empty_path),
+      empty.clone(),
+    )
+    .unwrap();
+    assert_eq!(candidate.key.as_str(), "repo:empty");
+    assert!(Arc::ptr_eq(&candidate.original_bytes, &empty));
+    assert!(!candidate.executable);
+
+    let binary_path = root.path().join("binary");
+    let binary: Arc<[u8]> = Arc::from(&[0_u8, 0xff, b'\r', b'\n'][..]);
+    std::fs::write(&binary_path, binary.as_ref()).unwrap();
+    let candidate = observe_direct_from_test_root(
+      root.path(),
+      &direct_file_specifier(&binary_path),
+      binary.clone(),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(&candidate.original_bytes, &binary));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn direct_repo_source_refuses_url_and_key_aliases() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    let file_path = root.path().join("src/file.ts");
+    std::fs::write(&file_path, b"source").unwrap();
+    let valid = direct_file_specifier(&file_path);
+    let bytes = || Arc::<[u8]>::from(&b"source"[..]);
+
+    let root_url = direct_file_specifier(root.path());
+    assert!(matches!(
+      observe_direct_from_test_root(root.path(), &root_url, bytes()),
+      Err(OdenParentDirectRepoSourceError::OutsideRetainedRoot { .. })
+    ));
+    let outside_root = tempfile::tempdir().unwrap();
+    let outside_path = outside_root.path().join("outside.ts");
+    std::fs::write(&outside_path, b"source").unwrap();
+    assert!(matches!(
+      observe_direct_from_test_root(
+        root.path(),
+        &direct_file_specifier(&outside_path),
+        bytes(),
+      ),
+      Err(OdenParentDirectRepoSourceError::OutsideRetainedRoot { .. })
+    ));
+
+    let mut host = valid.clone();
+    host.set_host(Some("localhost")).unwrap();
+    assert!(matches!(
+      observe_direct_from_test_root(root.path(), &host, bytes()),
+      Err(OdenParentDirectRepoSourceError::InvalidFileUrl("URL has a host"))
+    ));
+    let mut query = valid.clone();
+    query.set_query(Some("alias"));
+    assert!(matches!(
+      observe_direct_from_test_root(root.path(), &query, bytes()),
+      Err(OdenParentDirectRepoSourceError::InvalidFileUrl(
+        "URL has a query or fragment"
+      ))
+    ));
+    let mut fragment = valid.clone();
+    fragment.set_fragment(Some("alias"));
+    assert!(matches!(
+      observe_direct_from_test_root(root.path(), &fragment, bytes()),
+      Err(OdenParentDirectRepoSourceError::InvalidFileUrl(
+        "URL has a query or fragment"
+      ))
+    ));
+
+    let alternate_percent = ModuleSpecifier::parse(
+      &valid.as_str().replace("file.ts", "%66ile.ts"),
+    )
+    .unwrap();
+    assert!(matches!(
+      observe_direct_from_test_root(
+        root.path(),
+        &alternate_percent,
+        bytes(),
+      ),
+      Err(OdenParentDirectRepoSourceError::InvalidFileUrl(
+        "URL spelling is not the byte-exact path round trip"
+      ))
+    ));
+
+    for path in [
+      root.path().join("literal%path"),
+      root.path().join("unicode-é.ts"),
+      root.path().join(ODEN_PARENT_GENERATED_JSON_PATH),
+      root.path().join("a".repeat(256)),
+      root.path().join(format!("{}a", "a/".repeat(2_048))),
+    ] {
+      assert!(matches!(
+        observe_direct_from_test_root(
+          root.path(),
+          &direct_file_specifier(&path),
+          bytes(),
+        ),
+        Err(OdenParentDirectRepoSourceError::RepoKey(_))
+      ));
+    }
+
+    let traversed = valid.join("../../../outside.ts").unwrap();
+    assert!(matches!(
+      observe_direct_from_test_root(root.path(), &traversed, bytes()),
+      Err(OdenParentDirectRepoSourceError::OutsideRetainedRoot { .. })
+    ));
+
+    let root_name = root.path().file_name().unwrap().to_str().unwrap();
+    let prefix_sibling = root
+      .path()
+      .with_file_name(format!("{root_name}-sibling"));
+    let prefix_sibling_specifier =
+      direct_file_specifier(&prefix_sibling.join("outside.ts"));
+    assert!(matches!(
+      observe_direct_from_test_root(
+        root.path(),
+        &prefix_sibling_specifier,
+        bytes(),
+      ),
+      Err(OdenParentDirectRepoSourceError::OutsideRetainedRoot { .. })
+    ));
+    let encoded_traversal = ModuleSpecifier::parse(&format!(
+      "{}/%2e%2e/{root_name}-sibling/outside.ts",
+      root_url.as_str()
+    ))
+    .unwrap();
+    assert_eq!(encoded_traversal, prefix_sibling_specifier);
+    assert!(!encoded_traversal.as_str().contains("%2e"));
+    assert!(matches!(
+      observe_direct_from_test_root(
+        root.path(),
+        &encoded_traversal,
+        bytes(),
+      ),
+      Err(OdenParentDirectRepoSourceError::OutsideRetainedRoot { .. })
+    ));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn direct_repo_source_refuses_links_specials_and_inexact_bytes() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("target"), b"target").unwrap();
+    symlink("target", root.path().join("final-link")).unwrap();
+    std::fs::create_dir(root.path().join("real-dir")).unwrap();
+    std::fs::write(root.path().join("real-dir/member"), b"member").unwrap();
+    symlink("real-dir", root.path().join("dir-link")).unwrap();
+    std::fs::hard_link(root.path().join("target"), root.path().join("alias"))
+      .unwrap();
+    std::fs::create_dir(root.path().join("directory")).unwrap();
+    std::fs::write(root.path().join("wrong"), b"abc").unwrap();
+    let fifo_path = root.path().join("fifo");
+    let fifo = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `fifo` is NUL-terminated and the mode is valid.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+    for path in [root.path().join("final-link"), root.path().join("dir-link/member")] {
+      assert!(matches!(
+        observe_direct_from_test_root(
+          root.path(),
+          &direct_file_specifier(&path),
+          Arc::from(&b"target"[..]),
+        ),
+        Err(OdenParentDirectRepoSourceError::RetainedDescriptor(
+          OdenParentRetainedContractError::OpenComponent { .. }
+        ))
+      ));
+    }
+    assert!(matches!(
+      observe_direct_from_test_root(
+        root.path(),
+        &direct_file_specifier(&root.path().join("alias")),
+        Arc::from(&b"target"[..]),
+      ),
+      Err(OdenParentDirectRepoSourceError::InvalidLinkCount {
+        links: 2,
+        ..
+      })
+    ));
+    assert!(matches!(
+      observe_direct_from_test_root(
+        root.path(),
+        &direct_file_specifier(&root.path().join("wrong")),
+        Arc::from(&b"abcd"[..]),
+      ),
+      Err(OdenParentDirectRepoSourceError::SizeMismatch {
+        expected: 4,
+        actual: 3,
+        ..
+      })
+    ));
+    for path in [root.path().join("directory"), fifo_path] {
+      assert!(matches!(
+        observe_direct_from_test_root(
+          root.path(),
+          &direct_file_specifier(&path),
+          Arc::from(&b""[..]),
+        ),
+        Err(OdenParentDirectRepoSourceError::NotRegularFile(_))
+      ));
+    }
+    assert!(matches!(
+      observe_direct_from_test_root(
+        root.path(),
+        &direct_file_specifier(&root.path().join("wrong")),
+        Arc::from(&b"abd"[..]),
+      ),
+      Err(OdenParentDirectRepoSourceError::ByteMismatch {
+        offset: 2,
+        ..
+      })
+    ));
+    assert!(matches!(
+      observe_direct_from_test_root(
+        root.path(),
+        &direct_file_specifier(&root.path().join("wrong")),
+        Arc::from(&b"ab"[..]),
+      ),
+      Err(OdenParentDirectRepoSourceError::SizeMismatch {
+        expected: 2,
+        actual: 3,
+        ..
+      })
+    ));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn direct_repo_source_detects_mutation_and_requires_exact_case() {
+    let file_root = tempfile::tempdir().unwrap();
+    let file_path = file_root.path().join("member");
+    std::fs::write(&file_path, b"member").unwrap();
+    let file_mode = file_path.metadata().unwrap().permissions().mode();
+    let file_result = observe_oden_parent_direct_repo_source_from_test_root(
+      file_root.path(),
+      &direct_file_specifier(&file_path),
+      Arc::from(&b"member"[..]),
+      || {
+        std::fs::set_permissions(
+          &file_path,
+          std::fs::Permissions::from_mode(file_mode ^ 0o100),
+        )
+        .unwrap();
+      },
+    );
+    std::fs::set_permissions(
+      &file_path,
+      std::fs::Permissions::from_mode(file_mode),
+    )
+    .unwrap();
+    assert!(matches!(
+      file_result,
+      Err(OdenParentDirectRepoSourceError::DescriptorChanged {
+        ref descriptor,
+        ..
+      }) if descriptor == "member"
+    ));
+
+    let growth_root = tempfile::tempdir().unwrap();
+    let growth_path = growth_root.path().join("member");
+    std::fs::write(&growth_path, b"member").unwrap();
+    let growth_result = observe_oden_parent_direct_repo_source_from_test_root(
+      growth_root.path(),
+      &direct_file_specifier(&growth_path),
+      Arc::from(&b"member"[..]),
+      || {
+        std::fs::write(&growth_path, b"member grew").unwrap();
+      },
+    );
+    assert!(matches!(
+      growth_result,
+      Err(OdenParentDirectRepoSourceError::DescriptorChanged {
+        ref descriptor,
+        ..
+      }) if descriptor == "member"
+    ));
+
+    let truncation_root = tempfile::tempdir().unwrap();
+    let truncation_path = truncation_root.path().join("member");
+    std::fs::write(&truncation_path, b"member").unwrap();
+    let truncation_result =
+      observe_oden_parent_direct_repo_source_from_test_root(
+        truncation_root.path(),
+        &direct_file_specifier(&truncation_path),
+        Arc::from(&b"member"[..]),
+        || {
+          std::fs::write(&truncation_path, b"mem").unwrap();
+        },
+      );
+    assert!(matches!(
+      truncation_result,
+      Err(OdenParentDirectRepoSourceError::DescriptorChanged {
+        ref descriptor,
+        ..
+      }) if descriptor == "member"
+    ));
+
+    let intermediate_root = tempfile::tempdir().unwrap();
+    let intermediate = intermediate_root.path().join("dir");
+    std::fs::create_dir(&intermediate).unwrap();
+    let member = intermediate.join("member");
+    std::fs::write(&member, b"member").unwrap();
+    let intermediate_mode = intermediate.metadata().unwrap().permissions().mode();
+    let intermediate_result =
+      observe_oden_parent_direct_repo_source_from_test_root(
+        intermediate_root.path(),
+        &direct_file_specifier(&member),
+        Arc::from(&b"member"[..]),
+        || {
+          std::fs::set_permissions(
+            &intermediate,
+            std::fs::Permissions::from_mode(intermediate_mode ^ 0o100),
+          )
+          .unwrap();
+        },
+      );
+    std::fs::set_permissions(
+      &intermediate,
+      std::fs::Permissions::from_mode(intermediate_mode),
+    )
+    .unwrap();
+    assert!(matches!(
+      intermediate_result,
+      Err(OdenParentDirectRepoSourceError::DescriptorChanged {
+        ref descriptor,
+        ..
+      }) if descriptor == "dir"
+    ));
+
+    let root = tempfile::tempdir().unwrap();
+    let member = root.path().join("member");
+    std::fs::write(&member, b"member").unwrap();
+    let root_mode = root.path().metadata().unwrap().permissions().mode();
+    let root_result = observe_oden_parent_direct_repo_source_from_test_root(
+      root.path(),
+      &direct_file_specifier(&member),
+      Arc::from(&b"member"[..]),
+      || {
+        std::fs::set_permissions(
+          root.path(),
+          std::fs::Permissions::from_mode(root_mode ^ 0o100),
+        )
+        .unwrap();
+      },
+    );
+    std::fs::set_permissions(
+      root.path(),
+      std::fs::Permissions::from_mode(root_mode),
+    )
+    .unwrap();
+    assert!(matches!(
+      root_result,
+      Err(OdenParentDirectRepoSourceError::RetainedDescriptor(
+        OdenParentRetainedContractError::DescriptorChanged {
+          ref descriptor,
+          ..
+        }
+      )) if descriptor == "."
+    ));
+
+    let case_root = tempfile::tempdir().unwrap();
+    std::fs::write(case_root.path().join("Case.ts"), b"case").unwrap();
+    let wrong_case = direct_file_specifier(&case_root.path().join("case.ts"));
+    assert!(matches!(
+      observe_direct_from_test_root(
+        case_root.path(),
+        &wrong_case,
+        Arc::from(&b"case"[..]),
+      ),
+      Err(OdenParentDirectRepoSourceError::InvalidExactComponentCount {
+        ref component,
+        matches: 0,
+        ..
+      }) if component == "case.ts"
+    ));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn direct_repo_dirent_name_is_record_bounded() {
+    // SAFETY: all-zero integers and c_char arrays are valid dirent field
+    // values; the test sets every field consumed by the platform extractor.
+    let mut entry = unsafe { std::mem::zeroed::<libc::dirent>() };
+    let name_offset = std::mem::offset_of!(libc::dirent, d_name);
+    entry.d_name[0] = b'a' as libc::c_char;
+    entry.d_name[1] = 0;
+
+    #[cfg(target_os = "linux")]
+    {
+      entry.d_reclen = (name_offset + 2).try_into().unwrap();
+      // SAFETY: `entry` is a complete local dirent with a two-byte d_name
+      // record containing `a\0`.
+      assert_eq!(
+        unsafe { oden_parent_dirent_name(&entry, ".") }.unwrap(),
+        b"a"
+      );
+      entry.d_name[1] = b'b' as libc::c_char;
+      // SAFETY: the complete local dirent remains addressable; the extractor
+      // must refuse because the record-bounded name has no NUL.
+      assert!(matches!(
+        unsafe { oden_parent_dirent_name(&entry, ".") },
+        Err(OdenParentDirectRepoSourceError::MalformedDirectoryEntry(_))
+      ));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+      entry.d_reclen = (name_offset + 2).try_into().unwrap();
+      entry.d_namlen = 1;
+      // SAFETY: `entry` is a complete local dirent whose d_namlen and
+      // following NUL fit inside d_reclen.
+      assert_eq!(
+        unsafe { oden_parent_dirent_name(&entry, ".") }.unwrap(),
+        b"a"
+      );
+      entry.d_namlen = entry.d_name.len().try_into().unwrap();
+      // SAFETY: the full local struct is addressable; the extractor must
+      // refuse d_namlen at the declared capacity with no following NUL slot.
+      assert!(matches!(
+        unsafe { oden_parent_dirent_name(&entry, ".") },
+        Err(OdenParentDirectRepoSourceError::MalformedDirectoryEntry(_))
+      ));
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   fn load_from_test_root<H>(
     root: &Path,
     paths: &[&str],
@@ -1210,7 +2570,7 @@ mod tests {
     load_retained_contract_files_with(
       paths,
       limits,
-      || RetainedRepositoryRoot::open_path(root),
+      || RetainedRepositoryRoot::open_test_absolute(root),
       post_read_hook,
     )
   }
@@ -1242,7 +2602,7 @@ mod tests {
     root: &Path,
   ) -> Result<RetainedContractByteBundle, OdenParentRetainedContractError> {
     load_retained_contract_byte_bundle_with(|| {
-      RetainedRepositoryRoot::open_path(root)
+      RetainedRepositoryRoot::open_test_absolute(root)
     })
   }
 
@@ -1508,7 +2868,7 @@ mod tests {
     ]
     .into_iter();
     let bundle = load_retained_contract_byte_bundle_with(|| {
-      RetainedRepositoryRoot::open_path(roots.next().unwrap())
+      RetainedRepositoryRoot::open_test_absolute(roots.next().unwrap())
     })
     .unwrap();
     assert!(roots.next().is_none());
