@@ -3,9 +3,9 @@
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
 // These generator-side slices freeze the exact capture, source-closure, and
 // release contract memberships and a dormant descriptor-anchored retained-file
-// loader. Three release definitions, allowlist construction, generate/check
-// execution, and all three generated outputs remain absent, so neither reserved
-// mode gains authority or an output path.
+// loader. The build-metadata release definition, allowlist construction,
+// generate/check execution, and all three generated outputs remain absent, so
+// neither reserved mode gains authority or an output path.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::CString;
@@ -203,9 +203,9 @@ pub(crate) const ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS: &[&str] = &[
 
 /// Parent-root-relative definitions that comprise the release contract.
 ///
-/// The complete reviewed membership is fixed even while two schema members are
-/// intentionally absent. Any future retained load must refuse that partial
-/// repository state before it can form a candidate inventory.
+/// The complete reviewed membership is fixed even while the build-metadata
+/// schema member is intentionally absent. Any future retained load must refuse
+/// that partial repository state before it can form a candidate inventory.
 #[allow(dead_code)]
 pub(crate) const ODEN_PARENT_RELEASE_CONTRACT_PATHS: &[&str] = &[
   ".github/workflows/release.yml",
