@@ -194,6 +194,8 @@ fn os_str_is_oden_parent_allowlist_reserved_family(value: &OsStr) -> bool {
 }
 
 const MAX_IJSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const ODEN_PARENT_REPOSITORY_RELATIVE_PATH_MAX_BYTES: usize = 4_096;
+const ODEN_PARENT_REPOSITORY_RELATIVE_COMPONENT_MAX_BYTES: usize = 255;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum OdenParentAllowlistError {
@@ -1085,13 +1087,37 @@ fn invalid_vfs_key(role: &'static str, key: &str) -> OdenParentAllowlistError {
   }
 }
 
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Construct a repository VFS key only from the exact canonical retained-root-
+// relative path grammar; callers cannot supply or preserve an alternate key
+// prefix, percent encoding, or generated-output spelling.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OdenParentRepoVfsKey(String);
+
+impl OdenParentRepoVfsKey {
+  pub fn from_repository_relative_path(
+    path: &str,
+  ) -> Result<Self, OdenParentAllowlistError> {
+    validate_repository_relative_path(path)?;
+    let key = format!("repo:{path}");
+    if !validate_repo_vfs_key(&key) {
+      return Err(invalid_vfs_key("repository", &key));
+    }
+    Ok(Self(key))
+  }
+
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+}
+
 fn validate_repo_vfs_key(key: &str) -> bool {
   let Some(path) = key.strip_prefix("repo:") else {
     return false;
   };
   !path.contains('%')
     && !is_oden_parent_generated_path(path)
-    && validate_contract_path(path).is_ok()
+    && validate_repository_relative_path(path).is_ok()
 }
 
 fn is_oden_parent_generated_path(path: &str) -> bool {
@@ -1115,7 +1141,7 @@ fn validate_jsr_vfs_key(key: &str) -> bool {
   let Some(path) = reference.sub_path() else {
     return false;
   };
-  !path.is_empty() && validate_contract_path(path).is_ok()
+  !path.is_empty() && validate_repository_relative_path(path).is_ok()
 }
 
 fn validate_jsr_package_name(name: &str) -> bool {
@@ -1160,7 +1186,9 @@ fn validate_jsr_raw_specifier(specifier: &str) -> bool {
     return false;
   }
   match reference.sub_path() {
-    Some(path) => !path.is_empty() && validate_contract_path(path).is_ok(),
+    Some(path) => {
+      !path.is_empty() && validate_repository_relative_path(path).is_ok()
+    }
     None => true,
   }
 }
@@ -1430,7 +1458,7 @@ impl ContractInventory {
     let mut rows = Vec::with_capacity(files.len());
     let mut previous: Option<&str> = None;
     for file in files {
-      validate_contract_path(file.path)?;
+      validate_repository_relative_path(file.path)?;
       if is_oden_parent_generated_path(file.path) {
         return Err(OdenParentAllowlistError::GeneratedOutputMember(
           file.path.to_string(),
@@ -1979,14 +2007,20 @@ fn validate_digest_domain(
   Ok(())
 }
 
-fn validate_contract_path(path: &str) -> Result<(), OdenParentAllowlistError> {
+fn validate_repository_relative_path(
+  path: &str,
+) -> Result<(), OdenParentAllowlistError> {
   if path.is_empty()
+    || path.len() > ODEN_PARENT_REPOSITORY_RELATIVE_PATH_MAX_BYTES
+    || !path.is_ascii()
     || path.starts_with('/')
     || path.contains('\\')
     || path.contains('\0')
-    || path
-      .split('/')
-      .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    || path.split('/').any(|component| {
+      component.is_empty()
+        || component.len() > ODEN_PARENT_REPOSITORY_RELATIVE_COMPONENT_MAX_BYTES
+        || matches!(component, "." | "..")
+    })
   {
     return Err(OdenParentAllowlistError::InvalidContractPath(
       path.to_string(),
@@ -2621,7 +2655,6 @@ mod tests {
   fn vfs_keys_accept_only_closed_canonical_namespaces() {
     for key in [
       "repo:src/release.ts",
-      "repo:src/é.ts",
       "jsr:@scope/pkg@1.2.3/mod.ts",
       "jsr:pkg@1.2.3/mod.ts",
       "jsr:@scope/pkg@1.2.3-beta.1+build.2/mod.ts",
@@ -2648,6 +2681,8 @@ mod tests {
       "repo:src/../escape.ts",
       "repo:src\\windows.ts",
       "repo:src/%2e%2e/escape.ts",
+      "repo:src/é.ts",
+      "jsr:pkg@1.2.3/src/é.ts",
       "repo:generated/capsec/rev2/filesystem-parent-standalone-allowlist.json",
       "repo:fork/deno/cli/lib/standalone/oden_parent_allowlist_generated.rs",
       "repo:fork/deno/cli/lib/standalone/oden_parent_target_policy_generated.rs",
@@ -2706,6 +2741,86 @@ mod tests {
           validate_vfs_dependency_key(&key),
           Err(OdenParentAllowlistError::InvalidVfsKey {
             role: "dependency",
+            ..
+          })
+        ));
+      }
+    }
+  }
+
+  #[test]
+  fn repository_relative_path_grammar_is_shared_by_inventory_and_vfs_keys() {
+    let mut max_path_components = vec!["a".repeat(255); 15];
+    max_path_components.push("b".repeat(254));
+    max_path_components.push("c".to_string());
+    let max_path = max_path_components.join("/");
+    assert_eq!(max_path.len(), 4_096);
+    assert!(max_path.split('/').all(|component| component.len() <= 255));
+
+    let max_key =
+      OdenParentRepoVfsKey::from_repository_relative_path(&max_path).unwrap();
+    assert_eq!(max_key.as_str(), format!("repo:{max_path}"));
+    ContractInventory::from_files(&[ContractFile {
+      path: &max_path,
+      bytes: b"x",
+    }])
+    .unwrap();
+    assert!(validate_jsr_vfs_key(&format!("jsr:pkg@1.2.3/{max_path}")));
+    assert!(validate_jsr_raw_specifier(&format!(
+      "jsr:pkg@1.2.3/{max_path}"
+    )));
+
+    let overlong_path = format!("{max_path}d");
+    let overlong_component = "d".repeat(256);
+    for path in [
+      "".to_string(),
+      "/absolute".to_string(),
+      "a//b".to_string(),
+      "a/./b".to_string(),
+      "a/../b".to_string(),
+      "a\\b".to_string(),
+      "a\0b".to_string(),
+      "src/é.ts".to_string(),
+      overlong_path.clone(),
+      overlong_component,
+    ] {
+      assert!(
+        OdenParentRepoVfsKey::from_repository_relative_path(&path).is_err()
+      );
+      assert!(matches!(
+        ContractInventory::from_files(&[ContractFile {
+          path: &path,
+          bytes: b"x",
+        }]),
+        Err(OdenParentAllowlistError::InvalidContractPath(_))
+      ));
+    }
+    assert!(!validate_jsr_vfs_key(&format!(
+      "jsr:pkg@1.2.3/{overlong_path}"
+    )));
+    assert!(!validate_jsr_raw_specifier(&format!(
+      "jsr:pkg@1.2.3/{overlong_path}"
+    )));
+
+    ContractInventory::from_files(&[ContractFile {
+      path: "literal%path",
+      bytes: b"x",
+    }])
+    .unwrap();
+    assert!(matches!(
+      OdenParentRepoVfsKey::from_repository_relative_path("literal%path"),
+      Err(OdenParentAllowlistError::InvalidVfsKey {
+        role: "repository",
+        ..
+      })
+    ));
+
+    for path in ODEN_PARENT_GENERATED_PATHS {
+      for path in [path.to_string(), path.to_ascii_uppercase()] {
+        assert!(matches!(
+          OdenParentRepoVfsKey::from_repository_relative_path(&path),
+          Err(OdenParentAllowlistError::InvalidVfsKey {
+            role: "repository",
             ..
           })
         ));
@@ -3814,7 +3929,7 @@ mod tests {
       ContractInventory::from_files(&[]),
       Err(OdenParentAllowlistError::EmptyInventory)
     );
-    for path in ["", "/a", "a//b", "a/./b", "a/../b", "a\\b"] {
+    for path in ["", "/a", "a//b", "a/./b", "a/../b", "a\\b", "unicode/é"] {
       assert!(matches!(
         ContractInventory::from_files(&[ContractFile { path, bytes: b"x" }]),
         Err(OdenParentAllowlistError::InvalidContractPath(_))
