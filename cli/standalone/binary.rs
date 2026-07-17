@@ -17,13 +17,24 @@ use capacity_builder::BytesAppendable;
 use deno_ast::MediaType;
 use deno_ast::ModuleKind;
 use deno_ast::ModuleSpecifier;
+use deno_ast::SourceRangedForSpanned;
+use deno_ast::StartSourcePos;
+use deno_ast::swc::ast;
+use deno_ast::swc::ecma_visit::Visit;
+use deno_ast::swc::ecma_visit::VisitWith;
 use deno_cache_dir::CACHE_PERM;
 use deno_core::anyhow::Context;
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
 use deno_core::serde_json;
 use deno_core::url::Url;
+use deno_graph::Dependency;
+use deno_graph::ImportKind;
 use deno_graph::ModuleGraph;
+use deno_graph::Resolution;
+use deno_graph::analysis::ImportAttribute;
+use deno_graph::analysis::ImportAttributes;
+use deno_graph::source::ResolutionMode;
 use deno_lib::args::CaData;
 use deno_lib::args::UnstableConfig;
 use deno_lib::shared::ReleaseChannel;
@@ -37,6 +48,7 @@ use deno_lib::standalone::binary::SerializedWorkspaceResolver;
 use deno_lib::standalone::binary::SerializedWorkspaceResolverImportMap;
 use deno_lib::standalone::binary::SpecifierDataStore;
 use deno_lib::standalone::binary::SpecifierId;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsDependencyKind;
 use deno_lib::standalone::virtual_fs::BuiltVfs;
 use deno_lib::standalone::virtual_fs::DENO_COMPILE_GLOBAL_NODE_MODULES_DIR_NAME;
 use deno_lib::standalone::virtual_fs::VfsBuilder;
@@ -289,6 +301,1322 @@ pub struct WriteBinOptions<'a> {
   pub include_paths: &'a [ModuleSpecifier],
   pub exclude_paths: Vec<PathBuf>,
   pub compile_flags: &'a CompileFlags,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OdenParentObservedImportAttribute {
+  key: String,
+  value: String,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OdenParentObservedRuntimeDependency {
+  kind: OdenParentVfsDependencyKind,
+  raw_specifier: String,
+  resolved_specifier: ModuleSpecifier,
+  source_byte_start: u64,
+  source_byte_end: u64,
+  import_attributes: Vec<OdenParentObservedImportAttribute>,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+enum OdenParentRuntimeDependencyObservationError {
+  #[error("invalid original module bytes: {0}")]
+  InvalidOriginalBytes(&'static str),
+  #[error("pinned parser refused the exact original module bytes: {0}")]
+  Parse(String),
+  #[error("unsupported runtime dependency syntax: {0}")]
+  UnsupportedAst(&'static str),
+  #[error("module specifier is not one exact unescaped string literal: {0}")]
+  InvalidLiteral(&'static str),
+  #[error("unsupported import attributes: {0}")]
+  InvalidImportAttributes(&'static str),
+  #[error("unsupported deno_graph dependency fact: {0}")]
+  UnsupportedGraph(String),
+  #[error("AST and deno_graph dependency facts do not reconcile: {0}")]
+  GraphMismatch(String),
+  #[error("deno_graph contains an unmatched dependency occurrence: {0}")]
+  GraphLeftover(String),
+}
+
+#[derive(Debug)]
+struct OdenParentExactStringLiteral {
+  decoded: String,
+  full_start: usize,
+  full_end: usize,
+  payload_start: usize,
+  payload_end: usize,
+}
+
+#[derive(Debug)]
+struct OdenParentAstRuntimeDependency {
+  kind: OdenParentVfsDependencyKind,
+  raw_specifier: String,
+  full_start: usize,
+  full_end: usize,
+  source_byte_start: usize,
+  source_byte_end: usize,
+  import_attributes_present: bool,
+  import_attributes: Vec<OdenParentObservedImportAttribute>,
+}
+
+struct OdenParentRuntimeDependencyAstCollector<'a> {
+  original_bytes: &'a [u8],
+  source_start: StartSourcePos,
+  observations: Vec<OdenParentAstRuntimeDependency>,
+  error: Option<OdenParentRuntimeDependencyObservationError>,
+}
+
+impl OdenParentRuntimeDependencyAstCollector<'_> {
+  fn exact_string_literal(
+    &self,
+    literal: &ast::Str,
+  ) -> Result<
+    OdenParentExactStringLiteral,
+    OdenParentRuntimeDependencyObservationError,
+  > {
+    let full_range = literal.range().as_byte_range(self.source_start);
+    let Some(full_bytes) = self.original_bytes.get(full_range.clone()) else {
+      return Err(OdenParentRuntimeDependencyObservationError::InvalidLiteral(
+        "parser range is outside the supplied original bytes",
+      ));
+    };
+    let Some(raw) = literal.raw.as_ref() else {
+      return Err(OdenParentRuntimeDependencyObservationError::InvalidLiteral(
+        "parser did not retain the raw token",
+      ));
+    };
+    if raw.as_bytes() != full_bytes {
+      return Err(OdenParentRuntimeDependencyObservationError::InvalidLiteral(
+        "parser raw token differs from the supplied original bytes",
+      ));
+    }
+    if full_bytes.len() < 2
+      || !matches!(full_bytes.first(), Some(b'\'' | b'"'))
+      || full_bytes.first() != full_bytes.last()
+    {
+      return Err(OdenParentRuntimeDependencyObservationError::InvalidLiteral(
+        "token is not bounded by one matching quote pair",
+      ));
+    }
+    let Some(decoded) = literal.value.as_str() else {
+      return Err(OdenParentRuntimeDependencyObservationError::InvalidLiteral(
+        "decoded token is not Unicode",
+      ));
+    };
+    let payload_start = full_range.start + 1;
+    let payload_end = full_range.end - 1;
+    if self.original_bytes[payload_start..payload_end] != *decoded.as_bytes() {
+      return Err(OdenParentRuntimeDependencyObservationError::InvalidLiteral(
+        "raw payload contains an escape or differs from the decoded value",
+      ));
+    }
+    Ok(OdenParentExactStringLiteral {
+      decoded: decoded.to_string(),
+      full_start: full_range.start,
+      full_end: full_range.end,
+      payload_start,
+      payload_end,
+    })
+  }
+
+  fn exact_identifier(
+    &self,
+    identifier: &ast::IdentName,
+  ) -> Result<String, OdenParentRuntimeDependencyObservationError> {
+    let range = identifier.range().as_byte_range(self.source_start);
+    let Some(raw_bytes) = self.original_bytes.get(range) else {
+      return Err(
+        OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+          "identifier range is outside the supplied original bytes",
+        ),
+      );
+    };
+    if raw_bytes != identifier.sym.as_bytes() {
+      return Err(
+        OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+          "attribute identifier is escaped or differs from its decoded value",
+        ),
+      );
+    }
+    Ok(identifier.sym.to_string())
+  }
+
+  fn exact_property_name(
+    &self,
+    name: &ast::PropName,
+  ) -> Result<String, OdenParentRuntimeDependencyObservationError> {
+    match name {
+      ast::PropName::Ident(identifier) => self.exact_identifier(identifier),
+      ast::PropName::Str(value) => {
+        Ok(self.exact_string_literal(value)?.decoded)
+      }
+      _ => Err(
+        OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+          "attribute key is computed or is not a string/identifier",
+        ),
+      ),
+    }
+  }
+
+  fn exact_import_attributes(
+    &self,
+    object: &ast::ObjectLit,
+  ) -> Result<
+    Vec<OdenParentObservedImportAttribute>,
+    OdenParentRuntimeDependencyObservationError,
+  > {
+    let mut attributes = Vec::with_capacity(object.props.len());
+    for property in &object.props {
+      let ast::PropOrSpread::Prop(property) = property else {
+        return Err(
+          OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+            "attribute spread is not supported",
+          ),
+        );
+      };
+      let ast::Prop::KeyValue(property) = &**property else {
+        return Err(
+          OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+            "attribute is not a key/value pair",
+          ),
+        );
+      };
+      let key = self.exact_property_name(&property.key)?;
+      let ast::Expr::Lit(ast::Lit::Str(value)) = &*property.value else {
+        return Err(
+          OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+            "attribute value is not a string literal",
+          ),
+        );
+      };
+      attributes.push(OdenParentObservedImportAttribute {
+        key,
+        value: self.exact_string_literal(value)?.decoded,
+      });
+    }
+    Ok(attributes)
+  }
+
+  fn dynamic_import_attributes(
+    &self,
+    arguments: &[ast::ExprOrSpread],
+  ) -> Result<
+    (bool, Vec<OdenParentObservedImportAttribute>),
+    OdenParentRuntimeDependencyObservationError,
+  > {
+    match arguments {
+      [_specifier] => Ok((false, Vec::new())),
+      [_specifier, options] if options.spread.is_none() => {
+        let ast::Expr::Object(options) = &*options.expr else {
+          return Err(
+            OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+              "dynamic-import options are not an object literal",
+            ),
+          );
+        };
+        if options.props.len() != 1 {
+          return Err(
+            OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+              "dynamic-import options are not exactly one `with` property",
+            ),
+          );
+        }
+        let ast::PropOrSpread::Prop(property) = &options.props[0] else {
+          return Err(
+            OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+              "dynamic-import options contain a spread",
+            ),
+          );
+        };
+        let ast::Prop::KeyValue(property) = &**property else {
+          return Err(
+            OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+              "dynamic-import option is not a key/value pair",
+            ),
+          );
+        };
+        if self.exact_property_name(&property.key)? != "with" {
+          return Err(
+            OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+              "dynamic-import option is not `with`",
+            ),
+          );
+        }
+        let ast::Expr::Object(attributes) = &*property.value else {
+          return Err(
+            OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+              "dynamic-import `with` value is not an object literal",
+            ),
+          );
+        };
+        Ok((true, self.exact_import_attributes(attributes)?))
+      }
+      [_specifier, _options] => Err(
+        OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(
+          "dynamic-import options use spread syntax",
+        ),
+      ),
+      _ => Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+        "dynamic import does not have exactly one specifier and at most one options object",
+      )),
+    }
+  }
+
+  fn record_static(
+    &mut self,
+    kind: OdenParentVfsDependencyKind,
+    source: &ast::Str,
+    attributes: Option<&ast::ObjectLit>,
+  ) {
+    if self.error.is_some() {
+      return;
+    }
+    let result = (|| {
+      let source = self.exact_string_literal(source)?;
+      let import_attributes = attributes
+        .map(|attributes| self.exact_import_attributes(attributes))
+        .transpose()?
+        .unwrap_or_default();
+      Ok(OdenParentAstRuntimeDependency {
+        kind,
+        raw_specifier: source.decoded,
+        full_start: source.full_start,
+        full_end: source.full_end,
+        source_byte_start: source.payload_start,
+        source_byte_end: source.payload_end,
+        import_attributes_present: attributes.is_some(),
+        import_attributes,
+      })
+    })();
+    match result {
+      Ok(observation) => self.observations.push(observation),
+      Err(error) => self.error = Some(error),
+    }
+  }
+}
+
+impl Visit for OdenParentRuntimeDependencyAstCollector<'_> {
+  fn visit_import_decl(&mut self, node: &ast::ImportDecl) {
+    if node.type_only {
+      self.error =
+        Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+          "type-only import",
+        ));
+      return;
+    }
+    if node.phase != ast::ImportPhase::Evaluation {
+      self.error =
+        Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+          "source/defer import phase",
+        ));
+      return;
+    }
+    self.record_static(
+      OdenParentVfsDependencyKind::StaticImport,
+      &node.src,
+      node.with.as_deref(),
+    );
+  }
+
+  fn visit_export_all(&mut self, node: &ast::ExportAll) {
+    if node.type_only {
+      self.error =
+        Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+          "type-only export",
+        ));
+      return;
+    }
+    self.record_static(
+      OdenParentVfsDependencyKind::StaticExport,
+      &node.src,
+      node.with.as_deref(),
+    );
+  }
+
+  fn visit_named_export(&mut self, node: &ast::NamedExport) {
+    let Some(source) = &node.src else {
+      return;
+    };
+    if node.type_only {
+      self.error =
+        Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+          "type-only export",
+        ));
+      return;
+    }
+    self.record_static(
+      OdenParentVfsDependencyKind::StaticExport,
+      source,
+      node.with.as_deref(),
+    );
+  }
+
+  fn visit_ts_import_type(&mut self, _node: &ast::TsImportType) {
+    self.error =
+      Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+        "TypeScript import type expression",
+      ));
+  }
+
+  fn visit_ts_import_equals_decl(&mut self, _node: &ast::TsImportEqualsDecl) {
+    self.error =
+      Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+        "TypeScript import-equals dependency",
+      ));
+  }
+
+  fn visit_call_expr(&mut self, node: &ast::CallExpr) {
+    node.visit_children_with(self);
+    if self.error.is_some() {
+      return;
+    }
+    let import = match &node.callee {
+      ast::Callee::Import(import) => import,
+      ast::Callee::Expr(callee) if matches!(&**callee, ast::Expr::Ident(identifier) if identifier.sym == "require") =>
+      {
+        self.error =
+          Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+            "require call",
+          ));
+        return;
+      }
+      _ => return,
+    };
+    if import.phase != ast::ImportPhase::Evaluation {
+      self.error =
+        Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+          "source/defer dynamic-import phase",
+        ));
+      return;
+    }
+    let Some(specifier) = node.args.first() else {
+      self.error =
+        Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+          "dynamic import has no specifier",
+        ));
+      return;
+    };
+    if specifier.spread.is_some() {
+      self.error =
+        Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+          "dynamic-import specifier uses spread syntax",
+        ));
+      return;
+    }
+    let ast::Expr::Lit(ast::Lit::Str(specifier)) = &*specifier.expr else {
+      self.error =
+        Some(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+          "computed or template dynamic-import specifier",
+        ));
+      return;
+    };
+    let result = (|| {
+      let specifier = self.exact_string_literal(specifier)?;
+      let (import_attributes_present, import_attributes) =
+        self.dynamic_import_attributes(&node.args)?;
+      Ok(OdenParentAstRuntimeDependency {
+        kind: OdenParentVfsDependencyKind::DynamicImport,
+        raw_specifier: specifier.decoded,
+        full_start: specifier.full_start,
+        full_end: specifier.full_end,
+        source_byte_start: specifier.payload_start,
+        source_byte_end: specifier.payload_end,
+        import_attributes_present,
+        import_attributes,
+      })
+    })();
+    match result {
+      Ok(observation) => self.observations.push(observation),
+      Err(error) => self.error = Some(error),
+    }
+  }
+}
+
+fn oden_parent_position_byte_offset(
+  source: &str,
+  position: deno_graph::Position,
+) -> Option<usize> {
+  let mut line_start = 0;
+  for _ in 0..position.line {
+    let newline = source[line_start..].find('\n')?;
+    line_start = line_start.checked_add(newline + 1)?;
+  }
+  let line_end = source[line_start..]
+    .find('\n')
+    .map(|index| line_start + index)
+    .unwrap_or(source.len());
+  let line = &source[line_start..line_end];
+  if position.character == line.chars().count() {
+    return Some(line_end);
+  }
+  line
+    .char_indices()
+    .nth(position.character)
+    .map(|(index, _)| line_start + index)
+}
+
+fn oden_parent_position_range_bytes(
+  source: &str,
+  range: &deno_graph::PositionRange,
+) -> Option<std::ops::Range<usize>> {
+  let start = oden_parent_position_byte_offset(source, range.start)?;
+  let end = oden_parent_position_byte_offset(source, range.end)?;
+  (start <= end).then_some(start..end)
+}
+
+fn oden_parent_graph_import_attributes_are_supported(
+  attributes: &ImportAttributes,
+) -> bool {
+  match attributes {
+    ImportAttributes::None => true,
+    ImportAttributes::Unknown => false,
+    ImportAttributes::Known(attributes) => attributes
+      .values()
+      .all(|value| matches!(value, ImportAttribute::Known(_))),
+  }
+}
+
+fn oden_parent_graph_import_attributes_match(
+  graph_attributes: &ImportAttributes,
+  ast_attributes_present: bool,
+  ast_attributes: &[OdenParentObservedImportAttribute],
+) -> bool {
+  let ImportAttributes::Known(graph_attributes) = graph_attributes else {
+    return !ast_attributes_present
+      && ast_attributes.is_empty()
+      && matches!(graph_attributes, ImportAttributes::None);
+  };
+  if !ast_attributes_present {
+    return false;
+  }
+  let mut collapsed = HashMap::with_capacity(ast_attributes.len());
+  for attribute in ast_attributes {
+    collapsed.insert(attribute.key.as_str(), attribute.value.as_str());
+  }
+  graph_attributes.len() == collapsed.len()
+    && graph_attributes.iter().all(|(key, value)| {
+      let ImportAttribute::Known(value) = value else {
+        return false;
+      };
+      collapsed.get(key.as_str()).copied() == Some(value.as_str())
+    })
+}
+
+struct OdenParentGraphRuntimeDependencyOccurrence<'a> {
+  dependency_key: &'a str,
+  import: &'a deno_graph::Import,
+  resolved_specifier: &'a ModuleSpecifier,
+  full_range: std::ops::Range<usize>,
+  used: bool,
+}
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
+// Preserve exact parser occurrences before deno_graph's attribute-map loss.
+#[allow(dead_code)]
+fn observe_oden_parent_runtime_dependencies(
+  specifier: &ModuleSpecifier,
+  media_type: MediaType,
+  original_bytes: &[u8],
+  graph_dependencies: &IndexMap<String, Dependency>,
+) -> Result<
+  Vec<OdenParentObservedRuntimeDependency>,
+  OdenParentRuntimeDependencyObservationError,
+> {
+  let original_source = std::str::from_utf8(original_bytes).map_err(|_| {
+    OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+      "source is not UTF-8",
+    )
+  })?;
+  if original_bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "UTF-8 BOM is not an admitted original-byte preimage",
+      ),
+    );
+  }
+  if !matches!(media_type, MediaType::JavaScript | MediaType::TypeScript) {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "media type is not JavaScript or TypeScript",
+      ),
+    );
+  }
+
+  let parsed = deno_ast::parse_module(deno_ast::ParseParams {
+    specifier: specifier.clone(),
+    text: original_source.to_string().into(),
+    media_type,
+    capture_tokens: false,
+    maybe_syntax: None,
+    scope_analysis: false,
+  })
+  .map_err(|error| {
+    OdenParentRuntimeDependencyObservationError::Parse(error.to_string())
+  })?;
+  if parsed.text().as_bytes() != original_bytes {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "parser text differs from supplied original bytes",
+      ),
+    );
+  }
+
+  let mut collector = OdenParentRuntimeDependencyAstCollector {
+    original_bytes,
+    source_start: parsed.text_info_lazy().range().start,
+    observations: Vec::new(),
+    error: None,
+  };
+  parsed.program().visit_with(&mut collector);
+  if let Some(error) = collector.error {
+    return Err(error);
+  }
+
+  let mut graph_occurrences = Vec::new();
+  for (dependency_key, dependency) in graph_dependencies {
+    if !matches!(dependency.maybe_type, Resolution::None)
+      || dependency.maybe_deno_types_specifier.is_some()
+    {
+      return Err(
+        OdenParentRuntimeDependencyObservationError::UnsupportedGraph(format!(
+          "type dependency for {dependency_key:?}"
+        )),
+      );
+    }
+    let Resolution::Ok(resolution) = &dependency.maybe_code else {
+      return Err(
+        OdenParentRuntimeDependencyObservationError::UnsupportedGraph(format!(
+          "missing successful code resolution for {dependency_key:?}"
+        )),
+      );
+    };
+    if dependency.imports.is_empty() {
+      return Err(
+        OdenParentRuntimeDependencyObservationError::UnsupportedGraph(format!(
+          "code resolution for {dependency_key:?} has no imports"
+        )),
+      );
+    }
+    if dependency.is_dynamic
+      != dependency.imports.iter().all(|import| import.is_dynamic)
+    {
+      return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+        format!("aggregate dynamic flag for {dependency_key:?}"),
+      ));
+    }
+    if resolution.range.specifier != *specifier
+      || resolution.range.resolution_mode != Some(ResolutionMode::Import)
+    {
+      return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+        format!("resolution referrer for {dependency_key:?}"),
+      ));
+    }
+    let Some(resolution_range) = oden_parent_position_range_bytes(
+      original_source,
+      &resolution.range.range,
+    ) else {
+      return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+        format!("resolution range for {dependency_key:?}"),
+      ));
+    };
+
+    let mut first_import_range = None;
+    let mut first_import_attributes = None;
+    for import in &dependency.imports {
+      if import.kind != ImportKind::Es {
+        return Err(
+          OdenParentRuntimeDependencyObservationError::UnsupportedGraph(
+            format!(
+              "non-ES runtime kind {:?} for {dependency_key:?}",
+              import.kind
+            ),
+          ),
+        );
+      }
+      if import.specifier != *dependency_key
+        || import.specifier_range.specifier != *specifier
+        || import.specifier_range.resolution_mode
+          != Some(ResolutionMode::Import)
+      {
+        return Err(
+          OdenParentRuntimeDependencyObservationError::GraphMismatch(format!(
+            "specifier/referrer for {dependency_key:?}"
+          )),
+        );
+      }
+      if !oden_parent_graph_import_attributes_are_supported(&import.attributes)
+      {
+        return Err(
+          OdenParentRuntimeDependencyObservationError::UnsupportedGraph(
+            format!("unknown import attributes for {dependency_key:?}"),
+          ),
+        );
+      }
+      if let Some(first_import_attributes) = first_import_attributes {
+        if first_import_attributes != &import.attributes {
+          return Err(
+            OdenParentRuntimeDependencyObservationError::GraphMismatch(
+              format!(
+                "heterogeneous import attributes share one code resolution for {dependency_key:?}"
+              ),
+            ),
+          );
+        }
+      } else {
+        first_import_attributes = Some(&import.attributes);
+      }
+      let Some(full_range) = oden_parent_position_range_bytes(
+        original_source,
+        &import.specifier_range.range,
+      ) else {
+        return Err(
+          OdenParentRuntimeDependencyObservationError::GraphMismatch(format!(
+            "import range for {dependency_key:?}"
+          )),
+        );
+      };
+      first_import_range.get_or_insert_with(|| full_range.clone());
+      graph_occurrences.push(OdenParentGraphRuntimeDependencyOccurrence {
+        dependency_key,
+        import,
+        resolved_specifier: &resolution.specifier,
+        full_range,
+        used: false,
+      });
+    }
+    let first_attribute_type = match first_import_attributes.unwrap() {
+      ImportAttributes::Known(attributes) => match attributes.get("type") {
+        Some(ImportAttribute::Known(value)) => Some(value.as_str()),
+        Some(ImportAttribute::Unknown) => unreachable!(
+          "unknown graph attribute values were refused before this join"
+        ),
+        None => None,
+      },
+      ImportAttributes::None => None,
+      ImportAttributes::Unknown => unreachable!(
+        "unknown graph attribute sets were refused before this join"
+      ),
+    };
+    if dependency.maybe_attribute_type.as_deref() != first_attribute_type {
+      return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+        format!("attribute-type resolution input for {dependency_key:?}"),
+      ));
+    }
+    if first_import_range.as_ref() != Some(&resolution_range) {
+      return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+        format!(
+          "code resolution does not point to the first import for {dependency_key:?}"
+        ),
+      ));
+    }
+  }
+
+  let mut observations = Vec::with_capacity(collector.observations.len());
+  for ast_observation in collector.observations {
+    let matching = graph_occurrences
+      .iter()
+      .enumerate()
+      .filter_map(|(index, graph_occurrence)| {
+        (!graph_occurrence.used
+          && graph_occurrence.dependency_key == ast_observation.raw_specifier
+          && graph_occurrence.import.is_dynamic
+            == (ast_observation.kind
+              == OdenParentVfsDependencyKind::DynamicImport)
+          && graph_occurrence.full_range
+            == (ast_observation.full_start..ast_observation.full_end)
+          && oden_parent_graph_import_attributes_match(
+            &graph_occurrence.import.attributes,
+            ast_observation.import_attributes_present,
+            &ast_observation.import_attributes,
+          ))
+        .then_some(index)
+      })
+      .collect::<Vec<_>>();
+    let [matching_index] = matching.as_slice() else {
+      return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+        format!(
+          "expected one graph occurrence for {:?} at [{}..{}), found {}",
+          ast_observation.raw_specifier,
+          ast_observation.source_byte_start,
+          ast_observation.source_byte_end,
+          matching.len()
+        ),
+      ));
+    };
+    let graph_occurrence = &mut graph_occurrences[*matching_index];
+    graph_occurrence.used = true;
+    observations.push(OdenParentObservedRuntimeDependency {
+      kind: ast_observation.kind,
+      raw_specifier: ast_observation.raw_specifier,
+      resolved_specifier: graph_occurrence.resolved_specifier.clone(),
+      source_byte_start: ast_observation.source_byte_start as u64,
+      source_byte_end: ast_observation.source_byte_end as u64,
+      import_attributes: ast_observation.import_attributes,
+    });
+  }
+
+  if let Some(leftover) = graph_occurrences.iter().find(|value| !value.used) {
+    return Err(OdenParentRuntimeDependencyObservationError::GraphLeftover(
+      format!(
+        "{:?} at [{}..{})",
+        leftover.dependency_key,
+        leftover.full_range.start + 1,
+        leftover.full_range.end.saturating_sub(1)
+      ),
+    ));
+  }
+  Ok(observations)
+}
+
+#[cfg(test)]
+mod oden_parent_runtime_dependency_observer_tests {
+  use std::collections::HashMap;
+
+  use deno_graph::Import;
+  use deno_graph::Position;
+  use deno_graph::PositionRange;
+  use deno_graph::Range;
+  use deno_graph::ResolutionResolved;
+
+  use super::*;
+
+  const RELEASE_ENTRY_SOURCE: &str = concat!(
+    "// @ref LLP 0016#branded-parent-allowlist-and-compile-input [implements] — Inert private wrapper.\n",
+    "import capture from \"oden-internal:filesystem-parent-capture-v2\";\n",
+    "import { main } from \"./main.ts\";\n",
+    "\n",
+    "void capture;\n",
+    "\n",
+    "if (import.meta.main) {\n",
+    "  Deno.exit(await main(Deno.args));\n",
+    "}\n",
+  );
+
+  #[derive(Clone)]
+  struct TestGraphOccurrence<'a> {
+    raw_specifier: &'a str,
+    resolved_specifier: &'a str,
+    full_start: usize,
+    is_dynamic: bool,
+    attributes: Option<Vec<(&'a str, &'a str)>>,
+  }
+
+  fn test_referrer() -> ModuleSpecifier {
+    ModuleSpecifier::parse("file:///repo/src/test.ts").unwrap()
+  }
+
+  fn position_at(source: &str, byte_offset: usize) -> Position {
+    let prefix = &source[..byte_offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let line_start = prefix.rfind('\n').map(|index| index + 1).unwrap_or(0);
+    Position {
+      line,
+      character: source[line_start..byte_offset].chars().count(),
+    }
+  }
+
+  fn graph_range(
+    source: &str,
+    referrer: &ModuleSpecifier,
+    start: usize,
+    end: usize,
+  ) -> Range {
+    Range {
+      specifier: referrer.clone(),
+      range: PositionRange {
+        start: position_at(source, start),
+        end: position_at(source, end),
+      },
+      resolution_mode: Some(ResolutionMode::Import),
+    }
+  }
+
+  fn graph_attributes(attributes: Option<&[(&str, &str)]>) -> ImportAttributes {
+    let Some(attributes) = attributes else {
+      return ImportAttributes::None;
+    };
+    let mut graph_attributes = HashMap::new();
+    for (key, value) in attributes {
+      graph_attributes.insert(
+        (*key).to_string(),
+        ImportAttribute::Known((*value).to_string()),
+      );
+    }
+    ImportAttributes::Known(graph_attributes)
+  }
+
+  fn graph_dependencies(
+    source: &str,
+    referrer: &ModuleSpecifier,
+    occurrences: &[TestGraphOccurrence<'_>],
+  ) -> IndexMap<String, Dependency> {
+    let mut dependencies = IndexMap::<String, Dependency>::new();
+    for occurrence in occurrences {
+      let full_end = occurrence.full_start + occurrence.raw_specifier.len() + 2;
+      let range =
+        graph_range(source, referrer, occurrence.full_start, full_end);
+      let dependency = dependencies
+        .entry(occurrence.raw_specifier.to_string())
+        .or_default();
+      let attributes = graph_attributes(occurrence.attributes.as_deref());
+      if dependency.imports.is_empty() {
+        dependency.maybe_code = Resolution::Ok(Box::new(ResolutionResolved {
+          specifier: ModuleSpecifier::parse(occurrence.resolved_specifier)
+            .unwrap(),
+          range: range.clone(),
+        }));
+        dependency.is_dynamic = occurrence.is_dynamic;
+        dependency.maybe_attribute_type = match &attributes {
+          ImportAttributes::Known(attributes) => {
+            attributes.get("type").and_then(|value| match value {
+              ImportAttribute::Known(value) => Some(value.clone()),
+              ImportAttribute::Unknown => None,
+            })
+          }
+          ImportAttributes::None | ImportAttributes::Unknown => None,
+        };
+      } else {
+        dependency.is_dynamic &= occurrence.is_dynamic;
+      }
+      dependency.imports.push(Import {
+        specifier: occurrence.raw_specifier.to_string(),
+        kind: ImportKind::Es,
+        specifier_range: range,
+        is_dynamic: occurrence.is_dynamic,
+        is_side_effect: false,
+        attributes,
+      });
+    }
+    dependencies
+  }
+
+  fn observe(
+    source: &str,
+    occurrences: &[TestGraphOccurrence<'_>],
+  ) -> Result<
+    Vec<OdenParentObservedRuntimeDependency>,
+    OdenParentRuntimeDependencyObservationError,
+  > {
+    let referrer = test_referrer();
+    let graph = graph_dependencies(source, &referrer, occurrences);
+    observe_oden_parent_runtime_dependencies(
+      &referrer,
+      MediaType::TypeScript,
+      source.as_bytes(),
+      &graph,
+    )
+  }
+
+  fn double_quoted_start(source: &str, specifier: &str) -> usize {
+    source.find(&format!("\"{specifier}\"")).unwrap()
+  }
+
+  #[test]
+  fn oden_parent_runtime_dependency_observer_private_edge_and_determinism() {
+    let source = RELEASE_ENTRY_SOURCE;
+    assert_eq!(source.as_bytes().len(), 278);
+    let private = "oden-internal:filesystem-parent-capture-v2";
+    let main = "./main.ts";
+    let occurrences = [
+      TestGraphOccurrence {
+        raw_specifier: private,
+        resolved_specifier: private,
+        full_start: double_quoted_start(source, private),
+        is_dynamic: false,
+        attributes: None,
+      },
+      TestGraphOccurrence {
+        raw_specifier: main,
+        resolved_specifier: "file:///repo/src/main.ts",
+        full_start: double_quoted_start(source, main),
+        is_dynamic: false,
+        attributes: None,
+      },
+    ];
+    let first = observe(source, &occurrences).unwrap();
+    let second = observe(source, &occurrences).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+      first
+        .iter()
+        .map(|dependency| dependency.raw_specifier.as_str())
+        .collect::<Vec<_>>(),
+      vec![private, main]
+    );
+    assert_eq!(first[0].kind, OdenParentVfsDependencyKind::StaticImport);
+    assert_eq!(first[0].raw_specifier, private);
+    assert_eq!(first[0].resolved_specifier.as_str(), private);
+    assert_eq!(first[0].source_byte_start, 121);
+    assert_eq!(first[0].source_byte_end, 163);
+    assert!(first[0].import_attributes.is_empty());
+  }
+
+  #[test]
+  fn oden_parent_runtime_dependency_observer_reconciles_pinned_graph_facts() {
+    let specifier =
+      ModuleSpecifier::parse("file:///repo/src/release.ts").unwrap();
+    let parsed = deno_ast::parse_module(deno_ast::ParseParams {
+      specifier: specifier.clone(),
+      text: RELEASE_ENTRY_SOURCE.to_string().into(),
+      media_type: MediaType::TypeScript,
+      capture_tokens: false,
+      maybe_syntax: None,
+      scope_analysis: false,
+    })
+    .unwrap();
+    let module = deno_graph::parse_module_from_ast(
+      deno_graph::ParseModuleFromAstOptions {
+        graph_kind: deno_graph::GraphKind::CodeOnly,
+        specifier: specifier.clone(),
+        maybe_headers: None,
+        mtime: None,
+        parsed_source: &parsed,
+        file_system: &deno_graph::source::NullFileSystem,
+        jsr_url_provider: &deno_graph::source::DefaultJsrUrlProvider,
+        maybe_resolver: None,
+      },
+    );
+    let observed = observe_oden_parent_runtime_dependencies(
+      &specifier,
+      MediaType::TypeScript,
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+      &module.dependencies,
+    )
+    .unwrap();
+    assert_eq!(observed.len(), 2);
+    assert_eq!(
+      observed[0].raw_specifier,
+      "oden-internal:filesystem-parent-capture-v2"
+    );
+    assert_eq!(observed[0].source_byte_start, 121);
+    assert_eq!(observed[0].source_byte_end, 163);
+  }
+
+  #[test]
+  fn oden_parent_runtime_dependency_observer_static_export() {
+    let source =
+      "export { value } from \"./dep.ts\" with { type: \"json\" };\n";
+    let raw_specifier = "./dep.ts";
+    let observed = observe(
+      source,
+      &[TestGraphOccurrence {
+        raw_specifier,
+        resolved_specifier: "file:///repo/src/dep.ts",
+        full_start: double_quoted_start(source, raw_specifier),
+        is_dynamic: false,
+        attributes: Some(vec![("type", "json")]),
+      }],
+    )
+    .unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].kind, OdenParentVfsDependencyKind::StaticExport);
+    assert_eq!(
+      observed[0].import_attributes,
+      vec![OdenParentObservedImportAttribute {
+        key: "type".to_string(),
+        value: "json".to_string(),
+      }]
+    );
+  }
+
+  #[test]
+  fn oden_parent_runtime_dependency_observer_literal_dynamic_import() {
+    let source = concat!(
+      "const value = await import(\"./dep.ts\", ",
+      "{ with: { type: \"json\" } });\n",
+    );
+    let raw_specifier = "./dep.ts";
+    let observed = observe(
+      source,
+      &[TestGraphOccurrence {
+        raw_specifier,
+        resolved_specifier: "file:///repo/src/dep.ts",
+        full_start: double_quoted_start(source, raw_specifier),
+        is_dynamic: true,
+        attributes: Some(vec![("type", "json")]),
+      }],
+    )
+    .unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].kind, OdenParentVfsDependencyKind::DynamicImport);
+  }
+
+  #[test]
+  fn oden_parent_runtime_dependency_observer_preserves_duplicate_attributes() {
+    let source = concat!(
+      "const value = import(\"./data.json\", ",
+      "{ with: { type: \"json\", type: \"text\" } });\n",
+    );
+    let raw_specifier = "./data.json";
+    let observed = observe(
+      source,
+      &[TestGraphOccurrence {
+        raw_specifier,
+        resolved_specifier: "file:///repo/src/data.json",
+        full_start: double_quoted_start(source, raw_specifier),
+        is_dynamic: true,
+        attributes: Some(vec![("type", "json"), ("type", "text")]),
+      }],
+    )
+    .unwrap();
+    assert_eq!(
+      observed[0].import_attributes,
+      vec![
+        OdenParentObservedImportAttribute {
+          key: "type".to_string(),
+          value: "json".to_string(),
+        },
+        OdenParentObservedImportAttribute {
+          key: "type".to_string(),
+          value: "text".to_string(),
+        },
+      ]
+    );
+  }
+
+  #[test]
+  fn oden_parent_runtime_dependency_observer_refuses_computed_and_escaped() {
+    assert!(matches!(
+      observe("await import(specifier);\n", &[]),
+      Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+        _
+      ))
+    ));
+    assert!(matches!(
+      observe("await import(`./dep.ts`);\n", &[]),
+      Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+        _
+      ))
+    ));
+    assert!(matches!(
+      observe("import \"./de\\u0070.ts\";\n", &[]),
+      Err(OdenParentRuntimeDependencyObservationError::InvalidLiteral(
+        _
+      ))
+    ));
+  }
+
+  #[test]
+  fn oden_parent_runtime_dependency_observer_refuses_require_types_and_bad_options()
+   {
+    assert!(matches!(
+      observe("require(\"./dep.ts\");\n", &[]),
+      Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+        _
+      ))
+    ));
+    assert!(matches!(
+      observe("import type { Value } from \"./dep.ts\";\n", &[]),
+      Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+        _
+      ))
+    ));
+    assert!(matches!(
+      observe("import value = require(\"./dep.ts\");\n", &[]),
+      Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+        _
+      ))
+    ));
+    assert!(matches!(
+      observe(
+        "await import(\"./dep.ts\", { assert: { type: \"json\" } });\n",
+        &[],
+      ),
+      Err(
+        OdenParentRuntimeDependencyObservationError::InvalidImportAttributes(_)
+      )
+    ));
+  }
+
+  #[test]
+  fn oden_parent_runtime_dependency_observer_preserves_multibyte_and_cr_offsets()
+   {
+    let source = "const β = 1;\r\nimport \"./dep.ts\";\r\n";
+    let raw_specifier = "./dep.ts";
+    let full_start = double_quoted_start(source, raw_specifier);
+    let observed = observe(
+      source,
+      &[TestGraphOccurrence {
+        raw_specifier,
+        resolved_specifier: "file:///repo/src/dep.ts",
+        full_start,
+        is_dynamic: false,
+        attributes: None,
+      }],
+    )
+    .unwrap();
+    assert_eq!(observed[0].source_byte_start, (full_start + 1) as u64);
+    assert_eq!(
+      observed[0].source_byte_end,
+      (full_start + 1 + raw_specifier.len()) as u64
+    );
+  }
+
+  #[test]
+  fn oden_parent_runtime_dependency_observer_reconciles_grouped_attribute_resolution()
+   {
+    let raw_specifier = "./dep.ts";
+    let source = concat!(
+      "import \"./dep.ts\" with { type: \"json\" };\n",
+      "import \"./dep.ts\" with { type: \"json\" };\n",
+    );
+    let starts = source
+      .match_indices("\"./dep.ts\"")
+      .map(|(index, _)| index)
+      .collect::<Vec<_>>();
+    let observed = observe(
+      source,
+      &[
+        TestGraphOccurrence {
+          raw_specifier,
+          resolved_specifier: "file:///repo/src/dep.ts",
+          full_start: starts[0],
+          is_dynamic: false,
+          attributes: Some(vec![("type", "json")]),
+        },
+        TestGraphOccurrence {
+          raw_specifier,
+          resolved_specifier: "file:///repo/src/dep.ts",
+          full_start: starts[1],
+          is_dynamic: false,
+          attributes: Some(vec![("type", "json")]),
+        },
+      ],
+    )
+    .unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(observed[0].source_byte_start < observed[1].source_byte_start);
+
+    let source = concat!(
+      "import \"./dep.ts\" with { type: \"json\" };\n",
+      "import \"./dep.ts\" with { type: \"text\" };\n",
+    );
+    let starts = source
+      .match_indices("\"./dep.ts\"")
+      .map(|(index, _)| index)
+      .collect::<Vec<_>>();
+    assert!(matches!(
+      observe(
+        source,
+        &[
+          TestGraphOccurrence {
+            raw_specifier,
+            resolved_specifier: "file:///repo/src/dep.ts",
+            full_start: starts[0],
+            is_dynamic: false,
+            attributes: Some(vec![("type", "json")]),
+          },
+          TestGraphOccurrence {
+            raw_specifier,
+            resolved_specifier: "file:///repo/src/dep.ts",
+            full_start: starts[1],
+            is_dynamic: false,
+            attributes: Some(vec![("type", "text")]),
+          },
+        ],
+      ),
+      Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+        _
+      ))
+    ));
+
+    let source = "import \"./dep.ts\" with { type: \"json\" };\n";
+    let referrer = test_referrer();
+    let mut graph = graph_dependencies(
+      source,
+      &referrer,
+      &[TestGraphOccurrence {
+        raw_specifier,
+        resolved_specifier: "file:///repo/src/dep.ts",
+        full_start: double_quoted_start(source, raw_specifier),
+        is_dynamic: false,
+        attributes: Some(vec![("type", "json")]),
+      }],
+    );
+    graph.get_mut(raw_specifier).unwrap().maybe_attribute_type =
+      Some("text".to_string());
+    assert!(matches!(
+      observe_oden_parent_runtime_dependencies(
+        &referrer,
+        MediaType::TypeScript,
+        source.as_bytes(),
+        &graph,
+      ),
+      Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+        _
+      ))
+    ));
+  }
+
+  #[test]
+  fn oden_parent_runtime_dependency_observer_refuses_graph_mismatch_and_leftover()
+   {
+    let source = "import \"./dep.ts\";\n";
+    let raw_specifier = "./dep.ts";
+    let mismatch = observe(
+      source,
+      &[TestGraphOccurrence {
+        raw_specifier,
+        resolved_specifier: "file:///repo/src/dep.ts",
+        full_start: double_quoted_start(source, raw_specifier),
+        is_dynamic: true,
+        attributes: None,
+      }],
+    );
+    assert!(matches!(
+      mismatch,
+      Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+        _
+      ))
+    ));
+
+    let source = "const value = \"./dep.ts\";\n";
+    let leftover = observe(
+      source,
+      &[TestGraphOccurrence {
+        raw_specifier,
+        resolved_specifier: "file:///repo/src/dep.ts",
+        full_start: double_quoted_start(source, raw_specifier),
+        is_dynamic: false,
+        attributes: None,
+      }],
+    );
+    assert!(matches!(
+      leftover,
+      Err(OdenParentRuntimeDependencyObservationError::GraphLeftover(
+        _
+      ))
+    ));
+
+    let source = "import \"./dep.ts\";\n";
+    let mut wrong_mode_graph = graph_dependencies(
+      source,
+      &test_referrer(),
+      &[TestGraphOccurrence {
+        raw_specifier,
+        resolved_specifier: "file:///repo/src/dep.ts",
+        full_start: double_quoted_start(source, raw_specifier),
+        is_dynamic: false,
+        attributes: None,
+      }],
+    );
+    wrong_mode_graph.get_mut(raw_specifier).unwrap().imports[0]
+      .specifier_range
+      .resolution_mode = None;
+    assert!(
+      observe_oden_parent_runtime_dependencies(
+        &test_referrer(),
+        MediaType::TypeScript,
+        source.as_bytes(),
+        &wrong_mode_graph,
+      )
+      .is_err()
+    );
+  }
 }
 
 pub struct DenoCompileBinaryWriter<'a> {
