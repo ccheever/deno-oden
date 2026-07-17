@@ -3,9 +3,10 @@
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
 // These generator-side slices freeze the exact capture, source-closure, and
 // release contract memberships and a dormant descriptor-anchored retained-file
-// loader. The build-metadata definition and candidate codec now exist, while
-// allowlist construction, generate/check execution, and all three generated
-// outputs remain absent, so neither reserved mode gains authority or an output.
+// loader. The build-metadata definition, candidate codec, and an uncalled pure
+// in-memory allowlist compositor now exist, while generate/check execution and
+// all three generated outputs remain absent, so neither reserved mode gains
+// authority or an output.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::CString;
@@ -28,6 +29,10 @@ use std::path::Path;
 use deno_lib::standalone::oden_parent_allowlist::ContractFile;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use deno_lib::standalone::oden_parent_allowlist::ContractInventory;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlist;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistInputs;
 #[cfg(test)]
 use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_GENERATED_JSON_PATH;
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
@@ -39,6 +44,12 @@ use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_TARGET_POLICY_GENER
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistError;
 use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use deno_lib::standalone::oden_parent_allowlist::OdenParentStandaloneConfiguration;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use deno_lib::standalone::oden_parent_allowlist::OdenParentStaticImportEdge;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsGraph;
 use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE;
 
 const ODEN_PARENT_ALLOWLIST_AUTHORING_FEATURE: &str =
@@ -204,8 +215,9 @@ pub(crate) const ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS: &[&str] = &[
 /// Parent-root-relative definitions that comprise the release contract.
 ///
 /// The complete reviewed membership is fixed and all 32 definition paths now
-/// exist. Retained loading alone cannot construct or authorize an allowlist;
-/// the absent generator/checker and mode handlers remain separate gates.
+/// exist. Retained loading and the uncalled in-memory candidate compositor
+/// cannot authorize an allowlist; the absent generator/checker and mode
+/// handlers remain separate gates.
 #[allow(dead_code)]
 pub(crate) const ODEN_PARENT_RELEASE_CONTRACT_PATHS: &[&str] = &[
   ".github/workflows/release.yml",
@@ -488,6 +500,27 @@ struct RetainedContractByteBundle {
   capture: RetainedContractFiles,
   source_closure: RetainedContractFiles,
   release: RetainedContractFiles,
+}
+
+/// Already-typed compiler projections accepted by the pure candidate
+/// compositor. This local adapter adds no path, mode, or authority input.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+struct OdenParentAllowlistCompilerProjectionInput<'a> {
+  configuration: &'a OdenParentStandaloneConfiguration,
+  vfs_graph: &'a OdenParentVfsGraph,
+  static_import_edge: &'a OdenParentStaticImportEdge,
+}
+
+/// Owned candidate bytes for the two allowlist renderings. These bytes have no
+/// output path and confer no generator, compiler, or release authority.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
+struct OdenParentAllowlistCandidateOutput {
+  json_file: Vec<u8>,
+  rust_module: Vec<u8>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -783,8 +816,8 @@ where
 
 /// Dormant Linux/macOS-only loader for one already reviewed literal path
 /// inventory. Its returned bytes are not source authentication or authority;
-/// absent allowlist construction, generator/checker, and mode handlers keep
-/// both modes fail-closed.
+/// the uncalled candidate compositor and absent generator/checker and mode
+/// handlers keep both modes fail-closed.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(dead_code)]
 fn load_retained_contract_files(
@@ -843,6 +876,33 @@ fn load_retained_contract_byte_bundle(
   )
 }
 
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Compose only unauthenticated candidate bytes; mode admission and output
+// ownership remain separate absent authorities.
+/// Purely composes the retained inventory projections with already-typed
+/// compiler projections. This function performs no I/O, has no production
+/// caller, and is not connected to either raw-dispatch mode.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+fn compose_oden_parent_allowlist_candidate(
+  retained: &RetainedContractByteBundle,
+  compiler: OdenParentAllowlistCompilerProjectionInput<'_>,
+) -> Result<OdenParentAllowlistCandidateOutput, OdenParentAllowlistError> {
+  let allowlist = OdenParentAllowlist::from_inputs(OdenParentAllowlistInputs {
+    capture_contract: retained.capture.inventory(),
+    source_closure_contract: retained.source_closure.inventory(),
+    release_contract: retained.release.inventory(),
+    configuration: compiler.configuration,
+    vfs_graph: compiler.vfs_graph,
+    static_import_edge: compiler.static_import_edge,
+  })?;
+
+  Ok(OdenParentAllowlistCandidateOutput {
+    json_file: allowlist.render_json_file()?,
+    rust_module: allowlist.render_rust_module()?,
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -855,7 +915,33 @@ mod tests {
   use std::os::unix::fs::PermissionsExt;
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_lib::args::UnstableConfig;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_lib::standalone::binary::SerializedWorkspaceResolver;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ENTRYPOINT_KEY;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_PRIVATE_MODULE_SPECIFIER;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_lib::standalone::oden_parent_allowlist::OdenParentImportAttributes;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_lib::standalone::oden_parent_allowlist::OdenParentStaticImportEdgeObservation;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsDependencyKind;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsDependencyObservation;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsMediaType;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsModuleObservation;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   use deno_lib::standalone::oden_parent_allowlist::raw_sha256_digest;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use deno_runtime::deno_telemetry::OtelConfig;
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  const CANDIDATE_ENTRYPOINT_SOURCE: &[u8] =
+    b"import \"oden-internal:filesystem-parent-capture-v2\";\n";
 
   fn role_facts(
     supported_os: bool,
@@ -1260,6 +1346,145 @@ mod tests {
       assert_eq!(metadata.mode(), sentinel.mode);
       assert_eq!(metadata.nlink(), sentinel.links);
       assert_eq!(std::fs::read(destination).unwrap(), sentinel.bytes);
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn candidate_configuration() -> OdenParentStandaloneConfiguration {
+    let workspace_resolver = SerializedWorkspaceResolver {
+      import_map: None,
+      jsr_pkgs: Vec::new(),
+      package_jsons: Default::default(),
+      pkg_json_resolution:
+        deno_resolver::workspace::PackageJsonDepResolution::Enabled,
+      catalogs: Default::default(),
+    };
+    OdenParentStandaloneConfiguration::from_effective(
+      &workspace_resolver,
+      &UnstableConfig::default(),
+      &OtelConfig::default(),
+    )
+    .unwrap()
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn candidate_vfs_and_static_edge(
+  ) -> (OdenParentVfsGraph, OdenParentStaticImportEdge) {
+    let dependency = [OdenParentVfsDependencyObservation {
+      kind: OdenParentVfsDependencyKind::StaticImport,
+      raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      resolved_key: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      source_byte_start: 8,
+      source_byte_end: 50,
+      import_attributes: &[],
+    }];
+    let module = [OdenParentVfsModuleObservation {
+      key: ODEN_PARENT_ENTRYPOINT_KEY,
+      media_type: OdenParentVfsMediaType::TypeScript,
+      original_bytes: CANDIDATE_ENTRYPOINT_SOURCE,
+      emitted_bytes: CANDIDATE_ENTRYPOINT_SOURCE,
+      source_map_bytes: None,
+      dependencies: &dependency,
+    }];
+    let vfs_graph =
+      OdenParentVfsGraph::from_observations(&module, &[]).unwrap();
+    let import_attributes =
+      OdenParentImportAttributes::from_observed_pairs(&[]).unwrap();
+    let static_import_edge = OdenParentStaticImportEdge::from_observation(
+      OdenParentStaticImportEdgeObservation {
+        entrypoint_source_bytes: CANDIDATE_ENTRYPOINT_SOURCE,
+        dependency_ordinal: 0,
+        occurrence_count: 1,
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        resolved_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        referrer_key: ODEN_PARENT_ENTRYPOINT_KEY,
+        import_attributes: &import_attributes,
+        source_byte_start: 8,
+        source_byte_end: 50,
+      },
+    )
+    .unwrap();
+    (vfs_graph, static_import_edge)
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn candidate_compositor_matches_direct_typed_projection_deterministically() {
+    let absent_root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(absent_root.path(), "candidate");
+    assert_generated_paths_absent(absent_root.path());
+    let retained = load_bundle_from_test_root(absent_root.path()).unwrap();
+    let configuration = candidate_configuration();
+    let (vfs_graph, static_import_edge) = candidate_vfs_and_static_edge();
+    let compiler = OdenParentAllowlistCompilerProjectionInput {
+      configuration: &configuration,
+      vfs_graph: &vfs_graph,
+      static_import_edge: &static_import_edge,
+    };
+
+    let candidate =
+      compose_oden_parent_allowlist_candidate(&retained, compiler).unwrap();
+    let repeated =
+      compose_oden_parent_allowlist_candidate(&retained, compiler).unwrap();
+    assert_eq!(candidate, repeated);
+    assert_generated_paths_absent(absent_root.path());
+
+    let direct = OdenParentAllowlist::from_inputs(OdenParentAllowlistInputs {
+      capture_contract: retained.capture.inventory(),
+      source_closure_contract: retained.source_closure.inventory(),
+      release_contract: retained.release.inventory(),
+      configuration: &configuration,
+      vfs_graph: &vfs_graph,
+      static_import_edge: &static_import_edge,
+    })
+    .unwrap();
+    assert_eq!(candidate.json_file, direct.render_json_file().unwrap());
+    assert_eq!(candidate.rust_module, direct.render_rust_module().unwrap());
+
+    let json_jcs = candidate.json_file.strip_suffix(b"\n").unwrap();
+    let json_jcs = std::str::from_utf8(json_jcs).unwrap();
+    let rust_module = std::str::from_utf8(&candidate.rust_module).unwrap();
+    assert!(rust_module.contains(&format!(
+      "pub const ODEN_PARENT_ALLOWLIST_JCS: &[u8] = br#\"{json_jcs}\"#;"
+    )));
+    assert!(rust_module.contains(direct.digest().unwrap().as_str()));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn candidate_compositor_has_no_output_or_dispatch_authority() {
+    let sentinel_root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(sentinel_root.path(), "candidate");
+    let sentinels = seed_generated_path_sentinels(sentinel_root.path());
+    let sentinel_retained =
+      load_bundle_from_test_root(sentinel_root.path()).unwrap();
+    let configuration = candidate_configuration();
+    let (vfs_graph, static_import_edge) = candidate_vfs_and_static_edge();
+    compose_oden_parent_allowlist_candidate(
+      &sentinel_retained,
+      OdenParentAllowlistCompilerProjectionInput {
+        configuration: &configuration,
+        vfs_graph: &vfs_graph,
+        static_import_edge: &static_import_edge,
+      },
+    )
+    .unwrap();
+    assert_generated_path_sentinels_unchanged(
+      sentinel_root.path(),
+      &sentinels,
+    );
+
+    for dispatch in [
+      OdenParentAllowlistRawDispatch::Generate,
+      OdenParentAllowlistRawDispatch::Check,
+    ] {
+      assert_eq!(
+        crate::oden_parent_allowlist_refusal_exit_code_for_raw_dispatch(
+          dispatch
+        ),
+        ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE,
+      );
     }
   }
 
