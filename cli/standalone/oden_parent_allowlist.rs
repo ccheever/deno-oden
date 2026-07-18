@@ -440,6 +440,13 @@ enum OdenParentDirectRepoSourceError {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub(super) struct OdenParentDirectRepoSourceObservationError(
+  #[from] OdenParentDirectRepoSourceError,
+);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DescriptorSnapshot {
   device: u64,
@@ -752,11 +759,30 @@ struct HeldDirectory {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(dead_code)]
 #[derive(Debug)]
-struct OdenParentDirectRepoSourceCandidate {
+pub(super) struct OdenParentDirectRepoSourceCandidate {
   key: OdenParentRepoVfsKey,
   specifier: ModuleSpecifier,
   original_bytes: Arc<[u8]>,
   executable: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl OdenParentDirectRepoSourceCandidate {
+  pub(super) fn key(&self) -> &OdenParentRepoVfsKey {
+    &self.key
+  }
+
+  pub(super) fn specifier(&self) -> &ModuleSpecifier {
+    &self.specifier
+  }
+
+  pub(super) fn original_bytes(&self) -> &Arc<[u8]> {
+    &self.original_bytes
+  }
+
+  pub(super) fn executable(&self) -> bool {
+    self.executable
+  }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1481,7 +1507,7 @@ fn finish_oden_parent_direct_repo_source(
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(dead_code)]
-fn observe_oden_parent_direct_repo_source_candidate(
+fn observe_oden_parent_direct_repo_source_candidate_with_current_root(
   specifier: &ModuleSpecifier,
   original_bytes: Arc<[u8]>,
 ) -> Result<OdenParentDirectRepoSourceCandidate, OdenParentDirectRepoSourceError>
@@ -1490,6 +1516,22 @@ fn observe_oden_parent_direct_repo_source_candidate(
   let read =
     read_oden_parent_direct_repo_source(&root, specifier, original_bytes)?;
   finish_oden_parent_direct_repo_source(read)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+pub(super) fn observe_oden_parent_direct_repo_source_candidate(
+  specifier: &ModuleSpecifier,
+  original_bytes: Arc<[u8]>,
+) -> Result<
+  OdenParentDirectRepoSourceCandidate,
+  OdenParentDirectRepoSourceObservationError,
+> {
+  observe_oden_parent_direct_repo_source_candidate_with_current_root(
+    specifier,
+    original_bytes,
+  )
+  .map_err(Into::into)
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -1507,6 +1549,28 @@ where
     read_oden_parent_direct_repo_source(&root, specifier, original_bytes)?;
   post_read_hook();
   finish_oden_parent_direct_repo_source(read)
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(super) fn observe_oden_parent_direct_repo_source_for_join_from_test_root<H>(
+  root_path: &Path,
+  specifier: &ModuleSpecifier,
+  original_bytes: Arc<[u8]>,
+  post_read_hook: H,
+) -> Result<
+  OdenParentDirectRepoSourceCandidate,
+  OdenParentDirectRepoSourceObservationError,
+>
+where
+  H: FnOnce(),
+{
+  observe_oden_parent_direct_repo_source_from_test_root(
+    root_path,
+    specifier,
+    original_bytes,
+    post_read_hook,
+  )
+  .map_err(Into::into)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

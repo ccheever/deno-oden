@@ -82,6 +82,12 @@ use deno_semver::npm::NpmPackageReqReference;
 use indexmap::IndexMap;
 use node_resolver::analyze::ResolvedCjsAnalysis;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::oden_parent_allowlist::OdenParentDirectRepoSourceCandidate;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::oden_parent_allowlist::OdenParentDirectRepoSourceObservationError;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::oden_parent_allowlist::observe_oden_parent_direct_repo_source_candidate;
 use super::virtual_fs::output_vfs;
 use crate::args::CliOptions;
 use crate::args::CompileFlags;
@@ -408,6 +414,28 @@ enum OdenParentReleaseEntrypointCandidateError {
   RuntimeDependency(#[from] OdenParentRuntimeDependencyObservationError),
   #[error(transparent)]
   StaticImportEdge(#[from] OdenParentAllowlistError),
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, thiserror::Error)]
+enum OdenParentReleaseEntrypointDirectRepoCandidateError {
+  #[error(transparent)]
+  Graph(#[from] OdenParentReleaseEntrypointCandidateError),
+  #[error(transparent)]
+  DirectRepository(#[from] OdenParentDirectRepoSourceObservationError),
+  #[error("release entrypoint graph/direct-file candidate mismatch: {0}")]
+  Mismatch(&'static str),
+}
+
+/// Candidate-only pairing of the graph-owned release-entrypoint view and the
+/// retained direct-file view. This does not authenticate either producer or
+/// construct a VFS row, compiler projection, output, or authority value.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+#[derive(Debug)]
+struct OdenParentReleaseEntrypointDirectRepoCandidate {
+  graph: OdenParentReleaseEntrypointCandidate,
+  direct_repository: OdenParentDirectRepoSourceCandidate,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -1644,10 +1672,96 @@ fn observe_oden_parent_release_entrypoint_candidate(
   })
 }
 
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
+// Join only the graph-owned release-entry Arc to its exact retained direct file.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn observe_oden_parent_release_entrypoint_direct_repo_candidate_with<F>(
+  graph: &ModuleGraph,
+  entrypoint: &ModuleSpecifier,
+  observe_direct_repository: F,
+) -> Result<
+  OdenParentReleaseEntrypointDirectRepoCandidate,
+  OdenParentReleaseEntrypointDirectRepoCandidateError,
+>
+where
+  F: FnOnce(
+    &ModuleSpecifier,
+    Arc<[u8]>,
+  ) -> Result<
+    OdenParentDirectRepoSourceCandidate,
+    OdenParentDirectRepoSourceObservationError,
+  >,
+{
+  let graph_candidate =
+    observe_oden_parent_release_entrypoint_candidate(graph, entrypoint)?;
+  let direct_repository = observe_direct_repository(
+    &graph_candidate.entrypoint_specifier,
+    graph_candidate.original_bytes.clone(),
+  )?;
+
+  if direct_repository.specifier() != &graph_candidate.entrypoint_specifier {
+    return Err(
+      OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+        "retained direct-file specifier differs from the graph entrypoint",
+      ),
+    );
+  }
+  if direct_repository.key().as_str() != ODEN_PARENT_ENTRYPOINT_KEY {
+    return Err(
+      OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+        "retained direct-file key is not repo:src/release.ts",
+      ),
+    );
+  }
+  if !Arc::ptr_eq(
+    direct_repository.original_bytes(),
+    &graph_candidate.original_bytes,
+  ) {
+    return Err(
+      OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+        "retained direct-file bytes do not reuse the graph-owned allocation",
+      ),
+    );
+  }
+  if direct_repository.executable() {
+    return Err(
+      OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+        "retained release entrypoint is executable",
+      ),
+    );
+  }
+
+  Ok(OdenParentReleaseEntrypointDirectRepoCandidate {
+    graph: graph_candidate,
+    direct_repository,
+  })
+}
+
+/// Production-uncalled graph/direct-file candidate adapter. The retained root
+/// is opened only after the graph candidate has supplied its exact original
+/// byte allocation; a later authenticated source session must bind both inputs.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+fn observe_oden_parent_release_entrypoint_direct_repo_candidate(
+  graph: &ModuleGraph,
+  entrypoint: &ModuleSpecifier,
+) -> Result<
+  OdenParentReleaseEntrypointDirectRepoCandidate,
+  OdenParentReleaseEntrypointDirectRepoCandidateError,
+> {
+  observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
+    graph,
+    entrypoint,
+    observe_oden_parent_direct_repo_source_candidate,
+  )
+}
+
 #[cfg(test)]
 mod oden_parent_runtime_dependency_observer_tests {
   use std::collections::HashMap;
 
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use super::super::oden_parent_allowlist::observe_oden_parent_direct_repo_source_for_join_from_test_root;
   use deno_graph::BuildOptions;
   use deno_graph::GraphKind;
   use deno_graph::Import;
@@ -1769,6 +1883,23 @@ mod oden_parent_runtime_dependency_observer_tests {
       BuildOptions::default(),
     ));
     (graph, entrypoint)
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn materialize_release_entrypoint(
+    root: &Path,
+    relative_path: &str,
+    executable: bool,
+  ) -> ModuleSpecifier {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = root.join(relative_path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, RELEASE_ENTRY_SOURCE.as_bytes()).unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(if executable { 0o755 } else { 0o644 });
+    std::fs::set_permissions(&path, permissions).unwrap();
+    ModuleSpecifier::from_file_path(path).unwrap()
   }
 
   type TestModuleSource = (String, Source<String, Vec<u8>>);
@@ -2635,6 +2766,277 @@ mod oden_parent_runtime_dependency_observer_tests {
         "dependency is not a direct file/node target or candidate JSR redirect chain"
       ))
     ));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn release_entrypoint_direct_repo_join_retains_graph_arc_and_both_views() {
+    let root = tempfile::TempDir::new().unwrap();
+    let entrypoint =
+      materialize_release_entrypoint(root.path(), "src/release.ts", false);
+    let (graph, graph_entrypoint) = release_graph(
+      entrypoint.as_str(),
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+    assert_eq!(graph_entrypoint, entrypoint);
+    let graph_original_bytes = match graph.get(&entrypoint).unwrap() {
+      deno_graph::Module::Js(module) => {
+        module.source.try_get_original_bytes().unwrap()
+      }
+      _ => unreachable!(),
+    };
+
+    let candidate =
+      observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
+        &graph,
+        &entrypoint,
+        |specifier, original_bytes| {
+          observe_oden_parent_direct_repo_source_for_join_from_test_root(
+            root.path(),
+            specifier,
+            original_bytes,
+            || {},
+          )
+        },
+      )
+      .unwrap();
+
+    assert_eq!(candidate.graph.entrypoint_specifier, entrypoint);
+    assert_eq!(
+      candidate.direct_repository.specifier(),
+      &candidate.graph.entrypoint_specifier
+    );
+    assert_eq!(
+      candidate.direct_repository.key().as_str(),
+      ODEN_PARENT_ENTRYPOINT_KEY
+    );
+    assert!(Arc::ptr_eq(
+      &candidate.graph.original_bytes,
+      &graph_original_bytes
+    ));
+    assert!(Arc::ptr_eq(
+      candidate.direct_repository.original_bytes(),
+      &candidate.graph.original_bytes
+    ));
+    assert!(!candidate.direct_repository.executable());
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn release_entrypoint_direct_repo_join_refuses_pointer_key_specifier_and_mode_drift()
+   {
+    let root = tempfile::TempDir::new().unwrap();
+    let entrypoint =
+      materialize_release_entrypoint(root.path(), "src/release.ts", false);
+    let alias =
+      materialize_release_entrypoint(root.path(), "src/alias.ts", false);
+    let (graph, _) = release_graph(
+      entrypoint.as_str(),
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+
+    let pointer_mismatch =
+      observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
+        &graph,
+        &entrypoint,
+        |specifier, original_bytes| {
+          let copied = Arc::<[u8]>::from(original_bytes.as_ref());
+          assert!(!Arc::ptr_eq(&copied, &original_bytes));
+          observe_oden_parent_direct_repo_source_for_join_from_test_root(
+            root.path(),
+            specifier,
+            copied,
+            || {},
+          )
+        },
+      );
+    assert!(matches!(
+      pointer_mismatch,
+      Err(OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+        "retained direct-file bytes do not reuse the graph-owned allocation"
+      ))
+    ));
+
+    let specifier_mismatch =
+      observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
+        &graph,
+        &entrypoint,
+        |_specifier, original_bytes| {
+          observe_oden_parent_direct_repo_source_for_join_from_test_root(
+            root.path(),
+            &alias,
+            original_bytes,
+            || {},
+          )
+        },
+      );
+    assert!(matches!(
+      specifier_mismatch,
+      Err(OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+        "retained direct-file specifier differs from the graph entrypoint"
+      ))
+    ));
+
+    let wrong_key_root = tempfile::TempDir::new().unwrap();
+    let wrong_key_entrypoint = materialize_release_entrypoint(
+      wrong_key_root.path(),
+      "src/Release.ts",
+      false,
+    );
+    let (wrong_key_graph, _) = release_graph(
+      wrong_key_entrypoint.as_str(),
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+    let wrong_key =
+      observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
+        &wrong_key_graph,
+        &wrong_key_entrypoint,
+        |specifier, original_bytes| {
+          observe_oden_parent_direct_repo_source_for_join_from_test_root(
+            wrong_key_root.path(),
+            specifier,
+            original_bytes,
+            || {},
+          )
+        },
+      );
+    assert!(matches!(
+      wrong_key,
+      Err(OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+        "retained direct-file key is not repo:src/release.ts"
+      ))
+    ));
+
+    let executable_root = tempfile::TempDir::new().unwrap();
+    let executable_entrypoint = materialize_release_entrypoint(
+      executable_root.path(),
+      "src/release.ts",
+      true,
+    );
+    let (executable_graph, _) = release_graph(
+      executable_entrypoint.as_str(),
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+    let executable =
+      observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
+        &executable_graph,
+        &executable_entrypoint,
+        |specifier, original_bytes| {
+          observe_oden_parent_direct_repo_source_for_join_from_test_root(
+            executable_root.path(),
+            specifier,
+            original_bytes,
+            || {},
+          )
+        },
+      );
+    assert!(matches!(
+      executable,
+      Err(OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+        "retained release entrypoint is executable"
+      ))
+    ));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn release_entrypoint_direct_repo_join_refuses_post_read_mutation() {
+    let root = tempfile::TempDir::new().unwrap();
+    let entrypoint =
+      materialize_release_entrypoint(root.path(), "src/release.ts", false);
+    let entrypoint_path = root.path().join("src/release.ts");
+    let (graph, _) = release_graph(
+      entrypoint.as_str(),
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+    let mut changed_bytes = RELEASE_ENTRY_SOURCE.as_bytes().to_vec();
+    *changed_bytes.last_mut().unwrap() ^= 1;
+
+    let result =
+      observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
+        &graph,
+        &entrypoint,
+        |specifier, original_bytes| {
+          observe_oden_parent_direct_repo_source_for_join_from_test_root(
+            root.path(),
+            specifier,
+            original_bytes,
+            || std::fs::write(&entrypoint_path, changed_bytes).unwrap(),
+          )
+        },
+      );
+    let Err(
+      OdenParentReleaseEntrypointDirectRepoCandidateError::DirectRepository(
+        error,
+      ),
+    ) = result
+    else {
+      panic!("post-read mutation did not refuse at the retained-file boundary");
+    };
+    assert!(
+      error
+        .to_string()
+        .contains("retained descriptor changed while reading direct repository source")
+    );
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn release_entrypoint_direct_repo_join_requires_original_graph_bytes_before_direct_read()
+   {
+    let root = tempfile::TempDir::new().unwrap();
+    let entrypoint = ModuleSpecifier::from_file_path(
+      root.path().join("src/release.ts"),
+    )
+    .unwrap();
+    let utf16_source = utf16le_source(RELEASE_ENTRY_SOURCE);
+    let (decoded_only_graph, _) =
+      release_graph(entrypoint.as_str(), &utf16_source);
+    let direct_called = Cell::new(false);
+    let result =
+      observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
+        &decoded_only_graph,
+        &entrypoint,
+        |_specifier, _original_bytes| {
+          direct_called.set(true);
+          unreachable!("direct observer must not run without graph-owned bytes")
+        },
+      );
+    assert!(matches!(
+      result,
+      Err(OdenParentReleaseEntrypointDirectRepoCandidateError::Graph(
+        OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+          "entrypoint graph source does not retain its original bytes"
+        )
+      ))
+    ));
+    assert!(!direct_called.get());
+
+    let (valid_graph, _) = release_graph(
+      entrypoint.as_str(),
+      RELEASE_ENTRY_SOURCE.as_bytes(),
+    );
+    let mut query_alias = entrypoint.clone();
+    query_alias.set_query(Some("alias"));
+    let direct_called = Cell::new(false);
+    let result =
+      observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
+        &valid_graph,
+        &query_alias,
+        |_specifier, _original_bytes| {
+          direct_called.set(true);
+          unreachable!("URL aliases must refuse before retained-file I/O")
+        },
+      );
+    assert!(matches!(
+      result,
+      Err(OdenParentReleaseEntrypointDirectRepoCandidateError::Graph(
+        OdenParentReleaseEntrypointCandidateError::InvalidGraph(
+          "entrypoint is not one query-free and fragment-free file URL"
+        )
+      ))
+    ));
+    assert!(!direct_called.get());
   }
 
   #[test]
