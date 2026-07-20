@@ -90,6 +90,42 @@ delete import.meta[\"oden.filesystem-parent-capture-v8-brand/2\"];\n\
 export default (request) => op_oden_filesystem_parent_capture_v2(brand, request);\n";
 pub const ODEN_PARENT_PROFILE: &str = "oden/capsec/2";
 
+// @ref LLP 0019#checked-final-lto-target-policy [implements] — Freeze only
+// the pure carrier relation and its four generated target identities. No
+// registry approval, target selection, source authentication, admission, or
+// generated-file authority is carried by these constants.
+pub const ODEN_PARENT_TARGET_POLICY_REGISTRY_SCHEMA: &str =
+  "oden/capsec-filesystem-final-lto-target-policy-registry/2";
+pub const ODEN_PARENT_TARGET_POLICY_CARRIER_SCHEMA: &str =
+  "oden/capsec-filesystem-parent-target-policy-carrier/2";
+pub const ODEN_PARENT_TARGET_POLICY_REGISTRY_BYTES_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-final-lto-target-policy-registry-bytes:2";
+pub const ODEN_PARENT_TARGET_POLICY_DIGEST_DOMAIN: &str =
+  "oden:capsec:filesystem-final-lto-target-policy:2";
+const ODEN_PARENT_TARGET_POLICY_REGISTRY_JCS_MAX_BYTES: usize = 67_108_864;
+const ODEN_PARENT_TARGET_POLICY_CARRIER_JCS_MAX_BYTES: usize = 67_112_960;
+const ODEN_PARENT_TARGET_POLICY_CARRIER_OVERHEAD_MAX_BYTES: usize = 4_096;
+const ODEN_PARENT_TARGET_POLICY_REVISION: u64 = 1;
+const ODEN_PARENT_TARGET_POLICY_TARGET_ORDER: [&str; 4] = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-unknown-linux-gnu",
+];
+const ODEN_PARENT_TARGET_POLICY_RUST_CFG_DIGESTS: [&str; 4] = [
+  "716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a",
+  "fdfd9dc24cb0c588308450d2fc622110258ab9b4cd22a2994287469428c5906d",
+  "2215dcca89932ecf67370ba53dfcbf8cb3f720e09441dff76871815e93bd274c",
+  "f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c",
+];
+const ODEN_PARENT_TARGET_POLICY_CARGO_GRAPH_DIGESTS: [&str; 4] = [
+  "db9c30f9dc521febae03256945ad55fa7bafe3ebc79ca35e94210bd0155d9a05",
+  "2bbbbee7d64104b0348f04ca21947c8a17f59263cce48ec2f5eb8ab4ae28b8df",
+  "a86d9658bf2ef4a76b20e2a52355a02539586ec2e863c7fac7caf58354496b3d",
+  "707b9ce9055b0cdca90b3765ce5bdb765725c9f319b0c8cc5f52815ddc84f069",
+];
+const ODEN_PARENT_TARGET_POLICY_CAPSEC_FEATURES: &str = "action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate";
+
 const ODEN_PARENT_ALLOWLIST_CANDIDATE_JCS_MAX_BYTES: usize = 4_096;
 const ODEN_PARENT_ENTRYPOINT_SOURCE_DIGEST: &str =
   "sha256-2ktwzbOtQigbPxqXKjU3rminYozLuYrAPtvKLsiTKCU";
@@ -297,6 +333,14 @@ pub enum OdenParentAllowlistError {
   },
   #[error("embedded parent allowlist digest does not match its JCS bytes")]
   EmbeddedAllowlistDigestMismatch,
+  #[error("invalid parent target-policy carrier candidate: {0}")]
+  InvalidTargetPolicyCarrierCandidate(&'static str),
+  #[error("invalid parent target-policy carrier JSON: {0}")]
+  InvalidTargetPolicyCarrierJson(String),
+  #[error("invalid parent target-policy carrier field {field}: {reason}")]
+  InvalidTargetPolicyCarrierField { field: String, reason: &'static str },
+  #[error("parent target-policy carrier digest mismatch: {0}")]
+  TargetPolicyCarrierDigestMismatch(&'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -2093,6 +2137,645 @@ fn render_oden_parent_allowlist_rust_module(
   )
 }
 
+/// Pure, production-uncalled target-policy carrier relation candidate.
+///
+/// This owns and validates one exact canonical registry envelope, freezes its
+/// four target/feature identities, derives the registry and selected-wrapper
+/// digests, and renders the exact carrier JCS and Rust source. It deliberately
+/// does not validate the opaque target-policy semantics, approve a registry,
+/// select a row, inspect a repository, write a file, authenticate source, or
+/// create admission or release authority.
+// @ref LLP 0019#checked-final-lto-target-policy [implements] — Derive only the
+// exact in-memory carrier relation while keeping every authority join absent.
+pub fn render_oden_parent_target_policy_carrier_candidate(
+  registry_jcs: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), OdenParentAllowlistError> {
+  let target_policies =
+    take_oden_parent_target_policy_registry_rows(registry_jcs)?;
+  let registry_digest = framed_sha256_digest(
+    ODEN_PARENT_TARGET_POLICY_REGISTRY_BYTES_DIGEST_DOMAIN,
+    registry_jcs,
+  );
+  let mut rows = Vec::with_capacity(target_policies.len());
+  for target_policy in target_policies {
+    let selected_policy = serde_json::json!({
+      "schema": ODEN_PARENT_TARGET_POLICY_REGISTRY_SCHEMA,
+      "profile": ODEN_PARENT_PROFILE,
+      "policyRevision": ODEN_PARENT_TARGET_POLICY_REVISION,
+      "targetPolicy": target_policy,
+    });
+    let selected_policy_jcs = canonical_value_jcs(&selected_policy)?;
+    let target_policy_digest = hjcs_digest(
+      ODEN_PARENT_TARGET_POLICY_DIGEST_DOMAIN,
+      &selected_policy_jcs,
+    )?;
+    rows.push(serde_json::json!({
+      "selectedPolicy": selected_policy,
+      "targetPolicyDigest": target_policy_digest.as_str(),
+    }));
+  }
+  let carrier = serde_json::json!({
+    "schema": ODEN_PARENT_TARGET_POLICY_CARRIER_SCHEMA,
+    "profile": ODEN_PARENT_PROFILE,
+    "policyRevision": ODEN_PARENT_TARGET_POLICY_REVISION,
+    "registryByteDigest": registry_digest.as_str(),
+    "rows": rows,
+  });
+  let carrier_jcs = canonical_value_jcs(&carrier)?;
+  require_oden_parent_target_policy_carrier_bounds(
+    carrier_jcs.len(),
+    registry_jcs.len(),
+  )?;
+  let rust_module =
+    render_oden_parent_target_policy_carrier_rust_module(&carrier_jcs)?;
+  Ok((carrier_jcs, rust_module))
+}
+
+/// Validate an inert compiled carrier and independently reproduce its source.
+///
+/// Success returns only deterministic Rust-source candidate bytes. The
+/// reconstructed registry stays local, no row is selected, and no caller can
+/// obtain a validated registry, target capability, admission, or output right.
+// @ref LLP 0019#checked-final-lto-target-policy [implements] — Reconstruct and
+// recheck the complete carrier relation without creating file or row authority.
+pub fn render_checked_oden_parent_target_policy_carrier_rust_module(
+  carrier_jcs: &[u8],
+) -> Result<Vec<u8>, OdenParentAllowlistError> {
+  let _reconstructed_registry =
+    reconstruct_oden_parent_target_policy_registry(carrier_jcs)?;
+  render_oden_parent_target_policy_carrier_rust_module(carrier_jcs)
+}
+
+fn take_oden_parent_target_policy_registry_rows(
+  registry_jcs: &[u8],
+) -> Result<Vec<serde_json::Value>, OdenParentAllowlistError> {
+  let value = parse_exact_oden_parent_target_policy_json(
+    registry_jcs,
+    ODEN_PARENT_TARGET_POLICY_REGISTRY_JCS_MAX_BYTES,
+    "registry JCS byte length is outside the frozen bound",
+  )?;
+  let mut root = take_oden_parent_target_policy_object(value, "registry")?;
+  require_oden_parent_target_policy_object_keys(
+    &root,
+    &["schema", "profile", "policyRevision", "targets"],
+    "registry",
+  )?;
+  require_oden_parent_target_policy_string(
+    &root,
+    "schema",
+    ODEN_PARENT_TARGET_POLICY_REGISTRY_SCHEMA,
+    "registry.schema",
+  )?;
+  require_oden_parent_target_policy_string(
+    &root,
+    "profile",
+    ODEN_PARENT_PROFILE,
+    "registry.profile",
+  )?;
+  require_oden_parent_target_policy_revision(
+    &root,
+    "policyRevision",
+    "registry.policyRevision",
+  )?;
+  let targets = root.remove("targets").ok_or_else(|| {
+    invalid_oden_parent_target_policy_field(
+      "registry.targets",
+      "field is missing",
+    )
+  })?;
+  let serde_json::Value::Array(targets) = targets else {
+    return Err(invalid_oden_parent_target_policy_field(
+      "registry.targets",
+      "value is not an array",
+    ));
+  };
+  if targets.len() != ODEN_PARENT_TARGET_POLICY_TARGET_ORDER.len() {
+    return Err(invalid_oden_parent_target_policy_field(
+      "registry.targets",
+      "array does not contain exactly four rows",
+    ));
+  }
+  for (index, target_policy) in targets.iter().enumerate() {
+    require_oden_parent_target_policy_identity(
+      target_policy,
+      index,
+      &format!("registry.targets[{index}]"),
+    )?;
+  }
+  Ok(targets)
+}
+
+fn reconstruct_oden_parent_target_policy_registry(
+  carrier_jcs: &[u8],
+) -> Result<Vec<u8>, OdenParentAllowlistError> {
+  let value = parse_exact_oden_parent_target_policy_json(
+    carrier_jcs,
+    ODEN_PARENT_TARGET_POLICY_CARRIER_JCS_MAX_BYTES,
+    "carrier JCS byte length is outside the frozen bound",
+  )?;
+  let mut root = take_oden_parent_target_policy_object(value, "carrier")?;
+  require_oden_parent_target_policy_object_keys(
+    &root,
+    &[
+      "schema",
+      "profile",
+      "policyRevision",
+      "registryByteDigest",
+      "rows",
+    ],
+    "carrier",
+  )?;
+  require_oden_parent_target_policy_string(
+    &root,
+    "schema",
+    ODEN_PARENT_TARGET_POLICY_CARRIER_SCHEMA,
+    "carrier.schema",
+  )?;
+  require_oden_parent_target_policy_string(
+    &root,
+    "profile",
+    ODEN_PARENT_PROFILE,
+    "carrier.profile",
+  )?;
+  require_oden_parent_target_policy_revision(
+    &root,
+    "policyRevision",
+    "carrier.policyRevision",
+  )?;
+  let registry_digest = require_oden_parent_target_policy_string_value(
+    &root,
+    "registryByteDigest",
+    "carrier.registryByteDigest",
+  )?
+  .to_string();
+  let registry_digest =
+    CanonicalSha256Digest::parse("registryByteDigest", registry_digest)?;
+  let rows = root.remove("rows").ok_or_else(|| {
+    invalid_oden_parent_target_policy_field("carrier.rows", "field is missing")
+  })?;
+  let serde_json::Value::Array(rows) = rows else {
+    return Err(invalid_oden_parent_target_policy_field(
+      "carrier.rows",
+      "value is not an array",
+    ));
+  };
+  if rows.len() != ODEN_PARENT_TARGET_POLICY_TARGET_ORDER.len() {
+    return Err(invalid_oden_parent_target_policy_field(
+      "carrier.rows",
+      "array does not contain exactly four rows",
+    ));
+  }
+
+  let mut target_policies = Vec::with_capacity(rows.len());
+  for (index, row) in rows.into_iter().enumerate() {
+    let row_label = format!("carrier.rows[{index}]");
+    let mut row = take_oden_parent_target_policy_object(row, &row_label)?;
+    require_oden_parent_target_policy_object_keys(
+      &row,
+      &["selectedPolicy", "targetPolicyDigest"],
+      &row_label,
+    )?;
+    let target_policy_digest = require_oden_parent_target_policy_string_value(
+      &row,
+      "targetPolicyDigest",
+      &format!("{row_label}.targetPolicyDigest"),
+    )?
+    .to_string();
+    let target_policy_digest =
+      CanonicalSha256Digest::parse("targetPolicyDigest", target_policy_digest)?;
+    let selected_policy = row.remove("selectedPolicy").ok_or_else(|| {
+      invalid_oden_parent_target_policy_field(
+        format!("{row_label}.selectedPolicy"),
+        "field is missing",
+      )
+    })?;
+    let selected_label = format!("{row_label}.selectedPolicy");
+    let selected = require_oden_parent_target_policy_object(
+      &selected_policy,
+      &selected_label,
+    )?;
+    require_oden_parent_target_policy_object_keys(
+      selected,
+      &["schema", "profile", "policyRevision", "targetPolicy"],
+      &selected_label,
+    )?;
+    require_oden_parent_target_policy_string(
+      selected,
+      "schema",
+      ODEN_PARENT_TARGET_POLICY_REGISTRY_SCHEMA,
+      &format!("{selected_label}.schema"),
+    )?;
+    require_oden_parent_target_policy_string(
+      selected,
+      "profile",
+      ODEN_PARENT_PROFILE,
+      &format!("{selected_label}.profile"),
+    )?;
+    require_oden_parent_target_policy_revision(
+      selected,
+      "policyRevision",
+      &format!("{selected_label}.policyRevision"),
+    )?;
+    let target_policy = selected.get("targetPolicy").ok_or_else(|| {
+      invalid_oden_parent_target_policy_field(
+        format!("{selected_label}.targetPolicy"),
+        "field is missing",
+      )
+    })?;
+    require_oden_parent_target_policy_identity(
+      target_policy,
+      index,
+      &format!("{selected_label}.targetPolicy"),
+    )?;
+    let selected_policy_jcs = canonical_value_jcs(&selected_policy)?;
+    if hjcs_digest(
+      ODEN_PARENT_TARGET_POLICY_DIGEST_DOMAIN,
+      &selected_policy_jcs,
+    )? != target_policy_digest
+    {
+      return Err(OdenParentAllowlistError::TargetPolicyCarrierDigestMismatch(
+        "selected target-policy wrapper",
+      ));
+    }
+    let mut selected =
+      take_oden_parent_target_policy_object(selected_policy, &selected_label)?;
+    target_policies.push(selected.remove("targetPolicy").ok_or_else(|| {
+      invalid_oden_parent_target_policy_field(
+        format!("{selected_label}.targetPolicy"),
+        "field is missing",
+      )
+    })?);
+  }
+
+  let registry = serde_json::json!({
+    "schema": ODEN_PARENT_TARGET_POLICY_REGISTRY_SCHEMA,
+    "profile": ODEN_PARENT_PROFILE,
+    "policyRevision": ODEN_PARENT_TARGET_POLICY_REVISION,
+    "targets": target_policies,
+  });
+  let registry_jcs = canonical_value_jcs(&registry)?;
+  if registry_jcs.is_empty()
+    || registry_jcs.len() > ODEN_PARENT_TARGET_POLICY_REGISTRY_JCS_MAX_BYTES
+  {
+    return Err(
+      OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+        "reconstructed registry JCS byte length is outside the frozen bound",
+      ),
+    );
+  }
+  if framed_sha256_digest(
+    ODEN_PARENT_TARGET_POLICY_REGISTRY_BYTES_DIGEST_DOMAIN,
+    &registry_jcs,
+  ) != registry_digest
+  {
+    return Err(OdenParentAllowlistError::TargetPolicyCarrierDigestMismatch(
+      "reconstructed registry bytes",
+    ));
+  }
+  require_oden_parent_target_policy_carrier_bounds(
+    carrier_jcs.len(),
+    registry_jcs.len(),
+  )?;
+  Ok(registry_jcs)
+}
+
+fn parse_exact_oden_parent_target_policy_json(
+  bytes: &[u8],
+  maximum: usize,
+  bound_reason: &'static str,
+) -> Result<serde_json::Value, OdenParentAllowlistError> {
+  if bytes.is_empty() || bytes.len() > maximum {
+    return Err(
+      OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+        bound_reason,
+      ),
+    );
+  }
+  let OdenParentStrictJsonValue(value) = serde_json::from_slice::<
+    OdenParentStrictJsonValue,
+  >(bytes)
+  .map_err(|error| {
+    OdenParentAllowlistError::InvalidTargetPolicyCarrierJson(error.to_string())
+  })?;
+  if canonical_value_jcs(&value)? != bytes {
+    return Err(
+      OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+        "bytes are not the exact canonical JSON rendering",
+      ),
+    );
+  }
+  Ok(value)
+}
+
+fn require_oden_parent_target_policy_carrier_bounds(
+  carrier_length: usize,
+  registry_length: usize,
+) -> Result<(), OdenParentAllowlistError> {
+  let overhead = carrier_length.checked_sub(registry_length).ok_or(
+    OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+      "carrier is shorter than its reconstructed registry",
+    ),
+  )?;
+  if carrier_length > ODEN_PARENT_TARGET_POLICY_CARRIER_JCS_MAX_BYTES
+    || overhead > ODEN_PARENT_TARGET_POLICY_CARRIER_OVERHEAD_MAX_BYTES
+  {
+    return Err(
+      OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+        "carrier JCS exceeds its exact ceiling or wrapper-overhead bound",
+      ),
+    );
+  }
+  Ok(())
+}
+
+// @ref LLP 0019#checked-final-lto-target-policy [implements] — Render the
+// fixed source template and least admissible raw-string delimiter exactly.
+fn render_oden_parent_target_policy_carrier_rust_module(
+  carrier_jcs: &[u8],
+) -> Result<Vec<u8>, OdenParentAllowlistError> {
+  const PREFIX: &[u8] = b"// Generated from capsec/rev2/registry/filesystem-final-lto-target-policy.json. Do not edit.\n\
+// @ref LLP 0019#checked-final-lto-target-policy [implements]\n\
+#[rustfmt::skip]\n\
+pub(super) const ODEN_PARENT_TARGET_POLICY_CARRIER_JCS: &str = r";
+  let mut maximum_hash_run_after_quote = 0_usize;
+  let mut offset = 0_usize;
+  while offset < carrier_jcs.len() {
+    if carrier_jcs[offset] != b'"' {
+      offset += 1;
+      continue;
+    }
+    let mut hash_run = 0_usize;
+    while hash_run < 255
+      && carrier_jcs.get(offset + hash_run + 1) == Some(&b'#')
+    {
+      hash_run += 1;
+    }
+    maximum_hash_run_after_quote = maximum_hash_run_after_quote.max(hash_run);
+    offset += hash_run + 1;
+  }
+  let hash_count = maximum_hash_run_after_quote
+    .checked_add(1)
+    .filter(|hash_count| *hash_count <= 255)
+    .ok_or(
+      OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+        "no raw-string delimiter exists within the frozen bound",
+      ),
+    )?;
+  let capacity = PREFIX
+    .len()
+    .checked_add(hash_count)
+    .and_then(|length| length.checked_add(1))
+    .and_then(|length| length.checked_add(carrier_jcs.len()))
+    .and_then(|length| length.checked_add(1))
+    .and_then(|length| length.checked_add(hash_count))
+    .and_then(|length| length.checked_add(2))
+    .ok_or(
+      OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+        "Rust source length overflowed",
+      ),
+    )?;
+  let mut output = Vec::with_capacity(capacity);
+  output.extend_from_slice(PREFIX);
+  output.extend(std::iter::repeat_n(b'#', hash_count));
+  output.push(b'"');
+  output.extend_from_slice(carrier_jcs);
+  output.push(b'"');
+  output.extend(std::iter::repeat_n(b'#', hash_count));
+  output.extend_from_slice(b";\n");
+  if output.len() != capacity {
+    return Err(
+      OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+        "Rust source length differs from its checked construction",
+      ),
+    );
+  }
+  Ok(output)
+}
+
+fn require_oden_parent_target_policy_identity(
+  target_policy: &serde_json::Value,
+  index: usize,
+  label: &str,
+) -> Result<(), OdenParentAllowlistError> {
+  let object = require_oden_parent_target_policy_object(target_policy, label)?;
+  require_oden_parent_target_policy_string(
+    object,
+    "target",
+    ODEN_PARENT_TARGET_POLICY_TARGET_ORDER[index],
+    &format!("{label}.target"),
+  )?;
+  let expected_feature_set = oden_parent_target_policy_feature_set(index);
+  require_oden_parent_target_policy_string(
+    object,
+    "featureSet",
+    &expected_feature_set,
+    &format!("{label}.featureSet"),
+  )
+}
+
+fn oden_parent_target_policy_feature_set(index: usize) -> String {
+  format!(
+    "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:{};graph:sha256:{};profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:{}",
+    ODEN_PARENT_TARGET_POLICY_RUST_CFG_DIGESTS[index],
+    ODEN_PARENT_TARGET_POLICY_CARGO_GRAPH_DIGESTS[index],
+    ODEN_PARENT_TARGET_POLICY_CAPSEC_FEATURES,
+  )
+}
+
+fn invalid_oden_parent_target_policy_field(
+  field: impl Into<String>,
+  reason: &'static str,
+) -> OdenParentAllowlistError {
+  OdenParentAllowlistError::InvalidTargetPolicyCarrierField {
+    field: field.into(),
+    reason,
+  }
+}
+
+fn require_oden_parent_target_policy_object<'a>(
+  value: &'a serde_json::Value,
+  label: &str,
+) -> Result<
+  &'a serde_json::Map<String, serde_json::Value>,
+  OdenParentAllowlistError,
+> {
+  value.as_object().ok_or_else(|| {
+    invalid_oden_parent_target_policy_field(label, "value is not an object")
+  })
+}
+
+fn take_oden_parent_target_policy_object(
+  value: serde_json::Value,
+  label: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, OdenParentAllowlistError>
+{
+  let serde_json::Value::Object(value) = value else {
+    return Err(invalid_oden_parent_target_policy_field(
+      label,
+      "value is not an object",
+    ));
+  };
+  Ok(value)
+}
+
+fn require_oden_parent_target_policy_object_keys(
+  object: &serde_json::Map<String, serde_json::Value>,
+  keys: &[&str],
+  label: &str,
+) -> Result<(), OdenParentAllowlistError> {
+  if object.len() != keys.len()
+    || keys.iter().any(|key| !object.contains_key(*key))
+  {
+    return Err(invalid_oden_parent_target_policy_field(
+      label,
+      "object does not have the exact closed key set",
+    ));
+  }
+  Ok(())
+}
+
+fn require_oden_parent_target_policy_string_value<'a>(
+  object: &'a serde_json::Map<String, serde_json::Value>,
+  key: &str,
+  label: &str,
+) -> Result<&'a str, OdenParentAllowlistError> {
+  object
+    .get(key)
+    .and_then(serde_json::Value::as_str)
+    .ok_or_else(|| {
+      invalid_oden_parent_target_policy_field(label, "value is not a string")
+    })
+}
+
+fn require_oden_parent_target_policy_string(
+  object: &serde_json::Map<String, serde_json::Value>,
+  key: &str,
+  expected: &str,
+  label: &str,
+) -> Result<(), OdenParentAllowlistError> {
+  if require_oden_parent_target_policy_string_value(object, key, label)?
+    != expected
+  {
+    return Err(invalid_oden_parent_target_policy_field(
+      label,
+      "value differs from the frozen identity",
+    ));
+  }
+  Ok(())
+}
+
+fn require_oden_parent_target_policy_revision(
+  object: &serde_json::Map<String, serde_json::Value>,
+  key: &str,
+  label: &str,
+) -> Result<(), OdenParentAllowlistError> {
+  if object.get(key).and_then(serde_json::Value::as_u64)
+    != Some(ODEN_PARENT_TARGET_POLICY_REVISION)
+  {
+    return Err(invalid_oden_parent_target_policy_field(
+      label,
+      "value differs from the frozen revision",
+    ));
+  }
+  Ok(())
+}
+
+struct OdenParentStrictJsonValue(serde_json::Value);
+
+impl<'de> Deserialize<'de> for OdenParentStrictJsonValue {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    deserializer.deserialize_any(OdenParentStrictJsonValueVisitor)
+  }
+}
+
+struct OdenParentStrictJsonValueVisitor;
+
+impl<'de> serde::de::Visitor<'de> for OdenParentStrictJsonValueVisitor {
+  type Value = OdenParentStrictJsonValue;
+
+  fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    formatter.write_str("strict I-JSON value without duplicate object keys")
+  }
+
+  fn visit_unit<E>(self) -> Result<Self::Value, E> {
+    Ok(OdenParentStrictJsonValue(serde_json::Value::Null))
+  }
+
+  fn visit_none<E>(self) -> Result<Self::Value, E> {
+    Ok(OdenParentStrictJsonValue(serde_json::Value::Null))
+  }
+
+  fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+    Ok(OdenParentStrictJsonValue(serde_json::Value::Bool(value)))
+  }
+
+  fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+    Ok(OdenParentStrictJsonValue(serde_json::Value::Number(
+      value.into(),
+    )))
+  }
+
+  fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+    Ok(OdenParentStrictJsonValue(serde_json::Value::Number(
+      value.into(),
+    )))
+  }
+
+  fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+  where
+    E: serde::de::Error,
+  {
+    serde_json::Number::from_f64(value)
+      .map(serde_json::Value::Number)
+      .map(OdenParentStrictJsonValue)
+      .ok_or_else(|| E::custom("non-finite JSON number"))
+  }
+
+  fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+    Ok(OdenParentStrictJsonValue(serde_json::Value::String(
+      value.to_string(),
+    )))
+  }
+
+  fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+    Ok(OdenParentStrictJsonValue(serde_json::Value::String(value)))
+  }
+
+  fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+  where
+    A: serde::de::SeqAccess<'de>,
+  {
+    let mut values = Vec::new();
+    while let Some(OdenParentStrictJsonValue(value)) =
+      sequence.next_element::<OdenParentStrictJsonValue>()?
+    {
+      values.push(value);
+    }
+    Ok(OdenParentStrictJsonValue(serde_json::Value::Array(values)))
+  }
+
+  fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+  where
+    A: serde::de::MapAccess<'de>,
+  {
+    let mut object = serde_json::Map::new();
+    while let Some(key) = map.next_key::<String>()? {
+      if object.contains_key(&key) {
+        return Err(serde::de::Error::custom(format!(
+          "duplicate JSON object key: {key}"
+        )));
+      }
+      let OdenParentStrictJsonValue(value) =
+        map.next_value::<OdenParentStrictJsonValue>()?;
+      object.insert(key, value);
+    }
+    Ok(OdenParentStrictJsonValue(serde_json::Value::Object(object)))
+  }
+}
+
 pub fn raw_sha256_digest(bytes: &[u8]) -> CanonicalSha256Digest {
   let digest = Sha256::digest(bytes);
   CanonicalSha256Digest(format!("sha256-{}", URL_SAFE_NO_PAD.encode(digest)))
@@ -2428,6 +3111,68 @@ mod tests {
 
   fn zero_digest(field: &'static str) -> CanonicalSha256Digest {
     CanonicalSha256Digest::parse(field, ZERO_DIGEST).unwrap()
+  }
+
+  fn target_policy_registry_value(
+    delimiter_probe: Option<&str>,
+  ) -> serde_json::Value {
+    let targets = ODEN_PARENT_TARGET_POLICY_TARGET_ORDER
+      .iter()
+      .enumerate()
+      .map(|(index, target)| {
+        let mut target_policy = serde_json::json!({
+          "featureSet": oden_parent_target_policy_feature_set(index),
+          "opaqueOrdinal": index,
+          "requirements": {
+            "finalLto": true,
+            "linkerArgs": ["-Clto=fat", "-Ccodegen-units=1"],
+          },
+          "target": target,
+        });
+        if index == 0 {
+          if let Some(delimiter_probe) = delimiter_probe {
+            target_policy.as_object_mut().unwrap().insert(
+              "delimiterProbe".to_string(),
+              serde_json::json!(delimiter_probe),
+            );
+          }
+        }
+        target_policy
+      })
+      .collect::<Vec<_>>();
+    serde_json::json!({
+      "schema": ODEN_PARENT_TARGET_POLICY_REGISTRY_SCHEMA,
+      "profile": ODEN_PARENT_PROFILE,
+      "policyRevision": ODEN_PARENT_TARGET_POLICY_REVISION,
+      "targets": targets,
+    })
+  }
+
+  fn target_policy_registry_jcs() -> Vec<u8> {
+    canonical_value_jcs(&target_policy_registry_value(None)).unwrap()
+  }
+
+  fn replace_once(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    let offset = bytes
+      .windows(needle.len())
+      .position(|window| window == needle)
+      .expect("test mutation needle must occur");
+    let mut changed =
+      Vec::with_capacity(bytes.len() - needle.len() + replacement.len());
+    changed.extend_from_slice(&bytes[..offset]);
+    changed.extend_from_slice(replacement);
+    changed.extend_from_slice(&bytes[offset + needle.len()..]);
+    changed
+  }
+
+  fn assert_target_policy_carrier_checker_refuses(carrier: serde_json::Value) {
+    let carrier = canonical_value_jcs(&carrier).unwrap();
+    assert!(
+      render_checked_oden_parent_target_policy_carrier_rust_module(&carrier)
+        .is_err(),
+      "mutated carrier unexpectedly passed: {}",
+      String::from_utf8_lossy(&carrier),
+    );
   }
 
   fn minimal_workspace_resolver() -> SerializedWorkspaceResolver {
@@ -4560,6 +5305,396 @@ mod tests {
         "vfsGraphDigest",
       ],
     );
+  }
+
+  #[test]
+  fn target_policy_carrier_renders_exact_deterministic_relation() {
+    let registry_jcs = target_policy_registry_jcs();
+    let (carrier_jcs, rust_source) =
+      render_oden_parent_target_policy_carrier_candidate(&registry_jcs)
+        .unwrap();
+    assert_eq!(
+      render_oden_parent_target_policy_carrier_candidate(&registry_jcs)
+        .unwrap(),
+      (carrier_jcs.clone(), rust_source.clone()),
+    );
+    assert!(!carrier_jcs.is_empty());
+    assert_ne!(carrier_jcs.last(), Some(&b'\n'));
+    assert!(!rust_source.starts_with(&[0xef, 0xbb, 0xbf]));
+    assert!(!rust_source.contains(&b'\r'));
+    assert!(rust_source.ends_with(b";\n"));
+    assert!(!rust_source.ends_with(b"\n\n"));
+
+    let carrier: serde_json::Value =
+      serde_json::from_slice(&carrier_jcs).unwrap();
+    assert_eq!(canonical_value_jcs(&carrier).unwrap(), carrier_jcs);
+    assert_eq!(carrier["schema"], ODEN_PARENT_TARGET_POLICY_CARRIER_SCHEMA);
+    assert_eq!(carrier["profile"], ODEN_PARENT_PROFILE);
+    assert_eq!(
+      carrier["policyRevision"],
+      ODEN_PARENT_TARGET_POLICY_REVISION
+    );
+
+    let mut registry_hasher = Sha256::new();
+    registry_hasher.update(
+      ODEN_PARENT_TARGET_POLICY_REGISTRY_BYTES_DIGEST_DOMAIN.as_bytes(),
+    );
+    registry_hasher.update([0]);
+    registry_hasher.update(&registry_jcs);
+    let expected_registry_digest = format!(
+      "sha256-{}",
+      URL_SAFE_NO_PAD.encode(registry_hasher.finalize())
+    );
+    assert_eq!(carrier["registryByteDigest"], expected_registry_digest);
+
+    let rows = carrier["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    let mut reconstructed_targets = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+      assert_eq!(row.as_object().unwrap().len(), 2);
+      let selected = &row["selectedPolicy"];
+      assert_eq!(selected.as_object().unwrap().len(), 4);
+      assert_eq!(
+        selected["schema"],
+        ODEN_PARENT_TARGET_POLICY_REGISTRY_SCHEMA
+      );
+      assert_eq!(selected["profile"], ODEN_PARENT_PROFILE);
+      assert_eq!(
+        selected["policyRevision"],
+        ODEN_PARENT_TARGET_POLICY_REVISION
+      );
+      assert_eq!(
+        selected["targetPolicy"]["target"],
+        ODEN_PARENT_TARGET_POLICY_TARGET_ORDER[index]
+      );
+      assert_eq!(
+        selected["targetPolicy"]["featureSet"],
+        oden_parent_target_policy_feature_set(index)
+      );
+      let selected_jcs = canonical_value_jcs(selected).unwrap();
+      let mut selected_hasher = Sha256::new();
+      selected_hasher
+        .update(ODEN_PARENT_TARGET_POLICY_DIGEST_DOMAIN.as_bytes());
+      selected_hasher.update([0]);
+      selected_hasher.update(&selected_jcs);
+      assert_eq!(
+        row["targetPolicyDigest"],
+        format!(
+          "sha256-{}",
+          URL_SAFE_NO_PAD.encode(selected_hasher.finalize())
+        )
+      );
+      reconstructed_targets.push(selected["targetPolicy"].clone());
+    }
+    let reconstructed_registry = canonical_value_jcs(&serde_json::json!({
+      "schema": ODEN_PARENT_TARGET_POLICY_REGISTRY_SCHEMA,
+      "profile": ODEN_PARENT_PROFILE,
+      "policyRevision": ODEN_PARENT_TARGET_POLICY_REVISION,
+      "targets": reconstructed_targets,
+    }))
+    .unwrap();
+    assert_eq!(reconstructed_registry, registry_jcs);
+    assert!(carrier_jcs.len() - registry_jcs.len() <= 4_096);
+
+    let carrier_text = std::str::from_utf8(&carrier_jcs).unwrap();
+    assert_eq!(
+      rust_source,
+      format!(
+        "// Generated from capsec/rev2/registry/filesystem-final-lto-target-policy.json. Do not edit.\n\
+         // @ref LLP 0019#checked-final-lto-target-policy [implements]\n\
+         #[rustfmt::skip]\n\
+         pub(super) const ODEN_PARENT_TARGET_POLICY_CARRIER_JCS: &str = r#\"{carrier_text}\"#;\n"
+      )
+      .into_bytes(),
+    );
+    assert_eq!(
+      render_checked_oden_parent_target_policy_carrier_rust_module(
+        &carrier_jcs,
+      )
+      .unwrap(),
+      rust_source,
+    );
+  }
+
+  #[test]
+  fn target_policy_carrier_has_exact_frozen_target_status_identity() {
+    const EXPECTED: [(&str, &str); 4] = [
+      (
+        "aarch64-apple-darwin",
+        concat!(
+          "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
+          "cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;",
+          "graph:sha256:db9c30f9dc521febae03256945ad55fa7bafe3ebc79ca35e94210bd0155d9a05;",
+          "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
+          "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
+        ),
+      ),
+      (
+        "x86_64-apple-darwin",
+        concat!(
+          "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
+          "cfg:sha256:fdfd9dc24cb0c588308450d2fc622110258ab9b4cd22a2994287469428c5906d;",
+          "graph:sha256:2bbbbee7d64104b0348f04ca21947c8a17f59263cce48ec2f5eb8ab4ae28b8df;",
+          "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
+          "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
+        ),
+      ),
+      (
+        "aarch64-unknown-linux-gnu",
+        concat!(
+          "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
+          "cfg:sha256:2215dcca89932ecf67370ba53dfcbf8cb3f720e09441dff76871815e93bd274c;",
+          "graph:sha256:a86d9658bf2ef4a76b20e2a52355a02539586ec2e863c7fac7caf58354496b3d;",
+          "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
+          "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
+        ),
+      ),
+      (
+        "x86_64-unknown-linux-gnu",
+        concat!(
+          "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
+          "cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;",
+          "graph:sha256:707b9ce9055b0cdca90b3765ce5bdb765725c9f319b0c8cc5f52815ddc84f069;",
+          "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
+          "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
+        ),
+      ),
+    ];
+
+    for (index, (target, feature_set)) in EXPECTED.into_iter().enumerate() {
+      assert_eq!(ODEN_PARENT_TARGET_POLICY_TARGET_ORDER[index], target);
+      assert_eq!(oden_parent_target_policy_feature_set(index), feature_set);
+    }
+  }
+
+  #[test]
+  fn target_policy_carrier_registry_parser_is_recursive_and_exact() {
+    let registry_jcs = target_policy_registry_jcs();
+
+    assert!(matches!(
+      render_oden_parent_target_policy_carrier_candidate(&[]),
+      Err(OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(_))
+    ));
+    assert!(matches!(
+      parse_exact_oden_parent_target_policy_json(b"{}", 1, "test byte ceiling",),
+      Err(
+        OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+          "test byte ceiling"
+        )
+      )
+    ));
+
+    for noncanonical in [
+      {
+        let mut bytes = vec![b' '];
+        bytes.extend_from_slice(&registry_jcs);
+        bytes
+      },
+      {
+        let mut bytes = registry_jcs.clone();
+        bytes.push(b'\n');
+        bytes
+      },
+    ] {
+      assert!(matches!(
+        render_oden_parent_target_policy_carrier_candidate(&noncanonical),
+        Err(
+          OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+            "bytes are not the exact canonical JSON rendering"
+          )
+        )
+      ));
+    }
+
+    let registry_text = std::str::from_utf8(&registry_jcs).unwrap();
+    let duplicate_top =
+      format!("{{\"policyRevision\":1,{}", &registry_text[1..],).into_bytes();
+    let duplicate_nested = replace_once(
+      &registry_jcs,
+      b"\"opaqueOrdinal\":0",
+      b"\"opaqueOrdinal\":0,\"opaqueOrdinal\":0",
+    );
+    for duplicate in [duplicate_top, duplicate_nested] {
+      assert!(matches!(
+        render_oden_parent_target_policy_carrier_candidate(&duplicate),
+        Err(OdenParentAllowlistError::InvalidTargetPolicyCarrierJson(_))
+      ));
+    }
+
+    let unsafe_integer = replace_once(
+      &registry_jcs,
+      b"\"opaqueOrdinal\":0",
+      b"\"opaqueOrdinal\":9007199254740992",
+    );
+    assert_eq!(
+      render_oden_parent_target_policy_carrier_candidate(&unsafe_integer),
+      Err(OdenParentAllowlistError::InvalidIJsonNumber),
+    );
+  }
+
+  #[test]
+  fn target_policy_carrier_registry_refuses_shape_and_identity_aliases() {
+    let registry = target_policy_registry_value(None);
+    let mut mutations = Vec::new();
+
+    let mut changed = registry.clone();
+    changed["schema"] = serde_json::json!("other-schema");
+    mutations.push(changed);
+    let mut changed = registry.clone();
+    changed["profile"] = serde_json::json!("oden/capsec/other");
+    mutations.push(changed);
+    let mut changed = registry.clone();
+    changed["policyRevision"] = serde_json::json!(2);
+    mutations.push(changed);
+    let mut changed = registry.clone();
+    changed
+      .as_object_mut()
+      .unwrap()
+      .insert("unexpected".to_string(), serde_json::json!(true));
+    mutations.push(changed);
+    let mut changed = registry.clone();
+    changed["targets"].as_array_mut().unwrap().pop();
+    mutations.push(changed);
+    let mut changed = registry.clone();
+    changed["targets"].as_array_mut().unwrap().swap(0, 1);
+    mutations.push(changed);
+    let mut changed = registry.clone();
+    changed["targets"][0]["target"] = serde_json::json!("AARCH64-APPLE-DARWIN");
+    mutations.push(changed);
+    let mut changed = registry.clone();
+    changed["targets"][0]["featureSet"] = serde_json::json!(
+      oden_parent_target_policy_feature_set(0).to_uppercase()
+    );
+    mutations.push(changed);
+    let mut changed = registry.clone();
+    changed["targets"][0] = serde_json::json!(null);
+    mutations.push(changed);
+
+    for mutation in mutations {
+      let mutation = canonical_value_jcs(&mutation).unwrap();
+      assert!(
+        render_oden_parent_target_policy_carrier_candidate(&mutation).is_err(),
+        "mutated registry unexpectedly passed: {}",
+        String::from_utf8_lossy(&mutation),
+      );
+    }
+  }
+
+  #[test]
+  fn target_policy_carrier_checker_refuses_digest_and_wrapper_mutations() {
+    let registry_jcs = target_policy_registry_jcs();
+    let (carrier_jcs, _) =
+      render_oden_parent_target_policy_carrier_candidate(&registry_jcs)
+        .unwrap();
+    let carrier: serde_json::Value =
+      serde_json::from_slice(&carrier_jcs).unwrap();
+
+    let mut changed = carrier.clone();
+    changed["registryByteDigest"] = serde_json::json!(ZERO_DIGEST);
+    assert_target_policy_carrier_checker_refuses(changed);
+    let mut changed = carrier.clone();
+    changed["rows"][0]["targetPolicyDigest"] = serde_json::json!(ZERO_DIGEST);
+    assert_target_policy_carrier_checker_refuses(changed);
+    let mut changed = carrier.clone();
+    changed["rows"][0]["selectedPolicy"]["targetPolicy"]["opaqueOrdinal"] =
+      serde_json::json!(99);
+    assert_target_policy_carrier_checker_refuses(changed);
+
+    for (field, value) in [
+      ("schema", serde_json::json!("other-schema")),
+      ("profile", serde_json::json!("oden/capsec/other")),
+      ("policyRevision", serde_json::json!(2)),
+    ] {
+      let mut changed = carrier.clone();
+      changed["rows"][0]["selectedPolicy"][field] = value;
+      assert_target_policy_carrier_checker_refuses(changed);
+    }
+
+    let mut changed = carrier.clone();
+    changed["rows"][0]["selectedPolicy"]["targetPolicy"]["target"] =
+      serde_json::json!("aarch64-apple-darwin-suffix");
+    assert_target_policy_carrier_checker_refuses(changed);
+    let mut changed = carrier.clone();
+    changed["rows"][0]["selectedPolicy"]["targetPolicy"]["featureSet"] =
+      serde_json::json!("aliased-feature-set");
+    assert_target_policy_carrier_checker_refuses(changed);
+    let mut changed = carrier.clone();
+    changed["rows"].as_array_mut().unwrap().pop();
+    assert_target_policy_carrier_checker_refuses(changed);
+    let mut changed = carrier.clone();
+    changed["rows"][0]
+      .as_object_mut()
+      .unwrap()
+      .insert("unexpected".to_string(), serde_json::json!(true));
+    assert_target_policy_carrier_checker_refuses(changed);
+
+    let duplicate_nested = replace_once(
+      &carrier_jcs,
+      b"\"opaqueOrdinal\":0",
+      b"\"opaqueOrdinal\":0,\"opaqueOrdinal\":0",
+    );
+    assert!(matches!(
+      render_checked_oden_parent_target_policy_carrier_rust_module(
+        &duplicate_nested,
+      ),
+      Err(OdenParentAllowlistError::InvalidTargetPolicyCarrierJson(_))
+    ));
+  }
+
+  #[test]
+  fn target_policy_carrier_uses_minimal_raw_string_delimiter_and_bounds() {
+    let registry_jcs = canonical_value_jcs(&target_policy_registry_value(
+      Some("contains a raw-string terminator probe: \"###"),
+    ))
+    .unwrap();
+    let (carrier_jcs, rust_source) =
+      render_oden_parent_target_policy_carrier_candidate(&registry_jcs)
+        .unwrap();
+    assert!(carrier_jcs.windows(4).any(|window| window == b"\"###"));
+    assert!(rust_source.windows(6).any(|window| window == b"r####\""));
+    assert!(rust_source.ends_with(b"\"####;\n"));
+    assert_eq!(
+      render_checked_oden_parent_target_policy_carrier_rust_module(
+        &carrier_jcs,
+      )
+      .unwrap(),
+      rust_source,
+    );
+
+    let mut no_delimiter = vec![b'"'];
+    no_delimiter.extend(std::iter::repeat_n(b'#', 255));
+    assert!(matches!(
+      render_oden_parent_target_policy_carrier_rust_module(&no_delimiter),
+      Err(
+        OdenParentAllowlistError::InvalidTargetPolicyCarrierCandidate(
+          "no raw-string delimiter exists within the frozen bound"
+        )
+      )
+    ));
+
+    assert!(
+      require_oden_parent_target_policy_carrier_bounds(
+        ODEN_PARENT_TARGET_POLICY_CARRIER_JCS_MAX_BYTES,
+        ODEN_PARENT_TARGET_POLICY_REGISTRY_JCS_MAX_BYTES,
+      )
+      .is_ok()
+    );
+    for (carrier_length, registry_length) in [
+      (
+        ODEN_PARENT_TARGET_POLICY_CARRIER_JCS_MAX_BYTES + 1,
+        ODEN_PARENT_TARGET_POLICY_REGISTRY_JCS_MAX_BYTES,
+      ),
+      (4_098, 1),
+      (1, 2),
+    ] {
+      assert!(
+        require_oden_parent_target_policy_carrier_bounds(
+          carrier_length,
+          registry_length,
+        )
+        .is_err()
+      );
+    }
   }
 
   #[test]
