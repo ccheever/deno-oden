@@ -18,6 +18,7 @@ use deno_runtime::deno_telemetry::OtelConfig;
 use deno_runtime::deno_telemetry::OtelConsoleConfig;
 use deno_semver::jsr::JsrPackageNvReference;
 use deno_semver::jsr::JsrPackageReqReference;
+use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest as _;
 use sha2::Sha256;
@@ -89,6 +90,14 @@ delete import.meta[\"oden.filesystem-parent-capture-v8-brand/2\"];\n\
 export default (request) => op_oden_filesystem_parent_capture_v2(brand, request);\n";
 pub const ODEN_PARENT_PROFILE: &str = "oden/capsec/2";
 
+const ODEN_PARENT_ALLOWLIST_CANDIDATE_JCS_MAX_BYTES: usize = 4_096;
+const ODEN_PARENT_ENTRYPOINT_SOURCE_DIGEST: &str =
+  "sha256-2ktwzbOtQigbPxqXKjU3rminYozLuYrAPtvKLsiTKCU";
+const ODEN_PARENT_STATIC_IMPORT_EDGE_DIGEST: &str =
+  "sha256-QjCXbnZVWa11HTOJYfKV-tIL5iuvi2tuqLDEpi8MTG0";
+const ODEN_PARENT_SYNTHETIC_MODULE_SOURCE_DIGEST: &str =
+  "sha256-0aagkSSUwopjaS2bzw7TI_xLwvJR-49_hi6EInvzXWc";
+
 pub const ODEN_PARENT_GENERATED_JSON_PATH: &str =
   "generated/capsec/rev2/filesystem-parent-standalone-allowlist.json";
 pub const ODEN_PARENT_GENERATED_RUST_PATH: &str =
@@ -101,6 +110,19 @@ pub const ODEN_PARENT_GENERATED_PATHS: [&str; 3] = [
   ODEN_PARENT_TARGET_POLICY_GENERATED_RUST_PATH,
 ];
 pub const ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE: i32 = 76;
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Expose the private generated sibling only as two immutable candidate values.
+// This accessor parses nothing, validates nothing, and cannot confer admission,
+// startup, compiler, brand, or release authority.
+#[cfg(feature = "__oden_parent_allowlist_embedded")]
+pub fn embedded_oden_parent_allowlist_candidate()
+-> (&'static [u8], &'static str) {
+  (
+    super::oden_parent_allowlist_generated::ODEN_PARENT_ALLOWLIST_JCS,
+    super::oden_parent_allowlist_generated::ODEN_PARENT_ALLOWLIST_DIGEST,
+  )
+}
 
 const ODEN_PARENT_ALLOWLIST_RESERVED_PREFIX: &[u8; 29] =
   b"--_oden-parent-allowlist-mode";
@@ -264,6 +286,17 @@ pub enum OdenParentAllowlistError {
   UnreachableVfsFile(String),
   #[error("invalid parent VFS private edge: {0}")]
   InvalidVfsPrivateEdge(&'static str),
+  #[error("invalid embedded parent allowlist candidate: {0}")]
+  InvalidEmbeddedAllowlistCandidate(&'static str),
+  #[error("invalid embedded parent allowlist candidate JSON: {0}")]
+  InvalidEmbeddedAllowlistJson(String),
+  #[error("invalid embedded parent allowlist field {field}: {reason}")]
+  InvalidEmbeddedAllowlistField {
+    field: &'static str,
+    reason: &'static str,
+  },
+  #[error("embedded parent allowlist digest does not match its JCS bytes")]
+  EmbeddedAllowlistDigestMismatch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1775,6 +1808,37 @@ pub struct OdenParentAllowlist {
   vfs_graph_digest: OdenParentVfsGraphDigest,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OdenParentEmbeddedAllowlistCandidate {
+  #[serde(rename = "captureContractDigest")]
+  capture_contract_digest: String,
+  #[serde(rename = "engineProvenanceSchema")]
+  engine_provenance_schema: u8,
+  #[serde(rename = "entrypointKey")]
+  entrypoint_key: String,
+  #[serde(rename = "entrypointSourceDigest")]
+  entrypoint_source_digest: String,
+  #[serde(rename = "parentPrimitiveId")]
+  parent_primitive_id: String,
+  #[serde(rename = "privateModuleSpecifier")]
+  private_module_specifier: String,
+  profile: String,
+  #[serde(rename = "releaseContractDigest")]
+  release_contract_digest: String,
+  schema: String,
+  #[serde(rename = "sourceClosureContractDigest")]
+  source_closure_contract_digest: String,
+  #[serde(rename = "standaloneConfigurationDigest")]
+  standalone_configuration_digest: String,
+  #[serde(rename = "staticImportEdgeDigest")]
+  static_import_edge_digest: String,
+  #[serde(rename = "syntheticModuleSourceDigest")]
+  synthetic_module_source_digest: String,
+  #[serde(rename = "vfsGraphDigest")]
+  vfs_graph_digest: String,
+}
+
 /// Complete typed inputs to the pure allowlist projection.
 ///
 /// This value carries no caller-authored digest string, target, fork, engine,
@@ -1872,21 +1936,161 @@ impl OdenParentAllowlist {
     &self,
   ) -> Result<Vec<u8>, OdenParentAllowlistError> {
     let jcs = self.canonical_jcs()?;
-    let jcs = std::str::from_utf8(&jcs).map_err(|error| {
-      OdenParentAllowlistError::CanonicalJson(error.to_string())
-    })?;
     let digest = self.digest()?;
-    Ok(
-      format!(
-        "// Copyright 2018-2026 the Deno authors. MIT license.\n\
-       // This file is generated deterministically. Do not edit.\n\n\
-       pub const ODEN_PARENT_ALLOWLIST_JCS: &[u8] = br#\"{jcs}\"#;\n\
-       pub const ODEN_PARENT_ALLOWLIST_DIGEST: &str = \"{}\";\n",
-        digest.as_str()
-      )
-      .into_bytes(),
-    )
+    render_oden_parent_allowlist_rust_module(&jcs, &digest)
   }
+}
+
+/// Validate and render the inert compiled allowlist candidate.
+///
+/// This pure projection performs no file, graph, compiler, runtime, admission,
+/// or activation work. Its result is only the two deterministic source-file
+/// byte candidates corresponding to the supplied frozen JCS and HJCS values.
+pub fn render_checked_oden_parent_allowlist_candidate_files(
+  candidate_jcs: &[u8],
+  candidate_digest: &str,
+) -> Result<(Vec<u8>, Vec<u8>), OdenParentAllowlistError> {
+  if candidate_jcs.is_empty()
+    || candidate_jcs.len() > ODEN_PARENT_ALLOWLIST_CANDIDATE_JCS_MAX_BYTES
+  {
+    return Err(OdenParentAllowlistError::InvalidEmbeddedAllowlistCandidate(
+      "JCS byte length is outside the frozen bound",
+    ));
+  }
+
+  // The closed typed shape rejects duplicate, missing, and unknown members
+  // before constructing a generic JSON value.
+  let candidate: OdenParentEmbeddedAllowlistCandidate =
+    serde_json::from_slice(candidate_jcs).map_err(|error| {
+      OdenParentAllowlistError::InvalidEmbeddedAllowlistJson(error.to_string())
+    })?;
+  let candidate_value = serde_json::to_value(&candidate).map_err(|error| {
+    OdenParentAllowlistError::CanonicalJson(error.to_string())
+  })?;
+  if canonical_value_jcs(&candidate_value)? != candidate_jcs {
+    return Err(OdenParentAllowlistError::InvalidEmbeddedAllowlistCandidate(
+      "bytes are not the exact canonical JSON rendering",
+    ));
+  }
+
+  for (field, value) in [
+    (
+      "captureContractDigest",
+      candidate.capture_contract_digest.as_str(),
+    ),
+    (
+      "entrypointSourceDigest",
+      candidate.entrypoint_source_digest.as_str(),
+    ),
+    (
+      "releaseContractDigest",
+      candidate.release_contract_digest.as_str(),
+    ),
+    (
+      "sourceClosureContractDigest",
+      candidate.source_closure_contract_digest.as_str(),
+    ),
+    (
+      "standaloneConfigurationDigest",
+      candidate.standalone_configuration_digest.as_str(),
+    ),
+    (
+      "staticImportEdgeDigest",
+      candidate.static_import_edge_digest.as_str(),
+    ),
+    (
+      "syntheticModuleSourceDigest",
+      candidate.synthetic_module_source_digest.as_str(),
+    ),
+    ("vfsGraphDigest", candidate.vfs_graph_digest.as_str()),
+  ] {
+    CanonicalSha256Digest::parse(field, value)?;
+  }
+
+  for (field, actual, expected) in [
+    (
+      "entrypointKey",
+      candidate.entrypoint_key.as_str(),
+      ODEN_PARENT_ENTRYPOINT_KEY,
+    ),
+    (
+      "entrypointSourceDigest",
+      candidate.entrypoint_source_digest.as_str(),
+      ODEN_PARENT_ENTRYPOINT_SOURCE_DIGEST,
+    ),
+    (
+      "parentPrimitiveId",
+      candidate.parent_primitive_id.as_str(),
+      ODEN_PARENT_PRIMITIVE_ID,
+    ),
+    (
+      "privateModuleSpecifier",
+      candidate.private_module_specifier.as_str(),
+      ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+    ),
+    ("profile", candidate.profile.as_str(), ODEN_PARENT_PROFILE),
+    (
+      "schema",
+      candidate.schema.as_str(),
+      ODEN_PARENT_ALLOWLIST_SCHEMA,
+    ),
+    (
+      "staticImportEdgeDigest",
+      candidate.static_import_edge_digest.as_str(),
+      ODEN_PARENT_STATIC_IMPORT_EDGE_DIGEST,
+    ),
+    (
+      "syntheticModuleSourceDigest",
+      candidate.synthetic_module_source_digest.as_str(),
+      ODEN_PARENT_SYNTHETIC_MODULE_SOURCE_DIGEST,
+    ),
+  ] {
+    if actual != expected {
+      return Err(OdenParentAllowlistError::InvalidEmbeddedAllowlistField {
+        field,
+        reason: "value differs from the frozen identity",
+      });
+    }
+  }
+  if candidate.engine_provenance_schema != 2 {
+    return Err(OdenParentAllowlistError::InvalidEmbeddedAllowlistField {
+      field: "engineProvenanceSchema",
+      reason: "value differs from the frozen identity",
+    });
+  }
+
+  let candidate_digest =
+    CanonicalSha256Digest::parse("allowlistDigest", candidate_digest)?;
+  if hjcs_digest(ODEN_PARENT_ALLOWLIST_DIGEST_DOMAIN, candidate_jcs)?
+    != candidate_digest
+  {
+    return Err(OdenParentAllowlistError::EmbeddedAllowlistDigestMismatch);
+  }
+
+  let mut json_file = candidate_jcs.to_vec();
+  json_file.push(b'\n');
+  let rust_module =
+    render_oden_parent_allowlist_rust_module(candidate_jcs, &candidate_digest)?;
+  Ok((json_file, rust_module))
+}
+
+fn render_oden_parent_allowlist_rust_module(
+  canonical_jcs: &[u8],
+  digest: &CanonicalSha256Digest,
+) -> Result<Vec<u8>, OdenParentAllowlistError> {
+  let canonical_jcs = std::str::from_utf8(canonical_jcs).map_err(|error| {
+    OdenParentAllowlistError::CanonicalJson(error.to_string())
+  })?;
+  Ok(
+    format!(
+      "// Copyright 2018-2026 the Deno authors. MIT license.\n\
+       // This file is generated deterministically. Do not edit.\n\n\
+       pub const ODEN_PARENT_ALLOWLIST_JCS: &[u8] = br#\"{canonical_jcs}\"#;\n\
+       pub const ODEN_PARENT_ALLOWLIST_DIGEST: &str =\n\x20\x20\"{}\";\n",
+      digest.as_str()
+    )
+    .into_bytes(),
+  )
 }
 
 pub fn raw_sha256_digest(bytes: &[u8]) -> CanonicalSha256Digest {
@@ -2391,6 +2595,34 @@ mod tests {
       ),
       vfs_graph_digest: OdenParentVfsGraphDigest(zero_digest("vfsGraphDigest")),
     })
+  }
+
+  fn checked_embedded_candidate_jcs() -> Vec<u8> {
+    canonical_value_jcs(&serde_json::json!({
+      "captureContractDigest": ZERO_DIGEST,
+      "engineProvenanceSchema": 2,
+      "entrypointKey": ODEN_PARENT_ENTRYPOINT_KEY,
+      "entrypointSourceDigest": ODEN_PARENT_ENTRYPOINT_SOURCE_DIGEST,
+      "parentPrimitiveId": ODEN_PARENT_PRIMITIVE_ID,
+      "privateModuleSpecifier": ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      "profile": ODEN_PARENT_PROFILE,
+      "releaseContractDigest": ZERO_DIGEST,
+      "schema": ODEN_PARENT_ALLOWLIST_SCHEMA,
+      "sourceClosureContractDigest": ZERO_DIGEST,
+      "standaloneConfigurationDigest": ZERO_DIGEST,
+      "staticImportEdgeDigest": ODEN_PARENT_STATIC_IMPORT_EDGE_DIGEST,
+      "syntheticModuleSourceDigest":
+        ODEN_PARENT_SYNTHETIC_MODULE_SOURCE_DIGEST,
+      "vfsGraphDigest": ZERO_DIGEST,
+    }))
+    .unwrap()
+  }
+
+  fn checked_embedded_candidate_digest(jcs: &[u8]) -> String {
+    hjcs_digest(ODEN_PARENT_ALLOWLIST_DIGEST_DOMAIN, jcs)
+      .unwrap()
+      .as_str()
+      .to_string()
   }
 
   #[test]
@@ -4331,6 +4563,180 @@ mod tests {
   }
 
   #[test]
+  fn embedded_candidate_validator_renders_exact_frozen_files() {
+    let jcs = checked_embedded_candidate_jcs();
+    let digest = checked_embedded_candidate_digest(&jcs);
+    let (json_file, rust_module) =
+      render_checked_oden_parent_allowlist_candidate_files(&jcs, &digest)
+        .unwrap();
+
+    let mut expected_json = jcs.clone();
+    expected_json.push(b'\n');
+    assert_eq!(json_file, expected_json);
+    assert_eq!(
+      rust_module,
+      format!(
+        "// Copyright 2018-2026 the Deno authors. MIT license.\n\
+         // This file is generated deterministically. Do not edit.\n\n\
+         pub const ODEN_PARENT_ALLOWLIST_JCS: &[u8] = br#\"{}\"#;\n\
+         pub const ODEN_PARENT_ALLOWLIST_DIGEST: &str =\n\x20\x20\"{digest}\";\n",
+        std::str::from_utf8(&jcs).unwrap(),
+      )
+      .into_bytes(),
+    );
+  }
+
+  #[test]
+  fn embedded_candidate_validator_refuses_noncanonical_duplicate_and_shape() {
+    let jcs = checked_embedded_candidate_jcs();
+
+    let mut noncanonical = vec![b' '];
+    noncanonical.extend_from_slice(&jcs);
+    let digest = checked_embedded_candidate_digest(&noncanonical);
+    assert!(matches!(
+      render_checked_oden_parent_allowlist_candidate_files(
+        &noncanonical,
+        &digest,
+      ),
+      Err(OdenParentAllowlistError::InvalidEmbeddedAllowlistCandidate(
+        "bytes are not the exact canonical JSON rendering"
+      ))
+    ));
+
+    let duplicate = format!(
+      "{{\"captureContractDigest\":\"{ZERO_DIGEST}\",{}",
+      &std::str::from_utf8(&jcs).unwrap()[1..],
+    )
+    .into_bytes();
+    let digest = checked_embedded_candidate_digest(&duplicate);
+    assert!(matches!(
+      render_checked_oden_parent_allowlist_candidate_files(&duplicate, &digest),
+      Err(OdenParentAllowlistError::InvalidEmbeddedAllowlistJson(_))
+    ));
+
+    let mut extra: serde_json::Value = serde_json::from_slice(&jcs).unwrap();
+    extra
+      .as_object_mut()
+      .unwrap()
+      .insert("unexpected".to_string(), serde_json::json!(true));
+    let extra = canonical_value_jcs(&extra).unwrap();
+    let digest = checked_embedded_candidate_digest(&extra);
+    assert!(matches!(
+      render_checked_oden_parent_allowlist_candidate_files(&extra, &digest),
+      Err(OdenParentAllowlistError::InvalidEmbeddedAllowlistJson(_))
+    ));
+
+    let mut missing: serde_json::Value = serde_json::from_slice(&jcs).unwrap();
+    missing.as_object_mut().unwrap().remove("vfsGraphDigest");
+    let missing = canonical_value_jcs(&missing).unwrap();
+    let digest = checked_embedded_candidate_digest(&missing);
+    assert!(matches!(
+      render_checked_oden_parent_allowlist_candidate_files(&missing, &digest),
+      Err(OdenParentAllowlistError::InvalidEmbeddedAllowlistJson(_))
+    ));
+
+    for outside_bound in [Vec::new(), vec![b' '; 4_097]] {
+      assert!(matches!(
+        render_checked_oden_parent_allowlist_candidate_files(
+          &outside_bound,
+          ZERO_DIGEST,
+        ),
+        Err(OdenParentAllowlistError::InvalidEmbeddedAllowlistCandidate(
+          "JCS byte length is outside the frozen bound"
+        ))
+      ));
+    }
+  }
+
+  #[test]
+  fn embedded_candidate_validator_refuses_each_changed_frozen_identity() {
+    let jcs = checked_embedded_candidate_jcs();
+    for (field, replacement) in [
+      ("engineProvenanceSchema", serde_json::json!(3)),
+      ("entrypointKey", serde_json::json!("repo:src/other.ts")),
+      ("entrypointSourceDigest", serde_json::json!(ZERO_DIGEST)),
+      ("parentPrimitiveId", serde_json::json!("other-primitive")),
+      (
+        "privateModuleSpecifier",
+        serde_json::json!("oden-internal:other"),
+      ),
+      ("profile", serde_json::json!("oden/capsec/other")),
+      ("schema", serde_json::json!("oden/other-schema/2")),
+      ("staticImportEdgeDigest", serde_json::json!(ZERO_DIGEST)),
+      (
+        "syntheticModuleSourceDigest",
+        serde_json::json!(ZERO_DIGEST),
+      ),
+    ] {
+      let mut changed: serde_json::Value =
+        serde_json::from_slice(&jcs).unwrap();
+      changed
+        .as_object_mut()
+        .unwrap()
+        .insert(field.to_string(), replacement);
+      let changed = canonical_value_jcs(&changed).unwrap();
+      let digest = checked_embedded_candidate_digest(&changed);
+      assert!(matches!(
+        render_checked_oden_parent_allowlist_candidate_files(
+          &changed, &digest,
+        ),
+        Err(OdenParentAllowlistError::InvalidEmbeddedAllowlistField {
+          field: actual,
+          reason: "value differs from the frozen identity",
+        }) if actual == field
+      ));
+    }
+  }
+
+  #[test]
+  fn embedded_candidate_validator_refuses_digest_encodings_and_hjcs_mismatch() {
+    let jcs = checked_embedded_candidate_jcs();
+    for field in [
+      "captureContractDigest",
+      "entrypointSourceDigest",
+      "releaseContractDigest",
+      "sourceClosureContractDigest",
+      "standaloneConfigurationDigest",
+      "staticImportEdgeDigest",
+      "syntheticModuleSourceDigest",
+      "vfsGraphDigest",
+    ] {
+      let mut changed: serde_json::Value =
+        serde_json::from_slice(&jcs).unwrap();
+      changed
+        .as_object_mut()
+        .unwrap()
+        .insert(field.to_string(), serde_json::json!("sha256-not-canonical"));
+      let changed = canonical_value_jcs(&changed).unwrap();
+      let digest = checked_embedded_candidate_digest(&changed);
+      assert!(matches!(
+        render_checked_oden_parent_allowlist_candidate_files(
+          &changed, &digest,
+        ),
+        Err(OdenParentAllowlistError::InvalidSha256Digest {
+          field: actual,
+          ..
+        }) if actual == field
+      ));
+    }
+
+    assert!(matches!(
+      render_checked_oden_parent_allowlist_candidate_files(
+        &jcs,
+        "sha256-not-canonical",
+      ),
+      Err(OdenParentAllowlistError::InvalidSha256Digest {
+        field: "allowlistDigest",
+        ..
+      })
+    ));
+    assert_eq!(
+      render_checked_oden_parent_allowlist_candidate_files(&jcs, ZERO_DIGEST),
+      Err(OdenParentAllowlistError::EmbeddedAllowlistDigestMismatch),
+    );
+  }
+
+  #[test]
   fn allowlist_renderings_are_exact_and_deterministic() {
     let allowlist = test_allowlist();
     let jcs = allowlist.canonical_jcs().unwrap();
@@ -4360,10 +4766,27 @@ mod tests {
         "// Copyright 2018-2026 the Deno authors. MIT license.\n\
          // This file is generated deterministically. Do not edit.\n\n\
          pub const ODEN_PARENT_ALLOWLIST_JCS: &[u8] = br#\"{jcs_text}\"#;\n\
-         pub const ODEN_PARENT_ALLOWLIST_DIGEST: &str = \"{digest}\";\n"
+         pub const ODEN_PARENT_ALLOWLIST_DIGEST: &str =\n\x20\x20\"{digest}\";\n"
       )
       .into_bytes()
     );
+  }
+
+  #[cfg(feature = "__oden_parent_allowlist_embedded")]
+  #[test]
+  fn embedded_allowlist_accessor_is_canonical_and_self_consistent() {
+    let (jcs, digest) = embedded_oden_parent_allowlist_candidate();
+    assert!(!jcs.is_empty());
+    assert_ne!(jcs.last(), Some(&b'\n'));
+    let value: serde_json::Value = serde_json::from_slice(jcs).unwrap();
+    assert_eq!(canonical_value_jcs(&value).unwrap(), jcs);
+    assert_eq!(
+      hjcs_digest(ODEN_PARENT_ALLOWLIST_DIGEST_DOMAIN, jcs)
+        .unwrap()
+        .as_str(),
+      digest
+    );
+    render_checked_oden_parent_allowlist_candidate_files(jcs, digest).unwrap();
   }
 
   #[test]

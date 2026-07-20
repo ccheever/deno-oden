@@ -146,6 +146,44 @@ pub fn run_oden_parent_allowlist_generate() -> i32 {
   }
 }
 
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Reclassify the process's native argv before admitting embedded-only Check,
+// retain its root before either fixed-file read, and collapse every candidate
+// mismatch to silent exit 76. This synchronous route constructs no runtime,
+// compiler graph, cache, network client, final admission, or output authority.
+#[doc(hidden)]
+pub fn run_oden_parent_allowlist_check() -> i32 {
+  #[cfg(all(
+    feature = "__oden_parent_allowlist_embedded",
+    any(target_os = "linux", target_os = "macos")
+  ))]
+  {
+    let args = std::env::args_os().collect::<Vec<_>>();
+    oden_parent_allowlist_check_exit_code_for_raw_args_with(&args, |dispatch| {
+      let Ok(eligibility) =
+        standalone::admit_oden_parent_allowlist_check(dispatch)
+      else {
+        return false;
+      };
+      let Ok(session) =
+        standalone::begin_oden_parent_allowlist_check_session(eligibility)
+      else {
+        return false;
+      };
+
+      standalone::check_oden_parent_allowlist_outputs(session).is_ok()
+    })
+  }
+
+  #[cfg(not(all(
+    feature = "__oden_parent_allowlist_embedded",
+    any(target_os = "linux", target_os = "macos")
+  )))]
+  {
+    deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE
+  }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn oden_parent_allowlist_generate_exit_code_for_raw_args_with(
   args: &[std::ffi::OsString],
@@ -168,8 +206,33 @@ fn oden_parent_allowlist_generate_exit_code_for_raw_args_with(
   }
 }
 
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+fn oden_parent_allowlist_check_exit_code_for_raw_args_with(
+  args: &[std::ffi::OsString],
+  check: impl FnOnce(
+    deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch,
+  ) -> bool,
+) -> i32 {
+  use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE;
+  use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch;
+
+  let dispatch = deno_lib::standalone::oden_parent_allowlist::classify_oden_parent_allowlist_raw_argv(args);
+  if dispatch != OdenParentAllowlistRawDispatch::Check {
+    return ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE;
+  }
+
+  if check(dispatch) {
+    0
+  } else {
+    ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE
+  }
+}
+
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-mod oden_parent_allowlist_generate_bridge_tests {
+mod oden_parent_allowlist_bridge_tests {
   use super::*;
   use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE;
   use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch;
@@ -223,6 +286,55 @@ mod oden_parent_allowlist_generate_bridge_tests {
         oden_parent_allowlist_generate_exit_code_for_raw_args_with(
           &args,
           |_| panic!("non-exact raw argv reached Generate callback: {args:?}"),
+        ),
+        ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE,
+      );
+    }
+  }
+
+  #[test]
+  fn parent_allowlist_check_bridge_rederives_raw_argv_and_fails_closed() {
+    let exact = raw_args(&[
+      "arbitrary-argv-zero",
+      "compile",
+      "--_oden-parent-allowlist-mode=check",
+    ]);
+    assert_eq!(
+      oden_parent_allowlist_check_exit_code_for_raw_args_with(
+        &exact,
+        |dispatch| {
+          assert_eq!(dispatch, OdenParentAllowlistRawDispatch::Check);
+          true
+        },
+      ),
+      0,
+    );
+    assert_eq!(
+      oden_parent_allowlist_check_exit_code_for_raw_args_with(&exact, |_| {
+        false
+      },),
+      ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE,
+    );
+
+    for args in [
+      raw_args(&["deno", "compile"]),
+      raw_args(&["deno", "compile", "--_oden-parent-allowlist-mode=generate"]),
+      raw_args(&[
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=check",
+        "main.ts",
+      ]),
+      raw_args(&[
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=check-suffix",
+      ]),
+    ] {
+      assert_eq!(
+        oden_parent_allowlist_check_exit_code_for_raw_args_with(
+          &args,
+          |_| panic!("non-exact raw argv reached Check callback: {args:?}"),
         ),
         ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE,
       );

@@ -4,9 +4,10 @@
 // These generator-side slices freeze the exact capture, source-closure, and
 // release contract memberships. One authoring-only Generate session now holds
 // the retained root across graph observation, inventory reads, composition,
-// and per-file atomic replacement of the two allowlist review candidates.
-// Check, the target-policy carrier, brand/admission, and release authority stay
-// absent or fail-closed.
+// and per-file atomic replacement of the two allowlist review candidates. A
+// distinct embedded-only Check session now reconciles the in-memory, compiled,
+// and checked-in candidates without writing. The target-policy carrier,
+// brand/admission, and release authority stay absent or fail-closed.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::CString;
@@ -74,9 +75,9 @@ const ODEN_PARENT_ALLOWLIST_EMBEDDED_FEATURE: &str =
   "__oden_parent_allowlist_embedded";
 
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
-// Decode only the compile-time role shape. Generate eligibility can be consumed
-// once by the narrow authoring session; Check and every other shape still
-// refuse, and compilation shape alone grants no downstream authority.
+// Decode only the compile-time role shape. Generate and Check eligibility can
+// each be consumed once by its distinct narrow session; every other shape
+// refuses, and compilation shape alone grants no downstream authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OdenParentAllowlistRoleDecision {
   GenerateEligible,
@@ -154,6 +155,14 @@ pub(crate) struct OdenParentAllowlistGenerateEligibility {
   _private: (),
 }
 
+/// Opaque one-shot proof that this root crate has the exact supported,
+/// embedded-only shape for the reserved Check route. It deliberately has no
+/// public constructor and is neither `Clone` nor `Copy`.
+#[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+pub(crate) struct OdenParentAllowlistCheckEligibility {
+  _private: (),
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub(crate) struct OdenParentAllowlistGenerateError(
@@ -164,6 +173,20 @@ impl From<OdenParentAllowlistGenerateFailure>
   for OdenParentAllowlistGenerateError
 {
   fn from(value: OdenParentAllowlistGenerateFailure) -> Self {
+    Self(value)
+  }
+}
+
+#[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub(crate) struct OdenParentAllowlistCheckError(
+  OdenParentAllowlistCheckFailure,
+);
+
+#[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+impl From<OdenParentAllowlistCheckFailure> for OdenParentAllowlistCheckError {
+  fn from(value: OdenParentAllowlistCheckFailure) -> Self {
     Self(value)
   }
 }
@@ -183,6 +206,22 @@ fn admit_oden_parent_allowlist_generate_with(
   Ok(OdenParentAllowlistGenerateEligibility { _private: () })
 }
 
+#[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+fn admit_oden_parent_allowlist_check_with(
+  dispatch: OdenParentAllowlistRawDispatch,
+  facts: OdenParentAllowlistCompiledRoleFacts<'_>,
+) -> Result<
+  OdenParentAllowlistCheckEligibility,
+  OdenParentAllowlistCheckFailure,
+> {
+  if decode_oden_parent_allowlist_role(dispatch, facts)
+    != OdenParentAllowlistRoleDecision::CheckEligible
+  {
+    return Err(OdenParentAllowlistCheckFailure::IneligibleRole);
+  }
+  Ok(OdenParentAllowlistCheckEligibility { _private: () })
+}
+
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
 // Mint a one-shot Generate eligibility value only for the exact supported,
 // authoring-only compiled shape. Check and every other role remain ineligible.
@@ -193,6 +232,24 @@ pub(crate) fn admit_oden_parent_allowlist_generate(
   OdenParentAllowlistGenerateError,
 > {
   admit_oden_parent_allowlist_generate_with(
+    dispatch,
+    compiled_oden_parent_allowlist_role_facts(),
+  )
+  .map_err(Into::into)
+}
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Mint a one-shot Check eligibility value only for the exact supported,
+// embedded-only root shape. This permits one non-authoritative reconciliation
+// and cannot construct final admission or any downstream capability.
+#[cfg(feature = "__oden_parent_allowlist_embedded")]
+pub(crate) fn admit_oden_parent_allowlist_check(
+  dispatch: OdenParentAllowlistRawDispatch,
+) -> Result<
+  OdenParentAllowlistCheckEligibility,
+  OdenParentAllowlistCheckError,
+> {
+  admit_oden_parent_allowlist_check_with(
     dispatch,
     compiled_oden_parent_allowlist_role_facts(),
   )
@@ -555,6 +612,28 @@ enum OdenParentAllowlistGenerateFailure {
   ReplacedOutputMismatch(&'static str),
 }
 
+#[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+#[derive(Debug, thiserror::Error)]
+enum OdenParentAllowlistCheckFailure {
+  #[error("compiled role is not eligible for parent allowlist checking")]
+  IneligibleRole,
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("retained check input failed: {0}")]
+  Retained(#[from] OdenParentRetainedContractError),
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("compiled allowlist candidate validation failed: {0}")]
+  CandidateValidation(#[from] OdenParentAllowlistError),
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("allowlist generated-file observation failed: {0}")]
+  DirectRepository(#[from] OdenParentDirectRepoSourceError),
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("allowlist candidate does not match the compiled private module")]
+  EmbeddedCandidateMismatch,
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("allowlist checked file has an inexact mode: {0}")]
+  InexactOutputMode(&'static str),
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, thiserror::Error)]
 enum OdenParentDirectRepoSourceError {
@@ -584,6 +663,12 @@ enum OdenParentDirectRepoSourceError {
     component: String,
     matches: usize,
   },
+  #[error("retained directory {directory:?} contains {matches} ASCII-case-folded raw entries named {component:?}, expected one")]
+  InvalidCaseFoldedComponentCount {
+    directory: String,
+    component: String,
+    matches: usize,
+  },
   #[error("direct repository path component is not a directory: {0}")]
   ComponentNotDirectory(String),
   #[error("direct repository source is not a regular file: {0}")]
@@ -608,6 +693,16 @@ enum OdenParentDirectRepoSourceError {
   ByteMismatch { path: String, offset: u64 },
   #[error("direct repository source has bytes after the exact supplied candidate-byte length: {0}")]
   TrailingBytes(String),
+  #[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+  #[error("failed to inspect retained direct repository name {path:?}: {source}")]
+  InspectName {
+    path: String,
+    #[source]
+    source: std::io::Error,
+  },
+  #[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+  #[error("retained direct repository name changed: {0}")]
+  NameChanged(String),
   #[error("retained descriptor changed while reading direct repository source {member}: {descriptor}")]
   DescriptorChanged { member: String, descriptor: String },
 }
@@ -730,6 +825,18 @@ struct RetainedRepositoryRoot {
 /// `Clone` nor `Copy` and exposes no root descriptor.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) struct OdenParentAllowlistGenerateSession {
+  root: RetainedRepositoryRoot,
+}
+
+/// One embedded-only Check session owns its distinct eligibility transition
+/// and a retained repository root used only for candidate reconstruction and
+/// fixed-file reads. No writer accepts this type. It is intentionally neither
+/// `Clone` nor `Copy` and exposes no root descriptor.
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+pub(crate) struct OdenParentAllowlistCheckSession {
   root: RetainedRepositoryRoot,
 }
 
@@ -929,6 +1036,21 @@ pub(crate) fn begin_oden_parent_allowlist_generate_session(
     .map_err(|error| OdenParentAllowlistGenerateFailure::from(error).into())
 }
 
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Consume exact Check eligibility before acquiring its one retained root. The
+// resulting type has no path to the Generate writer or final admission.
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  feature = "__oden_parent_allowlist_embedded"
+))]
+pub(crate) fn begin_oden_parent_allowlist_check_session(
+  _eligibility: OdenParentAllowlistCheckEligibility,
+) -> Result<OdenParentAllowlistCheckSession, OdenParentAllowlistCheckError> {
+  RetainedRepositoryRoot::open_current()
+    .map(|root| OdenParentAllowlistCheckSession { root })
+    .map_err(|error| OdenParentAllowlistCheckFailure::from(error).into())
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl OdenParentAllowlistGenerateSession {
   pub(crate) fn repository_root_path(&self) -> &Path {
@@ -958,6 +1080,22 @@ impl OdenParentAllowlistGenerateSession {
     RetainedRepositoryRoot::open_test_absolute(path)
       .map(|root| Self { root })
       .map_err(|error| OdenParentAllowlistGenerateFailure::from(error).into())
+  }
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+impl OdenParentAllowlistCheckSession {
+  #[cfg(test)]
+  fn begin_for_test(
+    _eligibility: OdenParentAllowlistCheckEligibility,
+    path: &Path,
+  ) -> Result<Self, OdenParentAllowlistCheckError> {
+    RetainedRepositoryRoot::open_test_absolute(path)
+      .map(|root| Self { root })
+      .map_err(|error| OdenParentAllowlistCheckFailure::from(error).into())
   }
 }
 
@@ -1419,7 +1557,8 @@ fn require_exact_directory_component(
   let stream =
     OdenParentDirectoryStream::from_descriptor(scan_descriptor, directory_path)?;
   let scan_result = (|| {
-    let mut matches = 0_usize;
+    let mut exact_matches = 0_usize;
+    let mut folded_matches = 0_usize;
     loop {
       clear_oden_parent_readdir_errno();
       // SAFETY: `stream.raw` is a live uniquely owned DIR. Each returned
@@ -1440,13 +1579,16 @@ fn require_exact_directory_component(
       // readdir; d_type is intentionally ignored.
       let name = unsafe { oden_parent_dirent_name(entry, directory_path) }?;
       if name == component.as_bytes() {
-        matches = matches.saturating_add(1);
+        exact_matches = exact_matches.saturating_add(1);
+      }
+      if name.eq_ignore_ascii_case(component.as_bytes()) {
+        folded_matches = folded_matches.saturating_add(1);
       }
     }
-    Ok(matches)
+    Ok((exact_matches, folded_matches))
   })();
   let close_result = stream.close(directory_path);
-  let matches = match scan_result {
+  let (exact_matches, folded_matches) = match scan_result {
     Ok(matches) => matches,
     Err(error) => {
       let _ = close_result;
@@ -1454,12 +1596,21 @@ fn require_exact_directory_component(
     }
   };
   close_result?;
-  if matches != 1 {
+  if exact_matches != 1 {
     return Err(
       OdenParentDirectRepoSourceError::InvalidExactComponentCount {
         directory: directory_path.to_string(),
         component: component.to_string(),
-        matches,
+        matches: exact_matches,
+      },
+    );
+  }
+  if folded_matches != 1 {
+    return Err(
+      OdenParentDirectRepoSourceError::InvalidCaseFoldedComponentCount {
+        directory: directory_path.to_string(),
+        component: component.to_string(),
+        matches: folded_matches,
       },
     );
   }
@@ -2237,7 +2388,6 @@ fn compose_oden_parent_allowlist_candidate(
     vfs_graph: compiler.vfs_graph,
     static_import_edge: compiler.static_import_edge,
   })?;
-
   Ok(OdenParentAllowlistCandidateOutput {
     json_file: allowlist.render_json_file()?,
     rust_module: allowlist.render_rust_module()?,
@@ -3036,6 +3186,450 @@ pub(crate) fn generate_oden_parent_allowlist_outputs(
   result.map_err(Into::into)
 }
 
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+fn open_oden_parent_allowlist_checked_output<'a>(
+  root: &'a RetainedRepositoryRoot,
+  path: &'static str,
+  expected_bytes: &[u8],
+) -> Result<
+  OdenParentAllowlistCheckedOutputRead<'a>,
+  OdenParentAllowlistCheckFailure,
+> {
+  if path != ODEN_PARENT_GENERATED_JSON_PATH
+    && path != ODEN_PARENT_GENERATED_RUST_PATH
+  {
+    return Err(OdenParentAllowlistCheckFailure::EmbeddedCandidateMismatch);
+  }
+  root.require_stable(path)?;
+  root.require_current_and_named_paths_stable("check output open")?;
+  let components = path.split('/').collect::<Vec<_>>();
+  let (file_name, directory_components) = components
+    .split_last()
+    .expect("fixed checked output is nonempty");
+  let directory_flags =
+    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+  let mut held_directories: Vec<HeldDirectory> =
+    Vec::with_capacity(directory_components.len());
+  let mut directory_path = String::new();
+  for component in directory_components {
+    let (parent_descriptor, parent_snapshot, parent_path) =
+      match held_directories.last() {
+        Some(directory) => (
+          &directory.descriptor,
+          &directory.snapshot,
+          directory.path.as_str(),
+        ),
+        None => (&root.descriptor, &root.snapshot, "."),
+      };
+    require_exact_directory_component(
+      parent_descriptor,
+      parent_snapshot,
+      parent_path,
+      path,
+      component,
+    )?;
+    if !directory_path.is_empty() {
+      directory_path.push('/');
+    }
+    directory_path.push_str(component);
+    let descriptor = open_component(
+      parent_descriptor.as_raw_fd(),
+      path,
+      component,
+      directory_flags,
+    )?;
+    let snapshot = DescriptorSnapshot::capture(&descriptor, &directory_path)?;
+    if !snapshot.is_directory() {
+      return Err(
+        OdenParentDirectRepoSourceError::ComponentNotDirectory(directory_path)
+          .into(),
+      );
+    }
+    held_directories.push(HeldDirectory {
+      path: directory_path.clone(),
+      descriptor,
+      snapshot,
+    });
+  }
+
+  let directory = held_directories
+    .last()
+    .expect("fixed checked output has a parent directory");
+  require_exact_directory_component(
+    &directory.descriptor,
+    &directory.snapshot,
+    &directory.path,
+    path,
+    file_name,
+  )?;
+  let file_name = CString::new(file_name.as_bytes())
+    .expect("fixed checked output name has no NUL");
+  let file_flags =
+    libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+  let descriptor = open_component(
+    directory.descriptor.as_raw_fd(),
+    path,
+    file_name.to_str().expect("fixed checked name is ASCII"),
+    file_flags,
+  )?;
+  let snapshot = DescriptorSnapshot::capture(&descriptor, path)?;
+  if !snapshot.is_regular_file() {
+    return Err(
+      OdenParentDirectRepoSourceError::NotRegularFile(path.to_string()).into(),
+    );
+  }
+  if snapshot.links != 1 {
+    return Err(
+      OdenParentDirectRepoSourceError::InvalidLinkCount {
+        path: path.to_string(),
+        links: snapshot.links,
+      }
+      .into(),
+    );
+  }
+  if snapshot.size < 0
+    || snapshot.size as u64 != expected_bytes.len() as u64
+  {
+    return Err(
+      OdenParentDirectRepoSourceError::SizeMismatch {
+        path: path.to_string(),
+        expected: expected_bytes.len() as u64,
+        actual: snapshot.size,
+      }
+      .into(),
+    );
+  }
+  if snapshot.mode & 0o7777 != 0o644 {
+    return Err(OdenParentAllowlistCheckFailure::InexactOutputMode(path));
+  }
+  let read = OdenParentAllowlistCheckedOutputRead {
+    root,
+    path,
+    file_name,
+    expected_bytes: Arc::<[u8]>::from(expected_bytes.to_vec()),
+    descriptor,
+    snapshot,
+    held_directories,
+  };
+  require_oden_parent_allowlist_checked_output_name_stable(&read)?;
+  Ok(read)
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+struct OdenParentAllowlistCheckedOutputRead<'a> {
+  root: &'a RetainedRepositoryRoot,
+  path: &'static str,
+  file_name: CString,
+  expected_bytes: Arc<[u8]>,
+  descriptor: File,
+  snapshot: DescriptorSnapshot,
+  held_directories: Vec<HeldDirectory>,
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+fn require_oden_parent_allowlist_checked_output_name_stable(
+  read: &OdenParentAllowlistCheckedOutputRead<'_>,
+) -> Result<(), OdenParentAllowlistCheckFailure> {
+  let directory = read
+    .held_directories
+    .last()
+    .expect("fixed checked output has a parent directory");
+  require_exact_directory_component(
+    &directory.descriptor,
+    &directory.snapshot,
+    &directory.path,
+    read.path,
+    read.file_name.to_str().expect("fixed checked name is ASCII"),
+  )?;
+  let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+  // SAFETY: the retained directory and terminated fixed name remain live;
+  // AT_SYMLINK_NOFOLLOW observes the current name itself.
+  if unsafe {
+    libc::fstatat(
+      directory.descriptor.as_raw_fd(),
+      read.file_name.as_ptr(),
+      stat.as_mut_ptr(),
+      libc::AT_SYMLINK_NOFOLLOW,
+    )
+  } != 0
+  {
+    return Err(
+      OdenParentDirectRepoSourceError::InspectName {
+        path: read.path.to_string(),
+        source: std::io::Error::last_os_error(),
+      }
+      .into(),
+    );
+  }
+  // SAFETY: successful fstatat initialized the complete stat value.
+  let named = DescriptorSnapshot::from_stat(unsafe { stat.assume_init() });
+  if named != read.snapshot {
+    return Err(
+      OdenParentDirectRepoSourceError::NameChanged(read.path.to_string())
+        .into(),
+    );
+  }
+  Ok(())
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+fn require_oden_parent_allowlist_checked_output_bytes(
+  read: &mut OdenParentAllowlistCheckedOutputRead<'_>,
+) -> Result<(), OdenParentAllowlistCheckFailure> {
+  read.descriptor.seek(SeekFrom::Start(0)).map_err(|source| {
+    OdenParentDirectRepoSourceError::ReadFile {
+      path: read.path.to_string(),
+      source,
+    }
+  })?;
+  let mut offset = 0_usize;
+  let mut buffer = [0_u8; 8_192];
+  while offset < read.expected_bytes.len() {
+    let length = buffer.len().min(read.expected_bytes.len() - offset);
+    let read_length = read
+      .descriptor
+      .read(&mut buffer[..length])
+      .map_err(|source| OdenParentDirectRepoSourceError::ReadFile {
+        path: read.path.to_string(),
+        source,
+      })?;
+    if read_length == 0 {
+      return Err(
+        OdenParentDirectRepoSourceError::UnexpectedEof {
+          path: read.path.to_string(),
+          offset: offset as u64,
+        }
+        .into(),
+      );
+    }
+    let expected = &read.expected_bytes[offset..offset + read_length];
+    if buffer[..read_length] != *expected {
+      let mismatch = buffer[..read_length]
+        .iter()
+        .zip(expected)
+        .position(|(actual, expected)| actual != expected)
+        .expect("unequal checked-output slices have a mismatching byte");
+      return Err(
+        OdenParentDirectRepoSourceError::ByteMismatch {
+          path: read.path.to_string(),
+          offset: (offset + mismatch) as u64,
+        }
+        .into(),
+      );
+    }
+    offset += read_length;
+  }
+  let mut trailing = [0_u8; 1];
+  if read.descriptor.read(&mut trailing).map_err(|source| {
+    OdenParentDirectRepoSourceError::ReadFile {
+      path: read.path.to_string(),
+      source,
+    }
+  })? != 0
+  {
+    return Err(
+      OdenParentDirectRepoSourceError::TrailingBytes(read.path.to_string())
+        .into(),
+    );
+  }
+  Ok(())
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+fn require_oden_parent_allowlist_checked_output_descriptor_tree_stable(
+  read: &OdenParentAllowlistCheckedOutputRead<'_>,
+) -> Result<(), OdenParentAllowlistCheckFailure> {
+  require_oden_parent_allowlist_checked_output_name_stable(&read)?;
+  if DescriptorSnapshot::capture(&read.descriptor, read.path)? != read.snapshot
+  {
+    return Err(
+      OdenParentDirectRepoSourceError::DescriptorChanged {
+        member: read.path.to_string(),
+        descriptor: read.path.to_string(),
+      }
+      .into(),
+    );
+  }
+  for directory in read.held_directories.iter().rev() {
+    if DescriptorSnapshot::capture(&directory.descriptor, &directory.path)?
+      != directory.snapshot
+    {
+      return Err(
+        OdenParentDirectRepoSourceError::DescriptorChanged {
+          member: read.path.to_string(),
+          descriptor: directory.path.clone(),
+        }
+        .into(),
+      );
+    }
+  }
+  read.root.require_stable(read.path)?;
+  read
+    .root
+    .require_current_and_named_paths_stable("check output terminal")?;
+  Ok(())
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+fn require_oden_parent_allowlist_checked_output_reachable_from_root(
+  read: &OdenParentAllowlistCheckedOutputRead<'_>,
+) -> Result<(), OdenParentAllowlistCheckFailure> {
+  let reopened = open_oden_parent_allowlist_checked_output(
+    read.root,
+    read.path,
+    &read.expected_bytes,
+  )?;
+  if reopened.snapshot != read.snapshot
+    || reopened.held_directories.len() != read.held_directories.len()
+    || reopened
+      .held_directories
+      .iter()
+      .zip(&read.held_directories)
+      .any(|(reopened, original)| {
+        reopened.path != original.path || reopened.snapshot != original.snapshot
+      })
+  {
+    return Err(
+      OdenParentDirectRepoSourceError::NameChanged(read.path.to_string())
+        .into(),
+    );
+  }
+  require_oden_parent_allowlist_checked_output_descriptor_tree_stable(
+    &reopened,
+  )?;
+  Ok(())
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+fn finish_oden_parent_allowlist_checked_output(
+  read: &OdenParentAllowlistCheckedOutputRead<'_>,
+) -> Result<(), OdenParentAllowlistCheckFailure> {
+  require_oden_parent_allowlist_checked_output_descriptor_tree_stable(read)?;
+  require_oden_parent_allowlist_checked_output_reachable_from_root(read)?;
+  require_oden_parent_allowlist_checked_output_descriptor_tree_stable(read)
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+fn require_oden_parent_allowlist_candidate_files(
+  root: &RetainedRepositoryRoot,
+  candidate: &OdenParentAllowlistCandidateOutput,
+) -> Result<(), OdenParentAllowlistCheckFailure> {
+  require_oden_parent_allowlist_candidate_files_with_post_open_hook(
+    root,
+    candidate,
+    || {},
+  )
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+fn require_oden_parent_allowlist_candidate_files_with_post_open_hook<H>(
+  root: &RetainedRepositoryRoot,
+  candidate: &OdenParentAllowlistCandidateOutput,
+  post_open_hook: H,
+) -> Result<(), OdenParentAllowlistCheckFailure>
+where
+  H: FnOnce(),
+{
+  // Open and retain both descriptors before reading either. The expected
+  // lengths come only from the typed in-memory candidate, never file stat.
+  let mut json = open_oden_parent_allowlist_checked_output(
+    root,
+    ODEN_PARENT_GENERATED_JSON_PATH,
+    &candidate.json_file,
+  )?;
+  let mut rust = open_oden_parent_allowlist_checked_output(
+    root,
+    ODEN_PARENT_GENERATED_RUST_PATH,
+    &candidate.rust_module,
+  )?;
+  require_oden_parent_allowlist_checked_output_name_stable(&json)?;
+  require_oden_parent_allowlist_checked_output_name_stable(&rust)?;
+  root.require_stable("<check-files>")?;
+  post_open_hook();
+
+  require_oden_parent_allowlist_checked_output_bytes(&mut json)?;
+  require_oden_parent_allowlist_checked_output_bytes(&mut rust)?;
+
+  require_oden_parent_allowlist_checked_output_name_stable(&json)?;
+  require_oden_parent_allowlist_checked_output_name_stable(&rust)?;
+  finish_oden_parent_allowlist_checked_output(&json)?;
+  finish_oden_parent_allowlist_checked_output(&rust)?;
+  // Retain both original descriptors through a final cross-file pass. These
+  // sequential observations deliberately do not claim a coherent snapshot.
+  require_oden_parent_allowlist_checked_output_descriptor_tree_stable(&json)?;
+  require_oden_parent_allowlist_checked_output_descriptor_tree_stable(&rust)?;
+  root.require_stable("<check-files-terminal>")?;
+  root.require_current_and_named_paths_stable("check files terminal")?;
+  Ok(())
+}
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Validate the private compiled JCS/HJCS pair, reconstruct its two deterministic
+// source files, then hold and compare only those fixed checked-in files. This
+// synchronous route performs no graph, inventory, config, cache, network,
+// create, truncate, rename, unlink, sync, or write work and returns no
+// validated record or admission capability. It deliberately does not establish
+// freshness against current repository inputs; authenticated compile preflight
+// remains a later, separate boundary.
+#[cfg(all(
+  feature = "__oden_parent_allowlist_embedded",
+  any(target_os = "linux", target_os = "macos")
+))]
+pub(crate) fn check_oden_parent_allowlist_outputs(
+  session: OdenParentAllowlistCheckSession,
+) -> Result<(), OdenParentAllowlistCheckError> {
+  let result = (|| {
+    session
+      .root
+      .require_current_and_named_paths_stable("check start")?;
+    session.root.require_stable("<check-start>")?;
+
+    let (embedded_jcs, embedded_digest) = deno_lib::standalone::oden_parent_allowlist::embedded_oden_parent_allowlist_candidate();
+    let (json_file, rust_module) = deno_lib::standalone::oden_parent_allowlist::render_checked_oden_parent_allowlist_candidate_files(
+      embedded_jcs,
+      embedded_digest,
+    )?;
+    let candidate = OdenParentAllowlistCandidateOutput {
+      json_file,
+      rust_module,
+    };
+    require_oden_parent_allowlist_candidate_files(&session.root, &candidate)?;
+    session
+      .root
+      .require_current_and_named_paths_stable("check terminal")?;
+    session.root.require_stable("<check-terminal>")?;
+    Ok::<(), OdenParentAllowlistCheckFailure>(())
+  })();
+  result.map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -3201,6 +3795,62 @@ mod tests {
     }
   }
 
+  #[test]
+  fn check_eligibility_is_minted_only_for_exact_embedded_check() {
+    use OdenParentAllowlistRawDispatch as Dispatch;
+
+    assert!(
+      admit_oden_parent_allowlist_check_with(
+        Dispatch::Check,
+        role_facts(
+          true,
+          false,
+          true,
+          "__oden_parent_allowlist_embedded,__vendored_zlib_ng,default,upgrade",
+        ),
+      )
+      .is_ok()
+    );
+    for (dispatch, facts) in [
+      (
+        Dispatch::Generate,
+        role_facts(
+          true,
+          false,
+          true,
+          "__oden_parent_allowlist_embedded,__vendored_zlib_ng,default,upgrade",
+        ),
+      ),
+      (
+        Dispatch::Check,
+        role_facts(true, false, false, "default"),
+      ),
+      (
+        Dispatch::Check,
+        role_facts(
+          true,
+          true,
+          true,
+          "__oden_parent_allowlist_authoring,__oden_parent_allowlist_embedded",
+        ),
+      ),
+      (
+        Dispatch::Check,
+        role_facts(
+          false,
+          false,
+          true,
+          "__oden_parent_allowlist_embedded,__vendored_zlib_ng,default,upgrade",
+        ),
+      ),
+    ] {
+      assert!(matches!(
+        admit_oden_parent_allowlist_check_with(dispatch, facts),
+        Err(OdenParentAllowlistCheckFailure::IneligibleRole)
+      ));
+    }
+  }
+
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   fn test_generate_eligibility() -> OdenParentAllowlistGenerateEligibility {
     admit_oden_parent_allowlist_generate_with(
@@ -3210,6 +3860,20 @@ mod tests {
         true,
         false,
         "__oden_parent_allowlist_authoring,default",
+      ),
+    )
+    .unwrap()
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn test_check_eligibility() -> OdenParentAllowlistCheckEligibility {
+    admit_oden_parent_allowlist_check_with(
+      OdenParentAllowlistRawDispatch::Check,
+      role_facts(
+        true,
+        false,
+        true,
+        "__oden_parent_allowlist_embedded,__vendored_zlib_ng,default,upgrade",
       ),
     )
     .unwrap()
@@ -4139,6 +4803,32 @@ mod tests {
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn seed_check_candidate_outputs(
+    root: &Path,
+    candidate: &OdenParentAllowlistCandidateOutput,
+  ) {
+    create_generate_output_directories(root);
+    for (path, bytes) in [
+      (
+        ODEN_PARENT_GENERATED_JSON_PATH,
+        candidate.json_file.as_slice(),
+      ),
+      (
+        ODEN_PARENT_GENERATED_RUST_PATH,
+        candidate.rust_module.as_slice(),
+      ),
+    ] {
+      let destination = root.join(path);
+      std::fs::write(&destination, bytes).unwrap();
+      std::fs::set_permissions(
+        destination,
+        std::fs::Permissions::from_mode(0o644),
+      )
+      .unwrap();
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   fn assert_generate_temporaries_absent(root: &Path) {
     for (path, temporary_name) in [
       (
@@ -4205,6 +4895,38 @@ mod tests {
     );
     assert_generated_paths_absent(&selected);
     assert_generate_temporaries_absent(&selected);
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn check_session_is_distinct_and_refuses_named_root_substitution() {
+    let outer = tempfile::tempdir().unwrap();
+    let selected = outer.path().join("selected");
+    let substitute = outer.path().join("substitute");
+    let held_away = outer.path().join("held-away");
+    std::fs::create_dir(&selected).unwrap();
+    std::fs::create_dir(&substitute).unwrap();
+    let session = OdenParentAllowlistCheckSession::begin_for_test(
+      test_check_eligibility(),
+      &selected,
+    )
+    .unwrap();
+    assert_eq!(session.root.path, selected);
+    session
+      .root
+      .require_current_and_named_paths_stable("check test initial")
+      .unwrap();
+    session.root.require_stable("<check-test-initial>").unwrap();
+
+    std::fs::rename(&selected, &held_away).unwrap();
+    std::fs::rename(&substitute, &selected).unwrap();
+
+    assert!(
+      session
+        .root
+        .require_current_and_named_paths_stable("check test substituted")
+        .is_err()
+    );
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -4509,6 +5231,293 @@ mod tests {
       assert_eq!(std::fs::read(&victim).unwrap(), b"victim\n");
       assert_generate_temporaries_absent(root.path());
     }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn check_candidate_preserves_identity_mode_size_mtime_ctime_and_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(root.path(), "check-exact");
+    let candidate = candidate_output_for_root(root.path());
+    seed_check_candidate_outputs(root.path(), &candidate);
+    let before = [
+      ODEN_PARENT_GENERATED_JSON_PATH,
+      ODEN_PARENT_GENERATED_RUST_PATH,
+    ]
+    .map(|path| {
+      let metadata = std::fs::symlink_metadata(root.path().join(path)).unwrap();
+      (
+        path,
+        metadata.ino(),
+        metadata.nlink(),
+        metadata.len(),
+        metadata.mode(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+        std::fs::read(root.path().join(path)).unwrap(),
+      )
+    });
+    let retained_root =
+      RetainedRepositoryRoot::open_test_absolute(root.path()).unwrap();
+
+    require_oden_parent_allowlist_candidate_files(
+      &retained_root,
+      &candidate,
+    )
+    .unwrap();
+
+    for before in before {
+      let metadata =
+        std::fs::symlink_metadata(root.path().join(before.0)).unwrap();
+      assert_eq!(metadata.ino(), before.1);
+      assert_eq!(metadata.nlink(), before.2);
+      assert_eq!(metadata.len(), before.3);
+      assert_eq!(metadata.mode(), before.4);
+      assert_eq!(metadata.mtime(), before.5);
+      assert_eq!(metadata.mtime_nsec(), before.6);
+      assert_eq!(metadata.ctime(), before.7);
+      assert_eq!(metadata.ctime_nsec(), before.8);
+      assert_eq!(std::fs::read(root.path().join(before.0)).unwrap(), before.9);
+    }
+    assert_generate_temporaries_absent(root.path());
+  }
+
+  #[cfg(all(
+    feature = "__oden_parent_allowlist_embedded",
+    any(target_os = "linux", target_os = "macos")
+  ))]
+  #[test]
+  fn check_endpoint_reconciles_the_actual_compiled_candidate() {
+    let root = tempfile::tempdir().unwrap();
+    let (embedded_jcs, embedded_digest) = deno_lib::standalone::oden_parent_allowlist::embedded_oden_parent_allowlist_candidate();
+    let (json_file, rust_module) = deno_lib::standalone::oden_parent_allowlist::render_checked_oden_parent_allowlist_candidate_files(
+      embedded_jcs,
+      embedded_digest,
+    )
+    .unwrap();
+    let candidate = OdenParentAllowlistCandidateOutput {
+      json_file,
+      rust_module,
+    };
+    seed_check_candidate_outputs(root.path(), &candidate);
+    let session = OdenParentAllowlistCheckSession::begin_for_test(
+      test_check_eligibility(),
+      root.path(),
+    )
+    .unwrap();
+
+    check_oden_parent_allowlist_outputs(session).unwrap();
+    assert_generate_temporaries_absent(root.path());
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn check_candidate_refuses_missing_alias_drift_mode_links_and_specials() {
+    enum InvalidOutput {
+      Missing,
+      WrongCase,
+      Trailing,
+      ByteDrift,
+      Mode,
+      Symlink,
+      Hardlink,
+      Fifo,
+    }
+
+    for invalid in [
+      InvalidOutput::Missing,
+      InvalidOutput::WrongCase,
+      InvalidOutput::Trailing,
+      InvalidOutput::ByteDrift,
+      InvalidOutput::Mode,
+      InvalidOutput::Symlink,
+      InvalidOutput::Hardlink,
+      InvalidOutput::Fifo,
+    ] {
+      let root = tempfile::tempdir().unwrap();
+      materialize_retained_contract_tree(root.path(), "check-refusal");
+      let candidate = candidate_output_for_root(root.path());
+      seed_check_candidate_outputs(root.path(), &candidate);
+      let json = root.path().join(ODEN_PARENT_GENERATED_JSON_PATH);
+      let rust = root.path().join(ODEN_PARENT_GENERATED_RUST_PATH);
+      match invalid {
+        InvalidOutput::Missing => std::fs::remove_file(&rust).unwrap(),
+        InvalidOutput::WrongCase => {
+          let alias = json
+            .parent()
+            .unwrap()
+            .join("Filesystem-parent-standalone-allowlist.json");
+          std::fs::rename(&json, alias).unwrap();
+        }
+        InvalidOutput::Trailing => {
+          use std::io::Write as _;
+          std::fs::OpenOptions::new()
+            .append(true)
+            .open(&json)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        }
+        InvalidOutput::ByteDrift => {
+          let mut bytes = candidate.rust_module.clone();
+          bytes[0] ^= 1;
+          std::fs::write(&rust, bytes).unwrap();
+        }
+        InvalidOutput::Mode => {
+          std::fs::set_permissions(
+            &json,
+            std::fs::Permissions::from_mode(0o600),
+          )
+          .unwrap();
+        }
+        InvalidOutput::Symlink => {
+          let victim = root.path().join("check-symlink-victim");
+          std::fs::write(&victim, &candidate.rust_module).unwrap();
+          std::fs::remove_file(&rust).unwrap();
+          std::os::unix::fs::symlink(&victim, &rust).unwrap();
+        }
+        InvalidOutput::Hardlink => {
+          let victim = root.path().join("check-hardlink-victim");
+          std::fs::write(&victim, &candidate.rust_module).unwrap();
+          std::fs::remove_file(&rust).unwrap();
+          std::fs::hard_link(&victim, &rust).unwrap();
+        }
+        InvalidOutput::Fifo => {
+          std::fs::remove_file(&rust).unwrap();
+          let encoded = CString::new(rust.as_os_str().as_bytes()).unwrap();
+          // SAFETY: `encoded` is a terminated test-only pathname.
+          assert_eq!(unsafe { libc::mkfifo(encoded.as_ptr(), 0o644) }, 0);
+        }
+      }
+      let retained_root =
+        RetainedRepositoryRoot::open_test_absolute(root.path()).unwrap();
+      assert!(
+        require_oden_parent_allowlist_candidate_files(
+          &retained_root,
+          &candidate,
+        )
+        .is_err()
+      );
+      assert_generate_temporaries_absent(root.path());
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn check_candidate_refuses_an_additional_ascii_case_alias() {
+    use std::io::Write as _;
+
+    let root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(root.path(), "check-case-alias");
+    let candidate = candidate_output_for_root(root.path());
+    seed_check_candidate_outputs(root.path(), &candidate);
+    let json = root.path().join(ODEN_PARENT_GENERATED_JSON_PATH);
+    let alias = json
+      .parent()
+      .unwrap()
+      .join("Filesystem-parent-standalone-allowlist.json");
+    let mut alias_file = match std::fs::OpenOptions::new()
+      .write(true)
+      .create_new(true)
+      .open(&alias)
+    {
+      Ok(file) => file,
+      Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+        // A case-insensitive filesystem cannot materialize this adversarial
+        // state; the folded-name scanner is exercised on case-sensitive CI.
+        return;
+      }
+      Err(error) => panic!("failed to create case alias: {error}"),
+    };
+    alias_file.write_all(&candidate.json_file).unwrap();
+    drop(alias_file);
+    let retained_root =
+      RetainedRepositoryRoot::open_test_absolute(root.path()).unwrap();
+
+    assert!(matches!(
+      require_oden_parent_allowlist_candidate_files(
+        &retained_root,
+        &candidate,
+      ),
+      Err(OdenParentAllowlistCheckFailure::DirectRepository(
+        OdenParentDirectRepoSourceError::InvalidCaseFoldedComponentCount {
+          matches: 2,
+          ..
+        }
+      ))
+    ));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn check_candidate_detects_post_open_name_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(root.path(), "check-replacement");
+    let candidate = candidate_output_for_root(root.path());
+    seed_check_candidate_outputs(root.path(), &candidate);
+    let json = root.path().join(ODEN_PARENT_GENERATED_JSON_PATH);
+    let detached = json.with_extension("json.detached");
+    let retained_root =
+      RetainedRepositoryRoot::open_test_absolute(root.path()).unwrap();
+
+    assert!(
+      require_oden_parent_allowlist_candidate_files_with_post_open_hook(
+        &retained_root,
+        &candidate,
+        || {
+          std::fs::rename(&json, &detached).unwrap();
+          std::fs::write(&json, &candidate.json_file).unwrap();
+          std::fs::set_permissions(
+            &json,
+            std::fs::Permissions::from_mode(0o644),
+          )
+          .unwrap();
+        },
+      )
+      .is_err()
+    );
+    assert_eq!(std::fs::read(detached).unwrap(), candidate.json_file);
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn check_candidate_detects_post_open_ancestor_rebinding() {
+    let root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(root.path(), "check-rebinding");
+    let candidate = candidate_output_for_root(root.path());
+    seed_check_candidate_outputs(root.path(), &candidate);
+    let ancestor = root.path().join("generated/capsec/rev2");
+    let detached = root.path().join("generated/capsec/rev2.detached");
+    let retained_root =
+      RetainedRepositoryRoot::open_test_absolute(root.path()).unwrap();
+
+    assert!(
+      require_oden_parent_allowlist_candidate_files_with_post_open_hook(
+        &retained_root,
+        &candidate,
+        || {
+          std::fs::rename(&ancestor, &detached).unwrap();
+          std::fs::create_dir(&ancestor).unwrap();
+          let replacement = root.path().join(ODEN_PARENT_GENERATED_JSON_PATH);
+          std::fs::write(&replacement, &candidate.json_file).unwrap();
+          std::fs::set_permissions(
+            replacement,
+            std::fs::Permissions::from_mode(0o644),
+          )
+          .unwrap();
+        },
+      )
+      .is_err()
+    );
+    assert_eq!(
+      std::fs::read(
+        detached.join("filesystem-parent-standalone-allowlist.json")
+      )
+      .unwrap(),
+      candidate.json_file
+    );
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]

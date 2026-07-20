@@ -7,10 +7,10 @@ pub fn main() {
   // Prefer to keep this file simple and mostly empty.
   let args = std::env::args_os().collect::<Vec<_>>();
   // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
-  // This is the first Oden/Deno application branch. Exact authoring Generate
-  // alone enters the review-candidate handler; Check and every malformed
-  // reserved-family vector remain silent exit-76 refusals. No branch reaches
-  // ordinary standalone output or downstream authority.
+  // This is the first Oden/Deno application branch. Exact Generate and Check
+  // enter their separately role-gated candidate handlers; every malformed
+  // reserved-family vector remains a silent exit-76 refusal. Neither branch
+  // reaches ordinary standalone output or downstream authority.
   let oden_parent_allowlist_dispatch =
     deno_lib::standalone::oden_parent_allowlist::classify_oden_parent_allowlist_raw_argv(&args);
   match oden_parent_allowlist_dispatch {
@@ -19,11 +19,7 @@ pub fn main() {
       std::process::exit(deno::run_oden_parent_allowlist_generate());
     }
     deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch::Check => {
-      std::process::exit(
-        deno::oden_parent_allowlist_refusal_exit_code_for_raw_dispatch(
-          oden_parent_allowlist_dispatch,
-        ),
-      );
+      std::process::exit(deno::run_oden_parent_allowlist_check());
     }
     deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch::Refuse => {
       std::process::exit(

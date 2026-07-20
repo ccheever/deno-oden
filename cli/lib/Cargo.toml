@@ -15,7 +15,7 @@ path = "lib.rs"
 
 [features]
 # @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
-# This shared feature carries inert embedded bytes only after a later checkpoint.
+# This shared feature compiles only the private inert generated-byte sibling.
 __oden_parent_allowlist_embedded = []
 
 [dependencies]
