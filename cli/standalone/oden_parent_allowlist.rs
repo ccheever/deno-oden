@@ -618,20 +618,73 @@ enum OdenParentAllowlistCheckFailure {
   #[error("compiled role is not eligible for parent allowlist checking")]
   IneligibleRole,
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  #[error("retained check input failed: {0}")]
-  Retained(#[from] OdenParentRetainedContractError),
-  #[cfg(any(target_os = "linux", target_os = "macos"))]
   #[error("compiled allowlist candidate validation failed: {0}")]
   CandidateValidation(#[from] OdenParentAllowlistError),
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  #[error("allowlist generated-file observation failed: {0}")]
+  #[error("allowlist candidate-file reconciliation failed: {0}")]
+  CandidateFiles(#[from] OdenParentAllowlistCandidateFileFailure),
+}
+
+/// File-only reconciliation failures shared by raw Check and the later full-
+/// projection candidate. This type has no role, dispatch, embedded-candidate,
+/// graph, inventory, output, or admission transition.
+#[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+#[derive(Debug, thiserror::Error)]
+enum OdenParentAllowlistCandidateFileFailure {
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("retained candidate-file input failed: {0}")]
+  Retained(#[from] OdenParentRetainedContractError),
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("allowlist candidate-file observation failed: {0}")]
   DirectRepository(#[from] OdenParentDirectRepoSourceError),
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  #[error("allowlist candidate does not match the compiled private module")]
-  EmbeddedCandidateMismatch,
+  #[error("allowlist candidate-file path is outside the fixed pair: {0}")]
+  InvalidPath(&'static str),
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  #[error("allowlist checked file has an inexact mode: {0}")]
-  InexactOutputMode(&'static str),
+  #[error("allowlist candidate file has an inexact mode: {0}")]
+  InexactMode(&'static str),
+}
+
+#[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+impl From<OdenParentRetainedContractError> for OdenParentAllowlistCheckFailure {
+  fn from(value: OdenParentRetainedContractError) -> Self {
+    Self::CandidateFiles(OdenParentAllowlistCandidateFileFailure::from(value))
+  }
+}
+
+#[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub(crate) struct OdenParentAllowlistFullRegenerationError(
+  OdenParentAllowlistFullRegenerationFailure,
+);
+
+#[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+impl From<OdenParentAllowlistFullRegenerationFailure>
+  for OdenParentAllowlistFullRegenerationError
+{
+  fn from(value: OdenParentAllowlistFullRegenerationFailure) -> Self {
+    Self(value)
+  }
+}
+
+/// Failure-only result for the production-uncalled full-projection sink. It
+/// deliberately cannot carry a validated record or downstream capability.
+#[cfg(any(test, feature = "__oden_parent_allowlist_embedded"))]
+#[derive(Debug, thiserror::Error)]
+enum OdenParentAllowlistFullRegenerationFailure {
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("retained full-regeneration input failed: {0}")]
+  Retained(#[from] OdenParentRetainedContractError),
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("full-regeneration candidate projection failed: {0}")]
+  Projection(#[from] OdenParentAllowlistError),
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("regenerated allowlist differs from the compiled candidate")]
+  CompiledCandidateMismatch,
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[error("full-regeneration candidate-file reconciliation failed: {0}")]
+  CandidateFiles(#[from] OdenParentAllowlistCandidateFileFailure),
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -837,6 +890,20 @@ pub(crate) struct OdenParentAllowlistGenerateSession {
   any(test, feature = "__oden_parent_allowlist_embedded")
 ))]
 pub(crate) struct OdenParentAllowlistCheckSession {
+  root: RetainedRepositoryRoot,
+}
+
+/// One production-uncalled full-regeneration candidate owns a retained root
+/// that may be borrowed by the existing graph/direct-file observer and is
+/// finally consumed by the read-only inventory/embedded/file reconciliation
+/// sink. No production constructor exists, and no writer accepts this type.
+/// It is intentionally neither `Clone` nor `Copy`.
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+#[allow(dead_code)]
+pub(crate) struct OdenParentAllowlistFullRegenerationSession {
   root: RetainedRepositoryRoot,
 }
 
@@ -1048,7 +1115,12 @@ pub(crate) fn begin_oden_parent_allowlist_check_session(
 ) -> Result<OdenParentAllowlistCheckSession, OdenParentAllowlistCheckError> {
   RetainedRepositoryRoot::open_current()
     .map(|root| OdenParentAllowlistCheckSession { root })
-    .map_err(|error| OdenParentAllowlistCheckFailure::from(error).into())
+    .map_err(|error| {
+      OdenParentAllowlistCheckFailure::CandidateFiles(
+        OdenParentAllowlistCandidateFileFailure::from(error),
+      )
+      .into()
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1095,7 +1167,49 @@ impl OdenParentAllowlistCheckSession {
   ) -> Result<Self, OdenParentAllowlistCheckError> {
     RetainedRepositoryRoot::open_test_absolute(path)
       .map(|root| Self { root })
-      .map_err(|error| OdenParentAllowlistCheckFailure::from(error).into())
+      .map_err(|error| {
+        OdenParentAllowlistCheckFailure::CandidateFiles(
+          OdenParentAllowlistCandidateFileFailure::from(error),
+        )
+        .into()
+      })
+  }
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+impl OdenParentAllowlistFullRegenerationSession {
+  #[allow(dead_code)]
+  pub(crate) fn repository_root_path(&self) -> &Path {
+    &self.root.path
+  }
+
+  #[allow(dead_code)]
+  pub(crate) fn require_stable_reconciliation(
+    &self,
+  ) -> Result<(), OdenParentAllowlistFullRegenerationError> {
+    let result = (|| {
+      self
+        .root
+        .require_current_and_named_paths_stable("full regeneration session")?;
+      self.root.require_stable("<full-regeneration-session>")?;
+      Ok::<(), OdenParentRetainedContractError>(())
+    })();
+    result
+      .map_err(OdenParentAllowlistFullRegenerationFailure::from)
+      .map_err(Into::into)
+  }
+
+  #[cfg(test)]
+  pub(crate) fn begin_for_test(
+    path: &Path,
+  ) -> Result<Self, OdenParentAllowlistFullRegenerationError> {
+    RetainedRepositoryRoot::open_test_absolute(path)
+      .map(|root| Self { root })
+      .map_err(OdenParentAllowlistFullRegenerationFailure::from)
+      .map_err(Into::into)
   }
 }
 
@@ -1207,8 +1321,10 @@ struct OdenParentAllowlistCompilerProjectionInput<'a> {
 /// output path and confer no generator, compiler, or release authority.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct OdenParentAllowlistCandidateOutput {
+  canonical_jcs: Vec<u8>,
+  digest: String,
   json_file: Vec<u8>,
   rust_module: Vec<u8>,
 }
@@ -1918,40 +2034,30 @@ fn observe_oden_parent_direct_repo_source_candidate_with_current_root(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-impl OdenParentAllowlistGenerateSession {
-  /// Observe one direct repository source through the session's already-held
-  /// root. This creates no independent root or path authority; terminal
-  /// reconciliation remains part of the existing direct-source boundary.
-  pub(super) fn observe_direct_repository_source(
-    &self,
-    specifier: &ModuleSpecifier,
-    original_bytes: Arc<[u8]>,
-  ) -> Result<
-    OdenParentDirectRepoSourceCandidate,
-    OdenParentDirectRepoSourceObservationError,
-  > {
-    let read = read_oden_parent_direct_repo_source(
-      &self.root,
-      specifier,
-      original_bytes,
-    )?;
-    finish_oden_parent_direct_repo_source(read).map_err(Into::into)
-  }
+fn observe_direct_repository_source_with_retained_root(
+  root: &RetainedRepositoryRoot,
+  specifier: &ModuleSpecifier,
+  original_bytes: Arc<[u8]>,
+) -> Result<
+  OdenParentDirectRepoSourceCandidate,
+  OdenParentDirectRepoSourceObservationError,
+> {
+  let read =
+    read_oden_parent_direct_repo_source(root, specifier, original_bytes)?;
+  finish_oden_parent_direct_repo_source(read).map_err(Into::into)
+}
 
-  /// Read the one reviewed non-module bootstrap asset through this session's
-  /// retained root. The returned Arc is allocated only from the exact
-  /// no-follow descriptor bytes; no pathname loader or caller byte candidate
-  /// can supply this role.
-  pub(super) fn observe_bootstrap_asset_source(
-    &self,
-    specifier: &ModuleSpecifier,
-  ) -> Result<
-    OdenParentDirectRepoSourceCandidate,
-    OdenParentDirectRepoSourceObservationError,
-  > {
-    let candidate = (|| {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn observe_bootstrap_asset_source_with_retained_root(
+  root: &RetainedRepositoryRoot,
+  specifier: &ModuleSpecifier,
+) -> Result<
+  OdenParentDirectRepoSourceCandidate,
+  OdenParentDirectRepoSourceObservationError,
+> {
+  let candidate = (|| {
       let expected = ModuleSpecifier::from_file_path(
-        self.root.path.join(ODEN_PARENT_BOOTSTRAP_ASSET_PATH),
+        root.path.join(ODEN_PARENT_BOOTSTRAP_ASSET_PATH),
       )
       .map_err(|_| {
         OdenParentDirectRepoSourceError::InvalidBootstrapAsset(
@@ -1969,7 +2075,7 @@ impl OdenParentAllowlistGenerateSession {
       fn ignore_post_read(_: &str) {}
       let mut post_read_hook = ignore_post_read;
       let retained = load_one_retained_contract_file(
-        &self.root,
+        root,
         ODEN_PARENT_BOOTSTRAP_ASSET_PATH,
         &mut aggregate_bytes,
         RetainedContractFileLimits {
@@ -1980,7 +2086,7 @@ impl OdenParentAllowlistGenerateSession {
       )?;
       let original_bytes = Arc::<[u8]>::from(retained.bytes);
       let read = read_oden_parent_direct_repo_source(
-        &self.root,
+        root,
         specifier,
         original_bytes,
       )?;
@@ -1993,8 +2099,78 @@ impl OdenParentAllowlistGenerateSession {
         ));
       }
       Ok(candidate)
-    })()?;
-    Ok(candidate)
+  })()?;
+  Ok(candidate)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl OdenParentAllowlistGenerateSession {
+  /// Observe one direct repository source through the session's already-held
+  /// root. This creates no independent root or path authority; terminal
+  /// reconciliation remains part of the existing direct-source boundary.
+  pub(super) fn observe_direct_repository_source(
+    &self,
+    specifier: &ModuleSpecifier,
+    original_bytes: Arc<[u8]>,
+  ) -> Result<
+    OdenParentDirectRepoSourceCandidate,
+    OdenParentDirectRepoSourceObservationError,
+  > {
+    observe_direct_repository_source_with_retained_root(
+      &self.root,
+      specifier,
+      original_bytes,
+    )
+  }
+
+  /// Read the one reviewed non-module bootstrap asset through this session's
+  /// retained root. The returned Arc is allocated only from the exact
+  /// no-follow descriptor bytes; no pathname loader or caller byte candidate
+  /// can supply this role.
+  pub(super) fn observe_bootstrap_asset_source(
+    &self,
+    specifier: &ModuleSpecifier,
+  ) -> Result<
+    OdenParentDirectRepoSourceCandidate,
+    OdenParentDirectRepoSourceObservationError,
+  > {
+    observe_bootstrap_asset_source_with_retained_root(&self.root, specifier)
+  }
+}
+
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+#[allow(dead_code)]
+impl OdenParentAllowlistFullRegenerationSession {
+  /// Borrow the same retained root for one exact graph-owned direct-file join.
+  /// This observation grants no compositor, writer, or admission authority.
+  pub(super) fn observe_direct_repository_source(
+    &self,
+    specifier: &ModuleSpecifier,
+    original_bytes: Arc<[u8]>,
+  ) -> Result<
+    OdenParentDirectRepoSourceCandidate,
+    OdenParentDirectRepoSourceObservationError,
+  > {
+    observe_direct_repository_source_with_retained_root(
+      &self.root,
+      specifier,
+      original_bytes,
+    )
+  }
+
+  /// Borrow the same retained root for the reviewed bootstrap asset. Only the
+  /// later consuming reconciliation sink can use the owning session.
+  pub(super) fn observe_bootstrap_asset_source(
+    &self,
+    specifier: &ModuleSpecifier,
+  ) -> Result<
+    OdenParentDirectRepoSourceCandidate,
+    OdenParentDirectRepoSourceObservationError,
+  > {
+    observe_bootstrap_asset_source_with_retained_root(&self.root, specifier)
   }
 }
 
@@ -2388,7 +2564,11 @@ fn compose_oden_parent_allowlist_candidate(
     vfs_graph: compiler.vfs_graph,
     static_import_edge: compiler.static_import_edge,
   })?;
+  let canonical_jcs = allowlist.canonical_jcs()?;
+  let digest = allowlist.digest()?.as_str().to_string();
   Ok(OdenParentAllowlistCandidateOutput {
+    canonical_jcs,
+    digest,
     json_file: allowlist.render_json_file()?,
     rust_module: allowlist.render_rust_module()?,
   })
@@ -3196,12 +3376,12 @@ fn open_oden_parent_allowlist_checked_output<'a>(
   expected_bytes: &[u8],
 ) -> Result<
   OdenParentAllowlistCheckedOutputRead<'a>,
-  OdenParentAllowlistCheckFailure,
+  OdenParentAllowlistCandidateFileFailure,
 > {
   if path != ODEN_PARENT_GENERATED_JSON_PATH
     && path != ODEN_PARENT_GENERATED_RUST_PATH
   {
-    return Err(OdenParentAllowlistCheckFailure::EmbeddedCandidateMismatch);
+    return Err(OdenParentAllowlistCandidateFileFailure::InvalidPath(path));
   }
   root.require_stable(path)?;
   root.require_current_and_named_paths_stable("check output open")?;
@@ -3303,7 +3483,7 @@ fn open_oden_parent_allowlist_checked_output<'a>(
     );
   }
   if snapshot.mode & 0o7777 != 0o644 {
-    return Err(OdenParentAllowlistCheckFailure::InexactOutputMode(path));
+    return Err(OdenParentAllowlistCandidateFileFailure::InexactMode(path));
   }
   let read = OdenParentAllowlistCheckedOutputRead {
     root,
@@ -3338,7 +3518,7 @@ struct OdenParentAllowlistCheckedOutputRead<'a> {
 ))]
 fn require_oden_parent_allowlist_checked_output_name_stable(
   read: &OdenParentAllowlistCheckedOutputRead<'_>,
-) -> Result<(), OdenParentAllowlistCheckFailure> {
+) -> Result<(), OdenParentAllowlistCandidateFileFailure> {
   let directory = read
     .held_directories
     .last()
@@ -3387,7 +3567,7 @@ fn require_oden_parent_allowlist_checked_output_name_stable(
 ))]
 fn require_oden_parent_allowlist_checked_output_bytes(
   read: &mut OdenParentAllowlistCheckedOutputRead<'_>,
-) -> Result<(), OdenParentAllowlistCheckFailure> {
+) -> Result<(), OdenParentAllowlistCandidateFileFailure> {
   read.descriptor.seek(SeekFrom::Start(0)).map_err(|source| {
     OdenParentDirectRepoSourceError::ReadFile {
       path: read.path.to_string(),
@@ -3453,7 +3633,7 @@ fn require_oden_parent_allowlist_checked_output_bytes(
 ))]
 fn require_oden_parent_allowlist_checked_output_descriptor_tree_stable(
   read: &OdenParentAllowlistCheckedOutputRead<'_>,
-) -> Result<(), OdenParentAllowlistCheckFailure> {
+) -> Result<(), OdenParentAllowlistCandidateFileFailure> {
   require_oden_parent_allowlist_checked_output_name_stable(&read)?;
   if DescriptorSnapshot::capture(&read.descriptor, read.path)? != read.snapshot
   {
@@ -3491,7 +3671,7 @@ fn require_oden_parent_allowlist_checked_output_descriptor_tree_stable(
 ))]
 fn require_oden_parent_allowlist_checked_output_reachable_from_root(
   read: &OdenParentAllowlistCheckedOutputRead<'_>,
-) -> Result<(), OdenParentAllowlistCheckFailure> {
+) -> Result<(), OdenParentAllowlistCandidateFileFailure> {
   let reopened = open_oden_parent_allowlist_checked_output(
     read.root,
     read.path,
@@ -3524,7 +3704,7 @@ fn require_oden_parent_allowlist_checked_output_reachable_from_root(
 ))]
 fn finish_oden_parent_allowlist_checked_output(
   read: &OdenParentAllowlistCheckedOutputRead<'_>,
-) -> Result<(), OdenParentAllowlistCheckFailure> {
+) -> Result<(), OdenParentAllowlistCandidateFileFailure> {
   require_oden_parent_allowlist_checked_output_descriptor_tree_stable(read)?;
   require_oden_parent_allowlist_checked_output_reachable_from_root(read)?;
   require_oden_parent_allowlist_checked_output_descriptor_tree_stable(read)
@@ -3537,7 +3717,7 @@ fn finish_oden_parent_allowlist_checked_output(
 fn require_oden_parent_allowlist_candidate_files(
   root: &RetainedRepositoryRoot,
   candidate: &OdenParentAllowlistCandidateOutput,
-) -> Result<(), OdenParentAllowlistCheckFailure> {
+) -> Result<(), OdenParentAllowlistCandidateFileFailure> {
   require_oden_parent_allowlist_candidate_files_with_post_open_hook(
     root,
     candidate,
@@ -3553,7 +3733,7 @@ fn require_oden_parent_allowlist_candidate_files_with_post_open_hook<H>(
   root: &RetainedRepositoryRoot,
   candidate: &OdenParentAllowlistCandidateOutput,
   post_open_hook: H,
-) -> Result<(), OdenParentAllowlistCheckFailure>
+) -> Result<(), OdenParentAllowlistCandidateFileFailure>
 where
   H: FnOnce(),
 {
@@ -3590,6 +3770,117 @@ where
   Ok(())
 }
 
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  feature = "__oden_parent_allowlist_embedded"
+))]
+fn checked_oden_parent_allowlist_candidate_output(
+  candidate_jcs: &[u8],
+  candidate_digest: &str,
+) -> Result<OdenParentAllowlistCandidateOutput, OdenParentAllowlistError> {
+  let (json_file, rust_module) = deno_lib::standalone::oden_parent_allowlist::render_checked_oden_parent_allowlist_candidate_files(
+    candidate_jcs,
+    candidate_digest,
+  )?;
+  Ok(OdenParentAllowlistCandidateOutput {
+    canonical_jcs: candidate_jcs.to_vec(),
+    digest: candidate_digest.to_string(),
+    json_file,
+    rust_module,
+  })
+}
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Consume a distinct retained-root session only after a caller has supplied
+// the already-typed complete compiler projection. Reload all three literal
+// inventories, regenerate both renderings, validate and compare the inert
+// compiled pair, and descriptor-compare the two fixed files without invoking
+// graph construction or any writer. This production-compiled sink has no
+// production constructor or caller and returns no validated record, admission,
+// output, brand, or release capability.
+#[cfg(all(
+  any(target_os = "linux", target_os = "macos"),
+  any(test, feature = "__oden_parent_allowlist_embedded")
+))]
+fn reconcile_oden_parent_allowlist_full_regeneration_with_compiled_candidate(
+  session: OdenParentAllowlistFullRegenerationSession,
+  configuration: &OdenParentStandaloneConfiguration,
+  vfs_graph: &OdenParentVfsGraph,
+  static_import_edge: &OdenParentStaticImportEdge,
+  compiled: &OdenParentAllowlistCandidateOutput,
+) -> Result<(), OdenParentAllowlistFullRegenerationError> {
+  let result = (|| {
+    session
+      .root
+      .require_current_and_named_paths_stable("full regeneration start")?;
+    session.root.require_stable("<full-regeneration-start>")?;
+
+    let retained =
+      load_retained_contract_byte_bundle_from_root(&session.root)?;
+    let regenerated = compose_oden_parent_allowlist_candidate(
+      &retained,
+      OdenParentAllowlistCompilerProjectionInput {
+        configuration,
+        vfs_graph,
+        static_import_edge,
+      },
+    )?;
+    session.root.require_current_and_named_paths_stable(
+      "full regeneration projection terminal",
+    )?;
+    session
+      .root
+      .require_stable("<full-regeneration-projection>")?;
+
+    if regenerated != *compiled {
+      return Err(
+        OdenParentAllowlistFullRegenerationFailure::CompiledCandidateMismatch,
+      );
+    }
+
+    require_oden_parent_allowlist_candidate_files(
+      &session.root,
+      &regenerated,
+    )?;
+    session
+      .root
+      .require_current_and_named_paths_stable("full regeneration terminal")?;
+    session.root.require_stable("<full-regeneration-terminal>")?;
+    Ok::<(), OdenParentAllowlistFullRegenerationFailure>(())
+  })();
+  result.map_err(Into::into)
+}
+
+/// Production-uncalled full-projection reconciliation candidate. The caller
+/// cannot select paths or inventory membership, and success is intentionally
+/// represented only by `()`.
+#[cfg(all(
+  feature = "__oden_parent_allowlist_embedded",
+  any(target_os = "linux", target_os = "macos")
+))]
+#[allow(dead_code)]
+pub(crate) fn reconcile_oden_parent_allowlist_full_regeneration(
+  session: OdenParentAllowlistFullRegenerationSession,
+  configuration: &OdenParentStandaloneConfiguration,
+  vfs_graph: &OdenParentVfsGraph,
+  static_import_edge: &OdenParentStaticImportEdge,
+) -> Result<(), OdenParentAllowlistFullRegenerationError> {
+  let (embedded_jcs, embedded_digest) = deno_lib::standalone::oden_parent_allowlist::embedded_oden_parent_allowlist_candidate();
+  let compiled = checked_oden_parent_allowlist_candidate_output(
+    embedded_jcs,
+    embedded_digest,
+  )
+  .map_err(OdenParentAllowlistFullRegenerationFailure::from)
+  .map_err(OdenParentAllowlistFullRegenerationError::from)?;
+  reconcile_oden_parent_allowlist_full_regeneration_with_compiled_candidate(
+    session,
+    configuration,
+    vfs_graph,
+    static_import_edge,
+    &compiled,
+  )
+}
+
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
 // Validate the private compiled JCS/HJCS pair, reconstruct its two deterministic
 // source files, then hold and compare only those fixed checked-in files. This
@@ -3612,14 +3903,10 @@ pub(crate) fn check_oden_parent_allowlist_outputs(
     session.root.require_stable("<check-start>")?;
 
     let (embedded_jcs, embedded_digest) = deno_lib::standalone::oden_parent_allowlist::embedded_oden_parent_allowlist_candidate();
-    let (json_file, rust_module) = deno_lib::standalone::oden_parent_allowlist::render_checked_oden_parent_allowlist_candidate_files(
+    let candidate = checked_oden_parent_allowlist_candidate_output(
       embedded_jcs,
       embedded_digest,
     )?;
-    let candidate = OdenParentAllowlistCandidateOutput {
-      json_file,
-      rust_module,
-    };
     require_oden_parent_allowlist_candidate_files(&session.root, &candidate)?;
     session
       .root
@@ -4716,7 +5003,9 @@ mod tests {
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  fn candidate_configuration() -> OdenParentStandaloneConfiguration {
+  fn candidate_configuration_with_unstable(
+    unstable: &UnstableConfig,
+  ) -> OdenParentStandaloneConfiguration {
     let workspace_resolver = SerializedWorkspaceResolver {
       import_map: None,
       jsr_pkgs: Vec::new(),
@@ -4727,10 +5016,15 @@ mod tests {
     };
     OdenParentStandaloneConfiguration::from_effective(
       &workspace_resolver,
-      &UnstableConfig::default(),
+      unstable,
       &OtelConfig::default(),
     )
     .unwrap()
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn candidate_configuration() -> OdenParentStandaloneConfiguration {
+    candidate_configuration_with_unstable(&UnstableConfig::default())
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -4826,6 +5120,48 @@ mod tests {
       )
       .unwrap();
     }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[derive(Debug, PartialEq, Eq)]
+  struct CandidateFileSnapshot {
+    path: &'static str,
+    device: u64,
+    inode: u64,
+    links: u64,
+    mode: u32,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+    bytes: Vec<u8>,
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn snapshot_candidate_files(root: &Path) -> Vec<CandidateFileSnapshot> {
+    [
+      ODEN_PARENT_GENERATED_JSON_PATH,
+      ODEN_PARENT_GENERATED_RUST_PATH,
+    ]
+    .into_iter()
+    .map(|path| {
+      let metadata = std::fs::symlink_metadata(root.join(path)).unwrap();
+      CandidateFileSnapshot {
+        path,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        links: metadata.nlink(),
+        mode: metadata.mode(),
+        size: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+        bytes: std::fs::read(root.join(path)).unwrap(),
+      }
+    })
+    .collect()
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -4927,6 +5263,326 @@ mod tests {
         .require_current_and_named_paths_stable("check test substituted")
         .is_err()
     );
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn full_regeneration_session_is_distinct_and_refuses_named_root_substitution()
+  {
+    let outer = tempfile::tempdir().unwrap();
+    let selected = outer.path().join("selected");
+    let substitute = outer.path().join("substitute");
+    let held_away = outer.path().join("held-away");
+    std::fs::create_dir(&selected).unwrap();
+    std::fs::create_dir(&substitute).unwrap();
+    materialize_retained_contract_tree(&selected, "selected-regeneration");
+    materialize_retained_contract_tree(&substitute, "substitute-regeneration");
+    let configuration = candidate_configuration();
+    let (vfs_graph, static_import_edge) = candidate_vfs_and_static_edge();
+    let compiled = candidate_output_for_root(&selected);
+    seed_check_candidate_outputs(&selected, &compiled);
+    let session =
+      OdenParentAllowlistFullRegenerationSession::begin_for_test(&selected)
+        .unwrap();
+    session.require_stable_reconciliation().unwrap();
+
+    std::fs::rename(&selected, &held_away).unwrap();
+    std::fs::rename(&substitute, &selected).unwrap();
+    let before = snapshot_candidate_files(&held_away);
+
+    assert!(session.require_stable_reconciliation().is_err());
+    assert!(
+      reconcile_oden_parent_allowlist_full_regeneration_with_compiled_candidate(
+        session,
+        &configuration,
+        &vfs_graph,
+        &static_import_edge,
+        &compiled,
+      )
+      .is_err()
+    );
+    assert_eq!(snapshot_candidate_files(&held_away), before);
+    assert_generated_paths_absent(&selected);
+    assert_generate_temporaries_absent(&held_away);
+    assert_generate_temporaries_absent(&selected);
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn full_regeneration_reconciliation_accepts_exact_inputs_and_preserves_files()
+  {
+    let root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(root.path(), "full-regeneration-exact");
+    let configuration = candidate_configuration();
+    let (vfs_graph, static_import_edge) = candidate_vfs_and_static_edge();
+    let compiled = candidate_output_for_root(root.path());
+    seed_check_candidate_outputs(root.path(), &compiled);
+    let before = snapshot_candidate_files(root.path());
+    let session = OdenParentAllowlistFullRegenerationSession::begin_for_test(
+      root.path(),
+    )
+    .unwrap();
+
+    reconcile_oden_parent_allowlist_full_regeneration_with_compiled_candidate(
+      session,
+      &configuration,
+      &vfs_graph,
+      &static_import_edge,
+      &compiled,
+    )
+    .unwrap();
+
+    assert_eq!(snapshot_candidate_files(root.path()), before);
+    assert_generate_temporaries_absent(root.path());
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn full_regeneration_reconciliation_refuses_each_inventory_partition_drift()
+  {
+    for (partition, path, expected_membership) in [
+      (
+        "capture",
+        "schemas/capsec/rev2/filesystem-candidate-arena.schema.json",
+        [true, false, false],
+      ),
+      (
+        "source-closure",
+        "scripts/release/filesystem-reachability-analyzer.ts",
+        [false, true, false],
+      ),
+      (
+        "release",
+        ".github/workflows/release.yml",
+        [false, false, true],
+      ),
+    ] {
+      assert_eq!(
+        [
+          ODEN_PARENT_CAPTURE_CONTRACT_PATHS.contains(&path),
+          ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS.contains(&path),
+          ODEN_PARENT_RELEASE_CONTRACT_PATHS.contains(&path),
+        ],
+        expected_membership,
+      );
+      let root = tempfile::tempdir().unwrap();
+      materialize_retained_contract_tree(
+        root.path(),
+        &format!("full-regeneration-{partition}"),
+      );
+      let configuration = candidate_configuration();
+      let (vfs_graph, static_import_edge) = candidate_vfs_and_static_edge();
+      let compiled = candidate_output_for_root(root.path());
+      seed_check_candidate_outputs(root.path(), &compiled);
+      let session = OdenParentAllowlistFullRegenerationSession::begin_for_test(
+        root.path(),
+      )
+      .unwrap();
+      std::fs::write(
+        root.path().join(path),
+        format!("independent {partition} drift\n"),
+      )
+      .unwrap();
+      let before = snapshot_candidate_files(root.path());
+
+      assert!(matches!(
+        reconcile_oden_parent_allowlist_full_regeneration_with_compiled_candidate(
+          session,
+          &configuration,
+          &vfs_graph,
+          &static_import_edge,
+          &compiled,
+        ),
+        Err(OdenParentAllowlistFullRegenerationError(
+          OdenParentAllowlistFullRegenerationFailure::CompiledCandidateMismatch
+        ))
+      ));
+      assert_eq!(snapshot_candidate_files(root.path()), before);
+      assert_generate_temporaries_absent(root.path());
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn full_regeneration_reconciliation_refuses_configuration_graph_and_edge_drift()
+  {
+    let root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(
+      root.path(),
+      "full-regeneration-projection-drift",
+    );
+    let configuration = candidate_configuration();
+    let (vfs_graph, static_import_edge) = candidate_vfs_and_static_edge();
+    let compiled = candidate_output_for_root(root.path());
+    seed_check_candidate_outputs(root.path(), &compiled);
+    let before = snapshot_candidate_files(root.path());
+
+    let changed_workspace_resolver: SerializedWorkspaceResolver =
+      deno_core::serde_json::from_value(deno_core::serde_json::json!({
+        "catalogs": {
+          "release": { "example": "jsr:@scope/example@1.0.0" }
+        },
+        "import_map": null,
+        "jsr_pkgs": [],
+        "package_jsons": {},
+        "pkg_json_resolution": "Enabled",
+      }))
+      .unwrap();
+    let changed_configuration = OdenParentStandaloneConfiguration::from_effective(
+      &changed_workspace_resolver,
+      &UnstableConfig::default(),
+      &OtelConfig::default(),
+    )
+    .unwrap();
+
+    let dependency = [OdenParentVfsDependencyObservation {
+      kind: OdenParentVfsDependencyKind::StaticImport,
+      raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      resolved_key: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+      source_byte_start: 8,
+      source_byte_end: 50,
+      import_attributes: &[],
+    }];
+    let changed_emission =
+      b"import \"oden-internal:filesystem-parent-capture-v2\";\n// changed emission\n";
+    let module = [OdenParentVfsModuleObservation {
+      key: ODEN_PARENT_ENTRYPOINT_KEY,
+      media_type: OdenParentVfsMediaType::TypeScript,
+      original_bytes: CANDIDATE_ENTRYPOINT_SOURCE,
+      emitted_bytes: changed_emission,
+      source_map_bytes: None,
+      dependencies: &dependency,
+    }];
+    let changed_vfs_graph =
+      OdenParentVfsGraph::from_observations(&module, &[]).unwrap();
+
+    let changed_edge_source =
+      b"// prefix\nimport \"oden-internal:filesystem-parent-capture-v2\";\n";
+    let private_bytes = ODEN_PARENT_PRIVATE_MODULE_SPECIFIER.as_bytes();
+    let changed_start = changed_edge_source
+      .windows(private_bytes.len())
+      .position(|window| window == private_bytes)
+      .unwrap() as u64;
+    let import_attributes =
+      OdenParentImportAttributes::from_observed_pairs(&[]).unwrap();
+    let changed_edge = OdenParentStaticImportEdge::from_observation(
+      OdenParentStaticImportEdgeObservation {
+        entrypoint_source_bytes: changed_edge_source,
+        dependency_ordinal: 0,
+        occurrence_count: 1,
+        kind: OdenParentVfsDependencyKind::StaticImport,
+        raw_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        resolved_specifier: ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+        referrer_key: ODEN_PARENT_ENTRYPOINT_KEY,
+        import_attributes: &import_attributes,
+        source_byte_start: changed_start,
+        source_byte_end: changed_start + private_bytes.len() as u64,
+      },
+    )
+    .unwrap();
+
+    for (candidate_configuration, candidate_graph, candidate_edge) in [
+      (&changed_configuration, &vfs_graph, &static_import_edge),
+      (&configuration, &changed_vfs_graph, &static_import_edge),
+      (&configuration, &vfs_graph, &changed_edge),
+    ] {
+      let session =
+        OdenParentAllowlistFullRegenerationSession::begin_for_test(root.path())
+          .unwrap();
+      assert!(
+        reconcile_oden_parent_allowlist_full_regeneration_with_compiled_candidate(
+          session,
+          candidate_configuration,
+          candidate_graph,
+          candidate_edge,
+          &compiled,
+        )
+        .is_err()
+      );
+      assert_eq!(snapshot_candidate_files(root.path()), before);
+      assert_generate_temporaries_absent(root.path());
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn full_regeneration_reconciliation_refuses_compiled_and_checked_file_drift()
+  {
+    let root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(
+      root.path(),
+      "full-regeneration-compiled-drift",
+    );
+    let configuration = candidate_configuration();
+    let (vfs_graph, static_import_edge) = candidate_vfs_and_static_edge();
+    let compiled = candidate_output_for_root(root.path());
+    seed_check_candidate_outputs(root.path(), &compiled);
+
+    let mut changed_jcs = compiled.clone();
+    changed_jcs.canonical_jcs[0] ^= 1;
+    let mut changed_digest = compiled.clone();
+    changed_digest.digest.push('x');
+    let mut changed_json_rendering = compiled.clone();
+    changed_json_rendering.json_file[0] ^= 1;
+    let mut changed_rust_rendering = compiled.clone();
+    changed_rust_rendering.rust_module[0] ^= 1;
+    for changed in [
+      changed_jcs,
+      changed_digest,
+      changed_json_rendering,
+      changed_rust_rendering,
+    ] {
+      let before = snapshot_candidate_files(root.path());
+      let session =
+        OdenParentAllowlistFullRegenerationSession::begin_for_test(root.path())
+          .unwrap();
+      assert!(matches!(
+        reconcile_oden_parent_allowlist_full_regeneration_with_compiled_candidate(
+          session,
+          &configuration,
+          &vfs_graph,
+          &static_import_edge,
+          &changed,
+        ),
+        Err(OdenParentAllowlistFullRegenerationError(
+          OdenParentAllowlistFullRegenerationFailure::CompiledCandidateMismatch
+        ))
+      ));
+      assert_eq!(snapshot_candidate_files(root.path()), before);
+    }
+
+    for changed_paths in [
+      vec![ODEN_PARENT_GENERATED_JSON_PATH],
+      vec![ODEN_PARENT_GENERATED_RUST_PATH],
+      vec![
+        ODEN_PARENT_GENERATED_JSON_PATH,
+        ODEN_PARENT_GENERATED_RUST_PATH,
+      ],
+    ] {
+      seed_check_candidate_outputs(root.path(), &compiled);
+      for path in changed_paths {
+        let destination = root.path().join(path);
+        let mut bytes = std::fs::read(&destination).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(destination, bytes).unwrap();
+      }
+      let before = snapshot_candidate_files(root.path());
+      let session =
+        OdenParentAllowlistFullRegenerationSession::begin_for_test(root.path())
+          .unwrap();
+      assert!(
+        reconcile_oden_parent_allowlist_full_regeneration_with_compiled_candidate(
+          session,
+          &configuration,
+          &vfs_graph,
+          &static_import_edge,
+          &compiled,
+        )
+        .is_err()
+      );
+      assert_eq!(snapshot_candidate_files(root.path()), before);
+      assert_generate_temporaries_absent(root.path());
+    }
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -5292,15 +5948,11 @@ mod tests {
   fn check_endpoint_reconciles_the_actual_compiled_candidate() {
     let root = tempfile::tempdir().unwrap();
     let (embedded_jcs, embedded_digest) = deno_lib::standalone::oden_parent_allowlist::embedded_oden_parent_allowlist_candidate();
-    let (json_file, rust_module) = deno_lib::standalone::oden_parent_allowlist::render_checked_oden_parent_allowlist_candidate_files(
+    let candidate = checked_oden_parent_allowlist_candidate_output(
       embedded_jcs,
       embedded_digest,
     )
     .unwrap();
-    let candidate = OdenParentAllowlistCandidateOutput {
-      json_file,
-      rust_module,
-    };
     seed_check_candidate_outputs(root.path(), &candidate);
     let session = OdenParentAllowlistCheckSession::begin_for_test(
       test_check_eligibility(),
@@ -5441,7 +6093,7 @@ mod tests {
         &retained_root,
         &candidate,
       ),
-      Err(OdenParentAllowlistCheckFailure::DirectRepository(
+      Err(OdenParentAllowlistCandidateFileFailure::DirectRepository(
         OdenParentDirectRepoSourceError::InvalidCaseFoldedComponentCount {
           matches: 2,
           ..

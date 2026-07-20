@@ -3417,6 +3417,8 @@ mod oden_parent_runtime_dependency_observer_tests {
   use std::collections::HashMap;
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
+  use super::super::oden_parent_allowlist::OdenParentAllowlistFullRegenerationSession;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   use super::super::oden_parent_allowlist::observe_oden_parent_direct_repo_source_for_join_from_test_root;
   use deno_graph::BuildOptions;
   use deno_graph::GraphKind;
@@ -5752,6 +5754,42 @@ mod oden_parent_runtime_dependency_observer_tests {
     assert!(canonical.contains("jsr:@std/jsonc@1.0.2/parse.ts"));
     assert!(!canonical.contains("https://jsr.io"));
     assert!(!canonical.contains("\"files\":[]"));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[tokio::test]
+  async fn full_regeneration_reconciliation_observes_real_graph_through_one_retained_root()
+  {
+    let (root, graph, entrypoint) = whole_graph_fixture().await;
+    let session =
+      OdenParentAllowlistFullRegenerationSession::begin_for_test(root.path())
+        .unwrap();
+    assert_eq!(session.repository_root_path(), root.path());
+    session.require_stable_reconciliation().unwrap();
+
+    let observe = || {
+      observe_oden_parent_whole_graph_with(
+        &graph,
+        &entrypoint,
+        |specifier, bytes| {
+          session.observe_direct_repository_source(specifier, bytes)
+        },
+        |specifier| session.observe_bootstrap_asset_source(specifier),
+        |_specifier, _media_type, bytes| {
+          let mut emitted = bytes.to_vec();
+          emitted.extend_from_slice(b"\n// exact-test-emission\n");
+          Ok(OdenParentObservedEmittedModule {
+            emitted_bytes: emitted,
+            source_map_bytes: Some(b"{\"version\":3}".to_vec()),
+          })
+        },
+      )
+    };
+    let (first_graph, first_edge) = observe().unwrap();
+    let (second_graph, second_edge) = observe().unwrap();
+    assert_eq!(first_graph, second_graph);
+    assert_eq!(first_edge, second_edge);
+    session.require_stable_reconciliation().unwrap();
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
