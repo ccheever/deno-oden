@@ -1,0 +1,5 @@
+// Copyright 2018-2026 the Deno authors. MIT license.
+// This file is generated deterministically. Do not edit.
+
+pub const ODEN_PARENT_ALLOWLIST_JCS: &[u8] = br#"{"captureContractDigest":"sha256-bTzDXeR5eYVmtWDq4SuLmCb8BrFmjwR_MrS967OsTBQ","engineProvenanceSchema":2,"entrypointKey":"repo:src/release.ts","entrypointSourceDigest":"sha256-2ktwzbOtQigbPxqXKjU3rminYozLuYrAPtvKLsiTKCU","parentPrimitiveId":"oden.filesystem-parent-capture/2","privateModuleSpecifier":"oden-internal:filesystem-parent-capture-v2","profile":"oden/capsec/2","releaseContractDigest":"sha256-nprghEKrH9ZIOnpGw4VgrAPPGu5q1EahtZOsru--wRk","schema":"oden/capsec-filesystem-parent-standalone-allowlist/2","sourceClosureContractDigest":"sha256-z0rQnsHh0_nlG_N02QKlWSaiAOjd96_psox40wDq9Tc","standaloneConfigurationDigest":"sha256-NY-pnxIsao4GI-JWhA40DDx9jKF_2QeE_KzeX0QfdXw","staticImportEdgeDigest":"sha256-QjCXbnZVWa11HTOJYfKV-tIL5iuvi2tuqLDEpi8MTG0","syntheticModuleSourceDigest":"sha256-0aagkSSUwopjaS2bzw7TI_xLwvJR-49_hi6EInvzXWc","vfsGraphDigest":"sha256-p1MgEOzEf0aIKTvj6ARv3YnxiX8y8acQseG7jGWS1Y8"}"#;
+pub const ODEN_PARENT_ALLOWLIST_DIGEST: &str = "sha256-Ij1RrsiN0MqaSXrY_7Wb7f2YhCX0H8iVwRKB7ThC25E";

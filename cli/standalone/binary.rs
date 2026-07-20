@@ -53,10 +53,18 @@ use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ENTRYPOINT_KEY;
 use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_PRIVATE_MODULE_SPECIFIER;
 use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistError;
 use deno_lib::standalone::oden_parent_allowlist::OdenParentImportAttributes;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentObservedImportAttribute as OdenParentVfsObservedImportAttribute;
 use deno_lib::standalone::oden_parent_allowlist::OdenParentObservedImportAttribute as OdenParentProjectedImportAttribute;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentRepoVfsKey;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentStandaloneConfiguration;
 use deno_lib::standalone::oden_parent_allowlist::OdenParentStaticImportEdge;
 use deno_lib::standalone::oden_parent_allowlist::OdenParentStaticImportEdgeObservation;
 use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsDependencyKind;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsDependencyObservation;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsFileObservation;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsGraph;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsMediaType;
+use deno_lib::standalone::oden_parent_allowlist::OdenParentVfsModuleObservation;
 use deno_lib::standalone::virtual_fs::BuiltVfs;
 use deno_lib::standalone::virtual_fs::DENO_COMPILE_GLOBAL_NODE_MODULES_DIR_NAME;
 use deno_lib::standalone::virtual_fs::VfsBuilder;
@@ -78,10 +86,17 @@ use deno_resolver::file_fetcher::FetchLocalOptions;
 use deno_resolver::file_fetcher::FetchOptions;
 use deno_resolver::file_fetcher::FetchPermissionsOptionRef;
 use deno_resolver::workspace::WorkspaceResolver;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use deno_runtime::deno_telemetry::OtelConfig;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use deno_runtime::deno_telemetry::OtelConsoleConfig;
+use deno_semver::jsr::JsrPackageReqReference;
 use deno_semver::npm::NpmPackageReqReference;
 use indexmap::IndexMap;
 use node_resolver::analyze::ResolvedCjsAnalysis;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::oden_parent_allowlist::OdenParentAllowlistGenerateSession;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::oden_parent_allowlist::OdenParentDirectRepoSourceCandidate;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -92,6 +107,7 @@ use super::virtual_fs::output_vfs;
 use crate::args::CliOptions;
 use crate::args::CompileFlags;
 use crate::args::CompileFlagsExt;
+use crate::args::OdenParentAllowlistMode;
 use crate::args::get_default_v8_flags;
 use crate::cache::DenoDir;
 use crate::file_fetcher::CliFileFetcher;
@@ -359,6 +375,7 @@ enum OdenParentOrdinaryEsmDependencyTargetKind {
   Json,
   Wasm,
   NodeBuiltin,
+  AssetFile,
 }
 
 #[allow(dead_code)]
@@ -436,6 +453,79 @@ enum OdenParentReleaseEntrypointDirectRepoCandidateError {
 struct OdenParentReleaseEntrypointDirectRepoCandidate {
   graph: OdenParentReleaseEntrypointCandidate,
   direct_repository: OdenParentDirectRepoSourceCandidate,
+}
+
+/// Owned compiler observations for the authoring-only parent-allowlist
+/// Generate path. These values are still candidate inputs: producing them does
+/// not write an output, advertise a target, activate the private module, or
+/// confer compiler or release authority.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Debug)]
+pub(crate) struct OdenParentAuthoringGenerateObservation {
+  configuration: OdenParentStandaloneConfiguration,
+  vfs_graph: OdenParentVfsGraph,
+  static_import_edge: OdenParentStaticImportEdge,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl OdenParentAuthoringGenerateObservation {
+  pub(crate) fn configuration(&self) -> &OdenParentStandaloneConfiguration {
+    &self.configuration
+  }
+
+  pub(crate) fn vfs_graph(&self) -> &OdenParentVfsGraph {
+    &self.vfs_graph
+  }
+
+  pub(crate) fn static_import_edge(&self) -> &OdenParentStaticImportEdge {
+    &self.static_import_edge
+  }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug)]
+struct OdenParentObservedEmittedModule {
+  emitted_bytes: Vec<u8>,
+  source_map_bytes: Option<Vec<u8>>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug)]
+struct OdenParentOwnedVfsDependency {
+  kind: OdenParentVfsDependencyKind,
+  raw_specifier: String,
+  resolved_key: String,
+  source_byte_start: u64,
+  source_byte_end: u64,
+  import_attributes: Vec<OdenParentObservedImportAttribute>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug)]
+struct OdenParentOwnedVfsModule {
+  graph_specifier: ModuleSpecifier,
+  key: String,
+  media_type: OdenParentVfsMediaType,
+  original_bytes: Arc<[u8]>,
+  emitted_bytes: Vec<u8>,
+  source_map_bytes: Option<Vec<u8>>,
+  dependencies: Vec<OdenParentOwnedVfsDependency>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug)]
+struct OdenParentOwnedVfsFile {
+  graph_specifier: ModuleSpecifier,
+  key: String,
+  original_bytes: Arc<[u8]>,
+  executable: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug)]
+struct OdenParentAuthenticatedJsrKey {
+  key: String,
+  package_nv: String,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -840,6 +930,224 @@ impl Visit for OdenParentRuntimeDependencyAstCollector<'_> {
   }
 }
 
+#[derive(Debug)]
+struct OdenParentAstOmittedTypeDependency {
+  raw_specifier: String,
+  full_start: usize,
+  full_end: usize,
+  expected_graph_kind: ImportKind,
+}
+
+/// Whole-graph-only parser pass. Unlike the reusable runtime observer above,
+/// this pass recognizes declaration-level TypeScript type dependencies so it
+/// can prove that CodeOnly omitted exactly those occurrences. It also counts
+/// the one reviewed computed application handoff without projecting it as a
+/// graph edge or VFS row.
+struct OdenParentWholeGraphDependencyAstCollector<'a> {
+  runtime: OdenParentRuntimeDependencyAstCollector<'a>,
+  omitted_types: Vec<OdenParentAstOmittedTypeDependency>,
+  computed_loader_ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl OdenParentWholeGraphDependencyAstCollector<'_> {
+  fn error(&mut self, reason: &'static str) {
+    if self.runtime.error.is_none() {
+      self.runtime.error = Some(
+        OdenParentRuntimeDependencyObservationError::UnsupportedAst(reason),
+      );
+    }
+  }
+
+  fn record_omitted_type(&mut self, source: &ast::Str, has_attributes: bool) {
+    if self.runtime.error.is_some() {
+      return;
+    }
+    if has_attributes {
+      self.error("type-only dependency with import attributes");
+      return;
+    }
+    match self.runtime.exact_string_literal(source) {
+      Ok(source) => {
+        self.omitted_types.push(OdenParentAstOmittedTypeDependency {
+          raw_specifier: source.decoded,
+          full_start: source.full_start,
+          full_end: source.full_end,
+          expected_graph_kind: ImportKind::TsType,
+        });
+      }
+      Err(error) => self.runtime.error = Some(error),
+    }
+  }
+
+  fn record_literal_dynamic_import(&mut self, node: &ast::CallExpr) {
+    let Some(specifier) = node.args.first() else {
+      self.error("dynamic import has no specifier");
+      return;
+    };
+    if specifier.spread.is_some() {
+      self.error("dynamic-import specifier uses spread syntax");
+      return;
+    }
+    let ast::Expr::Lit(ast::Lit::Str(specifier)) = &*specifier.expr else {
+      self.record_computed_loader(node);
+      return;
+    };
+    let result = (|| {
+      let specifier = self.runtime.exact_string_literal(specifier)?;
+      let (import_attributes_present, import_attributes) =
+        self.runtime.dynamic_import_attributes(&node.args)?;
+      Ok(OdenParentAstRuntimeDependency {
+        kind: OdenParentVfsDependencyKind::DynamicImport,
+        raw_specifier: specifier.decoded,
+        full_start: specifier.full_start,
+        full_end: specifier.full_end,
+        source_byte_start: specifier.payload_start,
+        source_byte_end: specifier.payload_end,
+        import_attributes_present,
+        import_attributes,
+      })
+    })();
+    match result {
+      Ok(observation) => self.runtime.observations.push(observation),
+      Err(error) => self.runtime.error = Some(error),
+    }
+  }
+
+  fn record_computed_loader(&mut self, node: &ast::CallExpr) {
+    let [argument] = node.args.as_slice() else {
+      self.error("computed dynamic import has options or the wrong arity");
+      return;
+    };
+    let ast::Expr::Ident(identifier) = &*argument.expr else {
+      self.error("unreviewed computed or template dynamic-import specifier");
+      return;
+    };
+    let argument_range =
+      identifier.range().as_byte_range(self.runtime.source_start);
+    let call_range = node.range().as_byte_range(self.runtime.source_start);
+    if argument.spread.is_some()
+      || identifier.sym != "entry"
+      || self.runtime.original_bytes.get(argument_range) != Some(b"entry")
+      || self.runtime.original_bytes.get(call_range.clone())
+        != Some(b"import(entry)")
+    {
+      self.error(
+        "computed dynamic import is not the exact reviewed application handoff",
+      );
+      return;
+    }
+    self.computed_loader_ranges.push(call_range);
+  }
+}
+
+impl Visit for OdenParentWholeGraphDependencyAstCollector<'_> {
+  fn visit_import_decl(&mut self, node: &ast::ImportDecl) {
+    if node.phase != ast::ImportPhase::Evaluation {
+      self.error("source/defer import phase");
+      return;
+    }
+    if node.type_only {
+      self.record_omitted_type(&node.src, node.with.is_some());
+    } else {
+      self.runtime.record_static(
+        OdenParentVfsDependencyKind::StaticImport,
+        &node.src,
+        node.with.as_deref(),
+      );
+    }
+  }
+
+  fn visit_export_all(&mut self, node: &ast::ExportAll) {
+    if node.type_only {
+      self.record_omitted_type(&node.src, node.with.is_some());
+    } else {
+      self.runtime.record_static(
+        OdenParentVfsDependencyKind::StaticExport,
+        &node.src,
+        node.with.as_deref(),
+      );
+    }
+  }
+
+  fn visit_named_export(&mut self, node: &ast::NamedExport) {
+    let Some(source) = &node.src else {
+      return;
+    };
+    if node.type_only {
+      self.record_omitted_type(source, node.with.is_some());
+    } else {
+      // `export { type T } from ...` is deliberately a runtime occurrence in
+      // deno_graph: unlike `export type { T }`, the declaration can preserve a
+      // module evaluation edge. The exact source range keeps it distinct from
+      // a same-specifier declaration-level type export.
+      self.runtime.record_static(
+        OdenParentVfsDependencyKind::StaticExport,
+        source,
+        node.with.as_deref(),
+      );
+    }
+  }
+
+  fn visit_ts_import_type(&mut self, node: &ast::TsImportType) {
+    self.record_omitted_type(&node.arg, node.attributes.is_some());
+    node.visit_children_with(self);
+  }
+
+  fn visit_ts_import_equals_decl(&mut self, _node: &ast::TsImportEqualsDecl) {
+    self.error("TypeScript import-equals/CommonJS dependency");
+  }
+
+  fn visit_ts_export_assignment(&mut self, _node: &ast::TsExportAssignment) {
+    self.error("TypeScript export-equals/CommonJS assignment");
+  }
+
+  fn visit_ts_module_decl(&mut self, node: &ast::TsModuleDecl) {
+    if node.id.as_str().is_some() {
+      self.error("TypeScript external module augmentation");
+      return;
+    }
+    node.visit_children_with(self);
+  }
+
+  fn visit_call_expr(&mut self, node: &ast::CallExpr) {
+    node.visit_children_with(self);
+    if self.runtime.error.is_some() {
+      return;
+    }
+    match &node.callee {
+      ast::Callee::Import(import) => {
+        if import.phase != ast::ImportPhase::Evaluation {
+          self.error("source/defer dynamic-import phase");
+          return;
+        }
+        self.record_literal_dynamic_import(node);
+      }
+      ast::Callee::Expr(callee) if matches!(&**callee, ast::Expr::Ident(identifier) if identifier.sym == "require") =>
+      {
+        self.error("require/CommonJS call");
+      }
+      _ => {}
+    }
+  }
+
+  fn visit_new_expr(&mut self, node: &ast::NewExpr) {
+    node.visit_children_with(self);
+    if matches!(&*node.callee, ast::Expr::Ident(identifier) if matches!(identifier.sym.as_ref(), "Worker" | "SharedWorker"))
+    {
+      self.error("unreviewed Worker constructor");
+    }
+  }
+
+  fn visit_member_expr(&mut self, node: &ast::MemberExpr) {
+    node.visit_children_with(self);
+    if matches!(&*node.obj, ast::Expr::Ident(identifier) if identifier.sym == "module")
+      && node.prop.is_ident_with("exports")
+    {
+      self.error("module.exports/CommonJS access");
+    }
+  }
+}
+
 fn oden_parent_position_byte_offset(
   source: &str,
   position: deno_graph::Position,
@@ -918,68 +1226,15 @@ struct OdenParentGraphRuntimeDependencyOccurrence<'a> {
   used: bool,
 }
 
-// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
-// Preserve exact parser occurrences before deno_graph's attribute-map loss.
-#[allow(dead_code)]
-fn observe_oden_parent_runtime_dependencies(
+fn reconcile_oden_parent_runtime_dependency_observations(
   specifier: &ModuleSpecifier,
-  media_type: MediaType,
-  original_bytes: &[u8],
+  original_source: &str,
+  ast_observations: Vec<OdenParentAstRuntimeDependency>,
   graph_dependencies: &IndexMap<String, Dependency>,
 ) -> Result<
   Vec<OdenParentObservedRuntimeDependency>,
   OdenParentRuntimeDependencyObservationError,
 > {
-  let original_source = std::str::from_utf8(original_bytes).map_err(|_| {
-    OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
-      "source is not UTF-8",
-    )
-  })?;
-  if original_bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
-    return Err(
-      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
-        "UTF-8 BOM is not an admitted original-byte preimage",
-      ),
-    );
-  }
-  if !matches!(media_type, MediaType::JavaScript | MediaType::TypeScript) {
-    return Err(
-      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
-        "media type is not JavaScript or TypeScript",
-      ),
-    );
-  }
-
-  let parsed = deno_ast::parse_module(deno_ast::ParseParams {
-    specifier: specifier.clone(),
-    text: original_source.to_string().into(),
-    media_type,
-    capture_tokens: false,
-    maybe_syntax: None,
-    scope_analysis: false,
-  })
-  .map_err(|error| {
-    OdenParentRuntimeDependencyObservationError::Parse(error.to_string())
-  })?;
-  if parsed.text().as_bytes() != original_bytes {
-    return Err(
-      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
-        "parser text differs from supplied original bytes",
-      ),
-    );
-  }
-
-  let mut collector = OdenParentRuntimeDependencyAstCollector {
-    original_bytes,
-    source_start: parsed.text_info_lazy().range().start,
-    observations: Vec::new(),
-    error: None,
-  };
-  parsed.program().visit_with(&mut collector);
-  if let Some(error) = collector.error {
-    return Err(error);
-  }
-
   let mut graph_occurrences = Vec::new();
   for (dependency_key, dependency) in graph_dependencies {
     if !matches!(dependency.maybe_type, Resolution::None)
@@ -1119,8 +1374,8 @@ fn observe_oden_parent_runtime_dependencies(
     }
   }
 
-  let mut observations = Vec::with_capacity(collector.observations.len());
-  for ast_observation in collector.observations {
+  let mut observations = Vec::with_capacity(ast_observations.len());
+  for ast_observation in ast_observations {
     let matching = graph_occurrences
       .iter()
       .enumerate()
@@ -1176,6 +1431,343 @@ fn observe_oden_parent_runtime_dependencies(
   Ok(observations)
 }
 
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
+// Preserve exact parser occurrences before deno_graph's attribute-map loss.
+#[allow(dead_code)]
+fn observe_oden_parent_runtime_dependencies(
+  specifier: &ModuleSpecifier,
+  media_type: MediaType,
+  original_bytes: &[u8],
+  graph_dependencies: &IndexMap<String, Dependency>,
+) -> Result<
+  Vec<OdenParentObservedRuntimeDependency>,
+  OdenParentRuntimeDependencyObservationError,
+> {
+  let original_source = std::str::from_utf8(original_bytes).map_err(|_| {
+    OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+      "source is not UTF-8",
+    )
+  })?;
+  if original_bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "UTF-8 BOM is not an admitted original-byte preimage",
+      ),
+    );
+  }
+  if !matches!(media_type, MediaType::JavaScript | MediaType::TypeScript) {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "media type is not JavaScript or TypeScript",
+      ),
+    );
+  }
+
+  let parsed = deno_ast::parse_module(deno_ast::ParseParams {
+    specifier: specifier.clone(),
+    text: original_source.to_string().into(),
+    media_type,
+    capture_tokens: false,
+    maybe_syntax: None,
+    scope_analysis: false,
+  })
+  .map_err(|error| {
+    OdenParentRuntimeDependencyObservationError::Parse(error.to_string())
+  })?;
+  if parsed.text().as_bytes() != original_bytes {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "parser text differs from supplied original bytes",
+      ),
+    );
+  }
+
+  let mut collector = OdenParentRuntimeDependencyAstCollector {
+    original_bytes,
+    source_start: parsed.text_info_lazy().range().start,
+    observations: Vec::new(),
+    error: None,
+  };
+  parsed.program().visit_with(&mut collector);
+  if let Some(error) = collector.error {
+    return Err(error);
+  }
+
+  reconcile_oden_parent_runtime_dependency_observations(
+    specifier,
+    original_source,
+    collector.observations,
+    graph_dependencies,
+  )
+}
+
+fn oden_parent_parsed_source_has_comment_dependency(
+  parsed_source: &deno_ast::ParsedSource,
+) -> bool {
+  let module_info =
+    deno_graph::ast::ParserModuleAnalyzer::module_info(parsed_source);
+  let dependency_has_types_specifier =
+    module_info.dependencies.iter().any(|dependency| {
+      dependency
+        .as_static()
+        .and_then(|dependency| dependency.types_specifier.as_ref())
+        .is_some()
+        || dependency
+          .as_dynamic()
+          .and_then(|dependency| dependency.types_specifier.as_ref())
+          .is_some()
+    });
+  dependency_has_types_specifier
+    || !module_info.ts_references.is_empty()
+    || module_info.self_types_specifier.is_some()
+    || module_info.jsx_import_source.is_some()
+    || module_info.jsx_import_source_types.is_some()
+    || !module_info.jsdoc_imports.is_empty()
+}
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
+// Account for CodeOnly's deliberate type-edge omission and the one reviewed
+// computed application loader before projecting runtime graph rows.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn observe_oden_parent_whole_graph_dependencies(
+  specifier: &ModuleSpecifier,
+  media_type: MediaType,
+  original_bytes: &[u8],
+  graph_dependencies: &IndexMap<String, Dependency>,
+  reviewed_computed_loader: bool,
+) -> Result<
+  (Vec<OdenParentObservedRuntimeDependency>, usize),
+  OdenParentRuntimeDependencyObservationError,
+> {
+  let original_source = std::str::from_utf8(original_bytes).map_err(|_| {
+    OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+      "source is not UTF-8",
+    )
+  })?;
+  if original_bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "UTF-8 BOM is not an admitted original-byte preimage",
+      ),
+    );
+  }
+  if !matches!(media_type, MediaType::JavaScript | MediaType::TypeScript) {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "media type is not JavaScript or TypeScript",
+      ),
+    );
+  }
+
+  let parsed = deno_ast::parse_module(deno_ast::ParseParams {
+    specifier: specifier.clone(),
+    text: original_source.to_string().into(),
+    media_type,
+    capture_tokens: false,
+    maybe_syntax: None,
+    scope_analysis: false,
+  })
+  .map_err(|error| {
+    OdenParentRuntimeDependencyObservationError::Parse(error.to_string())
+  })?;
+  if parsed.text().as_bytes() != original_bytes {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "parser text differs from supplied original bytes",
+      ),
+    );
+  }
+  if oden_parent_parsed_source_has_comment_dependency(&parsed) {
+    return Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+      "deno_graph analyzer reported a comment-directed dependency",
+    ));
+  }
+
+  let mut collector = OdenParentWholeGraphDependencyAstCollector {
+    runtime: OdenParentRuntimeDependencyAstCollector {
+      original_bytes,
+      source_start: parsed.text_info_lazy().range().start,
+      observations: Vec::new(),
+      error: None,
+    },
+    omitted_types: Vec::new(),
+    computed_loader_ranges: Vec::new(),
+  };
+  parsed.program().visit_with(&mut collector);
+  if let Some(error) = collector.runtime.error {
+    return Err(error);
+  }
+
+  let expected_computed_count = usize::from(reviewed_computed_loader);
+  if collector.computed_loader_ranges.len() != expected_computed_count {
+    return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+      format!(
+        "reviewed computed-loader count is {}, expected {expected_computed_count}",
+        collector.computed_loader_ranges.len()
+      ),
+    ));
+  }
+  let mut omitted_ranges = HashSet::new();
+  for omitted in &collector.omitted_types {
+    if omitted.expected_graph_kind != ImportKind::TsType
+      || !omitted_ranges.insert((
+        omitted.raw_specifier.as_str(),
+        omitted.full_start,
+        omitted.full_end,
+      ))
+    {
+      return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+        "type-only AST occurrence classification is not unique".to_string(),
+      ));
+    }
+    if let Some(dependency) = graph_dependencies.get(&omitted.raw_specifier) {
+      if !matches!(dependency.maybe_type, Resolution::None)
+        || dependency.maybe_deno_types_specifier.is_some()
+      {
+        return Err(
+          OdenParentRuntimeDependencyObservationError::UnsupportedGraph(
+            format!(
+              "CodeOnly retained a type resolution for {:?}",
+              omitted.raw_specifier
+            ),
+          ),
+        );
+      }
+      for import in &dependency.imports {
+        let Some(range) = oden_parent_position_range_bytes(
+          original_source,
+          &import.specifier_range.range,
+        ) else {
+          return Err(
+            OdenParentRuntimeDependencyObservationError::GraphMismatch(
+              format!(
+                "type-omission comparison range for {:?}",
+                omitted.raw_specifier
+              ),
+            ),
+          );
+        };
+        if range == (omitted.full_start..omitted.full_end) {
+          return Err(
+            OdenParentRuntimeDependencyObservationError::GraphMismatch(
+              format!(
+                "CodeOnly did not omit the exact TsType occurrence for {:?}",
+                omitted.raw_specifier
+              ),
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  let runtime_dependencies =
+    reconcile_oden_parent_runtime_dependency_observations(
+      specifier,
+      original_source,
+      collector.runtime.observations,
+      graph_dependencies,
+    )?;
+  Ok((runtime_dependencies, expected_computed_count))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn observe_oden_parent_bootstrap_asset_source(
+  specifier: &ModuleSpecifier,
+  original_bytes: &[u8],
+) -> Result<usize, OdenParentRuntimeDependencyObservationError> {
+  let original_source = std::str::from_utf8(original_bytes).map_err(|_| {
+    OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+      "bootstrap asset source is not UTF-8",
+    )
+  })?;
+  if original_bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "bootstrap asset source has a UTF-8 BOM",
+      ),
+    );
+  }
+  let parsed = deno_ast::parse_module(deno_ast::ParseParams {
+    specifier: specifier.clone(),
+    text: original_source.to_string().into(),
+    media_type: MediaType::TypeScript,
+    capture_tokens: false,
+    maybe_syntax: None,
+    scope_analysis: false,
+  })
+  .map_err(|error| {
+    OdenParentRuntimeDependencyObservationError::Parse(error.to_string())
+  })?;
+  if parsed.text().as_bytes() != original_bytes {
+    return Err(
+      OdenParentRuntimeDependencyObservationError::InvalidOriginalBytes(
+        "bootstrap asset parser text differs from retained bytes",
+      ),
+    );
+  }
+  if oden_parent_parsed_source_has_comment_dependency(&parsed) {
+    return Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+      "bootstrap asset has an analyzer-reported comment dependency",
+    ));
+  }
+
+  let mut collector = OdenParentWholeGraphDependencyAstCollector {
+    runtime: OdenParentRuntimeDependencyAstCollector {
+      original_bytes,
+      source_start: parsed.text_info_lazy().range().start,
+      observations: Vec::new(),
+      error: None,
+    },
+    omitted_types: Vec::new(),
+    computed_loader_ranges: Vec::new(),
+  };
+  parsed.program().visit_with(&mut collector);
+  if let Some(error) = collector.runtime.error {
+    return Err(error);
+  }
+  let [type_dependency] = collector.omitted_types.as_slice() else {
+    return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+      "bootstrap asset does not have exactly one reviewed type dependency"
+        .to_string(),
+    ));
+  };
+  if type_dependency.expected_graph_kind != ImportKind::TsType
+    || type_dependency.raw_specifier != "./policy.ts"
+  {
+    return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+      "bootstrap asset type dependency is not the reviewed policy import"
+        .to_string(),
+    ));
+  }
+  let expected_runtime = ["./enforce.ts", "./attribution.ts"];
+  if collector.runtime.observations.len() != expected_runtime.len()
+    || collector
+      .runtime
+      .observations
+      .iter()
+      .zip(expected_runtime)
+      .any(|(observation, expected)| {
+        observation.kind != OdenParentVfsDependencyKind::StaticImport
+          || observation.raw_specifier != expected
+          || observation.import_attributes_present
+          || !observation.import_attributes.is_empty()
+      })
+  {
+    return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+      "bootstrap asset runtime imports differ from the reviewed materialized subgraph"
+        .to_string(),
+    ));
+  }
+  if collector.computed_loader_ranges.len() != 1 {
+    return Err(OdenParentRuntimeDependencyObservationError::GraphMismatch(
+      "bootstrap asset does not have exactly one reviewed computed loader"
+        .to_string(),
+    ));
+  }
+  Ok(1)
+}
+
 fn project_oden_parent_graph_redirect_chain(
   graph: &ModuleGraph,
   start: &ModuleSpecifier,
@@ -1211,42 +1803,104 @@ fn project_oden_parent_graph_redirect_chain(
   Ok((redirect_chain, current))
 }
 
+fn project_oden_parent_authenticated_jsr_key(
+  graph: &ModuleGraph,
+  specifier: &ModuleSpecifier,
+) -> Option<OdenParentAuthenticatedJsrKey> {
+  if specifier.scheme() != "https"
+    || specifier.host_str() != Some("jsr.io")
+    || !specifier.username().is_empty()
+    || specifier.password().is_some()
+    || specifier.port().is_some()
+    || specifier.query().is_some()
+    || specifier.fragment().is_some()
+    || specifier.as_str().contains('%')
+  {
+    return None;
+  }
+
+  let mut matched = None;
+  for (package_nv, _) in graph.packages.packages_with_deps() {
+    if !graph
+      .packages
+      .mappings()
+      .values()
+      .any(|mapped| mapped == package_nv)
+    {
+      continue;
+    }
+    let prefix =
+      format!("https://jsr.io/{}/{}/", package_nv.name, package_nv.version);
+    let Some(path) = specifier.as_str().strip_prefix(&prefix) else {
+      continue;
+    };
+    if path.is_empty() {
+      continue;
+    }
+    let key = format!("jsr:{package_nv}/{path}");
+    if matched.is_some() {
+      return None;
+    }
+    matched = Some(OdenParentAuthenticatedJsrKey {
+      key,
+      package_nv: package_nv.to_string(),
+    });
+  }
+  matched
+}
+
 fn oden_parent_is_candidate_jsr_redirect_chain(
+  graph: &ModuleGraph,
   redirect_chain: &[OdenParentGraphRedirectHop],
 ) -> bool {
   let [hop] = redirect_chain else {
     return false;
   };
-  hop.requested_specifier.scheme() == "jsr"
+  if hop.requested_specifier.scheme() != "jsr"
+    || hop.requested_specifier.query().is_some()
+    || hop.requested_specifier.fragment().is_some()
+    || hop.redirected_specifier.scheme() != "https"
+    || hop.redirected_specifier.host_str() != Some("jsr.io")
+    || !hop.redirected_specifier.username().is_empty()
+    || hop.redirected_specifier.password().is_some()
+    || hop.redirected_specifier.port().is_some()
+    || hop.redirected_specifier.query().is_some()
+    || hop.redirected_specifier.fragment().is_some()
+  {
+    return false;
+  }
+  let Ok(request) =
+    JsrPackageReqReference::from_str(hop.requested_specifier.as_str())
+  else {
+    return false;
+  };
+  let Some(authenticated) =
+    project_oden_parent_authenticated_jsr_key(graph, &hop.redirected_specifier)
+  else {
+    return false;
+  };
+  graph
+    .packages
+    .mappings()
+    .get(request.req())
+    .is_some_and(|mapped| mapped.to_string() == authenticated.package_nv)
+    && hop.requested_specifier.scheme() == "jsr"
     && hop.requested_specifier.query().is_none()
     && hop.requested_specifier.fragment().is_none()
-    && hop.redirected_specifier.scheme() == "https"
-    && hop.redirected_specifier.host_str() == Some("jsr.io")
-    && hop.redirected_specifier.username().is_empty()
-    && hop.redirected_specifier.password().is_none()
-    && hop.redirected_specifier.port().is_none()
-    && hop.redirected_specifier.query().is_none()
-    && hop.redirected_specifier.fragment().is_none()
 }
 
-fn oden_parent_graph_final_has_candidate_jsr_request(
+fn oden_parent_graph_final_has_authenticated_jsr_package(
   graph: &ModuleGraph,
   graph_final_specifier: &ModuleSpecifier,
 ) -> bool {
-  graph.redirects.keys().any(|request| {
-    request.scheme() == "jsr"
-      && project_oden_parent_graph_redirect_chain(graph, request)
-        .ok()
-        .is_some_and(|(redirect_chain, candidate_final)| {
-          candidate_final == *graph_final_specifier
-            && oden_parent_is_candidate_jsr_redirect_chain(&redirect_chain)
-        })
-  })
+  project_oden_parent_authenticated_jsr_key(graph, graph_final_specifier)
+    .is_some()
 }
 
 fn oden_parent_ordinary_esm_dependency_target_kind(
   target: &deno_graph::Module,
   graph_final_specifier: &ModuleSpecifier,
+  allow_reviewed_asset_file: bool,
 ) -> Result<
   OdenParentOrdinaryEsmDependencyTargetKind,
   OdenParentOrdinaryEsmGraphModuleCandidateError,
@@ -1304,6 +1958,14 @@ fn oden_parent_ordinary_esm_dependency_target_kind(
       }
       Ok(OdenParentOrdinaryEsmDependencyTargetKind::NodeBuiltin)
     }
+    deno_graph::Module::External(target)
+      if allow_reviewed_asset_file
+        && target.was_asset_load
+        && target.specifier == *graph_final_specifier
+        && target.specifier.scheme() == "file" =>
+    {
+      Ok(OdenParentOrdinaryEsmDependencyTargetKind::AssetFile)
+    }
     deno_graph::Module::Json(_)
     | deno_graph::Module::Npm(_)
     | deno_graph::Module::External(_) => Err(
@@ -1316,14 +1978,28 @@ fn oden_parent_ordinary_esm_dependency_target_kind(
 
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
 // Retain only one graph-final ordinary ESM module candidate and its exact edges.
-#[allow(dead_code)]
-fn observe_oden_parent_ordinary_esm_graph_module_candidate(
+fn observe_oden_parent_ordinary_esm_graph_module_candidate_with<
+  ObserveDependencies,
+>(
   graph: &ModuleGraph,
   module_specifier: &ModuleSpecifier,
+  allow_reviewed_asset_file: bool,
+  observe_dependencies: ObserveDependencies,
 ) -> Result<
-  OdenParentOrdinaryEsmGraphModuleCandidate,
+  (OdenParentOrdinaryEsmGraphModuleCandidate, usize),
   OdenParentOrdinaryEsmGraphModuleCandidateError,
-> {
+>
+where
+  ObserveDependencies: FnOnce(
+    &ModuleSpecifier,
+    MediaType,
+    &[u8],
+    &IndexMap<String, Dependency>,
+  ) -> Result<
+    (Vec<OdenParentObservedRuntimeDependency>, usize),
+    OdenParentRuntimeDependencyObservationError,
+  >,
+{
   if graph.graph_kind() != deno_graph::GraphKind::CodeOnly {
     return Err(
       OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
@@ -1331,8 +2007,7 @@ fn observe_oden_parent_ordinary_esm_graph_module_candidate(
       ),
     );
   }
-  if module_specifier.query().is_some()
-    || module_specifier.fragment().is_some()
+  if module_specifier.query().is_some() || module_specifier.fragment().is_some()
   {
     return Err(
       OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
@@ -1351,7 +2026,7 @@ fn observe_oden_parent_ordinary_esm_graph_module_candidate(
   }
   let input_scheme_is_admitted = module_specifier.scheme() == "file"
     || (module_specifier.scheme() == "https"
-      && oden_parent_graph_final_has_candidate_jsr_request(
+      && oden_parent_graph_final_has_authenticated_jsr_package(
         graph,
         module_specifier,
       ));
@@ -1412,8 +2087,8 @@ fn observe_oden_parent_ordinary_esm_graph_module_candidate(
       "module graph source does not retain its original bytes",
     ),
   )?;
-  let observed_runtime_dependencies =
-    observe_oden_parent_runtime_dependencies(
+  let (observed_runtime_dependencies, reviewed_computed_loader_count) =
+    observe_dependencies(
       &module.specifier,
       module.media_type,
       original_bytes.as_ref(),
@@ -1431,11 +2106,9 @@ fn observe_oden_parent_ordinary_esm_graph_module_candidate(
     if observation.raw_specifier == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
       || observation.resolved_specifier.as_str()
         == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
-      || graph_final_specifier.as_str()
-        == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+      || graph_final_specifier.as_str() == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
       || redirect_chain.iter().any(|hop| {
-        hop.requested_specifier.as_str()
-          == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+        hop.requested_specifier.as_str() == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
           || hop.redirected_specifier.as_str()
             == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
       })
@@ -1456,9 +2129,13 @@ fn observe_oden_parent_ordinary_esm_graph_module_candidate(
       );
     }
     let candidate_jsr_redirect =
-      oden_parent_is_candidate_jsr_redirect_chain(&redirect_chain);
+      oden_parent_is_candidate_jsr_redirect_chain(graph, &redirect_chain);
     let admitted_direct_scheme = redirect_chain.is_empty()
-      && matches!(graph_final_specifier.scheme(), "file" | "node");
+      && (matches!(graph_final_specifier.scheme(), "file" | "node")
+        || oden_parent_graph_final_has_authenticated_jsr_package(
+          graph,
+          &graph_final_specifier,
+        ));
     if !admitted_direct_scheme && !candidate_jsr_redirect {
       return Err(
         OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
@@ -1481,6 +2158,7 @@ fn observe_oden_parent_ordinary_esm_graph_module_candidate(
     let target_kind = oden_parent_ordinary_esm_dependency_target_kind(
       target,
       &graph_final_specifier,
+      allow_reviewed_asset_file,
     )?;
     runtime_dependencies.push(
       OdenParentOrdinaryEsmRuntimeDependencyCandidate {
@@ -1492,12 +2170,40 @@ fn observe_oden_parent_ordinary_esm_graph_module_candidate(
     );
   }
 
-  Ok(OdenParentOrdinaryEsmGraphModuleCandidate {
-    graph_final_module_specifier: module_specifier.clone(),
-    media_type,
-    original_bytes,
-    runtime_dependencies,
-  })
+  Ok((
+    OdenParentOrdinaryEsmGraphModuleCandidate {
+      graph_final_module_specifier: module_specifier.clone(),
+      media_type,
+      original_bytes,
+      runtime_dependencies,
+    },
+    reviewed_computed_loader_count,
+  ))
+}
+
+#[allow(dead_code)]
+fn observe_oden_parent_ordinary_esm_graph_module_candidate(
+  graph: &ModuleGraph,
+  module_specifier: &ModuleSpecifier,
+) -> Result<
+  OdenParentOrdinaryEsmGraphModuleCandidate,
+  OdenParentOrdinaryEsmGraphModuleCandidateError,
+> {
+  observe_oden_parent_ordinary_esm_graph_module_candidate_with(
+    graph,
+    module_specifier,
+    false,
+    |specifier, media_type, original_bytes, dependencies| {
+      observe_oden_parent_runtime_dependencies(
+        specifier,
+        media_type,
+        original_bytes,
+        dependencies,
+      )
+      .map(|dependencies| (dependencies, 0))
+    },
+  )
+  .map(|(candidate, _)| candidate)
 }
 
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
@@ -1756,6 +2462,956 @@ fn observe_oden_parent_release_entrypoint_direct_repo_candidate(
   )
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn oden_parent_repository_root_url(
+  entrypoint: &ModuleSpecifier,
+) -> Result<ModuleSpecifier, AnyError> {
+  let root = entrypoint.join("../").map_err(|_| {
+    deno_core::anyhow::anyhow!(
+      "Oden parent release entrypoint cannot yield a repository root"
+    )
+  })?;
+  if root.scheme() != "file"
+    || root.query().is_some()
+    || root.fragment().is_some()
+    || root.join("src/release.ts").ok().as_ref() != Some(entrypoint)
+  {
+    bail!(
+      "Oden parent release entrypoint is not exactly repository-relative src/release.ts"
+    );
+  }
+  Ok(root)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn project_oden_parent_repo_key(
+  repository_root: &ModuleSpecifier,
+  specifier: &ModuleSpecifier,
+) -> Result<String, AnyError> {
+  if specifier.scheme() != "file"
+    || specifier.query().is_some()
+    || specifier.fragment().is_some()
+    || specifier.as_str().contains('%')
+  {
+    bail!("Oden parent graph file is not one exact unescaped file URL");
+  }
+  let Some(relative) = repository_root.make_relative(specifier) else {
+    bail!("Oden parent graph file is outside the retained repository root");
+  };
+  if relative.is_empty()
+    || relative.starts_with('/')
+    || relative == ".."
+    || relative.starts_with("../")
+    || repository_root.join(&relative).ok().as_ref() != Some(specifier)
+  {
+    bail!("Oden parent graph file is not a strict canonical repository member");
+  }
+  Ok(
+    OdenParentRepoVfsKey::from_repository_relative_path(&relative)?
+      .as_str()
+      .to_string(),
+  )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn project_oden_parent_vfs_key(
+  graph: &ModuleGraph,
+  repository_root: &ModuleSpecifier,
+  specifier: &ModuleSpecifier,
+  used_jsr_packages: &mut HashSet<String>,
+) -> Result<String, AnyError> {
+  match specifier.scheme() {
+    "file" => project_oden_parent_repo_key(repository_root, specifier),
+    "node" => {
+      let Some(deno_graph::Module::Node(module)) = graph
+        .try_get(specifier)
+        .map_err(|error| deno_core::anyhow::anyhow!(error.to_string()))?
+      else {
+        bail!("Oden parent node dependency is not an exact graph terminal");
+      };
+      let expected = format!("node:{}", module.module_name);
+      if module.module_name.is_empty()
+        || specifier.as_str() != expected
+        || specifier.query().is_some()
+        || specifier.fragment().is_some()
+      {
+        bail!("Oden parent node dependency has a noncanonical key");
+      }
+      Ok(expected)
+    }
+    "https" => {
+      let Some(authenticated) =
+        project_oden_parent_authenticated_jsr_key(graph, specifier)
+      else {
+        bail!(
+          "Oden parent registry URL lacks an exact resolver/package-graph identity"
+        );
+      };
+      used_jsr_packages.insert(authenticated.package_nv);
+      Ok(authenticated.key)
+    }
+    _ if specifier.as_str() == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER => {
+      Ok(ODEN_PARENT_PRIVATE_MODULE_SPECIFIER.to_string())
+    }
+    _ => bail!("Oden parent graph dependency uses an unsupported key scheme"),
+  }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn oden_parent_otel_config_is_disabled(config: &OtelConfig) -> bool {
+  !config.tracing_enabled
+    && !config.metrics_enabled
+    && config.console == OtelConsoleConfig::Ignore
+    && config.deterministic_prefix.is_none()
+    && config.propagators.is_empty()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn oden_parent_owned_dependency(
+  observation: &OdenParentObservedRuntimeDependency,
+  resolved_key: String,
+) -> OdenParentOwnedVfsDependency {
+  OdenParentOwnedVfsDependency {
+    kind: observation.kind,
+    raw_specifier: observation.raw_specifier.clone(),
+    resolved_key,
+    source_byte_start: observation.source_byte_start,
+    source_byte_end: observation.source_byte_end,
+    import_attributes: observation.import_attributes.clone(),
+  }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reconcile_oden_parent_module_stores(
+  modules: &[OdenParentOwnedVfsModule],
+  files: &[OdenParentOwnedVfsFile],
+  redirects: &std::collections::BTreeMap<ModuleSpecifier, ModuleSpecifier>,
+) -> Result<(), AnyError> {
+  use std::os::unix::fs::MetadataExt;
+
+  let mut vfs = VfsBuilder::new();
+  let mut local_modules = Vec::new();
+  let mut asset_files = Vec::new();
+  let mut remote_modules = Vec::new();
+  let mut specifier_store = SpecifierStore::with_capacity(
+    modules
+      .len()
+      .saturating_add(redirects.len().saturating_mul(2)),
+  );
+  let mut remote_store =
+    SpecifierDataStore::<RemoteModuleEntry<'static>>::with_capacity(
+      modules.len(),
+    );
+
+  for module in modules {
+    let has_transpile = module.source_map_bytes.is_some();
+    if has_transpile == (module.emitted_bytes == module.original_bytes.as_ref())
+    {
+      bail!(
+        "Oden parent emitted/source-map relationship differs from standalone storage"
+      );
+    }
+    match module.graph_specifier.scheme() {
+      "file" => {
+        let path = url_to_file_path(&module.graph_specifier)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file()
+          || metadata.nlink() != 1
+          || metadata.mode() & 0o111 != 0
+        {
+          bail!(
+            "Oden parent local graph module is not one nonexecutable single-link regular file"
+          );
+        }
+        vfs.add_file_with_data(
+          &path,
+          deno_lib::standalone::virtual_fs::AddFileDataOptions {
+            data: module.original_bytes.to_vec(),
+            maybe_transpiled: has_transpile
+              .then(|| module.emitted_bytes.clone()),
+            maybe_source_map: module.source_map_bytes.clone(),
+            maybe_cjs_export_analysis: None,
+            mtime: metadata.modified().ok(),
+          },
+        )?;
+        local_modules.push((path, module));
+      }
+      "https" => {
+        let media_type = match module.media_type {
+          OdenParentVfsMediaType::TypeScript => MediaType::TypeScript,
+          OdenParentVfsMediaType::JavaScript => MediaType::JavaScript,
+          OdenParentVfsMediaType::Json => MediaType::Json,
+          OdenParentVfsMediaType::Wasm => MediaType::Wasm,
+        };
+        let id = specifier_store.get_or_add(&module.graph_specifier);
+        remote_store.add(
+          id,
+          RemoteModuleEntry {
+            media_type,
+            is_valid_utf8: is_valid_utf8(&module.original_bytes),
+            data: Cow::Owned(module.original_bytes.to_vec()),
+            maybe_transpiled: has_transpile
+              .then(|| Cow::Owned(module.emitted_bytes.clone())),
+            maybe_source_map: module.source_map_bytes.clone().map(Cow::Owned),
+            maybe_cjs_export_analysis: None,
+          },
+        );
+        remote_modules.push(module);
+      }
+      _ => bail!("Oden parent stored module has an unsupported scheme"),
+    }
+  }
+  for file in files {
+    let path = url_to_file_path(&file.graph_specifier)?;
+    vfs.add_file_with_data(
+      &path,
+      deno_lib::standalone::virtual_fs::AddFileDataOptions {
+        data: file.original_bytes.to_vec(),
+        maybe_transpiled: None,
+        maybe_source_map: None,
+        maybe_cjs_export_analysis: None,
+        mtime: None,
+      },
+    )?;
+    asset_files.push((path, file));
+  }
+
+  let mut redirects_store =
+    SpecifierDataStore::<SpecifierId>::with_capacity(redirects.len());
+  for (from, to) in redirects {
+    let from_id = specifier_store.get_or_add(from);
+    let to_id = specifier_store.get_or_add(to);
+    redirects_store.add(from_id, to_id);
+  }
+
+  let mut observed_local = vfs.iter_files().collect::<Vec<_>>();
+  observed_local.sort_by(|left, right| left.0.cmp(&right.0));
+  local_modules.sort_by(|left, right| left.0.cmp(&right.0));
+  asset_files.sort_by(|left, right| left.0.cmp(&right.0));
+  if observed_local.len()
+    != local_modules.len().saturating_add(asset_files.len())
+  {
+    bail!("Oden parent VFS builder produced an unaccounted local file row");
+  }
+  for (expected_path, expected) in &local_modules {
+    let Some((_, actual)) = observed_local
+      .iter()
+      .find(|(actual_path, _)| actual_path == expected_path)
+    else {
+      bail!("Oden parent VFS builder omitted a local module row");
+    };
+    if vfs.file_bytes(actual.offset) != Some(expected.original_bytes.as_ref())
+      || actual
+        .transpiled_offset
+        .and_then(|offset| vfs.file_bytes(offset))
+        != expected
+          .source_map_bytes
+          .as_ref()
+          .map(|_| expected.emitted_bytes.as_slice())
+      || actual
+        .source_map_offset
+        .and_then(|offset| vfs.file_bytes(offset))
+        != expected.source_map_bytes.as_deref()
+      || actual.cjs_export_analysis_offset.is_some()
+      || actual.executable
+    {
+      bail!("Oden parent VFS builder bytes do not match the graph projection");
+    }
+  }
+  for (expected_path, expected) in &asset_files {
+    let Some((_, actual)) = observed_local
+      .iter()
+      .find(|(actual_path, _)| actual_path == expected_path)
+    else {
+      bail!("Oden parent VFS builder omitted the reviewed asset row");
+    };
+    if vfs.file_bytes(actual.offset) != Some(expected.original_bytes.as_ref())
+      || actual.transpiled_offset.is_some()
+      || actual.source_map_offset.is_some()
+      || actual.cjs_export_analysis_offset.is_some()
+      || actual.executable != expected.executable
+    {
+      bail!("Oden parent VFS asset bytes differ from retained source bytes");
+    }
+  }
+  let built_vfs = vfs.build();
+  if built_vfs.files.is_empty()
+    != (local_modules.is_empty() && asset_files.is_empty())
+  {
+    bail!("Oden parent VFS builder finalization lost local module bytes");
+  }
+
+  let mut expected_specifiers = remote_modules
+    .iter()
+    .map(|module| &module.graph_specifier)
+    .collect::<HashSet<_>>();
+  for (from, to) in redirects {
+    expected_specifiers.insert(from);
+    expected_specifiers.insert(to);
+  }
+  if specifier_store.data.len() != expected_specifiers.len()
+    || specifier_store
+      .data
+      .keys()
+      .any(|specifier| !expected_specifiers.contains(specifier))
+    || specifier_store.data.values().collect::<HashSet<_>>().len()
+      != specifier_store.data.len()
+  {
+    bail!("Oden parent specifier store does not exactly match remote facts");
+  }
+
+  if remote_store.len() != remote_modules.len() {
+    bail!("Oden parent remote module store contains an unaccounted row");
+  }
+  for expected in remote_modules {
+    let Some(expected_id) = specifier_store.data.get(&expected.graph_specifier)
+    else {
+      bail!("Oden parent remote module lacks a specifier-store ID");
+    };
+    let Some(actual) = remote_store.get(*expected_id) else {
+      bail!("Oden parent remote module ID lacks a byte-store row");
+    };
+    let expected_media_type = match expected.media_type {
+      OdenParentVfsMediaType::TypeScript => MediaType::TypeScript,
+      OdenParentVfsMediaType::JavaScript => MediaType::JavaScript,
+      OdenParentVfsMediaType::Json => MediaType::Json,
+      OdenParentVfsMediaType::Wasm => MediaType::Wasm,
+    };
+    if actual.media_type != expected_media_type
+      || actual.data.as_ref() != expected.original_bytes.as_ref()
+      || actual.maybe_transpiled.as_deref()
+        != expected
+          .source_map_bytes
+          .as_ref()
+          .map(|_| expected.emitted_bytes.as_slice())
+      || actual.maybe_source_map.as_deref()
+        != expected.source_map_bytes.as_deref()
+      || actual.maybe_cjs_export_analysis.is_some()
+    {
+      bail!("Oden parent remote module store bytes do not match the graph");
+    }
+  }
+  for (actual_id, _) in remote_store.iter() {
+    let Some((actual_specifier, _)) = specifier_store
+      .data
+      .iter()
+      .find(|(_, expected_id)| **expected_id == actual_id)
+    else {
+      bail!("Oden parent remote byte-store ID has no specifier");
+    };
+    if !modules
+      .iter()
+      .any(|module| &module.graph_specifier == *actual_specifier)
+    {
+      bail!("Oden parent remote byte-store ID names a non-module specifier");
+    }
+  }
+
+  if redirects_store.len() != redirects.len() {
+    bail!("Oden parent redirect store contains an unaccounted row");
+  }
+  for (from, to) in redirects {
+    let Some(from_id) = specifier_store.data.get(from) else {
+      bail!("Oden parent redirect source lacks a specifier-store ID");
+    };
+    let Some(to_id) = specifier_store.data.get(to) else {
+      bail!("Oden parent redirect target lacks a specifier-store ID");
+    };
+    if redirects_store.get(*from_id) != Some(to_id) {
+      bail!("Oden parent redirect store differs from graph resolution facts");
+    }
+  }
+  Ok(())
+}
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] --
+// Reconcile the sole-root CodeOnly graph, graph-owned original byte Arcs, exact
+// resolver package facts, and the bytes/maps selected by the compiler emitter.
+// This adapter is output-free and does not activate the private module.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn observe_oden_parent_whole_graph_with<
+  ObserveDirect,
+  ObserveBootstrapAsset,
+  ObserveEmission,
+>(
+  graph: &ModuleGraph,
+  entrypoint: &ModuleSpecifier,
+  mut observe_direct: ObserveDirect,
+  mut observe_bootstrap_asset: ObserveBootstrapAsset,
+  mut observe_emission: ObserveEmission,
+) -> Result<(OdenParentVfsGraph, OdenParentStaticImportEdge), AnyError>
+where
+  ObserveDirect: FnMut(
+    &ModuleSpecifier,
+    Arc<[u8]>,
+  ) -> Result<
+    OdenParentDirectRepoSourceCandidate,
+    OdenParentDirectRepoSourceObservationError,
+  >,
+  ObserveBootstrapAsset: FnMut(
+    &ModuleSpecifier,
+  ) -> Result<
+    OdenParentDirectRepoSourceCandidate,
+    OdenParentDirectRepoSourceObservationError,
+  >,
+  ObserveEmission: FnMut(
+    &ModuleSpecifier,
+    OdenParentVfsMediaType,
+    &Arc<[u8]>,
+  )
+    -> Result<OdenParentObservedEmittedModule, AnyError>,
+{
+  if graph.graph_kind() != deno_graph::GraphKind::CodeOnly {
+    bail!("Oden parent authoring graph is not CodeOnly");
+  }
+  if graph.roots.len() != 1 || graph.roots.first() != Some(entrypoint) {
+    bail!(
+      "Oden parent authoring graph does not have the exact sole release root"
+    );
+  }
+  graph
+    .valid()
+    .map_err(|error| deno_core::anyhow::anyhow!(error.to_string()))?;
+  for (_, result) in graph.specifiers() {
+    if let Err(error) = result {
+      bail!("Oden parent authoring graph contains an error row: {error}");
+    }
+  }
+  let repository_root = oden_parent_repository_root_url(entrypoint)?;
+  let reviewed_computed_loader_specifier = repository_root
+    .join("src/capsec/bootstrap.ts")
+    .map_err(|_| {
+      deno_core::anyhow::anyhow!(
+        "Oden parent repository root cannot identify the reviewed computed loader"
+      )
+    })?;
+  let release =
+    observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
+      graph,
+      entrypoint,
+      |specifier, original_bytes| observe_direct(specifier, original_bytes),
+    )?;
+  let OdenParentReleaseEntrypointDirectRepoCandidate {
+    graph: release_graph,
+    direct_repository,
+  } = release;
+  if direct_repository.key().as_str() != ODEN_PARENT_ENTRYPOINT_KEY
+    || direct_repository.specifier() != entrypoint
+    || !Arc::ptr_eq(
+      direct_repository.original_bytes(),
+      &release_graph.original_bytes,
+    )
+  {
+    bail!("Oden parent retained release source lost its exact graph join");
+  }
+
+  let mut used_jsr_packages = HashSet::new();
+  let mut used_redirect_requests = HashSet::new();
+  let mut graph_edges = HashMap::<ModuleSpecifier, Vec<ModuleSpecifier>>::new();
+  let mut referenced_terminals = HashSet::new();
+  let mut referenced_files = HashSet::new();
+  let mut graph_files = HashSet::new();
+  let mut residual_asset_specifiers = graph
+    .asset_module_urls()
+    .into_iter()
+    .cloned()
+    .collect::<HashSet<_>>();
+  let mut modules = Vec::new();
+  let mut files = Vec::new();
+  let mut reviewed_computed_loader_count = 0usize;
+
+  let release_emission = observe_emission(
+    entrypoint,
+    OdenParentVfsMediaType::TypeScript,
+    &release_graph.original_bytes,
+  )?;
+  let mut release_dependencies =
+    Vec::with_capacity(release_graph.runtime_dependencies.len());
+  let mut release_edges = Vec::new();
+  for dependency in &release_graph.runtime_dependencies {
+    let graph_final = if dependency.resolved_specifier.as_str()
+      == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+    {
+      if graph.redirects.contains_key(&dependency.resolved_specifier)
+        || graph.resolve(&dependency.resolved_specifier)
+          != &dependency.resolved_specifier
+      {
+        bail!("Oden parent private terminal is redirected or aliased");
+      }
+      referenced_terminals.insert(dependency.resolved_specifier.clone());
+      dependency.resolved_specifier.clone()
+    } else {
+      let (redirect_chain, graph_final) =
+        project_oden_parent_graph_redirect_chain(
+          graph,
+          &dependency.resolved_specifier,
+        )?;
+      if !redirect_chain.is_empty() {
+        bail!("Oden parent release entry dependency is redirected");
+      }
+      release_edges.push(graph_final.clone());
+      graph_final
+    };
+    let resolved_key = project_oden_parent_vfs_key(
+      graph,
+      &repository_root,
+      &graph_final,
+      &mut used_jsr_packages,
+    )?;
+    release_dependencies
+      .push(oden_parent_owned_dependency(dependency, resolved_key));
+  }
+  graph_edges.insert(entrypoint.clone(), release_edges);
+  modules.push(OdenParentOwnedVfsModule {
+    graph_specifier: entrypoint.clone(),
+    key: direct_repository.key().as_str().to_string(),
+    media_type: OdenParentVfsMediaType::TypeScript,
+    original_bytes: release_graph.original_bytes.clone(),
+    emitted_bytes: release_emission.emitted_bytes,
+    source_map_bytes: release_emission.source_map_bytes,
+    dependencies: release_dependencies,
+  });
+
+  let mut graph_terminals = HashSet::new();
+  for graph_module in graph.modules() {
+    let specifier = graph_module.specifier();
+    if specifier == entrypoint {
+      continue;
+    }
+    match graph_module {
+      deno_graph::Module::Js(_) => {
+        residual_asset_specifiers.remove(specifier);
+        let (candidate, module_computed_loader_count) =
+          observe_oden_parent_ordinary_esm_graph_module_candidate_with(
+            graph,
+            specifier,
+            true,
+            |specifier, media_type, original_bytes, dependencies| {
+              observe_oden_parent_whole_graph_dependencies(
+                specifier,
+                media_type,
+                original_bytes,
+                dependencies,
+                false,
+              )
+            },
+          )?;
+        reviewed_computed_loader_count = reviewed_computed_loader_count
+          .checked_add(module_computed_loader_count)
+          .ok_or_else(|| {
+            deno_core::anyhow::anyhow!(
+              "Oden parent computed-loader count overflowed"
+            )
+          })?;
+        let media_type = match candidate.media_type {
+          OdenParentOrdinaryEsmMediaType::JavaScript => {
+            OdenParentVfsMediaType::JavaScript
+          }
+          OdenParentOrdinaryEsmMediaType::TypeScript => {
+            OdenParentVfsMediaType::TypeScript
+          }
+        };
+        let key = project_oden_parent_vfs_key(
+          graph,
+          &repository_root,
+          &candidate.graph_final_module_specifier,
+          &mut used_jsr_packages,
+        )?;
+        if candidate.graph_final_module_specifier.scheme() == "file" {
+          let direct = observe_direct(
+            &candidate.graph_final_module_specifier,
+            candidate.original_bytes.clone(),
+          )?;
+          if direct.key().as_str() != key
+            || direct.specifier() != &candidate.graph_final_module_specifier
+            || !Arc::ptr_eq(direct.original_bytes(), &candidate.original_bytes)
+            || direct.executable()
+          {
+            bail!(
+              "Oden parent local JavaScript graph row lost its retained-root join"
+            );
+          }
+        }
+        let emission = observe_emission(
+          &candidate.graph_final_module_specifier,
+          media_type,
+          &candidate.original_bytes,
+        )?;
+        let mut dependencies =
+          Vec::with_capacity(candidate.runtime_dependencies.len());
+        let mut edges = Vec::new();
+        for dependency in &candidate.runtime_dependencies {
+          if !dependency.redirect_chain.is_empty() {
+            if !oden_parent_is_candidate_jsr_redirect_chain(
+              graph,
+              &dependency.redirect_chain,
+            ) {
+              bail!("Oden parent dependency has an unauthenticated redirect");
+            }
+            for hop in &dependency.redirect_chain {
+              used_redirect_requests.insert(hop.requested_specifier.clone());
+            }
+          }
+          let resolved_key = project_oden_parent_vfs_key(
+            graph,
+            &repository_root,
+            &dependency.graph_final_specifier,
+            &mut used_jsr_packages,
+          )?;
+          match dependency.target_kind {
+            OdenParentOrdinaryEsmDependencyTargetKind::NodeBuiltin => {
+              referenced_terminals
+                .insert(dependency.graph_final_specifier.clone());
+            }
+            OdenParentOrdinaryEsmDependencyTargetKind::AssetFile => {
+              referenced_files.insert(dependency.graph_final_specifier.clone());
+              edges.push(dependency.graph_final_specifier.clone());
+            }
+            OdenParentOrdinaryEsmDependencyTargetKind::JavaScript
+            | OdenParentOrdinaryEsmDependencyTargetKind::TypeScript
+            | OdenParentOrdinaryEsmDependencyTargetKind::Json
+            | OdenParentOrdinaryEsmDependencyTargetKind::Wasm => {
+              edges.push(dependency.graph_final_specifier.clone());
+            }
+          }
+          dependencies.push(oden_parent_owned_dependency(
+            &dependency.observation,
+            resolved_key,
+          ));
+        }
+        graph_edges
+          .insert(candidate.graph_final_module_specifier.clone(), edges);
+        modules.push(OdenParentOwnedVfsModule {
+          graph_specifier: candidate.graph_final_module_specifier,
+          key,
+          media_type,
+          original_bytes: candidate.original_bytes,
+          emitted_bytes: emission.emitted_bytes,
+          source_map_bytes: emission.source_map_bytes,
+          dependencies,
+        });
+      }
+      deno_graph::Module::Json(module) => {
+        residual_asset_specifiers.remove(specifier);
+        if module.media_type != MediaType::Json {
+          bail!("Oden parent JSON graph row has an unsupported media type");
+        }
+        let original_bytes =
+          module.source.try_get_original_bytes().ok_or_else(|| {
+            deno_core::anyhow::anyhow!(
+              "Oden parent JSON graph row lacks original bytes"
+            )
+          })?;
+        if original_bytes.as_ref() != module.source.text.as_bytes()
+          || original_bytes.starts_with(b"\xef\xbb\xbf")
+        {
+          bail!("Oden parent JSON graph bytes are not exact BOM-free UTF-8");
+        }
+        let key = project_oden_parent_vfs_key(
+          graph,
+          &repository_root,
+          specifier,
+          &mut used_jsr_packages,
+        )?;
+        if specifier.scheme() == "file" {
+          let direct = observe_direct(specifier, original_bytes.clone())?;
+          if direct.key().as_str() != key
+            || direct.specifier() != specifier
+            || !Arc::ptr_eq(direct.original_bytes(), &original_bytes)
+            || direct.executable()
+          {
+            bail!(
+              "Oden parent local JSON graph row lost its retained-root join"
+            );
+          }
+        }
+        let emission = observe_emission(
+          specifier,
+          OdenParentVfsMediaType::Json,
+          &original_bytes,
+        )?;
+        if emission.source_map_bytes.is_some() {
+          bail!("Oden parent JSON graph row unexpectedly has a source map");
+        }
+        graph_edges.insert(specifier.clone(), Vec::new());
+        modules.push(OdenParentOwnedVfsModule {
+          graph_specifier: specifier.clone(),
+          key,
+          media_type: OdenParentVfsMediaType::Json,
+          original_bytes,
+          emitted_bytes: emission.emitted_bytes,
+          source_map_bytes: None,
+          dependencies: Vec::new(),
+        });
+      }
+      deno_graph::Module::Wasm(module) => {
+        residual_asset_specifiers.remove(specifier);
+        if !module.dependencies.is_empty() {
+          bail!(
+            "Oden parent Wasm graph rows with dependencies are unsupported"
+          );
+        }
+        let key = project_oden_parent_vfs_key(
+          graph,
+          &repository_root,
+          specifier,
+          &mut used_jsr_packages,
+        )?;
+        if specifier.scheme() == "file" {
+          let direct = observe_direct(specifier, module.source.clone())?;
+          if direct.key().as_str() != key
+            || direct.specifier() != specifier
+            || !Arc::ptr_eq(direct.original_bytes(), &module.source)
+            || direct.executable()
+          {
+            bail!(
+              "Oden parent local Wasm graph row lost its retained-root join"
+            );
+          }
+        }
+        let emission = observe_emission(
+          specifier,
+          OdenParentVfsMediaType::Wasm,
+          &module.source,
+        )?;
+        if emission.source_map_bytes.is_some() {
+          bail!("Oden parent Wasm graph row unexpectedly has a source map");
+        }
+        graph_edges.insert(specifier.clone(), Vec::new());
+        modules.push(OdenParentOwnedVfsModule {
+          graph_specifier: specifier.clone(),
+          key,
+          media_type: OdenParentVfsMediaType::Wasm,
+          original_bytes: module.source.clone(),
+          emitted_bytes: emission.emitted_bytes,
+          source_map_bytes: None,
+          dependencies: Vec::new(),
+        });
+      }
+      deno_graph::Module::Node(module) => {
+        if specifier.as_str() != format!("node:{}", module.module_name) {
+          bail!("Oden parent node graph terminal has a noncanonical key");
+        }
+        graph_terminals.insert(specifier.clone());
+      }
+      deno_graph::Module::External(module) => {
+        if graph.redirects.contains_key(&module.specifier)
+          || graph.resolve(&module.specifier) != &module.specifier
+        {
+          bail!("Oden parent graph contains an unsupported External row");
+        }
+        if module.specifier.as_str() == ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+          && !module.was_asset_load
+        {
+          graph_terminals.insert(module.specifier.clone());
+        } else if module.was_asset_load
+          && module.specifier == reviewed_computed_loader_specifier
+          && residual_asset_specifiers.contains(&module.specifier)
+        {
+          let key =
+            project_oden_parent_repo_key(&repository_root, &module.specifier)?;
+          let direct = observe_bootstrap_asset(&module.specifier)?;
+          if direct.key().as_str() != key
+            || direct.specifier() != &module.specifier
+            || direct.executable()
+          {
+            bail!(
+              "Oden parent bootstrap asset lost its retained-root byte join"
+            );
+          }
+          reviewed_computed_loader_count = reviewed_computed_loader_count
+            .checked_add(observe_oden_parent_bootstrap_asset_source(
+              &module.specifier,
+              direct.original_bytes().as_ref(),
+            )?)
+            .ok_or_else(|| {
+              deno_core::anyhow::anyhow!(
+                "Oden parent computed-loader count overflowed"
+              )
+            })?;
+          graph_files.insert(module.specifier.clone());
+          graph_edges.insert(module.specifier.clone(), Vec::new());
+          files.push(OdenParentOwnedVfsFile {
+            graph_specifier: module.specifier.clone(),
+            key,
+            original_bytes: direct.original_bytes().clone(),
+            executable: false,
+          });
+        } else {
+          bail!("Oden parent graph contains an unsupported External row");
+        }
+      }
+      deno_graph::Module::Npm(_) => {
+        bail!("Oden parent graph contains an unsupported npm row");
+      }
+    }
+  }
+
+  if reviewed_computed_loader_count != 1 {
+    bail!(
+      "Oden parent graph does not contain exactly one reviewed computed application loader"
+    );
+  }
+  let expected_residual_assets =
+    HashSet::from([reviewed_computed_loader_specifier.clone()]);
+  if residual_asset_specifiers != expected_residual_assets
+    || graph_files != expected_residual_assets
+    || referenced_files != expected_residual_assets
+  {
+    bail!(
+      "Oden parent residual asset set is not exactly the reviewed bootstrap file"
+    );
+  }
+
+  for (request, target) in &graph.redirects {
+    if !used_redirect_requests.contains(request) {
+      bail!("Oden parent graph contains an unaccounted redirect");
+    }
+    let chain = [OdenParentGraphRedirectHop {
+      requested_specifier: request.clone(),
+      redirected_specifier: target.clone(),
+    }];
+    if !oden_parent_is_candidate_jsr_redirect_chain(graph, &chain) {
+      bail!("Oden parent graph contains an unsupported redirect row");
+    }
+  }
+
+  let package_facts = graph
+    .packages
+    .packages_with_deps()
+    .map(|(package, _)| package.to_string())
+    .collect::<HashSet<_>>();
+  if package_facts != used_jsr_packages {
+    bail!("Oden parent graph JSR resolver facts are not fully accounted");
+  }
+  // `ModuleGraph::fill_from_lockfile` deliberately preloads every locked JSR
+  // request into `mappings()`, including requests outside this CodeOnly
+  // closure. Account only mappings actually selected by graph redirects, and
+  // require those selections to cover exactly the package rows found in the
+  // graph. Unselected lockfile mappings are fixed authoring input, not graph
+  // reachability facts.
+  let mut used_mapping_packages = HashSet::new();
+  for specifier in &used_redirect_requests {
+    let request = JsrPackageReqReference::from_str(specifier.as_str())
+      .map_err(|_| {
+        deno_core::anyhow::anyhow!(
+          "Oden parent graph contains a noncanonical JSR redirect request"
+        )
+      })?;
+    let Some(mapped_package) = graph.packages.mappings().get(request.req())
+    else {
+      bail!("Oden parent graph contains an unmapped JSR redirect request");
+    };
+    let mapped_package = mapped_package.to_string();
+    if !used_jsr_packages.contains(&mapped_package) {
+      bail!("Oden parent JSR redirect selects a package outside the graph");
+    }
+    used_mapping_packages.insert(mapped_package);
+  }
+  if used_mapping_packages != used_jsr_packages {
+    bail!("Oden parent graph contains an unaccounted used JSR mapping");
+  }
+
+  let stored_specifiers = modules
+    .iter()
+    .map(|module| module.graph_specifier.clone())
+    .chain(files.iter().map(|file| file.graph_specifier.clone()))
+    .collect::<HashSet<_>>();
+  let mut reachable = HashSet::new();
+  let mut pending = vec![entrypoint.clone()];
+  while let Some(specifier) = pending.pop() {
+    if !reachable.insert(specifier.clone()) {
+      continue;
+    }
+    let Some(edges) = graph_edges.get(&specifier) else {
+      bail!("Oden parent graph reachability reached an unprojected module");
+    };
+    for target in edges {
+      pending.push(target.clone());
+    }
+  }
+  if reachable != stored_specifiers {
+    bail!(
+      "Oden parent graph module rows are not exactly the reachable closure"
+    );
+  }
+  if graph_terminals != referenced_terminals {
+    bail!("Oden parent graph terminal rows and referenced terminals differ");
+  }
+
+  // The fixed Generate path has no `--include` inputs, npm tree, workspace
+  // package files, or arbitrary assets. Its sole residual asset is the exact
+  // retained bootstrap text file above. Exercise the ordinary standalone VFS,
+  // remote-module, specifier, and redirect stores and read every selected byte
+  // row back before constructing the digest graph.
+  reconcile_oden_parent_module_stores(&modules, &files, &graph.redirects)?;
+
+  let attribute_rows = modules
+    .iter()
+    .map(|module| {
+      module
+        .dependencies
+        .iter()
+        .map(|dependency| {
+          dependency
+            .import_attributes
+            .iter()
+            .map(|attribute| OdenParentVfsObservedImportAttribute {
+              key: attribute.key.as_str(),
+              value: attribute.value.as_str(),
+            })
+            .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+    })
+    .collect::<Vec<_>>();
+  let dependency_rows = modules
+    .iter()
+    .enumerate()
+    .map(|(module_index, module)| {
+      module
+        .dependencies
+        .iter()
+        .enumerate()
+        .map(|(dependency_index, dependency)| {
+          OdenParentVfsDependencyObservation {
+            kind: dependency.kind,
+            raw_specifier: dependency.raw_specifier.as_str(),
+            resolved_key: dependency.resolved_key.as_str(),
+            source_byte_start: dependency.source_byte_start,
+            source_byte_end: dependency.source_byte_end,
+            import_attributes: &attribute_rows[module_index][dependency_index],
+          }
+        })
+        .collect::<Vec<_>>()
+    })
+    .collect::<Vec<_>>();
+  let module_rows = modules
+    .iter()
+    .enumerate()
+    .map(|(index, module)| OdenParentVfsModuleObservation {
+      key: module.key.as_str(),
+      media_type: module.media_type,
+      original_bytes: module.original_bytes.as_ref(),
+      emitted_bytes: module.emitted_bytes.as_slice(),
+      source_map_bytes: module.source_map_bytes.as_deref(),
+      dependencies: &dependency_rows[index],
+    })
+    .collect::<Vec<_>>();
+  let file_rows = files
+    .iter()
+    .map(|file| OdenParentVfsFileObservation {
+      key: file.key.as_str(),
+      executable: file.executable,
+      original_bytes: file.original_bytes.as_ref(),
+      emitted_bytes: file.original_bytes.as_ref(),
+    })
+    .collect::<Vec<_>>();
+  let vfs_graph =
+    OdenParentVfsGraph::from_observations(&module_rows, &file_rows)?;
+  Ok((vfs_graph, release_graph.static_import_edge))
+}
+
 #[cfg(test)]
 mod oden_parent_runtime_dependency_observer_tests {
   use std::collections::HashMap;
@@ -1773,6 +3429,35 @@ mod oden_parent_runtime_dependency_observer_tests {
   use deno_graph::source::Source;
 
   use super::*;
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_authoring_otel_config_accepts_only_all_disabled() {
+    let default = OtelConfig::default();
+    assert!(oden_parent_otel_config_is_disabled(&default));
+
+    let mut tracing = default.clone();
+    tracing.tracing_enabled = true;
+    assert!(!oden_parent_otel_config_is_disabled(&tracing));
+
+    let mut metrics = default.clone();
+    metrics.metrics_enabled = true;
+    assert!(!oden_parent_otel_config_is_disabled(&metrics));
+
+    let mut console = default.clone();
+    console.console = OtelConsoleConfig::Capture;
+    assert!(!oden_parent_otel_config_is_disabled(&console));
+
+    let mut deterministic = default.clone();
+    deterministic.deterministic_prefix = Some(0);
+    assert!(!oden_parent_otel_config_is_disabled(&deterministic));
+
+    let mut propagators = default;
+    propagators.propagators.insert(
+      deno_runtime::deno_telemetry::OtelPropagators::TraceContext,
+    );
+    assert!(!oden_parent_otel_config_is_disabled(&propagators));
+  }
 
   const RELEASE_ENTRY_SOURCE: &str = concat!(
     "// @ref LLP 0016#branded-parent-allowlist-and-compile-input [implements] — Inert private wrapper.\n",
@@ -2291,12 +3976,11 @@ mod oden_parent_runtime_dependency_observer_tests {
       )],
       false,
     );
-    let javascript =
-      observe_oden_parent_ordinary_esm_graph_module_candidate(
-        &javascript_graph,
-        &javascript_specifier,
-      )
-      .unwrap();
+    let javascript = observe_oden_parent_ordinary_esm_graph_module_candidate(
+      &javascript_graph,
+      &javascript_specifier,
+    )
+    .unwrap();
     assert_eq!(
       javascript.media_type,
       OdenParentOrdinaryEsmMediaType::JavaScript
@@ -2304,8 +3988,7 @@ mod oden_parent_runtime_dependency_observer_tests {
   }
 
   #[tokio::test]
-  async fn oden_parent_ordinary_esm_candidate_retains_candidate_jsr_redirect()
-  {
+  async fn oden_parent_ordinary_esm_candidate_retains_candidate_jsr_redirect() {
     use deno_graph::packages::JsrPackageInfo;
     use deno_graph::packages::JsrPackageInfoVersion;
     use deno_graph::packages::JsrPackageVersionInfo;
@@ -2313,10 +3996,9 @@ mod oden_parent_runtime_dependency_observer_tests {
 
     let root = ModuleSpecifier::parse("file:///repo/src/jsr-user.ts").unwrap();
     let source = "import \"jsr:@package/foo@1.0.0\";\n";
-    let final_specifier = ModuleSpecifier::parse(
-      "https://jsr.io/@package/foo/1.0.0/mod.ts",
-    )
-    .unwrap();
+    let final_specifier =
+      ModuleSpecifier::parse("https://jsr.io/@package/foo/1.0.0/mod.ts")
+        .unwrap();
     let mut loader = MemoryLoader::default();
     loader.add_source_with_text(&root, source);
     loader.add_jsr_package_info(
@@ -2351,10 +4033,9 @@ mod oden_parent_runtime_dependency_observer_tests {
       )
       .await;
 
-    let candidate = observe_oden_parent_ordinary_esm_graph_module_candidate(
-      &graph, &root,
-    )
-    .unwrap();
+    let candidate =
+      observe_oden_parent_ordinary_esm_graph_module_candidate(&graph, &root)
+        .unwrap();
     let [dependency] = candidate.runtime_dependencies.as_slice() else {
       panic!("expected exactly one JSR dependency")
     };
@@ -2408,9 +4089,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &wrong_host,
         &root,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "dependency is not a direct file/node target or candidate JSR redirect chain"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency is not a direct file/node target or candidate JSR redirect chain"
+        )
+      )
     ));
 
     let mut second_registry_redirect = graph;
@@ -2424,9 +4107,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &second_registry_redirect,
         &root,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "dependency is not a direct file/node target or candidate JSR redirect chain"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency is not a direct file/node target or candidate JSR redirect chain"
+        )
+      )
     ));
   }
 
@@ -2453,9 +4138,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &all_graph,
         &all_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "module graph is not CodeOnly"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "module graph is not CodeOnly"
+        )
+      )
     ));
 
     let (graph, module_specifier) = ordinary_esm_graph(
@@ -2479,9 +4166,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &self_redirected_input,
         &module_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "module specifier is redirected or aliased rather than graph-final"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "module specifier is redirected or aliased rather than graph-final"
+        )
+      )
     ));
 
     let mut self_redirected_dependency = graph.clone();
@@ -2493,9 +4182,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &self_redirected_dependency,
         &module_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "dependency redirect chain contains a self redirect or cycle"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency redirect chain contains a self redirect or cycle"
+        )
+      )
     ));
 
     let alternate =
@@ -2512,9 +4203,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &cyclic_dependency,
         &module_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "dependency redirect chain contains a self redirect or cycle"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency redirect chain contains a self redirect or cycle"
+        )
+      )
     ));
   }
 
@@ -2536,9 +4229,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &missing_graph,
         &missing_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "dependency graph-final target is absent"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency graph-final target is absent"
+        )
+      )
     ));
 
     let error_source = "import \"./error.ts\";\nexport const root = 1;\n";
@@ -2562,9 +4257,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &error_graph,
         &error_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "dependency graph-final target failed to load"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency graph-final target failed to load"
+        )
+      )
     ));
 
     let mut query_input = error_specifier.clone();
@@ -2574,9 +4271,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &error_graph,
         &query_input,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "module specifier has a query or fragment"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "module specifier has a query or fragment"
+        )
+      )
     ));
     let mut fragment_input = error_specifier;
     fragment_input.set_fragment(Some("candidate"));
@@ -2585,9 +4284,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &error_graph,
         &fragment_input,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "module specifier has a query or fragment"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "module specifier has a query or fragment"
+        )
+      )
     ));
 
     let query_source =
@@ -2609,15 +4310,17 @@ mod oden_parent_runtime_dependency_observer_tests {
         &query_graph,
         &query_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "dependency graph-final specifier has a query or fragment"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency graph-final specifier has a query or fragment"
+        )
+      )
     ));
   }
 
   #[test]
   fn oden_parent_ordinary_esm_candidate_refuses_scripts_media_and_missing_original()
-  {
+   {
     let (script_graph, script_specifier) = ordinary_esm_graph(
       GraphKind::CodeOnly,
       "file:///repo/src/script.js",
@@ -2631,9 +4334,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &script_graph,
         &script_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "module graph target is a script rather than ESM"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "module graph target is a script rather than ESM"
+        )
+      )
     ));
 
     let (jsx_graph, jsx_specifier) = ordinary_esm_graph(
@@ -2649,9 +4354,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &jsx_graph,
         &jsx_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "module graph target is not JavaScript or TypeScript"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "module graph target is not JavaScript or TypeScript"
+        )
+      )
     ));
 
     let utf16_source = utf16le_source("export const value = 1;\n");
@@ -2668,9 +4375,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &decoded_graph,
         &decoded_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "module graph source does not retain its original bytes"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "module graph source does not retain its original bytes"
+        )
+      )
     ));
 
     let dependency_script_source =
@@ -2693,15 +4402,17 @@ mod oden_parent_runtime_dependency_observer_tests {
         &dependency_script_graph,
         &dependency_script_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "dependency target is a script rather than ESM"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency target is a script rather than ESM"
+        )
+      )
     ));
   }
 
   #[test]
   fn oden_parent_ordinary_esm_candidate_refuses_private_and_preserves_entrypoint_adapter()
-  {
+   {
     let (graph, entrypoint) = release_graph(
       "file:///repo/src/release.ts",
       RELEASE_ENTRY_SOURCE.as_bytes(),
@@ -2711,9 +4422,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &graph,
         &entrypoint,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "ordinary module depends on the private Oden internal target"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "ordinary module depends on the private Oden internal target"
+        )
+      )
     ));
     assert!(
       observe_oden_parent_release_entrypoint_candidate(&graph, &entrypoint)
@@ -2723,7 +4436,7 @@ mod oden_parent_runtime_dependency_observer_tests {
 
   #[test]
   fn oden_parent_ordinary_esm_candidate_refuses_unjustified_schemes_and_external_targets()
-  {
+   {
     for module_specifier in [
       "https://example.com/direct.ts",
       "data:text/javascript,export%20default%201",
@@ -2737,9 +4450,11 @@ mod oden_parent_runtime_dependency_observer_tests {
           &graph,
           &module_specifier,
         ),
-        Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-          "module specifier is neither a direct file nor a candidate JSR registry target"
-        ))
+        Err(
+          OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+            "module specifier is neither a direct file nor a candidate JSR registry target"
+          )
+        )
       ));
     }
 
@@ -2762,9 +4477,11 @@ mod oden_parent_runtime_dependency_observer_tests {
         &graph,
         &module_specifier,
       ),
-      Err(OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
-        "dependency is not a direct file/node target or candidate JSR redirect chain"
-      ))
+      Err(
+        OdenParentOrdinaryEsmGraphModuleCandidateError::InvalidGraph(
+          "dependency is not a direct file/node target or candidate JSR redirect chain"
+        )
+      )
     ));
   }
 
@@ -2774,10 +4491,8 @@ mod oden_parent_runtime_dependency_observer_tests {
     let root = tempfile::TempDir::new().unwrap();
     let entrypoint =
       materialize_release_entrypoint(root.path(), "src/release.ts", false);
-    let (graph, graph_entrypoint) = release_graph(
-      entrypoint.as_str(),
-      RELEASE_ENTRY_SOURCE.as_bytes(),
-    );
+    let (graph, graph_entrypoint) =
+      release_graph(entrypoint.as_str(), RELEASE_ENTRY_SOURCE.as_bytes());
     assert_eq!(graph_entrypoint, entrypoint);
     let graph_original_bytes = match graph.get(&entrypoint).unwrap() {
       deno_graph::Module::Js(module) => {
@@ -2830,10 +4545,8 @@ mod oden_parent_runtime_dependency_observer_tests {
       materialize_release_entrypoint(root.path(), "src/release.ts", false);
     let alias =
       materialize_release_entrypoint(root.path(), "src/alias.ts", false);
-    let (graph, _) = release_graph(
-      entrypoint.as_str(),
-      RELEASE_ENTRY_SOURCE.as_bytes(),
-    );
+    let (graph, _) =
+      release_graph(entrypoint.as_str(), RELEASE_ENTRY_SOURCE.as_bytes());
 
     let pointer_mismatch =
       observe_oden_parent_release_entrypoint_direct_repo_candidate_with(
@@ -2852,9 +4565,11 @@ mod oden_parent_runtime_dependency_observer_tests {
       );
     assert!(matches!(
       pointer_mismatch,
-      Err(OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
-        "retained direct-file bytes do not reuse the graph-owned allocation"
-      ))
+      Err(
+        OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+          "retained direct-file bytes do not reuse the graph-owned allocation"
+        )
+      )
     ));
 
     let specifier_mismatch =
@@ -2872,9 +4587,11 @@ mod oden_parent_runtime_dependency_observer_tests {
       );
     assert!(matches!(
       specifier_mismatch,
-      Err(OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
-        "retained direct-file specifier differs from the graph entrypoint"
-      ))
+      Err(
+        OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+          "retained direct-file specifier differs from the graph entrypoint"
+        )
+      )
     ));
 
     let wrong_key_root = tempfile::TempDir::new().unwrap();
@@ -2902,9 +4619,11 @@ mod oden_parent_runtime_dependency_observer_tests {
       );
     assert!(matches!(
       wrong_key,
-      Err(OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
-        "retained direct-file key is not repo:src/release.ts"
-      ))
+      Err(
+        OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+          "retained direct-file key is not repo:src/release.ts"
+        )
+      )
     ));
 
     let executable_root = tempfile::TempDir::new().unwrap();
@@ -2932,9 +4651,11 @@ mod oden_parent_runtime_dependency_observer_tests {
       );
     assert!(matches!(
       executable,
-      Err(OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
-        "retained release entrypoint is executable"
-      ))
+      Err(
+        OdenParentReleaseEntrypointDirectRepoCandidateError::Mismatch(
+          "retained release entrypoint is executable"
+        )
+      )
     ));
   }
 
@@ -2945,10 +4666,8 @@ mod oden_parent_runtime_dependency_observer_tests {
     let entrypoint =
       materialize_release_entrypoint(root.path(), "src/release.ts", false);
     let entrypoint_path = root.path().join("src/release.ts");
-    let (graph, _) = release_graph(
-      entrypoint.as_str(),
-      RELEASE_ENTRY_SOURCE.as_bytes(),
-    );
+    let (graph, _) =
+      release_graph(entrypoint.as_str(), RELEASE_ENTRY_SOURCE.as_bytes());
     let mut changed_bytes = RELEASE_ENTRY_SOURCE.as_bytes().to_vec();
     *changed_bytes.last_mut().unwrap() ^= 1;
 
@@ -2973,11 +4692,9 @@ mod oden_parent_runtime_dependency_observer_tests {
     else {
       panic!("post-read mutation did not refuse at the retained-file boundary");
     };
-    assert!(
-      error
-        .to_string()
-        .contains("retained descriptor changed while reading direct repository source")
-    );
+    assert!(error.to_string().contains(
+      "retained descriptor changed while reading direct repository source"
+    ));
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2985,10 +4702,9 @@ mod oden_parent_runtime_dependency_observer_tests {
   fn release_entrypoint_direct_repo_join_requires_original_graph_bytes_before_direct_read()
    {
     let root = tempfile::TempDir::new().unwrap();
-    let entrypoint = ModuleSpecifier::from_file_path(
-      root.path().join("src/release.ts"),
-    )
-    .unwrap();
+    let entrypoint =
+      ModuleSpecifier::from_file_path(root.path().join("src/release.ts"))
+        .unwrap();
     let utf16_source = utf16le_source(RELEASE_ENTRY_SOURCE);
     let (decoded_only_graph, _) =
       release_graph(entrypoint.as_str(), &utf16_source);
@@ -3012,10 +4728,8 @@ mod oden_parent_runtime_dependency_observer_tests {
     ));
     assert!(!direct_called.get());
 
-    let (valid_graph, _) = release_graph(
-      entrypoint.as_str(),
-      RELEASE_ENTRY_SOURCE.as_bytes(),
-    );
+    let (valid_graph, _) =
+      release_graph(entrypoint.as_str(), RELEASE_ENTRY_SOURCE.as_bytes());
     let mut query_alias = entrypoint.clone();
     query_alias.set_query(Some("alias"));
     let direct_called = Cell::new(false);
@@ -3657,6 +5371,445 @@ mod oden_parent_runtime_dependency_observer_tests {
       .is_err()
     );
   }
+  fn parsed_code_only_dependencies_with_media_type(
+    specifier: &ModuleSpecifier,
+    media_type: MediaType,
+    source: &str,
+  ) -> IndexMap<String, Dependency> {
+    let parsed = deno_ast::parse_module(deno_ast::ParseParams {
+      specifier: specifier.clone(),
+      text: source.to_string().into(),
+      media_type,
+      capture_tokens: false,
+      maybe_syntax: None,
+      scope_analysis: false,
+    })
+    .unwrap();
+    deno_graph::parse_module_from_ast(deno_graph::ParseModuleFromAstOptions {
+      graph_kind: GraphKind::CodeOnly,
+      specifier: specifier.clone(),
+      maybe_headers: None,
+      mtime: None,
+      parsed_source: &parsed,
+      file_system: &deno_graph::source::NullFileSystem,
+      jsr_url_provider: &deno_graph::source::DefaultJsrUrlProvider,
+      maybe_resolver: None,
+    })
+    .dependencies
+  }
+
+  fn parsed_code_only_dependencies(
+    specifier: &ModuleSpecifier,
+    source: &str,
+  ) -> IndexMap<String, Dependency> {
+    parsed_code_only_dependencies_with_media_type(
+      specifier,
+      MediaType::TypeScript,
+      source,
+    )
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_whole_graph_parser_proves_type_omission_by_exact_occurrence() {
+    let specifier =
+      ModuleSpecifier::parse("file:///repo/src/type-shape.ts").unwrap();
+    let source = concat!(
+      "import type { A } from \"./same.ts\";\n",
+      "import { type B, value } from \"./same.ts\";\n",
+      "type C = import(\"./other.ts\").C;\n",
+      "export type { D } from \"./types.ts\";\n",
+      "export { type E } from \"./runtime-export.ts\";\n",
+      "void value;\n",
+    );
+    let dependencies = parsed_code_only_dependencies(&specifier, source);
+    assert!(dependencies.get("./other.ts").is_none());
+    assert!(dependencies.get("./types.ts").is_none());
+    let (observed, computed) = observe_oden_parent_whole_graph_dependencies(
+      &specifier,
+      MediaType::TypeScript,
+      source.as_bytes(),
+      &dependencies,
+      false,
+    )
+    .unwrap();
+    assert_eq!(computed, 0);
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].raw_specifier, "./same.ts");
+    assert_eq!(observed[1].raw_specifier, "./runtime-export.ts");
+    let first_type = source.find("\"./same.ts\"").unwrap();
+    let runtime_same = source[first_type + 1..]
+      .find("\"./same.ts\"")
+      .map(|offset| first_type + 1 + offset)
+      .unwrap();
+    assert_eq!(observed[0].source_byte_start, (runtime_same + 1) as u64);
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_whole_graph_parser_refuses_unreviewed_surfaces_and_facts() {
+    let specifier =
+      ModuleSpecifier::parse("file:///repo/src/refusal.ts").unwrap();
+    for source in [
+      "const value = require(\"./dep.ts\");\nexport { value };\n",
+      "new Worker(\"./worker.ts\", { type: \"module\" });\nexport {};\n",
+      "module.exports = {};\nexport {};\n",
+      "/// <reference path=\"./types.d.ts\" />\nexport {};\n",
+      "const value = import(`./${name}.ts`);\nexport { value };\n",
+    ] {
+      let dependencies = parsed_code_only_dependencies(&specifier, source);
+      assert!(
+        observe_oden_parent_whole_graph_dependencies(
+          &specifier,
+          MediaType::TypeScript,
+          source.as_bytes(),
+          &dependencies,
+          false,
+        )
+        .is_err(),
+        "accepted {source:?}"
+      );
+    }
+
+    let source = "import \"./dep.ts\";\n";
+    let mut dependencies = parsed_code_only_dependencies(&specifier, source);
+    dependencies.get_mut("./dep.ts").unwrap().imports[0].kind =
+      ImportKind::EsSource;
+    assert!(
+      observe_oden_parent_whole_graph_dependencies(
+        &specifier,
+        MediaType::TypeScript,
+        source.as_bytes(),
+        &dependencies,
+        false,
+      )
+      .is_err()
+    );
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_whole_graph_parser_refuses_mixed_case_graph_directives() {
+    let specifier =
+      ModuleSpecifier::parse("file:///repo/src/directives.ts").unwrap();
+    for source in [
+      "/// <REFERENCE PATH=\"./types.d.ts\" />\nexport {};\n",
+      concat!(
+        "// @DENO-TYPES=\"./types.d.ts\"\n",
+        "import value from \"./value.js\";\n",
+        "void value;\n",
+      ),
+    ] {
+      let dependencies = parsed_code_only_dependencies(&specifier, source);
+      assert!(matches!(
+        observe_oden_parent_whole_graph_dependencies(
+          &specifier,
+          MediaType::TypeScript,
+          source.as_bytes(),
+          &dependencies,
+          false,
+        ),
+        Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+          "deno_graph analyzer reported a comment-directed dependency"
+        ))
+      ));
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_whole_graph_parser_refuses_free_form_jsdoc_import_type() {
+    let specifier =
+      ModuleSpecifier::parse("file:///repo/src/jsdoc.js").unwrap();
+    let source =
+      "/** note {import(\"./types.js\").T} */\nexport const value = 1;\n";
+    let dependencies = parsed_code_only_dependencies_with_media_type(
+      &specifier,
+      MediaType::JavaScript,
+      source,
+    );
+    assert!(matches!(
+      observe_oden_parent_whole_graph_dependencies(
+        &specifier,
+        MediaType::JavaScript,
+        source.as_bytes(),
+        &dependencies,
+        false,
+      ),
+      Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+        "deno_graph analyzer reported a comment-directed dependency"
+      ))
+    ));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_whole_graph_parser_refuses_jsdoc_import_declaration() {
+    let specifier =
+      ModuleSpecifier::parse("file:///repo/src/jsdoc.js").unwrap();
+    let source =
+      "/** @import { T } from \"./types.js\" */\nexport const value = 1;\n";
+    let dependencies = parsed_code_only_dependencies_with_media_type(
+      &specifier,
+      MediaType::JavaScript,
+      source,
+    );
+    assert!(matches!(
+      observe_oden_parent_whole_graph_dependencies(
+        &specifier,
+        MediaType::JavaScript,
+        source.as_bytes(),
+        &dependencies,
+        false,
+      ),
+      Err(OdenParentRuntimeDependencyObservationError::UnsupportedAst(
+        "deno_graph analyzer reported a comment-directed dependency"
+      ))
+    ));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_bootstrap_asset_parser_freezes_computed_handoff() {
+    let specifier =
+      ModuleSpecifier::parse("file:///repo/src/capsec/bootstrap.ts").unwrap();
+    let exact = concat!(
+      "import type { Grant } from \"./policy.ts\";\n",
+      "import { install } from \"./enforce.ts\";\n",
+      "import { buildAttributionContext } from \"./attribution.ts\";\n",
+      "export async function bootstrap(entry: string, _grant?: Grant) {\n",
+      "  void install; void buildAttributionContext;\n",
+      "  await import(entry);\n",
+      "}\n",
+    );
+    assert_eq!(
+      observe_oden_parent_bootstrap_asset_source(&specifier, exact.as_bytes())
+        .unwrap(),
+      1
+    );
+    for changed in [
+      exact.replace("import(entry)", "import(other)"),
+      exact.replace("import(entry)", "import(entry, {})"),
+      exact.replace("import(entry)", "import(entry); await import(entry)"),
+      exact.replace("./attribution.ts", "./new-loader.ts"),
+    ] {
+      assert!(
+        observe_oden_parent_bootstrap_asset_source(
+          &specifier,
+          changed.as_bytes(),
+        )
+        .is_err()
+      );
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  async fn whole_graph_fixture()
+  -> (tempfile::TempDir, ModuleGraph, ModuleSpecifier) {
+    use deno_graph::packages::JsrPackageInfo;
+    use deno_graph::packages::JsrPackageInfoVersion;
+    use deno_graph::packages::JsrPackageVersionInfo;
+    use deno_semver::Version;
+
+    let root = tempfile::tempdir_in("/private/tmp").unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::create_dir(src.join("capsec")).unwrap();
+    std::fs::write(src.join("release.ts"), RELEASE_ENTRY_SOURCE).unwrap();
+    let main_source = concat!(
+      "import bootstrap from \"./capsec/bootstrap.ts\" with { type: \"text\" };\n",
+      "import { parse } from \"jsr:@std/jsonc@^1.0.2\";\n",
+      "export async function main() { void bootstrap; parse(\"{}\"); return 0; }\n",
+    );
+    let bootstrap_source = concat!(
+      "import type { Grant } from \"./policy.ts\";\n",
+      "import { install } from \"./enforce.ts\";\n",
+      "import { buildAttributionContext } from \"./attribution.ts\";\n",
+      "export async function bootstrap(entry: string, _grant?: Grant) {\n",
+      "  void install; void buildAttributionContext;\n",
+      "  await import(entry);\n",
+      "}\n",
+    );
+    std::fs::write(src.join("main.ts"), main_source).unwrap();
+    std::fs::write(src.join("capsec/bootstrap.ts"), bootstrap_source).unwrap();
+
+    let entrypoint =
+      ModuleSpecifier::from_file_path(src.join("release.ts")).unwrap();
+    let main_specifier =
+      ModuleSpecifier::from_file_path(src.join("main.ts")).unwrap();
+    let bootstrap_specifier =
+      ModuleSpecifier::from_file_path(src.join("capsec/bootstrap.ts")).unwrap();
+    let private =
+      ModuleSpecifier::parse(ODEN_PARENT_PRIVATE_MODULE_SPECIFIER).unwrap();
+    let jsr_module =
+      ModuleSpecifier::parse("https://jsr.io/@std/jsonc/1.0.2/mod.ts").unwrap();
+    let jsr_parse =
+      ModuleSpecifier::parse("https://jsr.io/@std/jsonc/1.0.2/parse.ts")
+        .unwrap();
+    let mut loader = MemoryLoader::default();
+    loader.add_source_with_text(&entrypoint, RELEASE_ENTRY_SOURCE);
+    loader.add_source_with_text(&main_specifier, main_source);
+    loader.add_external_source(&bootstrap_specifier);
+    loader.add_external_source(&private);
+    loader.add_jsr_package_info(
+      "@std/jsonc",
+      &JsrPackageInfo {
+        versions: HashMap::from([(
+          Version::parse_standard("1.0.2").unwrap(),
+          JsrPackageInfoVersion::default(),
+        )]),
+        latest: None,
+      },
+    );
+    loader.add_jsr_version_info(
+      "@std/jsonc",
+      "1.0.2",
+      &JsrPackageVersionInfo {
+        exports: deno_core::serde_json::json!({ ".": "./mod.ts" }),
+        ..Default::default()
+      },
+    );
+    loader.add_source_with_text(
+      &jsr_module,
+      "export { parse } from \"./parse.ts\";\n",
+    );
+    loader.add_source_with_text(
+      &jsr_parse,
+      "export function parse(value: string) { return JSON.parse(value); }\n",
+    );
+    let mut graph = ModuleGraph::new(GraphKind::CodeOnly);
+    graph
+      .build(
+        vec![entrypoint.clone()],
+        Vec::new(),
+        &loader,
+        BuildOptions {
+          unstable_text_imports: true,
+          ..BuildOptions::default()
+        },
+      )
+      .await;
+    // Real authoring graphs preload all JSR lockfile mappings, not only the
+    // requests reached by the CodeOnly closure. Keep an unused locked mapping
+    // in the fixture so whole-graph reconciliation proves that distinction.
+    graph.packages.add_nv(
+      deno_semver::package::PackageReq::from_str("@std/unused@1").unwrap(),
+      deno_semver::package::PackageNv {
+        name: "@std/unused".into(),
+        version: Version::parse_standard("1.0.0").unwrap(),
+      },
+    );
+    (root, graph, entrypoint)
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[tokio::test]
+  async fn oden_parent_whole_graph_observes_transitive_jsr_and_real_vfs_stores()
+  {
+    let (root, graph, entrypoint) = whole_graph_fixture().await;
+    let observe = || {
+      observe_oden_parent_whole_graph_with(
+        &graph,
+        &entrypoint,
+        |specifier, bytes| {
+          observe_oden_parent_direct_repo_source_for_join_from_test_root(
+            root.path(),
+            specifier,
+            bytes,
+            || {},
+          )
+        },
+        |specifier| {
+          let bytes = Arc::<[u8]>::from(
+            std::fs::read(url_to_file_path(specifier).unwrap()).unwrap(),
+          );
+          observe_oden_parent_direct_repo_source_for_join_from_test_root(
+            root.path(),
+            specifier,
+            bytes,
+            || {},
+          )
+        },
+        |_specifier, _media_type, bytes| {
+          let mut emitted = bytes.to_vec();
+          emitted.extend_from_slice(b"\n// exact-test-emission\n");
+          Ok(OdenParentObservedEmittedModule {
+            emitted_bytes: emitted,
+            source_map_bytes: Some(b"{\"version\":3}".to_vec()),
+          })
+        },
+      )
+    };
+    let (first, first_edge) = observe().unwrap();
+    let (second, second_edge) = observe().unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first_edge, second_edge);
+    let canonical = String::from_utf8(first.canonical_jcs().unwrap()).unwrap();
+    assert!(canonical.contains("repo:src/release.ts"));
+    assert!(canonical.contains("repo:src/main.ts"));
+    assert!(canonical.contains("repo:src/capsec/bootstrap.ts"));
+    assert!(canonical.contains("jsr:@std/jsonc@1.0.2/mod.ts"));
+    assert!(canonical.contains("jsr:@std/jsonc@1.0.2/parse.ts"));
+    assert!(!canonical.contains("https://jsr.io"));
+    assert!(!canonical.contains("\"files\":[]"));
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[tokio::test]
+  async fn oden_parent_whole_graph_refuses_url_shape_without_package_facts_and_extra_root()
+   {
+    let (root, graph, entrypoint) = whole_graph_fixture().await;
+    let run = |graph: &ModuleGraph| {
+      observe_oden_parent_whole_graph_with(
+        graph,
+        &entrypoint,
+        |specifier, bytes| {
+          observe_oden_parent_direct_repo_source_for_join_from_test_root(
+            root.path(),
+            specifier,
+            bytes,
+            || {},
+          )
+        },
+        |specifier| {
+          let bytes = Arc::<[u8]>::from(
+            std::fs::read(url_to_file_path(specifier).unwrap()).unwrap(),
+          );
+          observe_oden_parent_direct_repo_source_for_join_from_test_root(
+            root.path(),
+            specifier,
+            bytes,
+            || {},
+          )
+        },
+        |_specifier, _media_type, bytes| {
+          Ok(OdenParentObservedEmittedModule {
+            emitted_bytes: bytes.to_vec(),
+            source_map_bytes: None,
+          })
+        },
+      )
+    };
+
+    let mut unauthenticated = graph.clone();
+    unauthenticated.packages = Default::default();
+    let error = run(&unauthenticated).unwrap_err().to_string();
+    assert!(
+      error.contains("resolver/package-graph")
+        || error.contains("candidate JSR")
+    );
+
+    let mut extra_root = graph;
+    extra_root
+      .roots
+      .insert(entrypoint.join("./main.ts").unwrap());
+    assert!(
+      run(&extra_root)
+        .unwrap_err()
+        .to_string()
+        .contains("sole release root")
+    );
+  }
 }
 
 pub struct DenoCompileBinaryWriter<'a> {
@@ -3701,6 +5854,246 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       npm_system_info,
       is_desktop,
     }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn oden_parent_authoring_workspace_resolver(
+    &self,
+    repository_root: &ModuleSpecifier,
+  ) -> Result<SerializedWorkspaceResolver, AnyError> {
+    let base_url = StandaloneRelativeFileBaseUrl::Path(repository_root);
+    let import_map = self
+      .workspace_resolver
+      .maybe_import_map()
+      .map(|import_map| {
+        if import_map.base_url().scheme() != "file" {
+          bail!("Oden parent workspace import map is not repository-local");
+        }
+        let specifier = base_url.specifier_key(import_map.base_url());
+        if specifier.starts_with("../")
+          || specifier.starts_with('/')
+          || specifier.contains('%')
+          || repository_root.join(specifier.as_ref()).ok().as_ref()
+            != Some(import_map.base_url())
+        {
+          bail!("Oden parent workspace import map has a noncanonical key");
+        }
+        Ok(SerializedWorkspaceResolverImportMap {
+          specifier: specifier.into_owned(),
+          json: import_map.to_json(),
+        })
+      })
+      .transpose()?;
+
+    let jsr_pkgs = self
+      .workspace_resolver
+      .jsr_packages()
+      .iter()
+      .map(|package| {
+        let relative_base = base_url.specifier_key(&package.base);
+        if relative_base.starts_with("../")
+          || relative_base.starts_with('/')
+          || relative_base.contains('%')
+          || repository_root.join(relative_base.as_ref()).ok().as_ref()
+            != Some(&package.base)
+        {
+          bail!("Oden parent workspace JSR package has a noncanonical base");
+        }
+        Ok(SerializedResolverWorkspaceJsrPackage {
+          relative_base: relative_base.into_owned(),
+          name: package.name.clone(),
+          version: package.version.clone(),
+          exports: package.exports.clone(),
+        })
+      })
+      .collect::<Result<Vec<_>, AnyError>>()?;
+
+    let package_jsons = self
+      .workspace_resolver
+      .package_jsons()
+      .map(|package_json| {
+        let specifier = package_json.specifier();
+        let key = base_url.specifier_key(&specifier);
+        if key.starts_with("../")
+          || key.starts_with('/')
+          || key.contains('%')
+          || repository_root.join(key.as_ref()).ok().as_ref()
+            != Some(&specifier)
+        {
+          bail!("Oden parent workspace package.json has a noncanonical key");
+        }
+        Ok((key.into_owned(), serde_json::to_value(package_json)?))
+      })
+      .collect::<Result<_, AnyError>>()?;
+
+    Ok(SerializedWorkspaceResolver {
+      import_map,
+      jsr_pkgs,
+      package_jsons,
+      pkg_json_resolution: self.workspace_resolver.pkg_json_dep_resolution(),
+      catalogs: self.workspace_resolver.catalogs().clone(),
+    })
+  }
+
+  /// Observe the complete fixed authoring Generate input without opening an
+  /// output or entering the ordinary standalone writer. The raw-mode
+  /// admission layer remains responsible for constructing the exact CLI state
+  /// and an exact private External graph terminal before this method runs.
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  pub(crate) fn observe_oden_parent_authoring_generate(
+    &self,
+    session: &OdenParentAllowlistGenerateSession,
+    graph: &ModuleGraph,
+    entrypoint: &ModuleSpecifier,
+    compile_flags: &CompileFlags,
+  ) -> Result<OdenParentAuthoringGenerateObservation, AnyError> {
+    session.require_stable_reconciliation()?;
+    if compile_flags.source_file != "src/release.ts"
+      || compile_flags.output.is_some()
+      || !compile_flags.args.is_empty()
+      || compile_flags.target.is_some()
+      || compile_flags.no_terminal
+      || compile_flags.icon.is_some()
+      || !compile_flags.include.is_empty()
+      || !compile_flags.exclude.is_empty()
+      || compile_flags.eszip
+      || compile_flags.self_extracting
+      || compile_flags.oden_parent_allowlist_mode
+        != Some(OdenParentAllowlistMode::Generate)
+      || compile_flags.oden_parent_instance_commitments.is_some()
+      || compile_flags.bundle
+      || compile_flags.app_name.as_deref() != Some("oden")
+      || compile_flags.minify
+      || compile_flags.exclude_unused_npm
+    {
+      bail!("Oden parent authoring Generate compile flags are not exact");
+    }
+    if self
+      .cli_options
+      .workspace()
+      .package_jsons()
+      .into_iter()
+      .next()
+      .is_some()
+    {
+      bail!("Oden parent authoring workspace contains package.json VFS inputs");
+    }
+    match self.npm_resolver {
+      CliNpmResolver::Byonm(_) => {
+        bail!("Oden parent authoring refuses BYONM VFS discovery");
+      }
+      CliNpmResolver::Managed(_) => {}
+    }
+
+    let repository_root = oden_parent_repository_root_url(entrypoint)?;
+    if url_to_file_path(&repository_root)? != session.repository_root_path() {
+      bail!("Oden parent authoring session root differs from the graph root");
+    }
+    let workspace_resolver =
+      self.oden_parent_authoring_workspace_resolver(&repository_root)?;
+    let unstable_config = UnstableConfig {
+      legacy_flag_enabled: false,
+      detect_cjs: self.cli_options.unstable_detect_cjs(),
+      features: self
+        .cli_options
+        .unstable_features()
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+      lazy_dynamic_imports: self.cli_options.unstable_lazy_dynamic_imports(),
+      npm_lazy_caching: self.cli_options.unstable_npm_lazy_caching(),
+      raw_imports: self.cli_options.unstable_raw_imports(),
+      sloppy_imports: self.cli_options.unstable_sloppy_imports(),
+      tsgo: self.cli_options.unstable_tsgo(),
+    };
+    let otel_config = self.cli_options.otel_config();
+    if !oden_parent_otel_config_is_disabled(&otel_config) {
+      bail!("Oden parent authoring telemetry configuration is not disabled");
+    }
+    let configuration = OdenParentStandaloneConfiguration::from_effective(
+      &workspace_resolver,
+      &unstable_config,
+      &otel_config,
+    )?;
+
+    let (vfs_graph, static_import_edge) = observe_oden_parent_whole_graph_with(
+      graph,
+      entrypoint,
+      |specifier, original_bytes| {
+        session.observe_direct_repository_source(specifier, original_bytes)
+      },
+      |specifier| session.observe_bootstrap_asset_source(specifier),
+      |specifier, media_type, original_bytes| {
+        let graph_module = graph
+          .try_get(specifier)
+          .map_err(|error| deno_core::anyhow::anyhow!(error.to_string()))?
+          .ok_or_else(|| {
+            deno_core::anyhow::anyhow!(
+              "Oden parent emitter input is absent from the graph"
+            )
+          })?;
+        match (graph_module, media_type) {
+          (
+            deno_graph::Module::Js(module),
+            OdenParentVfsMediaType::JavaScript
+            | OdenParentVfsMediaType::TypeScript,
+          ) => {
+            let graph_original =
+              module.source.try_get_original_bytes().ok_or_else(|| {
+                deno_core::anyhow::anyhow!(
+                  "Oden parent emitter input lacks graph-owned original bytes"
+                )
+              })?;
+            if !Arc::ptr_eq(&graph_original, original_bytes)
+              || graph_original.as_ref() != module.source.text.as_bytes()
+              || graph_original.starts_with(b"\xef\xbb\xbf")
+              || module.is_script
+              || !matches!(
+                (module.media_type, media_type),
+                (MediaType::JavaScript, OdenParentVfsMediaType::JavaScript)
+                  | (MediaType::TypeScript, OdenParentVfsMediaType::TypeScript)
+              )
+            {
+              bail!("Oden parent emitter input lost its exact graph join");
+            }
+            if module.media_type.is_emittable() {
+              let (emitted, source_map) =
+                self.emitter.emit_source_for_deno_compile(
+                  specifier,
+                  module.media_type,
+                  ModuleKind::Esm,
+                  &module.source.text,
+                )?;
+              if emitted != module.source.text.as_ref() {
+                return Ok(OdenParentObservedEmittedModule {
+                  emitted_bytes: emitted.into_bytes(),
+                  source_map_bytes: Some(source_map.into_bytes()),
+                });
+              }
+            }
+            Ok(OdenParentObservedEmittedModule {
+              emitted_bytes: original_bytes.to_vec(),
+              source_map_bytes: None,
+            })
+          }
+          (deno_graph::Module::Json(_), OdenParentVfsMediaType::Json)
+          | (deno_graph::Module::Wasm(_), OdenParentVfsMediaType::Wasm) => {
+            Ok(OdenParentObservedEmittedModule {
+              emitted_bytes: original_bytes.to_vec(),
+              source_map_bytes: None,
+            })
+          }
+          _ => bail!("Oden parent emitter input has an unsupported row kind"),
+        }
+      },
+    )?;
+
+    session.require_stable_reconciliation()?;
+    Ok(OdenParentAuthoringGenerateObservation {
+      configuration,
+      vfs_graph,
+      static_import_edge,
+    })
   }
 
   pub async fn write_bin(

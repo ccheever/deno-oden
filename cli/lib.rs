@@ -108,6 +108,128 @@ pub fn oden_parent_allowlist_refusal_exit_code_for_raw_dispatch(
   standalone::refusal_exit_code_for_oden_parent_allowlist_dispatch(dispatch)
 }
 
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Reclassify the process's unmodified native argv before admitting exact
+// authoring Generate and creating a current-thread runtime with no standalone
+// output. Errors collapse to silent exit 76; Check and all generic compile
+// routes remain disabled. No caller-supplied dispatch can mint admission.
+#[doc(hidden)]
+pub fn run_oden_parent_allowlist_generate() -> i32 {
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  {
+    let args = std::env::args_os().collect::<Vec<_>>();
+    oden_parent_allowlist_generate_exit_code_for_raw_args_with(
+      &args,
+      |dispatch| {
+        let Ok(admission) =
+          standalone::admit_oden_parent_allowlist_generate(dispatch)
+        else {
+          return false;
+        };
+        let Ok(session) =
+          standalone::begin_oden_parent_allowlist_generate_session(admission)
+        else {
+          return false;
+        };
+
+        deno_runtime::tokio_util::create_and_run_current_thread(async move {
+          tools::compile::run_oden_parent_allowlist_generate(session).await
+        })
+        .is_ok()
+      },
+    )
+  }
+
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE
+  }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn oden_parent_allowlist_generate_exit_code_for_raw_args_with(
+  args: &[std::ffi::OsString],
+  generate: impl FnOnce(
+    deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch,
+  ) -> bool,
+) -> i32 {
+  use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE;
+  use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch;
+
+  let dispatch = deno_lib::standalone::oden_parent_allowlist::classify_oden_parent_allowlist_raw_argv(args);
+  if dispatch != OdenParentAllowlistRawDispatch::Generate {
+    return ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE;
+  }
+
+  if generate(dispatch) {
+    0
+  } else {
+    ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE
+  }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod oden_parent_allowlist_generate_bridge_tests {
+  use super::*;
+  use deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE;
+  use deno_lib::standalone::oden_parent_allowlist::OdenParentAllowlistRawDispatch;
+  use std::ffi::OsString;
+
+  fn raw_args(args: &[&str]) -> Vec<OsString> {
+    args.iter().map(OsString::from).collect()
+  }
+
+  #[test]
+  fn parent_allowlist_generate_bridge_rederives_raw_argv_and_fails_closed() {
+    let exact = raw_args(&[
+      "arbitrary-argv-zero",
+      "compile",
+      "--_oden-parent-allowlist-mode=generate",
+    ]);
+    assert_eq!(
+      oden_parent_allowlist_generate_exit_code_for_raw_args_with(
+        &exact,
+        |dispatch| {
+          assert_eq!(dispatch, OdenParentAllowlistRawDispatch::Generate);
+          true
+        },
+      ),
+      0,
+    );
+    assert_eq!(
+      oden_parent_allowlist_generate_exit_code_for_raw_args_with(
+        &exact,
+        |_| false,
+      ),
+      ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE,
+    );
+
+    for args in [
+      raw_args(&["deno", "compile"]),
+      raw_args(&["deno", "compile", "--_oden-parent-allowlist-mode=check"]),
+      raw_args(&[
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate",
+        "main.ts",
+      ]),
+      raw_args(&[
+        "deno",
+        "compile",
+        "--_oden-parent-allowlist-mode=generate-suffix",
+      ]),
+    ] {
+      assert_eq!(
+        oden_parent_allowlist_generate_exit_code_for_raw_args_with(
+          &args,
+          |_| panic!("non-exact raw argv reached Generate callback: {args:?}"),
+        ),
+        ODEN_PARENT_ALLOWLIST_REFUSAL_EXIT_CODE,
+      );
+    }
+  }
+}
+
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

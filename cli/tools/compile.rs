@@ -17,6 +17,8 @@ use deno_core::error::AnyError;
 use deno_core::futures::FutureExt;
 use deno_graph::GraphKind;
 use deno_graph::ModuleGraph;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use deno_graph::source::Loader;
 use deno_npm_installer::graph::NpmCachingStrategy;
 use deno_path_util::resolve_url_or_path;
 use deno_path_util::url_from_file_path;
@@ -89,6 +91,329 @@ fn ensure_oden_parent_reserved_compile_inputs_are_disabled(
       "The internal `--_oden-parent-instance-commitments` input is reserved but not yet enabled; no standalone was produced"
     );
   }
+  Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OdenParentAuthoringLoadDecision {
+  ExactPrivateExternal,
+  RefusePrivateFamily,
+  Delegate,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn classify_oden_parent_authoring_load(
+  specifier: &ModuleSpecifier,
+) -> OdenParentAuthoringLoadDecision {
+  if specifier.scheme() != "oden-internal" {
+    return OdenParentAuthoringLoadDecision::Delegate;
+  }
+  if specifier.as_str()
+    == deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_PRIVATE_MODULE_SPECIFIER
+  {
+    OdenParentAuthoringLoadDecision::ExactPrivateExternal
+  } else {
+    OdenParentAuthoringLoadDecision::RefusePrivateFamily
+  }
+}
+
+/// The ordinary graph loader remains authoritative for every non-private
+/// module. The one frozen private specifier is retained as an exact external
+/// terminal; its separately frozen source is bound by the whole-graph adapter,
+/// not represented as a file/data URL or parsed as an ordinary graph module.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct OdenParentAuthoringGraphLoader<L> {
+  delegate: L,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl<L: Loader> Loader for OdenParentAuthoringGraphLoader<L> {
+  fn max_redirects(&self) -> usize {
+    self.delegate.max_redirects()
+  }
+
+  fn cache_info_enabled(&self) -> bool {
+    self.delegate.cache_info_enabled()
+  }
+
+  fn get_cache_info(
+    &self,
+    specifier: &ModuleSpecifier,
+  ) -> Option<deno_graph::source::CacheInfo> {
+    self.delegate.get_cache_info(specifier)
+  }
+
+  fn load(
+    &self,
+    specifier: &ModuleSpecifier,
+    options: deno_graph::source::LoadOptions,
+  ) -> deno_graph::source::LoadFuture {
+    match classify_oden_parent_authoring_load(specifier) {
+      OdenParentAuthoringLoadDecision::ExactPrivateExternal => {
+        if options.maybe_checksum.is_some() {
+          return Box::pin(std::future::ready(Ok(None)));
+        }
+        let specifier = specifier.clone();
+        Box::pin(std::future::ready(Ok(Some(
+          deno_graph::source::LoadResponse::External { specifier },
+        ))))
+      }
+      OdenParentAuthoringLoadDecision::RefusePrivateFamily => {
+        Box::pin(std::future::ready(Ok(None)))
+      }
+      OdenParentAuthoringLoadDecision::Delegate => {
+        self.delegate.load(specifier, options)
+      }
+    }
+  }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn fixed_oden_parent_allowlist_compile_flags() -> CompileFlags {
+  CompileFlags {
+    source_file: "src/release.ts".to_string(),
+    output: None,
+    args: Vec::new(),
+    target: None,
+    no_terminal: false,
+    icon: None,
+    include: Vec::new(),
+    exclude: Vec::new(),
+    eszip: false,
+    self_extracting: false,
+    oden_parent_allowlist_mode: Some(OdenParentAllowlistMode::Generate),
+    oden_parent_instance_commitments: None,
+    bundle: false,
+    app_name: Some("oden".to_string()),
+    minify: false,
+    exclude_unused_npm: false,
+  }
+}
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Construct the complete fixed authoring profile without consulting the
+// general parser. Exhaustive literals make a newly added flag a compile-time
+// review obligation instead of silently inheriting an ambient default.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn fixed_oden_parent_allowlist_flags(
+  repository_root: PathBuf,
+  compile_flags: &CompileFlags,
+) -> Flags {
+  Flags {
+    initial_cwd: Some(repository_root),
+    argv: Vec::new(),
+    subcommand: DenoSubcommand::Compile(compile_flags.clone()),
+    frozen_lockfile: Some(true),
+    ca_stores: None,
+    ca_data: None,
+    cache_blocklist: Vec::new(),
+    cached_only: false,
+    type_check_mode: TypeCheckMode::None,
+    config_flag: ConfigFlag::Path("deno.json".to_string()),
+    node_modules_dir: Some(NodeModulesDirMode::None),
+    node_modules_linker: None,
+    vendor: Some(false),
+    enable_testing_features: false,
+    ext: None,
+    internal: crate::args::InternalFlags {
+      cache_path: None,
+      root_node_modules_dir_override: None,
+      lockfile_skip_write: false,
+      is_desktop: false,
+      compile_bundle_embed_node_modules: false,
+      compile_bundle_referenced_paths: Vec::new(),
+      force_bundle_mode: false,
+    },
+    ignore: Vec::new(),
+    import_map_path: None,
+    env_file: None,
+    inspect_brk: None,
+    inspect_wait: None,
+    inspect: None,
+    inspect_publish_uid: None,
+    location: None,
+    lock: Some("deno.lock".to_string()),
+    log_level: None,
+    minimum_dependency_age: None,
+    no_remote: false,
+    no_lock: false,
+    no_npm: false,
+    reload: false,
+    seed: None,
+    trace_ops: None,
+    unstable_config: deno_lib::args::UnstableConfig {
+      legacy_flag_enabled: false,
+      detect_cjs: false,
+      lazy_dynamic_imports: false,
+      raw_imports: false,
+      sloppy_imports: false,
+      npm_lazy_caching: false,
+      tsgo: false,
+      features: Vec::new(),
+    },
+    unsafely_ignore_certificate_errors: None,
+    v8_flags: Vec::new(),
+    code_cache_enabled: true,
+    permissions: crate::args::PermissionFlags {
+      allow_all: true,
+      allow_env: None,
+      deny_env: None,
+      ignore_env: None,
+      allow_ffi: None,
+      deny_ffi: None,
+      allow_net: None,
+      deny_net: None,
+      allow_read: None,
+      deny_read: None,
+      ignore_read: None,
+      allow_run: None,
+      deny_run: None,
+      allow_sys: None,
+      deny_sys: None,
+      allow_write: None,
+      deny_write: None,
+      no_prompt: true,
+      allow_import: None,
+      deny_import: None,
+    },
+    allow_scripts: deno_npm_installer::PackagesAllowedScripts::None,
+    deny_scripts: Vec::new(),
+    permission_set: None,
+    eszip: false,
+    node_conditions: Vec::new(),
+    preload: Vec::new(),
+    require: Vec::new(),
+    tunnel: false,
+    cpu_prof: None,
+    watch: None,
+  }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const ODEN_PARENT_AUTHORING_AMBIENT_ENVIRONMENT_VARIABLES: [&str; 26] = [
+  "DENO_DISABLE_VERBATIM_MODULE_SYNTAX",
+  "JSR_URL",
+  "DENO_NO_PACKAGE_JSON",
+  "DENO_DONT_USE_INTERNAL_NODE_COMPAT_STATE_FD",
+  "NPM_CONFIG_REGISTRY",
+  "DENO_AUTH_TOKENS",
+  "DENO_TLS_CA_STORE",
+  "DENO_CERT",
+  "NODE_EXTRA_CA_CERTS",
+  "ALL_PROXY",
+  "all_proxy",
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "NO_PROXY",
+  "no_proxy",
+  "SSLKEYLOGFILE",
+  "DENO_PATCH_REACT_CVE",
+  "OTEL_SDK_DISABLED",
+  "OTEL_DENO",
+  "OTEL_PROPAGATORS",
+  "OTEL_DENO_TRACING",
+  "OTEL_DENO_METRICS",
+  "OTEL_DENO_CONSOLE",
+  "DENO_UNSTABLE_OTEL_DETERMINISTIC",
+];
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Refuse every reviewed ambient resolver, transport, trust, telemetry, and
+// source-rewrite input by native presence before constructing the CLI factory.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ensure_oden_parent_authoring_environment_is_closed_with<Lookup>(
+  mut lookup: Lookup,
+) -> Result<(), AnyError>
+where
+  Lookup: FnMut(&str) -> Option<std::ffi::OsString>,
+{
+  for name in ODEN_PARENT_AUTHORING_AMBIENT_ENVIRONMENT_VARIABLES {
+    if lookup(name).is_some() {
+      bail!("Oden parent allowlist authoring environment was not closed");
+    }
+  }
+  Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "presence-only authoring environment closure before CliFactory"
+)]
+fn ensure_oden_parent_authoring_environment_is_closed() -> Result<(), AnyError>
+{
+  ensure_oden_parent_authoring_environment_is_closed_with(|name| {
+    std::env::var_os(name)
+  })
+}
+
+// @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
+// Build the real sole-root CodeOnly graph with the standard loader delegated
+// for every ordinary module, project its complete authoring observations, and
+// only then hand the candidate to the fixed-path atomic writer. No standalone
+// output, base image, metadata, instance commitment, brand, or op is reachable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) async fn run_oden_parent_allowlist_generate(
+  session: crate::standalone::OdenParentAllowlistGenerateSession,
+) -> Result<(), AnyError> {
+  session.require_stable_reconciliation().map_err(|_| {
+    anyhow!("Oden parent allowlist session reconciliation refused")
+  })?;
+  ensure_oden_parent_authoring_environment_is_closed()?;
+  let repository_root = session.repository_root_path().to_path_buf();
+  let compile_flags = fixed_oden_parent_allowlist_compile_flags();
+  let flags = Arc::new(fixed_oden_parent_allowlist_flags(
+    repository_root,
+    &compile_flags,
+  ));
+  let factory = CliFactory::from_flags(flags);
+  let cli_options = factory.cli_options()?;
+  let entrypoint = cli_options.resolve_main_module()?.clone();
+  let roots = get_module_roots_and_include_paths(
+    &entrypoint,
+    &compile_flags.include,
+    &compile_flags.exclude,
+    cli_options,
+  )?;
+  if roots.strict.as_slice() != [entrypoint.clone()]
+    || !roots.include.is_empty()
+    || !roots.include_paths.is_empty()
+  {
+    bail!("Oden parent allowlist authoring graph roots were not exact");
+  }
+
+  let module_graph_creator = factory.module_graph_creator().await?;
+  let delegate = module_graph_creator
+    .module_graph_builder()
+    .create_graph_loader_with_root_permissions();
+  let mut loader = OdenParentAuthoringGraphLoader { delegate };
+  let graph = module_graph_creator
+    .create_graph_with_loader(
+      GraphKind::CodeOnly,
+      vec![entrypoint.clone()],
+      &mut loader,
+      NpmCachingStrategy::Eager,
+    )
+    .await?;
+  module_graph_creator.graph_valid(&graph)?;
+
+  let binary_writer = factory.create_compile_binary_writer(false).await?;
+  let observation = binary_writer.observe_oden_parent_authoring_generate(
+    &session,
+    &graph,
+    &entrypoint,
+    &compile_flags,
+  )?;
+  crate::standalone::generate_oden_parent_allowlist_outputs(
+    session,
+    observation.configuration(),
+    observation.vfs_graph(),
+    observation.static_import_edge(),
+  )
+  .map_err(|_| anyhow!("Oden parent allowlist output generation refused"))?;
   Ok(())
 }
 
@@ -1434,6 +1759,145 @@ mod test {
       err.to_string(),
       "The internal `--_oden-parent-instance-commitments` input is reserved but not yet enabled; no standalone was produced"
     );
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_authoring_environment_accepts_only_complete_absence() {
+    let mut observed = Vec::new();
+    ensure_oden_parent_authoring_environment_is_closed_with(|name| {
+      observed.push(name.to_string());
+      None
+    })
+    .unwrap();
+    assert_eq!(
+      observed,
+      ODEN_PARENT_AUTHORING_AMBIENT_ENVIRONMENT_VARIABLES
+    );
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_authoring_environment_refuses_every_present_name() {
+    for refused in ODEN_PARENT_AUTHORING_AMBIENT_ENVIRONMENT_VARIABLES {
+      let err =
+        ensure_oden_parent_authoring_environment_is_closed_with(|name| {
+          (name == refused).then(std::ffi::OsString::new)
+        })
+        .unwrap_err();
+      assert_eq!(
+        err.to_string(),
+        "Oden parent allowlist authoring environment was not closed",
+        "presence of {refused} was not refused"
+      );
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_authoring_environment_refuses_non_unicode_value() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let non_unicode = std::ffi::OsString::from_vec(vec![0xff]);
+    let err = ensure_oden_parent_authoring_environment_is_closed_with(|name| {
+      (name == "DENO_AUTH_TOKENS").then(|| non_unicode.clone())
+    })
+    .unwrap_err();
+    assert_eq!(
+      err.to_string(),
+      "Oden parent allowlist authoring environment was not closed"
+    );
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_authoring_profile_is_fixed_and_output_free() {
+    let repository_root = PathBuf::from("/reviewed/oden-root");
+    let compile_flags = fixed_oden_parent_allowlist_compile_flags();
+    assert_eq!(compile_flags.source_file, "src/release.ts");
+    assert_eq!(compile_flags.output, None);
+    assert_eq!(compile_flags.args, Vec::<String>::new());
+    assert_eq!(compile_flags.target, None);
+    assert_eq!(compile_flags.icon, None);
+    assert_eq!(compile_flags.include, Vec::<String>::new());
+    assert_eq!(compile_flags.exclude, Vec::<String>::new());
+    assert_eq!(
+      compile_flags.oden_parent_allowlist_mode,
+      Some(OdenParentAllowlistMode::Generate)
+    );
+    assert_eq!(compile_flags.oden_parent_instance_commitments, None);
+    assert!(!compile_flags.eszip);
+    assert!(!compile_flags.self_extracting);
+    assert!(!compile_flags.bundle);
+    assert_eq!(compile_flags.app_name.as_deref(), Some("oden"));
+    assert!(!compile_flags.minify);
+    assert!(!compile_flags.exclude_unused_npm);
+
+    let flags = fixed_oden_parent_allowlist_flags(
+      repository_root.clone(),
+      &compile_flags,
+    );
+    assert_eq!(
+      flags.initial_cwd.as_deref(),
+      Some(repository_root.as_path())
+    );
+    assert_eq!(
+      flags.subcommand,
+      DenoSubcommand::Compile(compile_flags.clone())
+    );
+    assert_eq!(flags.frozen_lockfile, Some(true));
+    assert_eq!(flags.config_flag, ConfigFlag::Path("deno.json".to_string()));
+    assert_eq!(flags.lock.as_deref(), Some("deno.lock"));
+    assert_eq!(flags.node_modules_dir, Some(NodeModulesDirMode::None));
+    assert_eq!(flags.vendor, Some(false));
+    assert_eq!(flags.type_check_mode, TypeCheckMode::None);
+    assert!(flags.code_cache_enabled);
+    assert!(flags.permissions.allow_all);
+    assert!(flags.permissions.no_prompt);
+    assert!(flags.argv.is_empty());
+    assert!(flags.preload.is_empty());
+    assert!(flags.require.is_empty());
+    assert!(flags.watch.is_none());
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn oden_parent_authoring_loader_admits_only_exact_private_terminal() {
+    let exact = ModuleSpecifier::parse(
+      deno_lib::standalone::oden_parent_allowlist::ODEN_PARENT_PRIVATE_MODULE_SPECIFIER,
+    )
+    .unwrap();
+    assert_eq!(
+      classify_oden_parent_authoring_load(&exact),
+      OdenParentAuthoringLoadDecision::ExactPrivateExternal
+    );
+
+    for refused in [
+      "oden-internal:filesystem-parent-capture-v1",
+      "oden-internal:filesystem-parent-capture-v2/extra",
+      "oden-internal:other",
+    ] {
+      assert_eq!(
+        classify_oden_parent_authoring_load(
+          &ModuleSpecifier::parse(refused).unwrap()
+        ),
+        OdenParentAuthoringLoadDecision::RefusePrivateFamily
+      );
+    }
+
+    for delegated in [
+      "file:///reviewed/oden-root/src/release.ts",
+      "jsr:@std/assert@1/mod.ts",
+      "node:fs",
+      "https://jsr.io/@std/assert/1.0.0/mod.ts",
+    ] {
+      assert_eq!(
+        classify_oden_parent_authoring_load(
+          &ModuleSpecifier::parse(delegated).unwrap()
+        ),
+        OdenParentAuthoringLoadDecision::Delegate
+      );
+    }
   }
 
   #[test]
