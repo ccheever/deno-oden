@@ -612,6 +612,28 @@ mod imp {
       let tag = self.key.hmac_sha256(&preimage);
       URL_SAFE_NO_PAD.encode(tag)
     }
+
+    /// Consumes the receipt key and yields its raw 32 bytes for the drive to
+    /// emit to the external, digest-bound TS fixture runner. This exists solely
+    /// because the runner file — not the native side — performs the seal (design
+    /// §3): `runnerDigest` provenance is only true when the HMAC is computed by
+    /// that file's bytes, so the raw key MUST cross to it. Per spec 5197 the
+    /// receipt key MAY reach the external runner post-gate; the release gate has
+    /// already proved single release, and consuming `self` here prevents any
+    /// reuse of the key after its bytes are handed out.
+    ///
+    /// The parent-capture key MUST NOT leave the drive (spec 5193-5196):
+    /// [`ParentCaptureKey`] deliberately has no bytes accessor, only its MAC
+    /// tag. This accessor is exposed on [`ReceiptKey`] alone.
+    ///
+    /// SecretKey's erase-on-drop discipline is preserved: `[u8; 32]` is `Copy`,
+    /// so this returns a copy while `self` — and the module-internal
+    /// [`SecretKey`] storage it wraps — is dropped and zeroized at end of scope.
+    /// The caller MUST zeroize the emitted buffer after base64url-encoding it
+    /// onto the handoff channel.
+    pub(crate) fn into_released_bytes(self) -> [u8; 32] {
+      self.key.bytes
+    }
   }
 
   #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2087,6 +2109,83 @@ mod imp {
       // Same key bytes would still differ from the receipt framing because the
       // domains differ; here we only assert determinism and shape.
       assert_eq!(tag, capture.authenticate_capture(body));
+    }
+
+    #[test]
+    fn receipt_key_into_released_bytes_yields_the_raw_key_once_after_the_gate()
+    {
+      let mut entropy = FixedEntropy::new(11);
+      let mut gate = ReceiptKeyReleaseGate::mint(&mut entropy).unwrap();
+      // The gate still fails closed before both marks exist.
+      assert_eq!(
+        gate.try_release().err(),
+        Some(GateRefusal::CaptureNotComplete)
+      );
+      gate.mark_capture_complete();
+      assert_eq!(
+        gate.try_release().err(),
+        Some(GateRefusal::OracleNotComplete)
+      );
+      gate.mark_oracle_complete();
+      // Exactly one release yields the receipt key.
+      let key = gate.try_release().expect("released after both facts");
+      // A second release refuses; the key was already taken.
+      assert_eq!(gate.try_release().err(), Some(GateRefusal::AlreadyReleased));
+      // The consuming accessor returns the raw 32 key bytes. FixedEntropy's
+      // first fill (the receipt key's mint) is byte[i] = seed.wrapping_add(i).
+      let mut expected = [0u8; 32];
+      for (index, byte) in expected.iter_mut().enumerate() {
+        *byte = 11u8.wrapping_add(index as u8);
+      }
+      let released = key.into_released_bytes();
+      assert_eq!(released.len(), 32);
+      assert_eq!(released, expected);
+    }
+
+    #[test]
+    fn key_types_gained_no_clone_copy_debug_or_serialize_derive() {
+      // Compile-time guard freezing "a secret is never copied, logged, or
+      // serialized" (spec 4918-4931, 4942-4943) across every key type. Each
+      // probe const resolves to the inherent `true` ONLY while the bound holds
+      // (inherent items shadow the trait default); a stray derive would flip a
+      // const and trip the matching assertion.
+      use core::marker::PhantomData;
+
+      struct Probe<T>(PhantomData<T>);
+
+      trait DerivedDefaults {
+        const CLONE: bool = false;
+        const COPY: bool = false;
+        const DEBUG: bool = false;
+        const SERIALIZE: bool = false;
+      }
+      impl<T> DerivedDefaults for Probe<T> {}
+
+      impl<T: Clone> Probe<T> {
+        const CLONE: bool = true;
+      }
+      impl<T: Copy> Probe<T> {
+        const COPY: bool = true;
+      }
+      impl<T: std::fmt::Debug> Probe<T> {
+        const DEBUG: bool = true;
+      }
+      impl<T: serde::Serialize> Probe<T> {
+        const SERIALIZE: bool = true;
+      }
+
+      macro_rules! assert_no_secret_derives {
+        ($ty:ty) => {{
+          assert!(!Probe::<$ty>::CLONE);
+          assert!(!Probe::<$ty>::COPY);
+          assert!(!Probe::<$ty>::DEBUG);
+          assert!(!Probe::<$ty>::SERIALIZE);
+        }};
+      }
+
+      assert_no_secret_derives!(SecretKey);
+      assert_no_secret_derives!(ParentCaptureKey);
+      assert_no_secret_derives!(ReceiptKey);
     }
 
     #[test]

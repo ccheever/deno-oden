@@ -28,6 +28,11 @@ pub fn main() {
     }
   }
   if let Some(exit_code) =
+    deno::maybe_run_oden_capsec_filesystem_drive(args.iter().cloned())
+  {
+    std::process::exit(exit_code);
+  }
+  if let Some(exit_code) =
     deno::maybe_run_oden_capsec_filesystem_supervisor(args.iter().cloned())
   {
     std::process::exit(exit_code);

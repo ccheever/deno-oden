@@ -15,6 +15,7 @@ mod node;
 mod node_compat_shim;
 mod npm;
 mod oden_capsec_filesystem_candidate;
+mod oden_capsec_filesystem_drive;
 // @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
 // Keep the fail-closed native child lifecycle compiled but unreachable until
 // trusted parent capture admits the first generated filesystem case. A POSIX
@@ -107,6 +108,7 @@ use crate::util::v8::get_v8_flags_from_env;
 use crate::util::v8::init_v8_flags;
 
 pub use oden_capsec_filesystem_candidate::maybe_run_oden_capsec_filesystem_candidate;
+pub use oden_capsec_filesystem_drive::maybe_run_oden_capsec_filesystem_drive;
 pub use oden_capsec_filesystem_supervisor::maybe_run_oden_capsec_filesystem_supervisor;
 
 // @ref LLP 0019#frozen-parent-standalone-allowlist-and-byte-graph [implements] —
