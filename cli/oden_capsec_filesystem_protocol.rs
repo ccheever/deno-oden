@@ -51,7 +51,7 @@ fn canonical_ascii(value: &OsStr) -> Option<&str> {
   value.is_ascii().then_some(value)
 }
 
-fn is_canonical_sha256_digest(value: &str) -> bool {
+pub(crate) fn is_canonical_sha256_digest(value: &str) -> bool {
   let Some(payload) = value.strip_prefix("sha256-") else {
     return false;
   };
@@ -65,7 +65,7 @@ fn is_canonical_sha256_digest(value: &str) -> bool {
       .is_some_and(|last| b"AEIMQUYcgkosw048".contains(last))
 }
 
-fn is_canonical_identifier(value: &str) -> bool {
+pub(crate) fn is_canonical_identifier(value: &str) -> bool {
   !value.is_empty()
     && value.len() <= 4096
     && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))

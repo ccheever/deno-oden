@@ -105,8 +105,8 @@ pub const ODEN_PARENT_TARGET_POLICY_DIGEST_DOMAIN: &str =
 const ODEN_PARENT_TARGET_POLICY_REGISTRY_JCS_MAX_BYTES: usize = 67_108_864;
 const ODEN_PARENT_TARGET_POLICY_CARRIER_JCS_MAX_BYTES: usize = 67_112_960;
 const ODEN_PARENT_TARGET_POLICY_CARRIER_OVERHEAD_MAX_BYTES: usize = 4_096;
-const ODEN_PARENT_TARGET_POLICY_REVISION: u64 = 1;
-const ODEN_PARENT_TARGET_POLICY_TARGET_ORDER: [&str; 4] = [
+pub(crate) const ODEN_PARENT_TARGET_POLICY_REVISION: u64 = 1;
+pub(crate) const ODEN_PARENT_TARGET_POLICY_TARGET_ORDER: [&str; 4] = [
   "aarch64-apple-darwin",
   "x86_64-apple-darwin",
   "aarch64-unknown-linux-gnu",
@@ -119,10 +119,10 @@ const ODEN_PARENT_TARGET_POLICY_RUST_CFG_DIGESTS: [&str; 4] = [
   "f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c",
 ];
 const ODEN_PARENT_TARGET_POLICY_CARGO_GRAPH_DIGESTS: [&str; 4] = [
-  "db9c30f9dc521febae03256945ad55fa7bafe3ebc79ca35e94210bd0155d9a05",
-  "2bbbbee7d64104b0348f04ca21947c8a17f59263cce48ec2f5eb8ab4ae28b8df",
-  "a86d9658bf2ef4a76b20e2a52355a02539586ec2e863c7fac7caf58354496b3d",
-  "707b9ce9055b0cdca90b3765ce5bdb765725c9f319b0c8cc5f52815ddc84f069",
+  "4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4",
+  "c7650cb863ece7539e1dd91bc86668009a014ac1214ab33519d414a6bc97f5d1",
+  "bfc94d8674086d8be04a63f26e94a93ce4795abf6fc5ef59ab5e4842df930cde",
+  "d47b808c447418803448de70b5b6fe0dba6da53f15a228f14d704abab0ccf9d9",
 ];
 const ODEN_PARENT_TARGET_POLICY_CAPSEC_FEATURES: &str = "action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate";
 
@@ -251,7 +251,7 @@ fn os_str_is_oden_parent_allowlist_reserved_family(value: &OsStr) -> bool {
     })
 }
 
-const MAX_IJSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+pub(crate) const MAX_IJSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const ODEN_PARENT_REPOSITORY_RELATIVE_PATH_MAX_BYTES: usize = 4_096;
 const ODEN_PARENT_REPOSITORY_RELATIVE_COMPONENT_MAX_BYTES: usize = 255;
 
@@ -2206,7 +2206,7 @@ pub fn render_checked_oden_parent_target_policy_carrier_rust_module(
   render_oden_parent_target_policy_carrier_rust_module(carrier_jcs)
 }
 
-fn take_oden_parent_target_policy_registry_rows(
+pub(crate) fn take_oden_parent_target_policy_registry_rows(
   registry_jcs: &[u8],
 ) -> Result<Vec<serde_json::Value>, OdenParentAllowlistError> {
   let value = parse_exact_oden_parent_target_policy_json(
@@ -2573,7 +2573,7 @@ fn require_oden_parent_target_policy_identity(
   )
 }
 
-fn oden_parent_target_policy_feature_set(index: usize) -> String {
+pub(crate) fn oden_parent_target_policy_feature_set(index: usize) -> String {
   format!(
     "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:{};graph:sha256:{};profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:{}",
     ODEN_PARENT_TARGET_POLICY_RUST_CFG_DIGESTS[index],
@@ -2680,7 +2680,7 @@ fn require_oden_parent_target_policy_revision(
   Ok(())
 }
 
-struct OdenParentStrictJsonValue(serde_json::Value);
+pub(crate) struct OdenParentStrictJsonValue(pub(crate) serde_json::Value);
 
 impl<'de> Deserialize<'de> for OdenParentStrictJsonValue {
   fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -2781,7 +2781,7 @@ pub fn raw_sha256_digest(bytes: &[u8]) -> CanonicalSha256Digest {
   CanonicalSha256Digest(format!("sha256-{}", URL_SAFE_NO_PAD.encode(digest)))
 }
 
-fn hjcs_digest(
+pub(crate) fn hjcs_digest(
   domain: &str,
   canonical_jcs: &[u8],
 ) -> Result<CanonicalSha256Digest, OdenParentAllowlistError> {
@@ -2789,7 +2789,10 @@ fn hjcs_digest(
   Ok(framed_sha256_digest(domain, canonical_jcs))
 }
 
-fn framed_sha256_digest(domain: &str, bytes: &[u8]) -> CanonicalSha256Digest {
+pub(crate) fn framed_sha256_digest(
+  domain: &str,
+  bytes: &[u8],
+) -> CanonicalSha256Digest {
   let mut hasher = Sha256::new();
   hasher.update(domain.as_bytes());
   hasher.update([0]);
@@ -2807,7 +2810,7 @@ fn framed_sha256_digest(domain: &str, bytes: &[u8]) -> CanonicalSha256Digest {
 // flattening, or custom serialization must reject duplicate keys and
 // non-finite numbers before constructing Value; serde_json's generic typed
 // conversion is not such a gate.
-fn canonical_value_jcs(
+pub(crate) fn canonical_value_jcs(
   value: &serde_json::Value,
 ) -> Result<Vec<u8>, OdenParentAllowlistError> {
   let mut output = String::new();
@@ -5424,7 +5427,7 @@ mod tests {
         concat!(
           "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
           "cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;",
-          "graph:sha256:db9c30f9dc521febae03256945ad55fa7bafe3ebc79ca35e94210bd0155d9a05;",
+          "graph:sha256:4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4;",
           "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
           "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
         ),
@@ -5434,7 +5437,7 @@ mod tests {
         concat!(
           "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
           "cfg:sha256:fdfd9dc24cb0c588308450d2fc622110258ab9b4cd22a2994287469428c5906d;",
-          "graph:sha256:2bbbbee7d64104b0348f04ca21947c8a17f59263cce48ec2f5eb8ab4ae28b8df;",
+          "graph:sha256:c7650cb863ece7539e1dd91bc86668009a014ac1214ab33519d414a6bc97f5d1;",
           "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
           "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
         ),
@@ -5444,7 +5447,7 @@ mod tests {
         concat!(
           "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
           "cfg:sha256:2215dcca89932ecf67370ba53dfcbf8cb3f720e09441dff76871815e93bd274c;",
-          "graph:sha256:a86d9658bf2ef4a76b20e2a52355a02539586ec2e863c7fac7caf58354496b3d;",
+          "graph:sha256:bfc94d8674086d8be04a63f26e94a93ce4795abf6fc5ef59ab5e4842df930cde;",
           "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
           "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
         ),
@@ -5454,7 +5457,7 @@ mod tests {
         concat!(
           "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
           "cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;",
-          "graph:sha256:707b9ce9055b0cdca90b3765ce5bdb765725c9f319b0c8cc5f52815ddc84f069;",
+          "graph:sha256:d47b808c447418803448de70b5b6fe0dba6da53f15a228f14d704abab0ccf9d9;",
           "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
           "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
         ),

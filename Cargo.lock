@@ -2760,6 +2760,7 @@ dependencies = [
  "base64 0.22.1",
  "boxed_error",
  "capacity_builder",
+ "curve25519-dalek",
  "deno_bundle_runtime",
  "deno_error",
  "deno_fs",

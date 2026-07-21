@@ -27,6 +27,17 @@ mod oden_capsec_filesystem_candidate;
   reason = "native process lifecycle remains dormant while case tables are empty"
 )]
 mod oden_capsec_filesystem_process;
+// @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
+// Parent-owned native capture (budget/keys/spawn staging/PGID proofs/split
+// FD 3/disk-budget/transcript) for the macOS pilot. Dormant until the first
+// generated case row admits a case; the process module remains the sole
+// lifecycle engine.
+#[cfg(unix)]
+#[allow(
+  dead_code,
+  reason = "parent native capture remains dormant while case tables are empty"
+)]
+mod oden_capsec_filesystem_parent;
 mod oden_capsec_filesystem_protocol;
 mod oden_capsec_filesystem_supervisor;
 mod ops;

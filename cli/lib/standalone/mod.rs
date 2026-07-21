@@ -9,4 +9,9 @@ pub mod oden_parent_allowlist;
 // inert JCS and digest bytes for fail-closed reconciliation.
 #[cfg(feature = "__oden_parent_allowlist_embedded")]
 mod oden_parent_allowlist_generated;
+// @ref LLP 0019#checked-final-lto-target-policy [implements] — Session-scoped
+// verifier family for the checked final-LTO target-policy selection. The
+// production TCB constructor refuses because the durable external
+// current-state authority does not exist yet.
+pub mod oden_target_policy_session;
 pub mod virtual_fs;
