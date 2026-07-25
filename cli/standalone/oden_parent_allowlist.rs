@@ -6376,7 +6376,7 @@ mod tests {
       let result = load_bundle_from_test_root(root.path());
       assert!(matches!(
         result,
-        Err(OdenParentRetainedContractError::OpenComponent {
+        Err(OdenParentRetainedContractError::ExactNameObservation {
           ref path,
           ..
         }) if path == missing_path
@@ -6561,7 +6561,10 @@ mod tests {
     );
     assert!(matches!(
       missing,
-      Err(OdenParentRetainedContractError::OpenComponent { .. })
+      Err(OdenParentRetainedContractError::ExactNameObservation {
+        ref path,
+        ..
+      }) if path == "missing"
     ));
 
     std::fs::write(root.path().join("empty"), []).unwrap();
