@@ -91,7 +91,7 @@ export default (request) => op_oden_filesystem_parent_capture_v2(brand, request)
 pub const ODEN_PARENT_PROFILE: &str = "oden/capsec/2";
 
 // @ref LLP 0019#checked-final-lto-target-policy [implements] — Freeze only
-// the pure carrier relation and its four generated target identities. No
+// the pure carrier relation and its two generated target identities. No
 // registry approval, target selection, source authentication, admission, or
 // generated-file authority is carried by these constants.
 pub const ODEN_PARENT_TARGET_POLICY_REGISTRY_SCHEMA: &str =
@@ -106,22 +106,14 @@ const ODEN_PARENT_TARGET_POLICY_REGISTRY_JCS_MAX_BYTES: usize = 67_108_864;
 const ODEN_PARENT_TARGET_POLICY_CARRIER_JCS_MAX_BYTES: usize = 67_112_960;
 const ODEN_PARENT_TARGET_POLICY_CARRIER_OVERHEAD_MAX_BYTES: usize = 4_096;
 pub(crate) const ODEN_PARENT_TARGET_POLICY_REVISION: u64 = 1;
-pub(crate) const ODEN_PARENT_TARGET_POLICY_TARGET_ORDER: [&str; 4] = [
-  "aarch64-apple-darwin",
-  "x86_64-apple-darwin",
-  "aarch64-unknown-linux-gnu",
-  "x86_64-unknown-linux-gnu",
-];
-const ODEN_PARENT_TARGET_POLICY_RUST_CFG_DIGESTS: [&str; 4] = [
+pub(crate) const ODEN_PARENT_TARGET_POLICY_TARGET_ORDER: [&str; 2] =
+  ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"];
+const ODEN_PARENT_TARGET_POLICY_RUST_CFG_DIGESTS: [&str; 2] = [
   "716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a",
-  "fdfd9dc24cb0c588308450d2fc622110258ab9b4cd22a2994287469428c5906d",
-  "2215dcca89932ecf67370ba53dfcbf8cb3f720e09441dff76871815e93bd274c",
   "f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c",
 ];
-const ODEN_PARENT_TARGET_POLICY_CARGO_GRAPH_DIGESTS: [&str; 4] = [
+const ODEN_PARENT_TARGET_POLICY_CARGO_GRAPH_DIGESTS: [&str; 2] = [
   "4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4",
-  "c7650cb863ece7539e1dd91bc86668009a014ac1214ab33519d414a6bc97f5d1",
-  "bfc94d8674086d8be04a63f26e94a93ce4795abf6fc5ef59ab5e4842df930cde",
   "d47b808c447418803448de70b5b6fe0dba6da53f15a228f14d704abab0ccf9d9",
 ];
 const ODEN_PARENT_TARGET_POLICY_CAPSEC_FEATURES: &str = "action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate";
@@ -2140,7 +2132,7 @@ fn render_oden_parent_allowlist_rust_module(
 /// Pure, production-uncalled target-policy carrier relation candidate.
 ///
 /// This owns and validates one exact canonical registry envelope, freezes its
-/// four target/feature identities, derives the registry and selected-wrapper
+/// two target/feature identities, derives the registry and selected-wrapper
 /// digests, and renders the exact carrier JCS and Rust source. It deliberately
 /// does not validate the opaque target-policy semantics, approve a registry,
 /// select a row, inspect a repository, write a file, authenticate source, or
@@ -2252,7 +2244,7 @@ pub(crate) fn take_oden_parent_target_policy_registry_rows(
   if targets.len() != ODEN_PARENT_TARGET_POLICY_TARGET_ORDER.len() {
     return Err(invalid_oden_parent_target_policy_field(
       "registry.targets",
-      "array does not contain exactly four rows",
+      "array does not contain exactly two rows",
     ));
   }
   for (index, target_policy) in targets.iter().enumerate() {
@@ -2322,7 +2314,7 @@ fn reconstruct_oden_parent_target_policy_registry(
   if rows.len() != ODEN_PARENT_TARGET_POLICY_TARGET_ORDER.len() {
     return Err(invalid_oden_parent_target_policy_field(
       "carrier.rows",
-      "array does not contain exactly four rows",
+      "array does not contain exactly two rows",
     ));
   }
 
@@ -5351,7 +5343,7 @@ mod tests {
     assert_eq!(carrier["registryByteDigest"], expected_registry_digest);
 
     let rows = carrier["rows"].as_array().unwrap();
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 2);
     let mut reconstructed_targets = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
       assert_eq!(row.as_object().unwrap().len(), 2);
@@ -5421,33 +5413,13 @@ mod tests {
 
   #[test]
   fn target_policy_carrier_has_exact_frozen_target_status_identity() {
-    const EXPECTED: [(&str, &str); 4] = [
+    const EXPECTED: [(&str, &str); 2] = [
       (
         "aarch64-apple-darwin",
         concat!(
           "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
           "cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;",
           "graph:sha256:4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4;",
-          "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
-          "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
-        ),
-      ),
-      (
-        "x86_64-apple-darwin",
-        concat!(
-          "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
-          "cfg:sha256:fdfd9dc24cb0c588308450d2fc622110258ab9b4cd22a2994287469428c5906d;",
-          "graph:sha256:c7650cb863ece7539e1dd91bc86668009a014ac1214ab33519d414a6bc97f5d1;",
-          "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
-          "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
-        ),
-      ),
-      (
-        "aarch64-unknown-linux-gnu",
-        concat!(
-          "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
-          "cfg:sha256:2215dcca89932ecf67370ba53dfcbf8cb3f720e09441dff76871815e93bd274c;",
-          "graph:sha256:bfc94d8674086d8be04a63f26e94a93ce4795abf6fc5ef59ab5e4842df930cde;",
           "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
           "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
         ),

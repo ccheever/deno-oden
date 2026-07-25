@@ -3,7 +3,7 @@
 // @ref LLP 0019#checked-final-lto-target-policy [implements] —
 // Session-scoped verifier family for the checked final-LTO target-policy
 // selection: bootstrap TCB, verifier session, current-approval guard and
-// single-use witness, complete atomic four-row registry validation, and the
+// single-use witness, complete atomic two-row registry validation, and the
 // checked one-row selection. The production TCB and compiled-identity
 // constructors REFUSE because the durable external current-state authority
 // and the externally provisioned compiled-identity catalog do not exist yet;
@@ -615,7 +615,7 @@ struct ValidatedTargetPolicyRow {
   target_policy_digest: CanonicalSha256Digest,
 }
 
-/// Private opaque result of the complete atomic four-row validation. Only the
+/// Private opaque result of the complete atomic two-row validation. Only the
 /// full validator below can create it; partial leaf assertions, a selected
 /// row alone, carrier closure, a digest comparison, or a candidate manifest
 /// cannot.
@@ -636,7 +636,7 @@ pub struct ValidatedFilesystemFinalLtoTargetPolicyRegistry<'session> {
 }
 
 impl<'session> ValidatedFilesystemFinalLtoTargetPolicyRegistry<'session> {
-  /// Complete atomic four-row validation. The exact retained canonical
+  /// Complete atomic two-row validation. The exact retained canonical
   /// registry bytes and the live verified approval are the only variable
   /// inputs. All of canonical shape, schema/profile/revision literals, the
   /// frozen row order, per-row semantic closure, independent content
@@ -653,7 +653,7 @@ impl<'session> ValidatedFilesystemFinalLtoTargetPolicyRegistry<'session> {
     guard.require_live()?;
 
     // Canonical shape, exact JCS bytes, closed registry envelope, frozen
-    // four-row order, and per-ordinal target/featureSet generated identity.
+    // two-row order, and per-ordinal target/featureSet generated identity.
     let target_policies =
       take_oden_parent_target_policy_registry_rows(registry_jcs)?;
 
@@ -802,10 +802,10 @@ impl ValidatedFilesystemFinalLtoCompiledIdentity {
     Err(OdenTargetPolicySessionError::ExternalCompiledIdentityAuthorityAbsent)
   }
 
-  /// Test-only fixture constructor. The target must be one of the four
+  /// Test-only fixture constructor. The target must be one of the two
   /// frozen release targets and the featureSet must equal the generated Rev2
   /// identity for that target byte-for-byte; host detection, caller choice
-  /// of a fifth target, or a reconstructed feature identity refuses.
+  /// of a non-member target, or a reconstructed feature identity refuses.
   #[cfg(test)]
   pub(crate) fn new_test_fixture(
     target: &str,
@@ -815,7 +815,7 @@ impl ValidatedFilesystemFinalLtoCompiledIdentity {
       .iter()
       .position(|candidate| *candidate == target)
       .ok_or(OdenTargetPolicySessionError::InvalidCompiledIdentity(
-        "target is not one of the four frozen release targets",
+        "target is not one of the two frozen release targets",
       ))?;
     let expected_feature_set = oden_parent_target_policy_feature_set(ordinal);
     if feature_set != expected_feature_set {
@@ -1272,7 +1272,7 @@ mod tests {
   /// wrongly accept). The S+L test below recomputes it from the actual golden
   /// S and requires equality before exercising the refusal.
   const GOLDEN_S_PLUS_L_LE_HEX: &str =
-    "cc5550279b379e520145979bd147eda314a768d68312839f9ad1b09d51e05d1d";
+    "469f813474de35ef8df962a96e1a0046a1ac3e79449ecb7de6cfefbf61415819";
   // The synthetic test registry's rows are exactly {target, featureSet} with
   // the generated identities, so its canonical bytes equal the reviewed
   // parent registry file byte-for-byte and these vectors equal the golden
@@ -1316,17 +1316,15 @@ mod tests {
   const GOLDEN_CURRENT_STATE_RECEIPT_JCS: &[u8] =
     include_bytes!("testdata/oden_target_policy/test-current-state.json");
   const GOLDEN_REGISTRY_BYTE_DIGEST: &str =
-    "sha256-w9co3swyrmVlOi7pC-AY7_5EIFXh24Pp8rTWiuyCaw0";
-  const GOLDEN_TARGET_POLICY_DIGESTS: [&str; 4] = [
+    "sha256-DGjCROj7Ffpo9qCQ6gBD2G8i2V9GhDKYOaeO6g_md_A";
+  const GOLDEN_TARGET_POLICY_DIGESTS: [&str; 2] = [
     "sha256-VDeCBZnJr3WNmIguy3EJxekIhMcX0eUKgtWJiT_Nblg",
-    "sha256-WDoLpqB0-rEMeVnPLsqMB8lXG02HoVxhEW1bPGPkaU0",
-    "sha256-cY0Wub-Xu_zLaAm-ogepRNwCXSRQd_6N9ewZ9STgVPs",
     "sha256--ZrECsKvcbdR-8CYYZ6Wwav-jvhgWNOkff8_o5SgZ1w",
   ];
   const GOLDEN_APPROVAL_DIGEST: &str =
-    "sha256-MHKpiWx2bvCr1OySZNxccf8s5VJ4i_ikCEVOOhL5f7E";
+    "sha256-fpqgHMIqoA5DlRXwY53U7LOQjxu3FyzjuZKAT6g_bWU";
   const GOLDEN_APPROVAL_SIGNATURE_BYTE_DIGEST: &str =
-    "sha256-h0lq5zxCu3-Z6GUAbcyrXXFWHqw-fch-4bKaF0IzB9k";
+    "sha256-uwqipvhWf8r-R3SH7GKZ-UWqhCtuG7fbvGBrFgKMprg";
   const GOLDEN_KEY_ID: &str =
     "sha256-klO1cvvohAH-s3QgHuFalxHR4zv2KW1fnMURElsM58c";
   const GOLDEN_ISSUED_AT_EPOCH_SECONDS: u64 = 1_784_505_600;
@@ -1620,7 +1618,7 @@ mod tests {
       )
       .unwrap();
     let mut digests = Vec::new();
-    for ordinal in 0..4 {
+    for ordinal in 0..ODEN_PARENT_TARGET_POLICY_TARGET_ORDER.len() {
       let identity = test_compiled_identity(ordinal);
       // Witness issuance consumes a guard by value, so each selection
       // re-verifies a fresh guard: in-session per-issuance re-verification,
@@ -1698,7 +1696,7 @@ mod tests {
       .get_mut("targets")
       .and_then(serde_json::Value::as_array_mut)
       .unwrap();
-    let duplicate = targets[3].clone();
+    let duplicate = targets.last().unwrap().clone();
     targets.push(duplicate);
     let registry_jcs = canonical_value_jcs(&registry).unwrap();
     assert!(matches!(
@@ -1775,7 +1773,7 @@ mod tests {
       .get_mut("targets")
       .and_then(serde_json::Value::as_array_mut)
       .unwrap();
-    targets[2]
+    targets[1]
       .as_object_mut()
       .unwrap()
       .insert("extra".to_string(), serde_json::json!(1));
@@ -2330,7 +2328,7 @@ mod tests {
       )
       .unwrap();
 
-    // A compiled identity naming a fifth target cannot select a row. The
+    // A compiled identity naming a non-member target cannot select a row. The
     // private type is constructed literally here (same module) because the
     // fixture constructor itself already refuses this identity.
     let foreign_identity = ValidatedFilesystemFinalLtoCompiledIdentity {
@@ -2378,7 +2376,7 @@ mod tests {
 
   #[test]
   fn compiled_identity_fixture_refuses_fallback_and_reconstruction() {
-    // A fifth target is caller choice / host detection and refuses.
+    // A non-member target is caller choice / host detection and refuses.
     assert_eq!(
       ValidatedFilesystemFinalLtoCompiledIdentity::new_test_fixture(
         "wasm32-unknown-unknown",
@@ -2386,7 +2384,7 @@ mod tests {
       )
       .err(),
       Some(OdenTargetPolicySessionError::InvalidCompiledIdentity(
-        "target is not one of the four frozen release targets",
+        "target is not one of the two frozen release targets",
       )),
     );
     // A separately reconstructed feature identity refuses.
@@ -2577,9 +2575,9 @@ mod tests {
       GOLDEN_APPROVAL_DIGEST,
     );
 
-    // All four selected-row digests equal the parent-pinned vectors; each
+    // Both selected-row digests equal the parent-pinned vectors; each
     // selection re-verifies a fresh guard for its single-use witness.
-    for ordinal in 0..4 {
+    for ordinal in 0..ODEN_PARENT_TARGET_POLICY_TARGET_ORDER.len() {
       let identity = test_compiled_identity(ordinal);
       let guard = session
         .verify_current_approval(GOLDEN_APPROVAL_JCS, &golden_signature())
