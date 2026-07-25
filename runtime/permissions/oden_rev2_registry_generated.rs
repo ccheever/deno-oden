@@ -2176,7 +2176,7 @@ pub struct Rev2TargetStatus {
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
 pub const REV2_VOCAB_DIGEST: &str = "sha256-a-uQBpqZ-PcfBvX5Oiuk-Q7LEs5z6kmkqhzJczUEo0M";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-Hq1xJFCyuLZhpoSiVu2BE4s0yZCUCMg45QEg8B58v6E";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-31XQbmRKSGHk7zh6Mtf8hE9N72a-YBCvfwEJoGlLNqs";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-SFvyfj3PfQcUC0REjPviGqms_7DEwFcghE7kL9WYSyo";
