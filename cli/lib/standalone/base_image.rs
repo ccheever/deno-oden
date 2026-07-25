@@ -84,7 +84,14 @@ pub enum DenortBaseImageTarget {
   X86_64UnknownLinuxGnu,
 }
 
+// @ref LLP 0019#backend-status [constrained-by] — Public projection admits
+// only the exact current two-target tuple; deferred physical-layout code is
+// retained solely behind the private regression helper.
 impl DenortBaseImageTarget {
+  fn is_current_release_target(self) -> bool {
+    matches!(self, Self::Aarch64AppleDarwin | Self::X86_64UnknownLinuxGnu)
+  }
+
   fn architecture(self) -> &'static str {
     match self {
       Self::Aarch64AppleDarwin | Self::Aarch64UnknownLinuxGnu => "aarch64",
@@ -122,11 +129,9 @@ impl TryFrom<&str> for DenortBaseImageTarget {
   fn try_from(value: &str) -> Result<Self, Self::Error> {
     match value {
       "aarch64-apple-darwin" => Ok(Self::Aarch64AppleDarwin),
-      "x86_64-apple-darwin" => Ok(Self::X86_64AppleDarwin),
-      "aarch64-unknown-linux-gnu" => Ok(Self::Aarch64UnknownLinuxGnu),
       "x86_64-unknown-linux-gnu" => Ok(Self::X86_64UnknownLinuxGnu),
       _ => Err(DenortBaseImageError::Unsupported(
-        "target is outside the frozen Oden release matrix",
+        "target is outside the current Oden release matrix",
       )),
     }
   }
@@ -263,6 +268,19 @@ pub enum MachOPayloadKind {
 }
 
 pub fn project_denort_base_image(
+  bytes: &[u8],
+  target: DenortBaseImageTarget,
+  mode: DenortBaseImageMode<'_>,
+) -> Result<DenortBaseImageProjection, DenortBaseImageError> {
+  if !target.is_current_release_target() {
+    return Err(DenortBaseImageError::Unsupported(
+      "target is outside the current Oden release matrix",
+    ));
+  }
+  project_denort_base_image_layout(bytes, target, mode)
+}
+
+fn project_denort_base_image_layout(
   bytes: &[u8],
   target: DenortBaseImageTarget,
   mode: DenortBaseImageMode<'_>,
@@ -2691,6 +2709,16 @@ mod tests {
 
   static MACHO_LIBSUI_LOCK: Mutex<()> = Mutex::new(());
 
+  // Retain regression coverage for the already-implemented deferred physical
+  // layouts without routing them through the public current-target gate.
+  fn project_denort_base_image(
+    bytes: &[u8],
+    target: DenortBaseImageTarget,
+    mode: DenortBaseImageMode<'_>,
+  ) -> Result<DenortBaseImageProjection, DenortBaseImageError> {
+    project_denort_base_image_layout(bytes, target, mode)
+  }
+
   fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
   }
@@ -3042,6 +3070,60 @@ mod tests {
       panic!("x86_64 Mach-O fixture produced a non-Mach-O projection");
     };
     projection
+  }
+
+  #[test]
+  fn public_target_gate_accepts_exact_two_and_refuses_deferred_targets() {
+    assert_eq!(
+      DenortBaseImageTarget::try_from("aarch64-apple-darwin").unwrap(),
+      DenortBaseImageTarget::Aarch64AppleDarwin
+    );
+    assert_eq!(
+      DenortBaseImageTarget::try_from("x86_64-unknown-linux-gnu").unwrap(),
+      DenortBaseImageTarget::X86_64UnknownLinuxGnu
+    );
+    for target in ["x86_64-apple-darwin", "aarch64-unknown-linux-gnu"] {
+      assert!(
+        DenortBaseImageTarget::try_from(target).is_err(),
+        "accepted deferred target string {target}"
+      );
+    }
+
+    assert!(
+      super::project_denort_base_image(
+        &macho_base(MACHO_CPU_ARM64),
+        DenortBaseImageTarget::Aarch64AppleDarwin,
+        DenortBaseImageMode::Base,
+      )
+      .is_ok()
+    );
+    assert!(
+      super::project_denort_base_image(
+        &elf_base(62),
+        DenortBaseImageTarget::X86_64UnknownLinuxGnu,
+        DenortBaseImageMode::Base,
+      )
+      .is_ok()
+    );
+
+    for (bytes, target) in [
+      (
+        macho_base(MACHO_CPU_X86_64),
+        DenortBaseImageTarget::X86_64AppleDarwin,
+      ),
+      (elf_base(183), DenortBaseImageTarget::Aarch64UnknownLinuxGnu),
+    ] {
+      assert!(matches!(
+        super::project_denort_base_image(
+          &bytes,
+          target,
+          DenortBaseImageMode::Base,
+        ),
+        Err(DenortBaseImageError::Unsupported(
+          "target is outside the current Oden release matrix"
+        ))
+      ));
+    }
   }
 
   #[test]
@@ -3655,17 +3737,17 @@ mod tests {
     .unwrap();
     assert_ne!(first, second);
 
-    let mut macho = macho_base(MACHO_CPU_X86_64);
+    let mut macho = macho_base(MACHO_CPU_ARM64);
     let first = denort_base_image_projection_digest(
       &macho,
-      DenortBaseImageTarget::X86_64AppleDarwin,
+      DenortBaseImageTarget::Aarch64AppleDarwin,
       DenortBaseImageMode::Base,
     )
     .unwrap();
     macho[0x1000] ^= 1;
     let second = denort_base_image_projection_digest(
       &macho,
-      DenortBaseImageTarget::X86_64AppleDarwin,
+      DenortBaseImageTarget::Aarch64AppleDarwin,
       DenortBaseImageMode::Base,
     )
     .unwrap();
@@ -3825,8 +3907,6 @@ mod tests {
 
   #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "macos", target_arch = "x86_64"),
-    all(target_os = "linux", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64"),
   ))]
   #[test]
@@ -3851,10 +3931,6 @@ mod tests {
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     let target = DenortBaseImageTarget::Aarch64AppleDarwin;
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    let target = DenortBaseImageTarget::X86_64AppleDarwin;
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    let target = DenortBaseImageTarget::Aarch64UnknownLinuxGnu;
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     let target = DenortBaseImageTarget::X86_64UnknownLinuxGnu;
 

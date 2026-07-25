@@ -110,6 +110,8 @@ pub struct OdenParentCaptureV2Metadata {
   pub generated_allowlist_digest: String,
 }
 
+// @ref LLP 0019#backend-status [constrained-by] — Candidate metadata admits
+// only the exact current two-target tuple; deferred Stage-A targets refuse.
 impl OdenParentCaptureV2Metadata {
   /// Validate the closed wire-level syntax before any generated allowlist or
   /// image-specific relation is consulted. Passing this check alone never
@@ -123,12 +125,9 @@ impl OdenParentCaptureV2Metadata {
     }
     if !matches!(
       self.target.as_str(),
-      "aarch64-apple-darwin"
-        | "x86_64-apple-darwin"
-        | "aarch64-unknown-linux-gnu"
-        | "x86_64-unknown-linux-gnu"
+      "aarch64-apple-darwin" | "x86_64-unknown-linux-gnu"
     ) {
-      return Err("metadata target is not in the Oden v1 release matrix");
+      return Err("metadata target is not in the current Oden release matrix");
     }
     if !is_oden_parent_ascii_text(&self.feature_set, 1, 4096)
       || !is_oden_parent_token(&self.parent_build_marker, 1, 256)
@@ -339,6 +338,23 @@ mod oden_parent_capture_v2_metadata_tests {
       let record: OdenParentCaptureV2Metadata =
         serde_json::from_value(value).unwrap();
       assert!(record.validate_closed_syntax().is_err(), "accepted {field}");
+    }
+  }
+
+  #[test]
+  fn parent_record_closed_syntax_refuses_deferred_targets() {
+    for target in ["x86_64-apple-darwin", "aarch64-unknown-linux-gnu"] {
+      let mut value = record_json();
+      value
+        .as_object_mut()
+        .unwrap()
+        .insert("target".to_string(), serde_json::json!(target));
+      let record: OdenParentCaptureV2Metadata =
+        serde_json::from_value(value).unwrap();
+      assert!(
+        record.validate_closed_syntax().is_err(),
+        "accepted deferred target {target}"
+      );
     }
   }
 }

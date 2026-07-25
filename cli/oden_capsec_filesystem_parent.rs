@@ -1381,6 +1381,8 @@ mod imp {
 
   /// The per-target identity binding every capture shares (contract
   /// `#/$defs/targetBinding`).
+  /// @ref LLP 0019#backend-status [constrained-by] — Candidate target
+  /// bindings admit only the exact current two-target tuple.
   #[derive(Clone, Debug, Eq, PartialEq)]
   pub(crate) struct TargetBinding {
     pub(crate) run_nonce: String,
@@ -1424,13 +1426,8 @@ mod imp {
     }
 
     fn is_well_formed(&self) -> bool {
-      let target_ok = [
-        "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-gnu",
-      ]
-      .contains(&self.target.as_str());
+      let target_ok = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+        .contains(&self.target.as_str());
       target_ok
         && !self.run_nonce.is_empty()
         && !self.feature_set.is_empty()
@@ -2602,6 +2599,21 @@ mod imp {
           field: "journalTransitions"
         })
       );
+    }
+
+    #[test]
+    fn disk_budget_refuses_deferred_target_bindings() {
+      for target in ["x86_64-apple-darwin", "aarch64-unknown-linux-gnu"] {
+        let mut inputs = synthetic_disk_inputs();
+        inputs.binding.target = target.into();
+        assert_eq!(
+          DiskBudgetObservation::build(inputs),
+          Err(DiskBudgetRefusal::Malformed {
+            field: "targetBinding"
+          }),
+          "accepted deferred target {target}"
+        );
+      }
     }
 
     // ---- lifecycle reaping projection ----
