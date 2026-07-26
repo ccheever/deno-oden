@@ -16,8 +16,8 @@ use std::path::Path;
 use super::OdenRev2NamespaceOperationGuard;
 use super::OdenRev2RuntimeAuthorityContext;
 use crate::oden_rev2_runtime::OdenRev2HostFilesystemCompletion;
-use crate::rev2_registry_generated::REV2_FILESYSTEM_LSTAT_EXISTING_FIXTURE_DESCRIPTORS;
-use crate::rev2_registry_generated::Rev2FilesystemLstatExistingFixtureDescriptor;
+use crate::rev2_registry_generated::REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS;
+use crate::rev2_registry_generated::Rev2FilesystemLstatExistingObservationInput;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OdenRev2FilesystemError {
@@ -202,20 +202,15 @@ pub fn oden_capsec_rev2_lstat_sync<'context>(
 /// Generated fixture identity is candidate provenance, not observed
 /// conformance or promotion authority.
 pub struct OdenRev2LstatExistingCandidateObservation {
-  fixture_definition_id: &'static str,
-  manifest_artifact_digest: &'static str,
+  fixture_artifact_digest: &'static str,
   case_id: &'static str,
   target: &'static str,
   metadata: std::fs::Metadata,
 }
 
 impl OdenRev2LstatExistingCandidateObservation {
-  pub fn fixture_definition_id(&self) -> &'static str {
-    self.fixture_definition_id
-  }
-
-  pub fn manifest_artifact_digest(&self) -> &'static str {
-    self.manifest_artifact_digest
+  pub fn fixture_artifact_digest(&self) -> &'static str {
+    self.fixture_artifact_digest
   }
 
   pub fn case_id(&self) -> &'static str {
@@ -234,12 +229,12 @@ impl OdenRev2LstatExistingCandidateObservation {
 fn validate_lstat_existing_candidate_context(
   target: &str,
   feature_set: &str,
-  descriptor: &Rev2FilesystemLstatExistingFixtureDescriptor,
+  input: &Rev2FilesystemLstatExistingObservationInput,
 ) -> Result<(), OdenRev2FilesystemError> {
-  if target != descriptor.target {
+  if target != input.target {
     return Err(refused("CANDIDATE-TARGET"));
   }
-  if feature_set != descriptor.feature_set {
+  if feature_set != input.feature_set {
     return Err(refused("CANDIDATE-FEATURE-SET"));
   }
   Ok(())
@@ -251,25 +246,30 @@ fn validate_lstat_existing_candidate_context(
 ///
 /// @ref LLP 0019#paths [implements] -- The parent root and the exact
 /// `input.txt` lexical child remain coupled to the checked native operation.
+/// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+/// [constrained-by] -- Among generated fixture data, this seam accepts only
+/// the observation-input projection; fixture-definition identity, manifest
+/// schema/path/HBYTES, runner identity/path/HBYTES, expectation, oracle,
+/// verdict, and keys are absent.
 #[allow(dead_code)]
 pub fn oden_capsec_rev2_observe_lstat_existing_candidate(
   context: &OdenRev2RuntimeAuthorityContext,
   parent_root: &Path,
-  descriptor: &'static Rev2FilesystemLstatExistingFixtureDescriptor,
+  input: &'static Rev2FilesystemLstatExistingObservationInput,
 ) -> Result<OdenRev2LstatExistingCandidateObservation, OdenRev2FilesystemError>
 {
   if !parent_root.is_absolute() {
     return Err(refused("CANDIDATE-PARENT-ROOT-ABSOLUTE"));
   }
-  if !REV2_FILESYSTEM_LSTAT_EXISTING_FIXTURE_DESCRIPTORS.contains(descriptor) {
-    return Err(refused("CANDIDATE-DESCRIPTOR"));
+  if !REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.contains(input) {
+    return Err(refused("CANDIDATE-OBSERVATION-INPUT"));
   }
   validate_lstat_existing_candidate_context(
     context.target(),
     context.feature_set(),
-    descriptor,
+    input,
   )?;
-  if descriptor.target_relative_path != "input.txt" {
+  if input.target_relative_path != "input.txt" {
     return Err(refused("CANDIDATE-TARGET-PATH"));
   }
   let canonical_parent = std::fs::canonicalize(parent_root)
@@ -284,10 +284,9 @@ pub fn oden_capsec_rev2_observe_lstat_existing_candidate(
   delivery.finish();
   let metadata = metadata.ok_or_else(|| refused("CANDIDATE-TARGET-MISSING"))?;
   Ok(OdenRev2LstatExistingCandidateObservation {
-    fixture_definition_id: descriptor.fixture_definition_id,
-    manifest_artifact_digest: descriptor.manifest_artifact_digest,
-    case_id: descriptor.case_id,
-    target: descriptor.target,
+    fixture_artifact_digest: input.fixture_artifact_digest,
+    case_id: input.case_id,
+    target: input.target,
     metadata,
   })
 }
@@ -1446,7 +1445,7 @@ mod tests {
 
   fn lstat_existing_candidate_context(
     root: &Path,
-    descriptor: &Rev2FilesystemLstatExistingFixtureDescriptor,
+    input: &Rev2FilesystemLstatExistingObservationInput,
   ) -> OdenRev2RuntimeAuthorityContext {
     let mut snapshot = policy_fixtures::candidate_snapshot(
       policy_fixtures::hermetic_target(),
@@ -1459,14 +1458,14 @@ mod tests {
         "bindingDigest": REV2_VOCAB_DIGEST,
       },
       "floor": [{
-        "sourceId": descriptor.authority_source_id,
+        "sourceId": input.authority_source_id,
         "selector": selector(
-          match descriptor.authority_capability {
+          match input.authority_capability {
             Rev2CapabilityId::FsList => "fs:list",
-            _ => panic!("lstat-existing descriptor capability must be fs:list"),
+            _ => panic!("lstat-existing observation capability must be fs:list"),
           },
           "path-exact",
-          descriptor.target_relative_path,
+          input.target_relative_path,
           SelectorPolarity::Positive,
         ),
       }],
@@ -1474,10 +1473,10 @@ mod tests {
       "denials": [],
     }]);
     snapshot["rootBindings"] = json!([{
-      "sourceId": descriptor.authority_source_id,
-      "logicalRoot": descriptor.logical_root,
+      "sourceId": input.authority_source_id,
+      "logicalRoot": input.logical_root,
       "principal": principal(),
-      "rootBindingId": descriptor.root_binding_id,
+      "rootBindingId": input.root_binding_id,
       "canonicalPath": {
         "encoding": "unicode",
         "value": root.to_str().unwrap(),
@@ -1503,14 +1502,14 @@ mod tests {
       target_env = "gnu"
     )
   ))]
-  fn native_lstat_existing_descriptor()
-  -> &'static Rev2FilesystemLstatExistingFixtureDescriptor {
+  fn native_lstat_existing_observation_input()
+  -> &'static Rev2FilesystemLstatExistingObservationInput {
     let compiled = policy_fixtures::embedded_compiled_target();
-    REV2_FILESYSTEM_LSTAT_EXISTING_FIXTURE_DESCRIPTORS
+    REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS
       .iter()
-      .find(|descriptor| {
-        descriptor.target == compiled.target
-          && descriptor.feature_set == compiled.feature_set
+      .find(|input| {
+        input.target == compiled.target
+          && input.feature_set == compiled.feature_set
       })
       .unwrap()
   }
@@ -1671,11 +1670,11 @@ mod tests {
   ))]
   #[test]
   fn lstat_existing_candidate_context_requires_exact_target_and_feature_set() {
-    let descriptor = native_lstat_existing_descriptor();
+    let input = native_lstat_existing_observation_input();
     super::validate_lstat_existing_candidate_context(
-      descriptor.target,
-      descriptor.feature_set,
-      descriptor,
+      input.target,
+      input.feature_set,
+      input,
     )
     .unwrap();
     for near_miss in [
@@ -1687,8 +1686,8 @@ mod tests {
         refusal(
           super::validate_lstat_existing_candidate_context(
             near_miss,
-            descriptor.feature_set,
-            descriptor,
+            input.feature_set,
+            input,
           )
           .unwrap_err()
         ),
@@ -1698,9 +1697,9 @@ mod tests {
     assert_eq!(
       refusal(
         super::validate_lstat_existing_candidate_context(
-          descriptor.target,
+          input.target,
           "rust:wrong-feature-set",
-          descriptor,
+          input,
         )
         .unwrap_err()
       ),
@@ -1719,29 +1718,25 @@ mod tests {
   ))]
   #[test]
   fn lstat_existing_candidate_observes_real_zero_file_without_mutation() {
-    let descriptor = native_lstat_existing_descriptor();
+    let input = native_lstat_existing_observation_input();
     let root = TempRoot::new("lstat-existing-candidate");
-    let target = root.0.join(descriptor.target_relative_path);
-    std::fs::write(&target, descriptor.target_content).unwrap();
+    let target = root.0.join(input.target_relative_path);
+    std::fs::write(&target, input.target_content).unwrap();
     let before = std::fs::read(&target).unwrap();
-    let context = lstat_existing_candidate_context(&root.0, descriptor);
+    let context = lstat_existing_candidate_context(&root.0, input);
     let _actors = ActorCapture::install(principal());
 
     let observation = super::oden_capsec_rev2_observe_lstat_existing_candidate(
-      &context, &root.0, descriptor,
+      &context, &root.0, input,
     )
     .unwrap();
 
     assert_eq!(
-      observation.fixture_definition_id(),
-      descriptor.fixture_definition_id
+      observation.fixture_artifact_digest(),
+      input.fixture_artifact_digest
     );
-    assert_eq!(
-      observation.manifest_artifact_digest(),
-      descriptor.manifest_artifact_digest
-    );
-    assert_eq!(observation.case_id(), descriptor.case_id);
-    assert_eq!(observation.target(), descriptor.target);
+    assert_eq!(observation.case_id(), input.case_id);
+    assert_eq!(observation.target(), input.target);
     assert!(observation.metadata().is_file());
     assert_eq!(observation.metadata().len(), 0);
     assert_eq!(
@@ -1763,20 +1758,20 @@ mod tests {
   ))]
   #[test]
   fn lstat_existing_candidate_refuses_wrong_parent_and_preserves_both_roots() {
-    let descriptor = native_lstat_existing_descriptor();
+    let input = native_lstat_existing_observation_input();
     let root = TempRoot::new("lstat-existing-candidate-root");
     let wrong = TempRoot::new("lstat-existing-candidate-wrong");
-    let root_target = root.0.join(descriptor.target_relative_path);
-    let wrong_target = wrong.0.join(descriptor.target_relative_path);
-    std::fs::write(&root_target, descriptor.target_content).unwrap();
+    let root_target = root.0.join(input.target_relative_path);
+    let wrong_target = wrong.0.join(input.target_relative_path);
+    std::fs::write(&root_target, input.target_content).unwrap();
     std::fs::write(&wrong_target, b"wrong-root").unwrap();
     let root_before = std::fs::read(&root_target).unwrap();
     let wrong_before = std::fs::read(&wrong_target).unwrap();
-    let context = lstat_existing_candidate_context(&root.0, descriptor);
+    let context = lstat_existing_candidate_context(&root.0, input);
     let _actors = ActorCapture::install(principal());
 
     let error = super::oden_capsec_rev2_observe_lstat_existing_candidate(
-      &context, &wrong.0, descriptor,
+      &context, &wrong.0, input,
     );
     assert_eq!(
       refusal(error.err().expect("wrong root must refuse")),

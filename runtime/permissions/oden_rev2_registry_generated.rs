@@ -2151,30 +2151,14 @@ pub const REV2_FILESYSTEM_CANDIDATE_CASE_PLANS: &[Rev2FilesystemCandidateCasePla
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Rev2FilesystemLstatExistingExpectedResult {
-  pub decision: Rev2AuditDecision,
-  pub native_result: Rev2FilesystemCandidateNativeResult,
-  pub delivery: Rev2FilesystemCandidateDelivery,
-  pub cleanup: Rev2FilesystemCandidateCleanup,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Rev2FilesystemLstatExistingFixtureDescriptor {
-  pub fixture_definition_id: &'static str,
-  pub manifest_schema: &'static str,
-  pub manifest_path: &'static str,
-  pub manifest_byte_length: usize,
-  pub manifest_byte_digest: &'static str,
-  pub manifest_artifact_digest: &'static str,
-  pub runner_id: &'static str,
-  pub runner_path: &'static str,
-  pub runner_byte_length: usize,
-  pub runner_byte_digest: &'static str,
+pub struct Rev2FilesystemLstatExistingObservationInput {
+  pub fixture_artifact_digest: &'static str,
   pub target: &'static str,
   pub feature_set: &'static str,
   pub case_id: &'static str,
   pub edge_id: &'static str,
   pub requirement_id: &'static str,
+  pub case_kind: &'static str,
   pub logical_root: &'static str,
   pub root_binding_id: &'static str,
   pub root_descriptor_slot: usize,
@@ -2186,26 +2170,17 @@ pub struct Rev2FilesystemLstatExistingFixtureDescriptor {
   pub principal_key: &'static str,
   pub authority_source_id: &'static str,
   pub authority_capability: Rev2CapabilityId,
-  pub expected_result: Rev2FilesystemLstatExistingExpectedResult,
 }
 
-pub const REV2_FILESYSTEM_LSTAT_EXISTING_FIXTURE_DESCRIPTORS: &[Rev2FilesystemLstatExistingFixtureDescriptor] = &[
-  Rev2FilesystemLstatExistingFixtureDescriptor {
-    fixture_definition_id: "fixture:native-op:ext/fs/ops.rs#op_fs_lstat_sync:aarch64-apple-darwin:v1",
-    manifest_schema: "oden/capsec-filesystem-conformance-manifest/2",
-    manifest_path: "capsec/rev2/fixtures/filesystem-lstat-sync-aarch64-apple-darwin-v1.manifest.json",
-    manifest_byte_length: 168558,
-    manifest_byte_digest: "sha256-5nFWZrX7eHTwi0a2G_TGuxShxXphSZlbEHdS0BMTcas",
-    manifest_artifact_digest: "sha256-kV34YfbR2X-lXOkg7OVNDvHI9607N9p1ru0pB9Lh3vY",
-    runner_id: "oden.capsec.filesystem/1",
-    runner_path: "capsec/rev2/fixtures/filesystem-receipt-runner-v1.ts",
-    runner_byte_length: 37637,
-    runner_byte_digest: "sha256-pw0mWI5ah3p9PCR3wV-qErpJpoL8g7jTlDfI7ob6Z3k",
+pub const REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS: &[Rev2FilesystemLstatExistingObservationInput] = &[
+  Rev2FilesystemLstatExistingObservationInput {
+    fixture_artifact_digest: "sha256-kV34YfbR2X-lXOkg7OVNDvHI9607N9p1ru0pB9Lh3vY",
     target: "aarch64-apple-darwin",
     feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
     case_id: "filesystem:lstat-sync:lstat-existing",
     edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
     requirement_id: "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete",
+    case_kind: "lstat-existing",
     logical_root: "$PROJECT",
     root_binding_id: "root:project",
     root_descriptor_slot: 0,
@@ -2217,37 +2192,15 @@ pub const REV2_FILESYSTEM_LSTAT_EXISTING_FIXTURE_DESCRIPTORS: &[Rev2FilesystemLs
     principal_key: "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     authority_source_id: "case:static:0",
     authority_capability: Rev2CapabilityId::FsList,
-    expected_result: Rev2FilesystemLstatExistingExpectedResult {
-      decision: Rev2AuditDecision::Allow,
-      native_result: Rev2FilesystemCandidateNativeResult {
-        class: Rev2FilesystemCandidateNativeResultClass::LstatComplete,
-        metadata_digest: Some(Rev2FilesystemCandidateMetadataDigestModel {
-          source: Rev2FilesystemCandidateMetadataDigestSource::InitialTargetMetadata,
-          algorithm: Rev2FilesystemCandidateMetadataDigestAlgorithm::HjcsSha256Base64url,
-          domain: Rev2FilesystemCandidateMetadataDigestDomain::OdenCapsecFilesystemLstatMetadata2,
-          preimage: Rev2FilesystemCandidateMetadataDigestPreimage::ExactInitialFilesystemMetadataProjectionJcs,
-        }),
-      },
-      delivery: Rev2FilesystemCandidateDelivery::Delivered,
-      cleanup: Rev2FilesystemCandidateCleanup::Complete,
-    },
   },
-  Rev2FilesystemLstatExistingFixtureDescriptor {
-    fixture_definition_id: "fixture:native-op:ext/fs/ops.rs#op_fs_lstat_sync:x86_64-unknown-linux-gnu:v1",
-    manifest_schema: "oden/capsec-filesystem-conformance-manifest/2",
-    manifest_path: "capsec/rev2/fixtures/filesystem-lstat-sync-x86_64-unknown-linux-gnu-v1.manifest.json",
-    manifest_byte_length: 168618,
-    manifest_byte_digest: "sha256-IDSnewOKeeTVLAc5y5SABrRmnYkdwblgRp1yU9_xcKY",
-    manifest_artifact_digest: "sha256-RTDyouftCzSDoG1Y9MAXy7NQBanZFt6hF_4vEvFWZig",
-    runner_id: "oden.capsec.filesystem/1",
-    runner_path: "capsec/rev2/fixtures/filesystem-receipt-runner-v1.ts",
-    runner_byte_length: 37637,
-    runner_byte_digest: "sha256-pw0mWI5ah3p9PCR3wV-qErpJpoL8g7jTlDfI7ob6Z3k",
+  Rev2FilesystemLstatExistingObservationInput {
+    fixture_artifact_digest: "sha256-RTDyouftCzSDoG1Y9MAXy7NQBanZFt6hF_4vEvFWZig",
     target: "x86_64-unknown-linux-gnu",
     feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:d47b808c447418803448de70b5b6fe0dba6da53f15a228f14d704abab0ccf9d9;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
     case_id: "filesystem:lstat-sync:lstat-existing",
     edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
     requirement_id: "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete",
+    case_kind: "lstat-existing",
     logical_root: "$PROJECT",
     root_binding_id: "root:project",
     root_descriptor_slot: 0,
@@ -2259,20 +2212,6 @@ pub const REV2_FILESYSTEM_LSTAT_EXISTING_FIXTURE_DESCRIPTORS: &[Rev2FilesystemLs
     principal_key: "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     authority_source_id: "case:static:0",
     authority_capability: Rev2CapabilityId::FsList,
-    expected_result: Rev2FilesystemLstatExistingExpectedResult {
-      decision: Rev2AuditDecision::Allow,
-      native_result: Rev2FilesystemCandidateNativeResult {
-        class: Rev2FilesystemCandidateNativeResultClass::LstatComplete,
-        metadata_digest: Some(Rev2FilesystemCandidateMetadataDigestModel {
-          source: Rev2FilesystemCandidateMetadataDigestSource::InitialTargetMetadata,
-          algorithm: Rev2FilesystemCandidateMetadataDigestAlgorithm::HjcsSha256Base64url,
-          domain: Rev2FilesystemCandidateMetadataDigestDomain::OdenCapsecFilesystemLstatMetadata2,
-          preimage: Rev2FilesystemCandidateMetadataDigestPreimage::ExactInitialFilesystemMetadataProjectionJcs,
-        }),
-      },
-      delivery: Rev2FilesystemCandidateDelivery::Delivered,
-      cleanup: Rev2FilesystemCandidateCleanup::Complete,
-    },
   },
 ];
 
@@ -102132,37 +102071,38 @@ mod tests {
   }
 
   #[test]
-  fn filesystem_lstat_existing_fixture_descriptors_are_exact_candidates_only() {
+  fn filesystem_lstat_existing_observation_inputs_are_exact_candidates_only() {
     let expected = [
-      ("aarch64-apple-darwin", 168558, "sha256-5nFWZrX7eHTwi0a2G_TGuxShxXphSZlbEHdS0BMTcas", "sha256-kV34YfbR2X-lXOkg7OVNDvHI9607N9p1ru0pB9Lh3vY"),
-      ("x86_64-unknown-linux-gnu", 168618, "sha256-IDSnewOKeeTVLAc5y5SABrRmnYkdwblgRp1yU9_xcKY", "sha256-RTDyouftCzSDoG1Y9MAXy7NQBanZFt6hF_4vEvFWZig"),
+      ("aarch64-apple-darwin", "sha256-kV34YfbR2X-lXOkg7OVNDvHI9607N9p1ru0pB9Lh3vY"),
+      ("x86_64-unknown-linux-gnu", "sha256-RTDyouftCzSDoG1Y9MAXy7NQBanZFt6hF_4vEvFWZig"),
     ];
-    assert_eq!(REV2_FILESYSTEM_LSTAT_EXISTING_FIXTURE_DESCRIPTORS.len(), expected.len());
-    for (descriptor, (target, manifest_byte_length, manifest_byte_digest, manifest_artifact_digest)) in REV2_FILESYSTEM_LSTAT_EXISTING_FIXTURE_DESCRIPTORS.iter().zip(expected) {
-      assert_eq!(descriptor.target, target);
-      assert_eq!(descriptor.manifest_byte_length, manifest_byte_length);
-      assert_eq!(descriptor.manifest_byte_digest, manifest_byte_digest);
-      assert_eq!(descriptor.manifest_artifact_digest, manifest_artifact_digest);
-      assert_ne!(descriptor.manifest_byte_digest, descriptor.manifest_artifact_digest);
-      assert_eq!(descriptor.case_id, "filesystem:lstat-sync:lstat-existing");
-      assert_eq!(descriptor.edge_id, "native-op:ext/fs/ops.rs#op_fs_lstat_sync");
-      assert_eq!(descriptor.requirement_id, "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete");
-      assert_eq!(descriptor.target_content, b"");
-      assert_eq!(descriptor.target_content_digest, "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU");
-      assert_eq!(descriptor.authority_capability, Rev2CapabilityId::FsList);
-      assert_eq!(descriptor.expected_result.decision, Rev2AuditDecision::Allow);
-      assert_eq!(descriptor.expected_result.native_result.class, Rev2FilesystemCandidateNativeResultClass::LstatComplete);
-      assert!(descriptor.expected_result.native_result.metadata_digest.is_some());
-      assert_eq!(descriptor.expected_result.delivery, Rev2FilesystemCandidateDelivery::Delivered);
-      assert_eq!(descriptor.expected_result.cleanup, Rev2FilesystemCandidateCleanup::Complete);
+    assert_eq!(REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.len(), expected.len());
+    for (input, (target, fixture_artifact_digest)) in REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.iter().zip(expected) {
+      assert_eq!(input.target, target);
+      assert_eq!(input.fixture_artifact_digest, fixture_artifact_digest);
+      assert_eq!(input.case_id, "filesystem:lstat-sync:lstat-existing");
+      assert_eq!(input.edge_id, "native-op:ext/fs/ops.rs#op_fs_lstat_sync");
+      assert_eq!(input.requirement_id, "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete");
+      assert_eq!(input.case_kind, "lstat-existing");
+      assert_eq!(input.logical_root, "$PROJECT");
+      assert_eq!(input.root_binding_id, "root:project");
+      assert_eq!(input.root_descriptor_slot, 0);
+      assert_eq!(input.fixture_root_identity, "fixture:project-root");
+      assert_eq!(input.target_object_id, "source");
+      assert_eq!(input.target_relative_path, "input.txt");
+      assert_eq!(input.target_content, b"");
+      assert_eq!(input.principal_key, "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+      assert_eq!(input.authority_source_id, "case:static:0");
+      assert_eq!(input.target_content_digest, "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU");
+      assert_eq!(input.authority_capability, Rev2CapabilityId::FsList);
       let status = REV2_TARGET_STATUS.iter().find(|row| row.target == target).unwrap();
-      assert_eq!(descriptor.feature_set, status.feature_set);
+      assert_eq!(input.feature_set, status.feature_set);
       assert_eq!((status.enforced, status.closed, status.absent, status.unsupported), (0, 0, 13, 983));
-      assert!(REV2_BACKEND_CELLS.iter().any(|(edge, cell_target, cell_status)| *edge == descriptor.edge_id && *cell_target == target && *cell_status == "unsupported"));
+      assert!(REV2_BACKEND_CELLS.iter().any(|(edge, cell_target, cell_status)| *edge == input.edge_id && *cell_target == target && *cell_status == "unsupported"));
       assert!(!REV2_ADVERTISED_TARGETS.contains(&target));
     }
     for unsupported in ["aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"] {
-      assert!(!REV2_FILESYSTEM_LSTAT_EXISTING_FIXTURE_DESCRIPTORS.iter().any(|row| row.target == unsupported));
+      assert!(!REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.iter().any(|row| row.target == unsupported));
     }
   }
 
