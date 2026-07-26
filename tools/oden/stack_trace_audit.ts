@@ -38,7 +38,10 @@ const EXEMPT: Record<string, string> = {
 };
 
 async function* rsFiles(dir: string): AsyncGenerator<string> {
-  for await (const e of Deno.readDir(dir)) {
+  const entries = [];
+  for await (const entry of Deno.readDir(dir)) entries.push(entry);
+  entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  for (const e of entries) {
     const p = `${dir}/${e.name}`;
     if (e.isDirectory) yield* rsFiles(p);
     else if (e.name.endsWith(".rs")) yield p;
@@ -50,7 +53,8 @@ type Fn = { name: string; attrs: string; body: string; isOp: boolean };
 // Extract fns with their attribute block and brace-counted body.
 function extractFns(src: string): Fn[] {
   const fns: Fn[] = [];
-  const re = /((?:#\[[^\]]*\]\s*)*)(?:pub(?:\([a-z]+\))?\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)/g;
+  const re =
+    /((?:#\[[^\]]*\]\s*)*)(?:pub(?:\([a-z]+\))?\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
     const attrs = m[1] ?? "";
@@ -121,7 +125,9 @@ for (const dir of SCAN_DIRS) {
       const rel = path.slice(ROOT.length);
       if (listArg && (checks || hasAnnotation)) {
         console.log(
-          `${checks ? "CHECKS" : "      "} ${hasAnnotation ? "ANNOT" : "     "} ${fn.name} (${rel})`,
+          `${checks ? "CHECKS" : "      "} ${
+            hasAnnotation ? "ANNOT" : "     "
+          } ${fn.name} (${rel})`,
         );
       }
       if (checks && !hasAnnotation) {
