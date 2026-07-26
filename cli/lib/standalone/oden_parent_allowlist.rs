@@ -114,7 +114,7 @@ const ODEN_PARENT_TARGET_POLICY_RUST_CFG_DIGESTS: [&str; 2] = [
 ];
 const ODEN_PARENT_TARGET_POLICY_CARGO_GRAPH_DIGESTS: [&str; 2] = [
   "4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4",
-  "d47b808c447418803448de70b5b6fe0dba6da53f15a228f14d704abab0ccf9d9",
+  "8a65d4b58b63c65ab24d7b86710ca4cd11421909f43a7ae1f690faa4e8414f43",
 ];
 const ODEN_PARENT_TARGET_POLICY_CAPSEC_FEATURES: &str = "action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate";
 
@@ -5429,7 +5429,7 @@ mod tests {
         concat!(
           "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
           "cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;",
-          "graph:sha256:d47b808c447418803448de70b5b6fe0dba6da53f15a228f14d704abab0ccf9d9;",
+          "graph:sha256:8a65d4b58b63c65ab24d7b86710ca4cd11421909f43a7ae1f690faa4e8414f43;",
           "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
           "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
         ),

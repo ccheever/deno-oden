@@ -1272,7 +1272,7 @@ mod tests {
   /// wrongly accept). The S+L test below recomputes it from the actual golden
   /// S and requires equality before exercising the refusal.
   const GOLDEN_S_PLUS_L_LE_HEX: &str =
-    "469f813474de35ef8df962a96e1a0046a1ac3e79449ecb7de6cfefbf61415819";
+    "5ebc10a7533fd36b05d6fb6be5a7081ad676ab3fb3c87a010266f6097eb0441f";
   // The synthetic test registry's rows are exactly {target, featureSet} with
   // the generated identities, so its canonical bytes equal the reviewed
   // parent registry file byte-for-byte and these vectors equal the golden
@@ -1316,15 +1316,15 @@ mod tests {
   const GOLDEN_CURRENT_STATE_RECEIPT_JCS: &[u8] =
     include_bytes!("testdata/oden_target_policy/test-current-state.json");
   const GOLDEN_REGISTRY_BYTE_DIGEST: &str =
-    "sha256-DGjCROj7Ffpo9qCQ6gBD2G8i2V9GhDKYOaeO6g_md_A";
+    "sha256-2Kzf6Pr7eI09jmY_ByJ4I-XKdRIlW4kK6cuXy5YiZwc";
   const GOLDEN_TARGET_POLICY_DIGESTS: [&str; 2] = [
     "sha256-VDeCBZnJr3WNmIguy3EJxekIhMcX0eUKgtWJiT_Nblg",
-    "sha256--ZrECsKvcbdR-8CYYZ6Wwav-jvhgWNOkff8_o5SgZ1w",
+    "sha256-9rF-H6XPh1e3_e0uwdGaOVXAjXKlkKVeTzhleC9LTe4",
   ];
   const GOLDEN_APPROVAL_DIGEST: &str =
-    "sha256-fpqgHMIqoA5DlRXwY53U7LOQjxu3FyzjuZKAT6g_bWU";
+    "sha256-gFMKTXhSfmCUQ_ceCweQ49O2AZc3trOdf5F1icPd3sE";
   const GOLDEN_APPROVAL_SIGNATURE_BYTE_DIGEST: &str =
-    "sha256-uwqipvhWf8r-R3SH7GKZ-UWqhCtuG7fbvGBrFgKMprg";
+    "sha256-l-zK1AZgIMMCJKmzhYz7x8ct_P07d7cykGv_dWHrCAc";
   const GOLDEN_KEY_ID: &str =
     "sha256-klO1cvvohAH-s3QgHuFalxHR4zv2KW1fnMURElsM58c";
   const GOLDEN_ISSUED_AT_EPOCH_SECONDS: u64 = 1_784_505_600;
