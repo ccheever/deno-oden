@@ -2174,7 +2174,7 @@ pub struct Rev2FilesystemLstatExistingObservationInput {
 
 pub const REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS: &[Rev2FilesystemLstatExistingObservationInput] = &[
   Rev2FilesystemLstatExistingObservationInput {
-    fixture_artifact_digest: "sha256-kV34YfbR2X-lXOkg7OVNDvHI9607N9p1ru0pB9Lh3vY",
+    fixture_artifact_digest: "sha256-94Ox6h7lni3XzEokz4lAX9vFsW5ST95AfsToi26MpXU",
     target: "aarch64-apple-darwin",
     feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
     case_id: "filesystem:lstat-sync:lstat-existing",
@@ -2194,7 +2194,7 @@ pub const REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS: &[Rev2FilesystemLst
     authority_capability: Rev2CapabilityId::FsList,
   },
   Rev2FilesystemLstatExistingObservationInput {
-    fixture_artifact_digest: "sha256-RTDyouftCzSDoG1Y9MAXy7NQBanZFt6hF_4vEvFWZig",
+    fixture_artifact_digest: "sha256-94Ox6h7lni3XzEokz4lAX9vFsW5ST95AfsToi26MpXU",
     target: "x86_64-unknown-linux-gnu",
     feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:d47b808c447418803448de70b5b6fe0dba6da53f15a228f14d704abab0ccf9d9;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
     case_id: "filesystem:lstat-sync:lstat-existing",
@@ -2241,7 +2241,7 @@ pub struct Rev2TargetStatus {
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
 pub const REV2_VOCAB_DIGEST: &str = "sha256-a-uQBpqZ-PcfBvX5Oiuk-Q7LEs5z6kmkqhzJczUEo0M";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-31XQbmRKSGHk7zh6Mtf8hE9N72a-YBCvfwEJoGlLNqs";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-utdnZeSuYJSBY464rc2LZ3GDU1DAV-7N2PPBfRESGwY";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-SFvyfj3PfQcUC0REjPviGqms_7DEwFcghE7kL9WYSyo";
@@ -102073,8 +102073,8 @@ mod tests {
   #[test]
   fn filesystem_lstat_existing_observation_inputs_are_exact_candidates_only() {
     let expected = [
-      ("aarch64-apple-darwin", "sha256-kV34YfbR2X-lXOkg7OVNDvHI9607N9p1ru0pB9Lh3vY"),
-      ("x86_64-unknown-linux-gnu", "sha256-RTDyouftCzSDoG1Y9MAXy7NQBanZFt6hF_4vEvFWZig"),
+      ("aarch64-apple-darwin", "sha256-94Ox6h7lni3XzEokz4lAX9vFsW5ST95AfsToi26MpXU"),
+      ("x86_64-unknown-linux-gnu", "sha256-94Ox6h7lni3XzEokz4lAX9vFsW5ST95AfsToi26MpXU"),
     ];
     assert_eq!(REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.len(), expected.len());
     for (input, (target, fixture_artifact_digest)) in REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.iter().zip(expected) {
