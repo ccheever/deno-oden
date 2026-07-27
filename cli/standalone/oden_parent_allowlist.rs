@@ -340,7 +340,7 @@ pub(crate) const ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS: &[&str] = &[
 
 /// Parent-root-relative definitions that comprise the release contract.
 ///
-/// The complete reviewed membership is fixed and all 32 definition paths now
+/// The complete reviewed membership is fixed and all 34 definition paths now
 /// exist. Authoring Generate may retain these exact bytes for two deterministic
 /// review candidates, but Check, source authentication, generated-input freeze,
 /// and downstream admission remain separate gates.
@@ -359,6 +359,7 @@ pub(crate) const ODEN_PARENT_RELEASE_CONTRACT_PATHS: &[&str] = &[
   "rust-toolchain.toml",
   "schemas/release/build-metadata.schema.json",
   "schemas/release/engine-provenance.schema.json",
+  "schemas/release/release-contract-pin.schema.json",
   "schemas/release/release-metadata.schema.json",
   "schemas/release/release-signing.schema.json",
   "schemas/release/rustsec-audit.schema.json",
@@ -368,6 +369,7 @@ pub(crate) const ODEN_PARENT_RELEASE_CONTRACT_PATHS: &[&str] = &[
   "scripts/install.sh",
   "scripts/release/build-artifact.ts",
   "scripts/release/checksums.ts",
+  "scripts/release/contract-pin.ts",
   "scripts/release/engine-provenance.ts",
   "scripts/release/metadata.ts",
   "scripts/release/preflight.ts",
@@ -4347,7 +4349,7 @@ mod tests {
 
   #[test]
   fn release_contract_paths_are_closed_sorted_literals() {
-    assert_closed_sorted_literals(ODEN_PARENT_RELEASE_CONTRACT_PATHS, 32);
+    assert_closed_sorted_literals(ODEN_PARENT_RELEASE_CONTRACT_PATHS, 34);
     assert_handwritten_rust_authorities(ODEN_PARENT_RELEASE_CONTRACT_PATHS);
   }
 
