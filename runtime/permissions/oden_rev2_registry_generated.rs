@@ -2174,7 +2174,7 @@ pub struct Rev2FilesystemLstatExistingObservationInput {
 
 pub const REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS: &[Rev2FilesystemLstatExistingObservationInput] = &[
   Rev2FilesystemLstatExistingObservationInput {
-    fixture_artifact_digest: "sha256-1asFxopqfzlZKwySDAChaoWsW3M33csXsDpAYcdpacc",
+    fixture_artifact_digest: "sha256-NJmJJmKTNqPzf4CTcy8G9NU3_gmV0ICICUSkhKt1bcw",
     target: "aarch64-apple-darwin",
     feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
     case_id: "filesystem:lstat-sync:lstat-existing",
@@ -2194,7 +2194,7 @@ pub const REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS: &[Rev2FilesystemLst
     authority_capability: Rev2CapabilityId::FsList,
   },
   Rev2FilesystemLstatExistingObservationInput {
-    fixture_artifact_digest: "sha256-1asFxopqfzlZKwySDAChaoWsW3M33csXsDpAYcdpacc",
+    fixture_artifact_digest: "sha256-NJmJJmKTNqPzf4CTcy8G9NU3_gmV0ICICUSkhKt1bcw",
     target: "x86_64-unknown-linux-gnu",
     feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:8a65d4b58b63c65ab24d7b86710ca4cd11421909f43a7ae1f690faa4e8414f43;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
     case_id: "filesystem:lstat-sync:lstat-existing",
@@ -2240,8 +2240,8 @@ pub struct Rev2TargetStatus {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-Kh-jAFYuISPCkdvlRQCZ5SZIjjX9Vaz65tZoQoIb4fo";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-rp7pXz5UCS98CtcdhJ7Srzb8ihCiDBjfMIcGx00QGyo";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-Wky_Se8y9GSqhaMpB9DYpA5kWXFptONOgf5MxxfUY0w";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-8ELJOmqRAgOANHb1JbWpBTwgA0DpTYSBEFJNKiJOhh4";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-SFvyfj3PfQcUC0REjPviGqms_7DEwFcghE7kL9WYSyo";
@@ -5872,9 +5872,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "branchId": "stage-a-target",
           "branchKind": "single",
           "condition": "the closure-private coverage host records both effects before creating its inspector session",
-          "enforcementDisposition": "bidirectional",
+          "enforcementDisposition": "negative-closure",
           "mechanism": "deny-only",
-          "negativeClosureSpecId": null
+          "negativeClosureSpecId": "negative-closure.categorical/2"
         },
         "generationKeys": [
           "negative-overlay",
@@ -5943,9 +5943,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "branchId": "stage-a-target",
           "branchKind": "single",
           "condition": "the closure-private profiler host records both effects before creating its inspector session",
-          "enforcementDisposition": "bidirectional",
+          "enforcementDisposition": "negative-closure",
           "mechanism": "deny-only",
-          "negativeClosureSpecId": null
+          "negativeClosureSpecId": "negative-closure.categorical/2"
         },
         "generationKeys": [
           "negative-overlay",
@@ -23070,7 +23070,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "operation-actor",
           "principal-set"
         ],
-        "atomicityGroup": "atomic:startup-hook:ext/tls/keylog.rs#get_ssl_key_log",
+        "atomicityGroup": null,
         "barriers": {
           "authorization": "before-commit",
           "cancellation": "release-provisional-state",
@@ -23089,26 +23089,6 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": null,
-            "capability": "env:read",
-            "cardinality": "exactly-one",
-            "condition": null,
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "startup-hook:ext/tls/keylog.rs#get_ssl_key_log:effect-slot:0",
-            "sourceResourceDescription": "SSLKEYLOGFILE"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": null,
-            "capability": "fs:write",
-            "cardinality": "exactly-one",
-            "condition": null,
-            "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
-            "effectSlotId": "startup-hook:ext/tls/keylog.rs#get_ssl_key_log:effect-slot:1",
-            "sourceResourceDescription": "SSLKEYLOGFILE destination"
-          },
-          {
-            "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
-            "branchId": null,
             "capability": "runtime:inspect",
             "cardinality": "exactly-one",
             "condition": null,
@@ -23120,10 +23100,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         "gate": {
           "branchId": "default",
           "branchKind": "single",
-          "condition": "startup reads SSLKEYLOGFILE and opens the destination before package code",
-          "enforcementDisposition": "bidirectional",
-          "mechanism": "adds-op-gate",
-          "negativeClosureSpecId": null
+          "condition": "Rev2 selection installs NoKeyLog before TLS extension initialization; any prior TLS key-log initialization fatally refuses the process",
+          "enforcementDisposition": "negative-closure",
+          "mechanism": "deny-only",
+          "negativeClosureSpecId": "negative-closure.categorical/2"
         },
         "generationKeys": [
           "negative-overlay",
@@ -33555,9 +33535,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "branchId": "stage-a-target",
           "branchKind": "single",
           "condition": "the helper reaches the native signal preflight, which checks both effects before delivery",
-          "enforcementDisposition": "bidirectional",
+          "enforcementDisposition": "negative-closure",
           "mechanism": "deny-only",
-          "negativeClosureSpecId": null
+          "negativeClosureSpecId": "negative-closure.categorical/2"
         },
         "generationKeys": [
           "negative-overlay",
@@ -38615,6 +38595,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "read/export branch",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "node-builtin:node:process:effect-slot:0",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "process environment name"
           },
           {
@@ -38625,6 +38612,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "mutation/load-env branch",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "node-builtin:node:process:effect-slot:1",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "process environment name"
           },
           {
@@ -38635,6 +38629,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "cwd/chdir/load-env branch",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "node-builtin:node:process:effect-slot:2",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "process cwd or dotenv path"
           },
           {
@@ -38645,6 +38646,10 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "peer signal branch",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "node-builtin:node:process:effect-slot:3",
+            "positiveChannels": [
+              "ambient-root",
+              "floor"
+            ],
             "sourceResourceDescription": "target process"
           },
           {
@@ -38655,6 +38660,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "diagnostic branch",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "node-builtin:node:process:effect-slot:4",
+            "positiveChannels": [],
             "sourceResourceDescription": "process report/core contents"
           },
           {
@@ -38665,6 +38671,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": "credential/priority branch",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "node-builtin:node:process:effect-slot:5",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "process identity or priority"
           }
         ],
@@ -38684,7 +38697,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         ],
         "lifetimeContractId": "lifetime.staged-effect/2",
         "maskedCommit": null,
-        "positiveChannels": [],
+        "positiveChannels": [
+          "ambient-root",
+          "floor",
+          "handle",
+          "mode-fallback",
+          "session"
+        ],
         "principalSources": [
           "captured-constrained-set"
         ],
@@ -38876,6 +38895,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": null,
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "node-builtin:node:repl:effect-slot:0",
+            "positiveChannels": [
+              "ambient-root",
+              "floor",
+              "handle",
+              "mode-fallback",
+              "session"
+            ],
             "sourceResourceDescription": "terminal/input stream"
           },
           {
@@ -38886,6 +38912,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
             "condition": null,
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "node-builtin:node:repl:effect-slot:1",
+            "positiveChannels": [],
             "sourceResourceDescription": "REPL evaluation context"
           }
         ],
@@ -38905,7 +38932,13 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
         ],
         "lifetimeContractId": "lifetime.staged-effect/2",
         "maskedCommit": null,
-        "positiveChannels": [],
+        "positiveChannels": [
+          "ambient-root",
+          "floor",
+          "handle",
+          "mode-fallback",
+          "session"
+        ],
         "principalSources": [
           "captured-constrained-set"
         ],
@@ -46333,8 +46366,8 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": null,
-            "capability": "fs:read",
-            "cardinality": "exactly-one",
+            "capability": "fs:watch",
+            "cardinality": "zero-or-more",
             "condition": null,
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/fs_events.rs#op_fs_events_open:effect-slot:0",
@@ -46400,8 +46433,8 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           {
             "authoritySelectorNormalizerId": "normalizer.schema-authority-selector/2",
             "branchId": null,
-            "capability": "fs:read",
-            "cardinality": "exactly-one",
+            "capability": "fs:watch",
+            "cardinality": "zero-or-more",
             "condition": "Rev1 watch fold",
             "effectOccurrenceNormalizerId": "normalizer.schema-effect-occurrence/2",
             "effectSlotId": "native-op:runtime/ops/fs_events.rs#op_fs_events_poll:effect-slot:0",
@@ -56800,9 +56833,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "branchId": "stage-a-target",
           "branchKind": "single",
           "condition": "legacy process signaling checks the complete effect set before delivery",
-          "enforcementDisposition": "bidirectional",
+          "enforcementDisposition": "negative-closure",
           "mechanism": "adds-op-gate",
-          "negativeClosureSpecId": null
+          "negativeClosureSpecId": "negative-closure.categorical/2"
         },
         "generationKeys": [
           "negative-overlay",
@@ -63592,9 +63625,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "branchId": "stage-a-target",
           "branchKind": "single",
           "condition": "the native entry point evaluates the complete patch-profile effect before work",
-          "enforcementDisposition": "bidirectional",
+          "enforcementDisposition": "negative-closure",
           "mechanism": "adds-op-gate",
-          "negativeClosureSpecId": null
+          "negativeClosureSpecId": "negative-closure.categorical/2"
         },
         "generationKeys": [
           "negative-overlay",
@@ -64681,9 +64714,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "branchId": "stage-a-target",
           "branchKind": "single",
           "condition": "every signal checks process:signal; SIGUSR1 also checks inspector:activate before delivery",
-          "enforcementDisposition": "bidirectional",
+          "enforcementDisposition": "negative-closure",
           "mechanism": "adds-op-gate",
-          "negativeClosureSpecId": null
+          "negativeClosureSpecId": "negative-closure.categorical/2"
         },
         "generationKeys": [
           "negative-overlay",
@@ -69485,9 +69518,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "branchId": "stage-a-target",
           "branchKind": "single",
           "condition": "abort/core disclosure crosses runtime:inspect before process termination",
-          "enforcementDisposition": "bidirectional",
+          "enforcementDisposition": "negative-closure",
           "mechanism": "adds-op-gate",
-          "negativeClosureSpecId": null
+          "negativeClosureSpecId": "negative-closure.categorical/2"
         },
         "generationKeys": [
           "negative-overlay",
@@ -74759,9 +74792,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "branchId": "stage-a-target",
           "branchKind": "single",
           "condition": "owned-child possession cannot rescue signal authority; SIGUSR1 is conjunctive",
-          "enforcementDisposition": "bidirectional",
+          "enforcementDisposition": "negative-closure",
           "mechanism": "deny-only",
-          "negativeClosureSpecId": null
+          "negativeClosureSpecId": "negative-closure.categorical/2"
         },
         "generationKeys": [
           "negative-overlay",
@@ -76699,9 +76732,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "branchId": "stage-a-target",
           "branchKind": "single",
           "condition": "the V8 diagnostic entry point crosses the deny-only runtime-inspection gate",
-          "enforcementDisposition": "bidirectional",
+          "enforcementDisposition": "negative-closure",
           "mechanism": "adds-op-gate",
-          "negativeClosureSpecId": null
+          "negativeClosureSpecId": "negative-closure.categorical/2"
         },
         "generationKeys": [
           "negative-overlay",
@@ -96554,7 +96587,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_spawn_child", effect_slot_id: "native-op:ext/process/lib.rs#op_spawn_child:effect-slot:1", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:process", effect_slot_id: "node-builtin:node:process:effect-slot:0", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "startup-hook:cli/util/v8.rs#get_v8_flags_from_env", effect_slot_id: "startup-hook:cli/util/v8.rs#get_v8_flags_from_env:effect-slot:0", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "startup-hook:ext/tls/keylog.rs#get_ssl_key_log", effect_slot_id: "startup-hook:ext/tls/keylog.rs#get_ssl_key_log:effect-slot:0", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "startup-hook:runtime/worker.rs#DENO_USR2_MEMORY_TRIM", effect_slot_id: "startup-hook:runtime/worker.rs#DENO_USR2_MEMORY_TRIM:effect-slot:0", capability: Rev2CapabilityId::EnvRead, resource_schema_id: "resource.env-name/2", occurrence_schema_id: "occurrence.env-read/2", positive_projection_id: "projection.env:read.positive/2", negative_projection_id: "projection.env:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_node_spawn_child", effect_slot_id: "native-op:ext/process/lib.rs#op_node_spawn_child:effect-slot:2", capability: Rev2CapabilityId::EnvWrite, resource_schema_id: "resource.env-write-target/2", occurrence_schema_id: "occurrence.env-write/2", positive_projection_id: "projection.env:write.positive/2", negative_projection_id: "projection.env:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/process/lib.rs#op_run", effect_slot_id: "native-op:ext/process/lib.rs#op_run:effect-slot:2", capability: Rev2CapabilityId::EnvWrite, resource_schema_id: "resource.env-write-target/2", occurrence_schema_id: "occurrence.env-write/2", positive_projection_id: "projection.env:write.positive/2", negative_projection_id: "projection.env:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -96740,8 +96772,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/node_sqlite/statement.rs#StatementSync::get", effect_slot_id: "native-op:ext/node_sqlite/statement.rs#StatementSync::get:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/node_sqlite/statement.rs#StatementSync::iterate", effect_slot_id: "native-op:ext/node_sqlite/statement.rs#StatementSync::iterate:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/node_sqlite/statement.rs#StatementSync::run", effect_slot_id: "native-op:ext/node_sqlite/statement.rs#StatementSync::run:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/fs_events.rs#op_fs_events_open", effect_slot_id: "native-op:runtime/ops/fs_events.rs#op_fs_events_open:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/fs_events.rs#op_fs_events_poll", effect_slot_id: "native-op:runtime/ops/fs_events.rs#op_fs_events_poll:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_query_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_query_permission:effect-slot:5", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_request_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_request_permission:effect-slot:5", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission", effect_slot_id: "native-op:runtime/ops/permissions.rs#op_revoke_permission:effect-slot:5", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -96750,6 +96780,8 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:module", effect_slot_id: "node-builtin:node:module:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:process", effect_slot_id: "node-builtin:node:process:effect-slot:2", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:sqlite", effect_slot_id: "node-builtin:node:sqlite:effect-slot:0", capability: Rev2CapabilityId::FsRead, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-read/2", positive_projection_id: "projection.fs:read.positive/2", negative_projection_id: "projection.fs:read.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
+  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/fs_events.rs#op_fs_events_open", effect_slot_id: "native-op:runtime/ops/fs_events.rs#op_fs_events_open:effect-slot:0", capability: Rev2CapabilityId::FsWatch, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-watch/2", positive_projection_id: "projection.fs:watch.positive/2", negative_projection_id: "projection.fs:watch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
+  Rev2ForkIntegrationRow { edge_id: "native-op:runtime/ops/fs_events.rs#op_fs_events_poll", effect_slot_id: "native-op:runtime/ops/fs_events.rs#op_fs_events_poll:effect-slot:0", capability: Rev2CapabilityId::FsWatch, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-watch/2", positive_projection_id: "projection.fs:watch.positive/2", negative_projection_id: "projection.fs:watch.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "diagnostic-route:ext/node/ops/process.rs#op_process_abort", effect_slot_id: "diagnostic-route:ext/node/ops/process.rs#op_process_abort:effect-slot:0", capability: Rev2CapabilityId::FsWrite, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-write/2", positive_projection_id: "projection.fs:write.positive/2", negative_projection_id: "projection.fs:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "diagnostic-route:ext/node/ops/v8.rs#op_v8_set_heap_snapshot_near_heap_limit", effect_slot_id: "diagnostic-route:ext/node/ops/v8.rs#op_v8_set_heap_snapshot_near_heap_limit:effect-slot:0", capability: Rev2CapabilityId::FsWrite, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-write/2", positive_projection_id: "projection.fs:write.positive/2", negative_projection_id: "projection.fs:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "diagnostic-route:ext/node/polyfills/trace_events.ts#Tracing.enable-trace-output", effect_slot_id: "diagnostic-route:ext/node/polyfills/trace_events.ts#Tracing.enable-trace-output:effect-slot:0", capability: Rev2CapabilityId::FsWrite, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-write/2", positive_projection_id: "projection.fs:write.positive/2", negative_projection_id: "projection.fs:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -96885,7 +96917,6 @@ pub const REV2_FORK_INTEGRATION: &[Rev2ForkIntegrationRow] = &[
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:fs", effect_slot_id: "node-builtin:node:fs:effect-slot:1", capability: Rev2CapabilityId::FsWrite, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-write/2", positive_projection_id: "projection.fs:write.positive/2", negative_projection_id: "projection.fs:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:fs/promises", effect_slot_id: "node-builtin:node:fs/promises:effect-slot:1", capability: Rev2CapabilityId::FsWrite, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-write/2", positive_projection_id: "projection.fs:write.positive/2", negative_projection_id: "projection.fs:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "node-builtin:node:sqlite", effect_slot_id: "node-builtin:node:sqlite:effect-slot:1", capability: Rev2CapabilityId::FsWrite, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-write/2", positive_projection_id: "projection.fs:write.positive/2", negative_projection_id: "projection.fs:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
-  Rev2ForkIntegrationRow { edge_id: "startup-hook:ext/tls/keylog.rs#get_ssl_key_log", effect_slot_id: "startup-hook:ext/tls/keylog.rs#get_ssl_key_log:effect-slot:1", capability: Rev2CapabilityId::FsWrite, resource_schema_id: "resource.path/2", occurrence_schema_id: "occurrence.path-write/2", positive_projection_id: "projection.fs:write.positive/2", negative_projection_id: "projection.fs:write.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "native-op:ext/webgpu/lib.rs#GPU::request_adapter", effect_slot_id: "native-op:ext/webgpu/lib.rs#GPU::request_adapter:effect-slot:0", capability: Rev2CapabilityId::GpuAccess, resource_schema_id: "resource.gpu-device/2", occurrence_schema_id: "occurrence.gpu-access/2", positive_projection_id: "projection.gpu:access.positive/2", negative_projection_id: "projection.gpu:access.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "diagnostic-route:ext/node/ops/inspector.rs#op_inspector_close", effect_slot_id: "diagnostic-route:ext/node/ops/inspector.rs#op_inspector_close:effect-slot:0", capability: Rev2CapabilityId::InspectorActivate, resource_schema_id: "resource.inspector-activation/2", occurrence_schema_id: "occurrence.inspector-activation/2", positive_projection_id: "projection.inspector:activate.positive/2", negative_projection_id: "projection.inspector:activate.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
   Rev2ForkIntegrationRow { edge_id: "diagnostic-route:ext/node/ops/inspector.rs#op_inspector_connect", effect_slot_id: "diagnostic-route:ext/node/ops/inspector.rs#op_inspector_connect:effect-slot:0", capability: Rev2CapabilityId::InspectorActivate, resource_schema_id: "resource.inspector-activation/2", occurrence_schema_id: "occurrence.inspector-activation/2", positive_projection_id: "projection.inspector:activate.positive/2", negative_projection_id: "projection.inspector:activate.negative/2", authority_selector_normalizer_id: "normalizer.schema-authority-selector/2", effect_occurrence_normalizer_id: "normalizer.schema-effect-occurrence/2" },
@@ -102084,8 +102115,8 @@ mod tests {
   #[test]
   fn filesystem_lstat_existing_observation_inputs_are_exact_candidates_only() {
     let expected = [
-      ("aarch64-apple-darwin", "sha256-1asFxopqfzlZKwySDAChaoWsW3M33csXsDpAYcdpacc"),
-      ("x86_64-unknown-linux-gnu", "sha256-1asFxopqfzlZKwySDAChaoWsW3M33csXsDpAYcdpacc"),
+      ("aarch64-apple-darwin", "sha256-NJmJJmKTNqPzf4CTcy8G9NU3_gmV0ICICUSkhKt1bcw"),
+      ("x86_64-unknown-linux-gnu", "sha256-NJmJJmKTNqPzf4CTcy8G9NU3_gmV0ICICUSkhKt1bcw"),
     ];
     assert_eq!(REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.len(), expected.len());
     for (input, (target, fixture_artifact_digest)) in REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.iter().zip(expected) {
