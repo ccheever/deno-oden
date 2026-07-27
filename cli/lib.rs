@@ -1102,6 +1102,10 @@ pub fn main() {
   // private policy/audit state, and erase their environment handoff before V8.
   // This scrubs JS reads and ordinary child inheritance; OS initial-environment
   // snapshots may retain stale paths, but never the key or consumed policy.
+  // @ref LLP 0019#tls-session-key-logging [implements] — Rev2 categorically
+  // disables TLS key logging before C03 verification and before any TLS
+  // extension can initialize. Standalone Rev2 is currently unconstructible;
+  // any future shared denort activation path must invoke this same preflight.
   let oden_capsec_armed =
     deno_runtime::deno_permissions::oden_capsec_init_control_plane(
       deno_runtime::deno_permissions::OdenRev2CompiledBuildIdentity {
@@ -1120,6 +1124,7 @@ pub fn main() {
         },
         actual_debug_assertions: cfg!(debug_assertions),
       },
+      deno_runtime::deno_tls::disable_oden_rev2_no_key_log,
     );
   deno_core::error::oden_capsec_set_armed(oden_capsec_armed);
   if let Some(exit_code) =

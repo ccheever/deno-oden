@@ -31,6 +31,7 @@ pub use webpki_roots;
 
 mod keylog;
 mod tls_key;
+pub use keylog::disable_oden_rev2_no_key_log;
 pub use keylog::get_ssl_key_log;
 pub use tls_key::*;
 

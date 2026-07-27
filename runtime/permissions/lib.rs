@@ -1833,6 +1833,24 @@ fn oden_rev2_continues_to_c04(
   armable && execution_role.is_some_and(|role| role != "probe")
 }
 
+fn oden_rev2_preflight_then_consume<T>(
+  snapshot: Option<&std::ffi::OsStr>,
+  preflight: impl FnOnce() -> Result<(), &'static str>,
+  consume: impl FnOnce(&std::ffi::OsStr) -> Result<T, String>,
+) -> Option<Result<T, String>> {
+  let snapshot = snapshot?;
+  let preflight_result = preflight();
+  let consume_result = consume(snapshot);
+  Some(match (preflight_result, consume_result) {
+    // A snapshot that could not be consumed or authenticated cannot carry an
+    // authenticated preflight claim. The consumer still ran after a failed
+    // preflight so every presented one-shot handoff remains consumed.
+    (_, Err(reason)) => Err(reason),
+    (Err(reason), Ok(_)) => Err(reason.to_string()),
+    (Ok(()), Ok(loaded)) => Ok(loaded),
+  })
+}
+
 /// Emit a distinct C04 transition after the immutable runtime context has
 /// actually been installed. The preceding C03 `rev2_loaded_context` record is
 /// deliberately left verification-only (`armed: false`); consumers must never
@@ -1892,8 +1910,12 @@ fn oden_rev2_runtime_install_evidence(
   clippy::disallowed_methods,
   reason = "single-threaded bootstrap snapshots and removes the private inherited handoff before V8 or worker threads start"
 )]
+/// @ref LLP 0019#tls-session-key-logging [implements] — Explicit Rev2
+/// selection installs the process-wide no-key-log state before C03 validation;
+/// even a preflight refusal consumes the one-shot bootstrap handoffs.
 pub fn oden_capsec_init_control_plane(
   rev2_build_identity: OdenRev2CompiledBuildIdentity,
+  rev2_preflight: impl FnOnce() -> Result<(), &'static str>,
 ) -> bool {
   let explicit_policy =
     std::env::var_os("ODEN_CAPSEC_POLICY").filter(|path| !path.is_empty());
@@ -1908,22 +1930,28 @@ pub fn oden_capsec_init_control_plane(
   };
   let mut rev2_armed = false;
   let _ = oden_capsec_project_root();
-  if let Some(snapshot) = explicit_rev2.as_deref() {
-    let loaded_result = if explicit_policy.is_some() {
-      // Consume/unlink any securely opened one-shot candidate even though the
-      // mixed protocol is unconditionally refused. This prevents a rejected
-      // handoff retaining receipt or host-binding material on disk.
-      let _ = oden_capsec_consume_rev2_snapshot(snapshot, &rev2_build_identity);
-      if let Some(policy) = explicit_policy.as_deref()
-        && let Some(control_root) =
-          oden_capsec_audit_channel().lock().control_root()
-      {
-        let _ = oden_capsec_consume_parent_policy(policy, &control_root);
+  if let Some(loaded_result) = oden_rev2_preflight_then_consume(
+    explicit_rev2.as_deref(),
+    rev2_preflight,
+    |snapshot| {
+      if explicit_policy.is_some() {
+        // Consume/unlink any securely opened one-shot candidate even though
+        // the mixed protocol is unconditionally refused. This prevents a
+        // rejected handoff retaining receipt or host-binding material on disk.
+        let _ =
+          oden_capsec_consume_rev2_snapshot(snapshot, &rev2_build_identity);
+        if let Some(policy) = explicit_policy.as_deref()
+          && let Some(control_root) =
+            oden_capsec_audit_channel().lock().control_root()
+        {
+          let _ = oden_capsec_consume_parent_policy(policy, &control_root);
+        }
+        Err("OD-CAP-REV2-MIXED-HANDOFF".to_string())
+      } else {
+        oden_capsec_consume_rev2_snapshot(snapshot, &rev2_build_identity)
       }
-      Err("OD-CAP-REV2-MIXED-HANDOFF".to_string())
-    } else {
-      oden_capsec_consume_rev2_snapshot(snapshot, &rev2_build_identity)
-    };
+    },
+  ) {
     let evidence = match &loaded_result {
       Ok(context) => context.evidence(),
       Err(reason) => serde_json::json!({
@@ -11275,6 +11303,79 @@ mod tests {
     assert!(!oden_rev2_continues_to_c04(true, Some("probe")));
     assert!(!oden_rev2_continues_to_c04(false, Some("run")));
     assert!(!oden_rev2_continues_to_c04(true, None));
+  }
+
+  #[test]
+  fn rev2_tls_key_log_preflight_is_rev2_only_and_precedes_consumption() {
+    use std::cell::RefCell;
+
+    let events = RefCell::new(Vec::new());
+    let absent = oden_rev2_preflight_then_consume::<()>(
+      None,
+      || {
+        events.borrow_mut().push("preflight");
+        Ok(())
+      },
+      |_| {
+        events.borrow_mut().push("consume");
+        Ok(())
+      },
+    );
+    assert!(absent.is_none());
+    assert!(events.borrow().is_empty());
+
+    let snapshot = std::ffi::OsStr::new("snapshot");
+    let loaded = oden_rev2_preflight_then_consume(
+      Some(snapshot),
+      || {
+        events.borrow_mut().push("preflight");
+        Ok(())
+      },
+      |observed| {
+        events.borrow_mut().push("consume");
+        assert_eq!(observed, snapshot);
+        Ok(17)
+      },
+    );
+    assert_eq!(loaded, Some(Ok(17)));
+    assert_eq!(*events.borrow(), ["preflight", "consume"]);
+  }
+
+  #[test]
+  fn rev2_tls_key_log_preflight_refusal_still_consumes_one_shot() {
+    use std::cell::RefCell;
+
+    const TLS_REFUSAL: &str = "OD-CAP-REV2-TLS-KEYLOG-ALREADY-INITIALIZED";
+    let events = RefCell::new(Vec::new());
+    let result = oden_rev2_preflight_then_consume(
+      Some(std::ffi::OsStr::new("snapshot")),
+      || {
+        events.borrow_mut().push("preflight");
+        Err(TLS_REFUSAL)
+      },
+      |_| {
+        events.borrow_mut().push("consume");
+        Ok(())
+      },
+    );
+
+    assert_eq!(result, Some(Err(TLS_REFUSAL.to_string())));
+    assert_eq!(*events.borrow(), ["preflight", "consume"]);
+  }
+
+  #[test]
+  fn rev2_tls_key_log_preflight_never_authenticates_a_broken_snapshot() {
+    const TLS_REFUSAL: &str = "OD-CAP-REV2-TLS-KEYLOG-ALREADY-INITIALIZED";
+    let result = oden_rev2_preflight_then_consume::<()>(
+      Some(std::ffi::OsStr::new("snapshot")),
+      || Err(TLS_REFUSAL),
+      |_| Err("OD-CAP-REV2-SNAPSHOT-IDENTITY".to_string()),
+    );
+
+    assert_eq!(
+      result,
+      Some(Err("OD-CAP-REV2-SNAPSHOT-IDENTITY".to_string()))
+    );
   }
 
   #[cfg(unix)]
