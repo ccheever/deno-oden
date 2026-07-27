@@ -2174,9 +2174,9 @@ pub struct Rev2FilesystemLstatExistingObservationInput {
 
 pub const REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS: &[Rev2FilesystemLstatExistingObservationInput] = &[
   Rev2FilesystemLstatExistingObservationInput {
-    fixture_artifact_digest: "sha256-NJmJJmKTNqPzf4CTcy8G9NU3_gmV0ICICUSkhKt1bcw",
+    fixture_artifact_digest: "sha256-3szKC9aWQKTqk6mhvQKZ_8lUDwUxcVrUUVcHBhjx8JE",
     target: "aarch64-apple-darwin",
-    feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
+    feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:62fc7ce277e35b03015efcb6c89461269dcc32c088e5e6c82419f31598473667;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
     case_id: "filesystem:lstat-sync:lstat-existing",
     edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
     requirement_id: "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete",
@@ -2194,9 +2194,9 @@ pub const REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS: &[Rev2FilesystemLst
     authority_capability: Rev2CapabilityId::FsList,
   },
   Rev2FilesystemLstatExistingObservationInput {
-    fixture_artifact_digest: "sha256-NJmJJmKTNqPzf4CTcy8G9NU3_gmV0ICICUSkhKt1bcw",
+    fixture_artifact_digest: "sha256-3szKC9aWQKTqk6mhvQKZ_8lUDwUxcVrUUVcHBhjx8JE",
     target: "x86_64-unknown-linux-gnu",
-    feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:8a65d4b58b63c65ab24d7b86710ca4cd11421909f43a7ae1f690faa4e8414f43;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
+    feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:3a41731043169db8c6a9452f6eb1150aeb1afb37ca223d87cf3c2bd974b66003;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
     case_id: "filesystem:lstat-sync:lstat-existing",
     edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
     requirement_id: "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete",
@@ -2241,7 +2241,7 @@ pub struct Rev2TargetStatus {
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
 pub const REV2_VOCAB_DIGEST: &str = "sha256-Wky_Se8y9GSqhaMpB9DYpA5kWXFptONOgf5MxxfUY0w";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-_LAsU1tajPh6F1GdCHXXxnCsBpeDTkEuB-U8f6clAts";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-wH1Wgy-MjEpc7ydy5-rU_D_5WPogtixpJa7Qkm_dfog";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-SFvyfj3PfQcUC0REjPviGqms_7DEwFcghE7kL9WYSyo";
@@ -3268,8 +3268,8 @@ pub const REV2_ADVERTISED_TARGETS: &[&str] = &[];
 pub const REV2_DEFERRED_STAGE_A_TARGETS: &[&str] = &["aarch64-unknown-linux-gnu", "x86_64-apple-darwin"];
 
 pub const REV2_TARGET_STATUS: &[Rev2TargetStatus] = &[
-  Rev2TargetStatus { target: "aarch64-apple-darwin", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a", cargo_feature_graph_digest: "sha256:4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 13, unsupported: 983 },
-  Rev2TargetStatus { target: "x86_64-unknown-linux-gnu", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c", cargo_feature_graph_digest: "sha256:8a65d4b58b63c65ab24d7b86710ca4cd11421909f43a7ae1f690faa4e8414f43", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:8a65d4b58b63c65ab24d7b86710ca4cd11421909f43a7ae1f690faa4e8414f43;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 13, unsupported: 983 },
+  Rev2TargetStatus { target: "x86_64-unknown-linux-gnu", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c", cargo_feature_graph_digest: "sha256:3a41731043169db8c6a9452f6eb1150aeb1afb37ca223d87cf3c2bd974b66003", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:3a41731043169db8c6a9452f6eb1150aeb1afb37ca223d87cf3c2bd974b66003;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 13, unsupported: 983 },
+  Rev2TargetStatus { target: "aarch64-apple-darwin", rust_toolchain: "1.95.0", cargo_features: "__vendored_zlib_ng,default,upgrade", rust_cfg_digest: "sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a", cargo_feature_graph_digest: "sha256:62fc7ce277e35b03015efcb6c89461269dcc32c088e5e6c82419f31598473667", build_profile: "release", feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:62fc7ce277e35b03015efcb6c89461269dcc32c088e5e6c82419f31598473667;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate", profile_claim: "not-advertised", enforced: 0, closed: 0, absent: 13, unsupported: 983 },
 ];
 
 pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
@@ -102115,8 +102115,8 @@ mod tests {
   #[test]
   fn filesystem_lstat_existing_observation_inputs_are_exact_candidates_only() {
     let expected = [
-      ("aarch64-apple-darwin", "sha256-NJmJJmKTNqPzf4CTcy8G9NU3_gmV0ICICUSkhKt1bcw"),
-      ("x86_64-unknown-linux-gnu", "sha256-NJmJJmKTNqPzf4CTcy8G9NU3_gmV0ICICUSkhKt1bcw"),
+      ("aarch64-apple-darwin", "sha256-3szKC9aWQKTqk6mhvQKZ_8lUDwUxcVrUUVcHBhjx8JE"),
+      ("x86_64-unknown-linux-gnu", "sha256-3szKC9aWQKTqk6mhvQKZ_8lUDwUxcVrUUVcHBhjx8JE"),
     ];
     assert_eq!(REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.len(), expected.len());
     for (input, (target, fixture_artifact_digest)) in REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.iter().zip(expected) {

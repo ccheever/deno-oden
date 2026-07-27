@@ -1272,14 +1272,14 @@ mod tests {
   /// wrongly accept). The S+L test below recomputes it from the actual golden
   /// S and requires equality before exercising the refusal.
   const GOLDEN_S_PLUS_L_LE_HEX: &str =
-    "5ebc10a7533fd36b05d6fb6be5a7081ad676ab3fb3c87a010266f6097eb0441f";
+    "b8a612cd0537c2b977eb405d9bf62389495bd10c5bd0aa4e4b00d68acdc59a19";
   // The synthetic test registry's rows are exactly {target, featureSet} with
   // the generated identities, so its canonical bytes equal the reviewed
   // parent registry file byte-for-byte and these vectors equal the golden
   // cross-integration vectors below.
   const REGISTRY_BYTE_DIGEST_VECTOR: &str = GOLDEN_REGISTRY_BYTE_DIGEST;
   const ROW0_TARGET_POLICY_DIGEST_VECTOR: &str =
-    "sha256-VDeCBZnJr3WNmIguy3EJxekIhMcX0eUKgtWJiT_Nblg";
+    "sha256-1qXv01QCOJWAmsx64S7dBRskaoylciw9u6Aqvg3cIdg";
 
   // ===== Golden cross-integration fixtures (CP1 parent artifacts) =====
   //
@@ -1316,15 +1316,15 @@ mod tests {
   const GOLDEN_CURRENT_STATE_RECEIPT_JCS: &[u8] =
     include_bytes!("testdata/oden_target_policy/test-current-state.json");
   const GOLDEN_REGISTRY_BYTE_DIGEST: &str =
-    "sha256-2Kzf6Pr7eI09jmY_ByJ4I-XKdRIlW4kK6cuXy5YiZwc";
+    "sha256-qklTluS9mYjYtxpGXvbMkcWyg8gIGo3HIxV3qy3JS9Y";
   const GOLDEN_TARGET_POLICY_DIGESTS: [&str; 2] = [
-    "sha256-VDeCBZnJr3WNmIguy3EJxekIhMcX0eUKgtWJiT_Nblg",
-    "sha256-9rF-H6XPh1e3_e0uwdGaOVXAjXKlkKVeTzhleC9LTe4",
+    "sha256-1qXv01QCOJWAmsx64S7dBRskaoylciw9u6Aqvg3cIdg",
+    "sha256-wNz_f6VAY_sb0JYJMqDunUbI3iGvGW73AQdnBG9Z1I0",
   ];
   const GOLDEN_APPROVAL_DIGEST: &str =
-    "sha256-gFMKTXhSfmCUQ_ceCweQ49O2AZc3trOdf5F1icPd3sE";
+    "sha256-TUMz8AvaDdjsRlENWD2M83XFiFSNwv3PECg5Hi9zuPw";
   const GOLDEN_APPROVAL_SIGNATURE_BYTE_DIGEST: &str =
-    "sha256-l-zK1AZgIMMCJKmzhYz7x8ct_P07d7cykGv_dWHrCAc";
+    "sha256-ic6W761EaabjEHx6HQhtj9qpEhqBSChYZmt7NEVSvT4";
   const GOLDEN_KEY_ID: &str =
     "sha256-klO1cvvohAH-s3QgHuFalxHR4zv2KW1fnMURElsM58c";
   const GOLDEN_ISSUED_AT_EPOCH_SECONDS: u64 = 1_784_505_600;

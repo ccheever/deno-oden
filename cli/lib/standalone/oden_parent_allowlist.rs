@@ -113,8 +113,8 @@ const ODEN_PARENT_TARGET_POLICY_RUST_CFG_DIGESTS: [&str; 2] = [
   "f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c",
 ];
 const ODEN_PARENT_TARGET_POLICY_CARGO_GRAPH_DIGESTS: [&str; 2] = [
-  "4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4",
-  "8a65d4b58b63c65ab24d7b86710ca4cd11421909f43a7ae1f690faa4e8414f43",
+  "62fc7ce277e35b03015efcb6c89461269dcc32c088e5e6c82419f31598473667",
+  "3a41731043169db8c6a9452f6eb1150aeb1afb37ca223d87cf3c2bd974b66003",
 ];
 const ODEN_PARENT_TARGET_POLICY_CAPSEC_FEATURES: &str = "action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate";
 
@@ -5419,7 +5419,7 @@ mod tests {
         concat!(
           "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
           "cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;",
-          "graph:sha256:4efa57ca17eaf3ca1905068ff67704a37ad7d79dd5f65dd1c3e0035563c83fb4;",
+          "graph:sha256:62fc7ce277e35b03015efcb6c89461269dcc32c088e5e6c82419f31598473667;",
           "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
           "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
         ),
@@ -5429,7 +5429,7 @@ mod tests {
         concat!(
           "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;",
           "cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;",
-          "graph:sha256:8a65d4b58b63c65ab24d7b86710ca4cd11421909f43a7ae1f690faa4e8414f43;",
+          "graph:sha256:3a41731043169db8c6a9452f6eb1150aeb1afb37ca223d87cf3c2bd974b66003;",
           "profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;",
           "capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
         ),
