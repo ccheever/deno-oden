@@ -5311,6 +5311,8 @@ fn generated_case_kind(
         Kind::StagedBarrierAuthorization => "staged-barrier:authorization",
         Kind::StagedBarrierCancellation => "staged-barrier:cancellation",
         Kind::StagedBarrierCleanup => "staged-barrier:cleanup",
+        Kind::StagedBarrierCommit => "staged-barrier:commit",
+        Kind::StagedBarrierDiscovery => "staged-barrier:discovery",
         Kind::StagedBarrierRevocation => "staged-barrier:revocation",
     }
 }
@@ -5764,6 +5766,34 @@ fn validate_fault_plan(
                 operation: FilesystemActorSequenceOperation::Cancel,
             },
         }),
+        Generated::CancelAfterCoreCommit => Some(FilesystemFaultPlan {
+            barrier_id: "case-plan:after-core-commit".to_string(),
+            phase: FilesystemFaultPhase::AfterCoreCommit,
+            action: FilesystemFaultAction::ActorSequence {
+                operation: FilesystemActorSequenceOperation::Cancel,
+            },
+        }),
+        Generated::NamespacePathReplacementAfterDiscovery => {
+            let (object_id, replacement_object_id) = match operation {
+                generated::Rev2FilesystemCandidateOperationSpec::LstatSync { .. } => {
+                    ("source", "destination")
+                }
+                generated::Rev2FilesystemCandidateOperationSpec::MkdirSync { .. } => {
+                    ("destination", "source")
+                }
+            };
+            Some(FilesystemFaultPlan {
+                barrier_id: "case-plan:after-discovery".to_string(),
+                phase: FilesystemFaultPhase::AfterDiscovery,
+                action: FilesystemFaultAction::NamespaceMutation {
+                    mutation: FilesystemNamespaceMutation {
+                        kind: FilesystemNamespaceMutationKind::PathReplacement,
+                        object_id: object_id.to_string(),
+                        replacement_object_id: replacement_object_id.to_string(),
+                    },
+                },
+            })
+        }
         Generated::OmitRequiredStage => match operation {
             generated::Rev2FilesystemCandidateOperationSpec::LstatSync { .. } => {
                 Some(FilesystemFaultPlan {
@@ -6197,9 +6227,12 @@ fn case_plan_resource_lifecycle(
     operation: &generated::Rev2FilesystemCandidateOperationSpec,
     plan: &generated::Rev2FilesystemCandidateCasePlanSpec,
     target: &FilesystemSetupObject,
-    target_state: generated::Rev2FilesystemCandidateTargetState,
+    _target_state: generated::Rev2FilesystemCandidateTargetState,
 ) -> Vec<FilesystemResourceLifecycleEntry> {
     let mut rows = Vec::new();
+    let has_phase = |phase: FilesystemTracePhase| {
+        projection.execution.trace_phases.contains(&phase)
+    };
     let operation_owner = format!("operation:{}", projection.case_id);
     let native_owner = format!("native:{}", projection.edge_id);
     let delivery_owner = format!("delivery:{}", projection.case_id);
@@ -6277,27 +6310,21 @@ fn case_plan_resource_lifecycle(
         None,
         Some(operation_owner.clone()),
     );
-    for slot in operation_slots(operation) {
-        push_resource_lifecycle(
-            &mut rows,
-            FilesystemTracePhase::AuthorizationComplete,
-            format!("authority-handle:{}", slot.effect_slot_id),
-            FilesystemResourceClass::AuthorityHandle,
-            FilesystemResourceTransition::Acquire,
-            None,
-            Some(operation_owner.clone()),
-        );
+    if has_phase(FilesystemTracePhase::AuthorizationComplete) {
+        for slot in operation_slots(operation) {
+            push_resource_lifecycle(
+                &mut rows,
+                FilesystemTracePhase::AuthorizationComplete,
+                format!("authority-handle:{}", slot.effect_slot_id),
+                FilesystemResourceClass::AuthorityHandle,
+                FilesystemResourceTransition::Acquire,
+                None,
+                Some(operation_owner.clone()),
+            );
+        }
     }
-    let creates_child = plan.outcome_disposition
-        == generated::Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation
-        && matches!(
-            (operation, target_state),
-            (
-                generated::Rev2FilesystemCandidateOperationSpec::MkdirSync { .. },
-                generated::Rev2FilesystemCandidateTargetState::Missing
-            )
-        );
-    if creates_child {
+    let mut prepared_child_owner = None;
+    if has_phase(FilesystemTracePhase::PreparationComplete) {
         push_resource_lifecycle(
             &mut rows,
             FilesystemTracePhase::PreparationComplete,
@@ -6307,6 +6334,9 @@ fn case_plan_resource_lifecycle(
             None,
             Some(operation_owner.clone()),
         );
+        prepared_child_owner = Some(operation_owner.clone());
+    }
+    if has_phase(FilesystemTracePhase::CoreCommitRecorded) && prepared_child_owner.is_some() {
         push_resource_lifecycle(
             &mut rows,
             FilesystemTracePhase::CoreCommitRecorded,
@@ -6316,19 +6346,22 @@ fn case_plan_resource_lifecycle(
             Some(operation_owner.clone()),
             Some(native_owner.clone()),
         );
+        prepared_child_owner = Some(native_owner.clone());
+    }
+    if has_phase(FilesystemTracePhase::NativeCommitRecorded) && prepared_child_owner.is_some() {
         push_resource_lifecycle(
             &mut rows,
             FilesystemTracePhase::NativeCommitRecorded,
             format!("prepared-child:{}", target.object_id),
             FilesystemResourceClass::PreparedChild,
             FilesystemResourceTransition::Release,
-            Some(native_owner),
+            Some(native_owner.clone()),
             None,
         );
+        prepared_child_owner = None;
     }
-    if plan.outcome_disposition
-        == generated::Rev2FilesystemCandidateOutcomeDisposition::AuthorizedOperation
-    {
+    let mut delivery_lease_owner = None;
+    if has_phase(FilesystemTracePhase::OperationCompleted) {
         push_resource_lifecycle(
             &mut rows,
             FilesystemTracePhase::OperationCompleted,
@@ -6338,6 +6371,9 @@ fn case_plan_resource_lifecycle(
             None,
             Some(operation_owner.clone()),
         );
+        delivery_lease_owner = Some(operation_owner.clone());
+    }
+    if has_phase(FilesystemTracePhase::DeliverySerialized) && delivery_lease_owner.is_some() {
         push_resource_lifecycle(
             &mut rows,
             FilesystemTracePhase::DeliverySerialized,
@@ -6353,7 +6389,30 @@ fn case_plan_resource_lifecycle(
             format!("delivery-lease:{}", target.object_id),
             FilesystemResourceClass::DeliveryLease,
             FilesystemResourceTransition::Release,
-            Some(delivery_owner),
+            Some(delivery_owner.clone()),
+            None,
+        );
+        delivery_lease_owner = None;
+    }
+    if let Some(owner) = delivery_lease_owner {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::ProvisionalResourcesReleased,
+            format!("delivery-lease:{}", target.object_id),
+            FilesystemResourceClass::DeliveryLease,
+            FilesystemResourceTransition::Release,
+            Some(owner),
+            None,
+        );
+    }
+    if let Some(owner) = prepared_child_owner {
+        push_resource_lifecycle(
+            &mut rows,
+            FilesystemTracePhase::ProvisionalResourcesReleased,
+            format!("prepared-child:{}", target.object_id),
+            FilesystemResourceClass::PreparedChild,
+            FilesystemResourceTransition::Release,
+            Some(owner),
             None,
         );
     }
@@ -6366,16 +6425,18 @@ fn case_plan_resource_lifecycle(
         Some(operation_owner.clone()),
         None,
     );
-    for slot in operation_slots(operation).iter().rev() {
-        push_resource_lifecycle(
-            &mut rows,
-            FilesystemTracePhase::ProvisionalResourcesReleased,
-            format!("authority-handle:{}", slot.effect_slot_id),
-            FilesystemResourceClass::AuthorityHandle,
-            FilesystemResourceTransition::Release,
-            Some(operation_owner.clone()),
-            None,
-        );
+    if has_phase(FilesystemTracePhase::AuthorizationComplete) {
+        for slot in operation_slots(operation).iter().rev() {
+            push_resource_lifecycle(
+                &mut rows,
+                FilesystemTracePhase::ProvisionalResourcesReleased,
+                format!("authority-handle:{}", slot.effect_slot_id),
+                FilesystemResourceClass::AuthorityHandle,
+                FilesystemResourceTransition::Release,
+                Some(operation_owner.clone()),
+                None,
+            );
+        }
     }
     for actor in projection.execution.actors.iter().rev() {
         push_resource_lifecycle(
@@ -8223,6 +8284,11 @@ fn terminal_outcome(
             "actor-sequence-refused",
             FilesystemCleanup::Complete,
         )),
+        Disposition::NamespaceRaceRefused => Ok(terminal_result(
+            FilesystemDecision::Refuse,
+            "namespace-race-refused",
+            FilesystemCleanup::Complete,
+        )),
     }
 }
 
@@ -8260,9 +8326,19 @@ fn evaluate_filesystem_candidate(
 ) -> Result<FilesystemCandidateOracleOutput, CoreError> {
     let material = filesystem_oracle_material(input)?;
     let malformed = input.case_projection.input_mutation == FilesystemInputMutation::TargetPathDotDot;
+    let discovery_fault = matches!(
+        input.case_projection
+            .fault_plan
+            .as_ref()
+            .map(|fault| (&fault.phase, &fault.action)),
+        Some((
+            FilesystemFaultPhase::AfterDiscovery,
+            FilesystemFaultAction::NamespaceMutation { .. }
+        ))
+    );
     let mut evaluations = Vec::new();
     let mut shared_core_evaluations = Vec::new();
-    if !malformed {
+    if !malformed && !discovery_fault {
         let request = filesystem_stage_request(
             &input.case_projection,
             &material.slots,
@@ -8332,7 +8408,7 @@ fn evaluate_filesystem_candidate(
     let (decision, expected_result, observed_result, side_effects, delivery, cleanup) =
         terminal_outcome(input, &material, &evaluations)?;
     let expected_core = FilesystemExpectedCore {
-        disposition: if malformed {
+        disposition: if malformed || discovery_fault {
             FilesystemCoreDisposition::NotReached
         } else {
             FilesystemCoreDisposition::Evaluated
@@ -11292,6 +11368,7 @@ mod tests {
                     FilesystemTracePhase::AuthorizationComplete,
                     FilesystemTracePhase::SourcesRevalidated,
                     FilesystemTracePhase::TargetRevalidated,
+                    FilesystemTracePhase::CoreCommitRecorded,
                     FilesystemTracePhase::OperationCompleted,
                     FilesystemTracePhase::DeliverySerialized,
                     FilesystemTracePhase::ProvisionalResourcesReleased,
@@ -11838,6 +11915,32 @@ mod tests {
                     operation: FilesystemActorSequenceOperation::Cancel,
                 },
             }),
+            FaultPlan::CancelAfterCoreCommit => Some(FilesystemFaultPlan {
+                barrier_id: "case-plan:after-core-commit".to_string(),
+                phase: FilesystemFaultPhase::AfterCoreCommit,
+                action: FilesystemFaultAction::ActorSequence {
+                    operation: FilesystemActorSequenceOperation::Cancel,
+                },
+            }),
+            FaultPlan::NamespacePathReplacementAfterDiscovery => {
+                let (object_id, replacement_object_id) =
+                    if edge_id.ends_with("op_fs_lstat_sync") {
+                        ("source", "destination")
+                    } else {
+                        ("destination", "source")
+                    };
+                Some(FilesystemFaultPlan {
+                    barrier_id: "case-plan:after-discovery".to_string(),
+                    phase: FilesystemFaultPhase::AfterDiscovery,
+                    action: FilesystemFaultAction::NamespaceMutation {
+                        mutation: FilesystemNamespaceMutation {
+                            kind: FilesystemNamespaceMutationKind::PathReplacement,
+                            object_id: object_id.to_string(),
+                            replacement_object_id: replacement_object_id.to_string(),
+                        },
+                    },
+                })
+            }
             FaultPlan::OmitRequiredStage => Some(if edge_id.ends_with("op_fs_lstat_sync") {
                 FilesystemFaultPlan {
                     barrier_id: "case-plan:after-target-revalidation".to_string(),
@@ -12262,6 +12365,20 @@ mod tests {
             edge.barriers.discovery,
             "before-next-effect-or-delivery"
         );
+        assert_eq!(edge.barriers.delivery, "unimplemented");
+
+        for edge_id in [
+            "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+        ] {
+            let filesystem_edge = core.edges.get(edge_id).unwrap();
+            assert_eq!(filesystem_edge.barriers.commit, "before-commit");
+            assert_eq!(
+                filesystem_edge.barriers.discovery,
+                "before-next-effect-or-delivery"
+            );
+            assert_eq!(filesystem_edge.barriers.delivery, "unimplemented");
+        }
 
         let mut invalid = edge.clone();
         invalid.barriers.commit = "release-provisional-state".to_string();
@@ -12274,6 +12391,24 @@ mod tests {
 
         invalid = edge.clone();
         invalid.barriers.discovery = "before-commit".to_string();
+        assert_eq!(
+            validate_edge_semantics(edge_id, &invalid)
+                .unwrap_err()
+                .reason_code,
+            REASON_SCHEMA_INVALID
+        );
+
+        invalid = edge.clone();
+        invalid.barriers.delivery = "before-commit".to_string();
+        assert_eq!(
+            validate_edge_semantics(edge_id, &invalid)
+                .unwrap_err()
+                .reason_code,
+            REASON_SCHEMA_INVALID
+        );
+
+        invalid = edge.clone();
+        invalid.barriers.delivery = "before-next-effect-or-delivery".to_string();
         assert_eq!(
             validate_edge_semantics(edge_id, &invalid)
                 .unwrap_err()
@@ -12815,12 +12950,12 @@ mod tests {
             input_mutations.insert(plan.input_mutation);
         }
 
-        assert_eq!(REV2_FILESYSTEM_CANDIDATE_CASE_PLANS.len(), 21);
+        assert_eq!(REV2_FILESYSTEM_CANDIDATE_CASE_PLANS.len(), 23);
         assert_eq!(principal_plans.len(), 5);
         assert_eq!(authority_plans.len(), 10);
-        assert_eq!(fault_plans.len(), 5);
+        assert_eq!(fault_plans.len(), 7);
         assert_eq!(core_expectations.len(), 11);
-        assert_eq!(outcome_dispositions.len(), 5);
+        assert_eq!(outcome_dispositions.len(), 6);
         assert_eq!(lifecycle_requirements.len(), 2);
         assert_eq!(committed_slots.len(), 2);
         assert_eq!(execution_modes.len(), 2);

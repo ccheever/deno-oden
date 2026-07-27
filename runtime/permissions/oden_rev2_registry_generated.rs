@@ -710,6 +710,10 @@ pub enum Rev2FilesystemCandidateCaseKind {
   StagedBarrierCancellation,
   #[serde(rename = "staged-barrier:cleanup")]
   StagedBarrierCleanup,
+  #[serde(rename = "staged-barrier:commit")]
+  StagedBarrierCommit,
+  #[serde(rename = "staged-barrier:discovery")]
+  StagedBarrierDiscovery,
   #[serde(rename = "staged-barrier:revocation")]
   StagedBarrierRevocation,
 }
@@ -770,8 +774,12 @@ pub enum Rev2FilesystemCandidateInputMutation {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Rev2FilesystemCandidateFaultPlan {
+  #[serde(rename = "cancel-after-core-commit")]
+  CancelAfterCoreCommit,
   #[serde(rename = "cancel-safe-boundary")]
   CancelSafeBoundary,
+  #[serde(rename = "namespace-path-replacement-after-discovery")]
+  NamespacePathReplacementAfterDiscovery,
   #[serde(rename = "none")]
   None,
   #[serde(rename = "omit-required-stage")]
@@ -824,6 +832,8 @@ pub enum Rev2FilesystemCandidateOutcomeDisposition {
   AuthorizedOperation,
   #[serde(rename = "cancellation-refused")]
   CancellationRefused,
+  #[serde(rename = "namespace-race-refused")]
+  NamespaceRaceRefused,
   #[serde(rename = "permission-denied")]
   PermissionDenied,
   #[serde(rename = "schema-refused")]
@@ -1885,7 +1895,7 @@ pub const REV2_FILESYSTEM_CANDIDATE_CASE_PLANS: &[Rev2FilesystemCandidateCasePla
         edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
         initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
         target_state: Rev2FilesystemCandidateTargetState::Existing,
-        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
       },
       Rev2FilesystemCandidateCaseTargetStateSpec {
         edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
@@ -1911,7 +1921,7 @@ pub const REV2_FILESYSTEM_CANDIDATE_CASE_PLANS: &[Rev2FilesystemCandidateCasePla
         edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
         initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
         target_state: Rev2FilesystemCandidateTargetState::Existing,
-        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
       },
     ],
     execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
@@ -1931,7 +1941,7 @@ pub const REV2_FILESYSTEM_CANDIDATE_CASE_PLANS: &[Rev2FilesystemCandidateCasePla
         edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
         initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
         target_state: Rev2FilesystemCandidateTargetState::Missing,
-        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
       },
     ],
     execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
@@ -1951,7 +1961,7 @@ pub const REV2_FILESYSTEM_CANDIDATE_CASE_PLANS: &[Rev2FilesystemCandidateCasePla
         edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
         initial_kind: Rev2FilesystemCandidateInitialObjectKind::Symlink,
         target_state: Rev2FilesystemCandidateTargetState::LinkEntry,
-        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
       },
     ],
     execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
@@ -1997,7 +2007,7 @@ pub const REV2_FILESYSTEM_CANDIDATE_CASE_PLANS: &[Rev2FilesystemCandidateCasePla
         edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
         initial_kind: Rev2FilesystemCandidateInitialObjectKind::Directory,
         target_state: Rev2FilesystemCandidateTargetState::Existing,
-        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
       },
     ],
     execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
@@ -2017,7 +2027,7 @@ pub const REV2_FILESYSTEM_CANDIDATE_CASE_PLANS: &[Rev2FilesystemCandidateCasePla
         edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
         initial_kind: Rev2FilesystemCandidateInitialObjectKind::Symlink,
         target_state: Rev2FilesystemCandidateTargetState::LinkEntry,
-        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::OperationCompleted, Rev2FilesystemCandidateTracePhase::DeliverySerialized, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
       },
     ],
     execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
@@ -2123,6 +2133,58 @@ pub const REV2_FILESYSTEM_CANDIDATE_CASE_PLANS: &[Rev2FilesystemCandidateCasePla
     lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
   },
   Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::StagedBarrierCommit,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::AuthorizationComplete, Rev2FilesystemCandidateTracePhase::SourcesRevalidated, Rev2FilesystemCandidateTracePhase::TargetRevalidated, Rev2FilesystemCandidateTracePhase::PreparationComplete, Rev2FilesystemCandidateTracePhase::PostPrepareRevalidated, Rev2FilesystemCandidateTracePhase::CoreCommitRecorded, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::CancelAfterCoreCommit,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::StaticAllowAll,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::All,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::CancellationRefused,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
+    case_kind: Rev2FilesystemCandidateCaseKind::StagedBarrierDiscovery,
+    target_states: &[
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsLstatSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::RegularFile,
+        target_state: Rev2FilesystemCandidateTargetState::Existing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+      Rev2FilesystemCandidateCaseTargetStateSpec {
+        edge_id: Rev2FilesystemCandidateOperationEdgeId::NativeOpExtFsOpsRsOpFsMkdirSync,
+        initial_kind: Rev2FilesystemCandidateInitialObjectKind::Missing,
+        target_state: Rev2FilesystemCandidateTargetState::Missing,
+        trace_phases: &[Rev2FilesystemCandidateTracePhase::HarnessAdmitted, Rev2FilesystemCandidateTracePhase::PublicOpEntered, Rev2FilesystemCandidateTracePhase::ActorsCaptured, Rev2FilesystemCandidateTracePhase::NamespaceGateAcquired, Rev2FilesystemCandidateTracePhase::DiscoveryComplete, Rev2FilesystemCandidateTracePhase::ProvisionalResourcesReleased, Rev2FilesystemCandidateTracePhase::NamespaceGateReleased, Rev2FilesystemCandidateTracePhase::HarnessExited],
+      },
+    ],
+    execution_mode: Rev2FilesystemCandidateExecutionMode::Enforce,
+    principal_plan: Rev2FilesystemCandidatePrincipalPlan::Actor,
+    authority_plan: Rev2FilesystemCandidateAuthorityPlan::StaticAll,
+    input_mutation: Rev2FilesystemCandidateInputMutation::None,
+    fault_plan: Rev2FilesystemCandidateFaultPlan::NamespacePathReplacementAfterDiscovery,
+    core_expectation: Rev2FilesystemCandidateCoreExpectation::NotReached,
+    committed_slots: Rev2FilesystemCandidateCommittedSlots::None,
+    outcome_disposition: Rev2FilesystemCandidateOutcomeDisposition::NamespaceRaceRefused,
+    lifecycle_requirement: Rev2FilesystemCandidateLifecycleRequirement::BalancedOperation,
+  },
+  Rev2FilesystemCandidateCasePlanSpec {
     case_kind: Rev2FilesystemCandidateCaseKind::AuthorableWrongPrincipalDenial,
     target_states: &[
       Rev2FilesystemCandidateCaseTargetStateSpec {
@@ -2174,7 +2236,7 @@ pub struct Rev2FilesystemLstatExistingObservationInput {
 
 pub const REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS: &[Rev2FilesystemLstatExistingObservationInput] = &[
   Rev2FilesystemLstatExistingObservationInput {
-    fixture_artifact_digest: "sha256-3szKC9aWQKTqk6mhvQKZ_8lUDwUxcVrUUVcHBhjx8JE",
+    fixture_artifact_digest: "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM",
     target: "aarch64-apple-darwin",
     feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:62fc7ce277e35b03015efcb6c89461269dcc32c088e5e6c82419f31598473667;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
     case_id: "filesystem:lstat-sync:lstat-existing",
@@ -2194,7 +2256,7 @@ pub const REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS: &[Rev2FilesystemLst
     authority_capability: Rev2CapabilityId::FsList,
   },
   Rev2FilesystemLstatExistingObservationInput {
-    fixture_artifact_digest: "sha256-3szKC9aWQKTqk6mhvQKZ_8lUDwUxcVrUUVcHBhjx8JE",
+    fixture_artifact_digest: "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM",
     target: "x86_64-unknown-linux-gnu",
     feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:3a41731043169db8c6a9452f6eb1150aeb1afb37ca223d87cf3c2bd974b66003;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
     case_id: "filesystem:lstat-sync:lstat-existing",
@@ -2240,8 +2302,8 @@ pub struct Rev2TargetStatus {
 }
 
 pub const REV2_PROFILE: &str = "oden/capsec/2";
-pub const REV2_VOCAB_DIGEST: &str = "sha256-Wky_Se8y9GSqhaMpB9DYpA5kWXFptONOgf5MxxfUY0w";
-pub const REV2_REGISTRY_DIGEST: &str = "sha256-wH1Wgy-MjEpc7ydy5-rU_D_5WPogtixpJa7Qkm_dfog";
+pub const REV2_VOCAB_DIGEST: &str = "sha256-2pRq0YVYy0kqRP0XDTtBReMmpbQqMLJ8QegFpbLOIDk";
+pub const REV2_REGISTRY_DIGEST: &str = "sha256-eDdJc2iy-6I-dUzGX8VzHfXosn6OmFqnH012mgpZ64E";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_SCHEMA: &str = "oden/capsec-runtime-protocol-fixture-corpus/2";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_PATH: &str = "capsec/rev2/fixtures/runtime-protocol-corpus.json";
 pub const REV2_RUNTIME_PROTOCOL_FIXTURE_CORPUS_DIGEST: &str = "sha256-SFvyfj3PfQcUC0REjPviGqms_7DEwFcghE7kL9WYSyo";
@@ -48147,9 +48209,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "authorization": "before-commit",
           "cancellation": "release-provisional-state",
           "cleanup": "always-permitted-only-when-non-authorizing",
-          "commit": "unimplemented",
+          "commit": "before-commit",
           "delivery": "unimplemented",
-          "discovery": "unimplemented",
+          "discovery": "before-next-effect-or-delivery",
           "revocation": "before-next-effect-or-delivery"
         },
         "completeEffectSlotIds": null,
@@ -48559,9 +48621,9 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
           "authorization": "before-commit",
           "cancellation": "release-provisional-state",
           "cleanup": "always-permitted-only-when-non-authorizing",
-          "commit": "unimplemented",
+          "commit": "before-commit",
           "delivery": "unimplemented",
-          "discovery": "unimplemented",
+          "discovery": "before-next-effect-or-delivery",
           "revocation": "before-next-effect-or-delivery"
         },
         "completeEffectSlotIds": null,
@@ -82234,6 +82296,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
               "authorization-complete",
               "sources-revalidated",
               "target-revalidated",
+              "core-commit-recorded",
               "operation-completed",
               "delivery-serialized",
               "provisional-resources-released",
@@ -82292,6 +82355,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
               "authorization-complete",
               "sources-revalidated",
               "target-revalidated",
+              "core-commit-recorded",
               "operation-completed",
               "delivery-serialized",
               "provisional-resources-released",
@@ -82326,6 +82390,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
               "authorization-complete",
               "sources-revalidated",
               "target-revalidated",
+              "core-commit-recorded",
               "operation-completed",
               "delivery-serialized",
               "provisional-resources-released",
@@ -82360,6 +82425,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
               "authorization-complete",
               "sources-revalidated",
               "target-revalidated",
+              "core-commit-recorded",
               "operation-completed",
               "delivery-serialized",
               "provisional-resources-released",
@@ -82428,6 +82494,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
               "authorization-complete",
               "sources-revalidated",
               "target-revalidated",
+              "core-commit-recorded",
               "operation-completed",
               "delivery-serialized",
               "provisional-resources-released",
@@ -82462,6 +82529,7 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
               "authorization-complete",
               "sources-revalidated",
               "target-revalidated",
+              "core-commit-recorded",
               "operation-completed",
               "delivery-serialized",
               "provisional-resources-released",
@@ -82637,6 +82705,104 @@ pub const REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON: &str = r###"{
               "sources-revalidated",
               "target-revalidated",
               "preparation-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "staged-barrier:commit",
+        "committedSlots": "all",
+        "coreExpectation": "static-allow-all",
+        "executionMode": "enforce",
+        "faultPlan": "cancel-after-core-commit",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "cancellation-refused",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "core-commit-recorded",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "authorization-complete",
+              "sources-revalidated",
+              "target-revalidated",
+              "preparation-complete",
+              "post-prepare-revalidated",
+              "core-commit-recorded",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          }
+        ]
+      },
+      {
+        "authorityPlan": "static-all",
+        "caseKind": "staged-barrier:discovery",
+        "committedSlots": "none",
+        "coreExpectation": "not-reached",
+        "executionMode": "enforce",
+        "faultPlan": "namespace-path-replacement-after-discovery",
+        "inputMutation": "none",
+        "lifecycleRequirement": "balanced-operation",
+        "outcomeDisposition": "namespace-race-refused",
+        "principalPlan": "actor",
+        "targetStates": [
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
+            "initialKind": "regular-file",
+            "targetState": "existing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
+              "provisional-resources-released",
+              "namespace-gate-released",
+              "harness-exited"
+            ]
+          },
+          {
+            "edgeId": "native-op:ext/fs/ops.rs#op_fs_mkdir_sync",
+            "initialKind": "missing",
+            "targetState": "missing",
+            "tracePhases": [
+              "harness-admitted",
+              "public-op-entered",
+              "actors-captured",
+              "namespace-gate-acquired",
+              "discovery-complete",
               "provisional-resources-released",
               "namespace-gate-released",
               "harness-exited"
@@ -102115,8 +102281,8 @@ mod tests {
   #[test]
   fn filesystem_lstat_existing_observation_inputs_are_exact_candidates_only() {
     let expected = [
-      ("aarch64-apple-darwin", "sha256-3szKC9aWQKTqk6mhvQKZ_8lUDwUxcVrUUVcHBhjx8JE"),
-      ("x86_64-unknown-linux-gnu", "sha256-3szKC9aWQKTqk6mhvQKZ_8lUDwUxcVrUUVcHBhjx8JE"),
+      ("aarch64-apple-darwin", "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM"),
+      ("x86_64-unknown-linux-gnu", "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM"),
     ];
     assert_eq!(REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.len(), expected.len());
     for (input, (target, fixture_artifact_digest)) in REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.iter().zip(expected) {
