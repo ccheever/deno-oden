@@ -340,10 +340,16 @@ pub(crate) const ODEN_PARENT_SOURCE_CLOSURE_CONTRACT_PATHS: &[&str] = &[
 
 /// Parent-root-relative definitions that comprise the release contract.
 ///
-/// The complete reviewed membership is fixed and all 34 definition paths now
-/// exist. Authoring Generate may retain these exact bytes for two deterministic
-/// review candidates, but Check, source authentication, generated-input freeze,
-/// and downstream admission remain separate gates.
+/// The complete reviewed membership is fixed and all 33 definition paths now
+/// exist. The live `third_party/components.json` instance is deliberately
+/// excluded: it must bind the final fork Gitlink, whose commit contains the
+/// generated Rust allowlist carrier, so hashing that instance here would create
+/// a commit/digest self-reference. Its schema, decoder/generator definition,
+/// exact Gitlink join, notice approval, and package-byte gates remain separate
+/// release requirements. Authoring Generate may retain these exact definition
+/// bytes for two deterministic review candidates, but Check, source
+/// authentication, generated-input freeze, and downstream admission remain
+/// separate gates.
 #[allow(dead_code)]
 pub(crate) const ODEN_PARENT_RELEASE_CONTRACT_PATHS: &[&str] = &[
   ".github/workflows/release.yml",
@@ -379,7 +385,6 @@ pub(crate) const ODEN_PARENT_RELEASE_CONTRACT_PATHS: &[&str] = &[
   "scripts/verify-fork.sh",
   "security/rustsec-ignores.json",
   "src/release.ts",
-  "third_party/components.json",
 ];
 
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
@@ -4349,8 +4354,55 @@ mod tests {
 
   #[test]
   fn release_contract_paths_are_closed_sorted_literals() {
-    assert_closed_sorted_literals(ODEN_PARENT_RELEASE_CONTRACT_PATHS, 34);
+    assert_closed_sorted_literals(ODEN_PARENT_RELEASE_CONTRACT_PATHS, 33);
     assert_handwritten_rust_authorities(ODEN_PARENT_RELEASE_CONTRACT_PATHS);
+    assert!(
+      !ODEN_PARENT_RELEASE_CONTRACT_PATHS
+        .contains(&"third_party/components.json")
+    );
+    for retained_definition in [
+      "schemas/release/third-party-components.schema.json",
+      "scripts/release/third-party-notices.ts",
+    ] {
+      assert!(
+        ODEN_PARENT_RELEASE_CONTRACT_PATHS.contains(&retained_definition)
+      );
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn release_contract_inventory_excludes_live_component_instance_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    materialize_retained_contract_tree(root.path(), "release-contract");
+    let manifest = root.path().join("third_party/components.json");
+    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    std::fs::write(&manifest, b"{\"forkCommit\":\"predecessor\"}\n").unwrap();
+    let before = load_from_test_root(
+      root.path(),
+      ODEN_PARENT_RELEASE_CONTRACT_PATHS,
+      ODEN_PARENT_RETAINED_CONTRACT_FILE_LIMITS,
+      |_| {},
+    )
+    .unwrap();
+
+    std::fs::write(&manifest, b"{\"forkCommit\":\"final\"}\n").unwrap();
+    let after = load_from_test_root(
+      root.path(),
+      ODEN_PARENT_RELEASE_CONTRACT_PATHS,
+      ODEN_PARENT_RETAINED_CONTRACT_FILE_LIMITS,
+      |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(before.inventory(), after.inventory());
+    assert!(
+      before
+        .inventory()
+        .rows()
+        .iter()
+        .all(|row| row.path() != "third_party/components.json")
+    );
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
