@@ -149,6 +149,59 @@ pub(crate) mod unix_transport {
   }
 
   impl FramedStreamEndpoint {
+    #[cfg(test)]
+    pub(crate) fn into_owned_fd_for_test(self) -> OwnedFd {
+      self.fd
+    }
+
+    /// Adopts one received `SCM_RIGHTS` descriptor only after proving it is a
+    /// connected, nonblocking, close-on-exec Unix stream socket. This performs
+    /// no clone and transfers the caller's sole owned descriptor directly into
+    /// the framed endpoint on success.
+    ///
+    /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
+    /// [implements] — The supervisor may treat the spawn-result right as the
+    /// candidate peer only after independently closing its socket type,
+    /// connection state, and inherited descriptor flags.
+    pub(crate) fn from_received_connected_unix_stream(
+      fd: OwnedFd,
+    ) -> io::Result<Self> {
+      require_socket_option(
+        fd.as_fd(),
+        libc::SOL_SOCKET,
+        libc::SO_TYPE,
+        libc::SOCK_STREAM,
+        "received candidate peer is not a stream socket",
+      )?;
+      require_unnamed_unix_socketpair_address(
+        fd.as_fd(),
+        libc::getsockname,
+        "received candidate peer is not an unnamed AF_UNIX socket",
+      )?;
+      require_unnamed_unix_socketpair_address(
+        fd.as_fd(),
+        libc::getpeername,
+        "received candidate peer is not connected to an unnamed AF_UNIX peer",
+      )?;
+      if descriptor_status_flags(fd.as_fd())? & libc::O_NONBLOCK == 0 {
+        return Err(invalid_data("received candidate peer is not nonblocking"));
+      }
+      if descriptor_flags(fd.as_fd())? & libc::FD_CLOEXEC == 0 {
+        return Err(invalid_data(
+          "received candidate peer is not close-on-exec",
+        ));
+      }
+      #[cfg(target_os = "macos")]
+      require_socket_option(
+        fd.as_fd(),
+        libc::SOL_SOCKET,
+        libc::SO_NOSIGPIPE,
+        1,
+        "received candidate peer does not suppress SIGPIPE",
+      )?;
+      Ok(Self { fd })
+    }
+
     pub(crate) fn as_fd(&self) -> BorrowedFd<'_> {
       self.fd.as_fd()
     }
@@ -428,6 +481,99 @@ pub(crate) mod unix_transport {
     }
     ancillary.finish()?;
     Ok(())
+  }
+
+  fn require_socket_option(
+    descriptor: BorrowedFd<'_>,
+    level: libc::c_int,
+    name: libc::c_int,
+    expected: libc::c_int,
+    message: &'static str,
+  ) -> io::Result<()> {
+    loop {
+      let mut value: libc::c_int = 0;
+      let mut length = size_of::<libc::c_int>() as libc::socklen_t;
+      // SAFETY: value and length are writable storage of the exact option
+      // type, and descriptor remains live throughout the call.
+      let result = unsafe {
+        libc::getsockopt(
+          descriptor.as_raw_fd(),
+          level,
+          name,
+          std::ptr::from_mut(&mut value).cast(),
+          std::ptr::from_mut(&mut length),
+        )
+      };
+      if result == 0 {
+        if length as usize != size_of::<libc::c_int>() || value != expected {
+          return Err(invalid_data(message));
+        }
+        return Ok(());
+      }
+      let error = io::Error::last_os_error();
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(invalid_data(message));
+      }
+    }
+  }
+
+  fn require_unnamed_unix_socketpair_address(
+    descriptor: BorrowedFd<'_>,
+    operation: unsafe extern "C" fn(
+      libc::c_int,
+      *mut libc::sockaddr,
+      *mut libc::socklen_t,
+    ) -> libc::c_int,
+    message: &'static str,
+  ) -> io::Result<()> {
+    loop {
+      // SAFETY: zero is a valid initial state for sockaddr_storage.
+      let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+      let mut length = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+      // SAFETY: address and length are writable storage for either socket
+      // address query, and descriptor remains live throughout the call.
+      let result = unsafe {
+        operation(
+          descriptor.as_raw_fd(),
+          std::ptr::from_mut(&mut address).cast(),
+          std::ptr::from_mut(&mut length),
+        )
+      };
+      if result == 0 {
+        let length = length as usize;
+        let path_offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
+        #[cfg(target_os = "macos")]
+        let expected_length = size_of::<libc::sockaddr>();
+        #[cfg(not(target_os = "macos"))]
+        let expected_length = path_offset;
+        if length != expected_length
+          || address.ss_family as libc::c_int != libc::AF_UNIX
+        {
+          return Err(invalid_data(message));
+        }
+        #[cfg(target_os = "macos")]
+        {
+          // XNU returns a 16-byte sockaddr_un for an unnamed socketpair. The
+          // bytes after sun_family must remain zero; a pathname starts there.
+          // SAFETY: length is the exact returned address length and the
+          // sockaddr_storage buffer is larger than that bound.
+          let bytes = unsafe {
+            std::slice::from_raw_parts(
+              std::ptr::from_ref(&address).cast::<u8>(),
+              length,
+            )
+          };
+          if bytes[path_offset..].iter().any(|byte| *byte != 0) {
+            return Err(invalid_data(message));
+          }
+        }
+        return Ok(());
+      }
+      let error = io::Error::last_os_error();
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(invalid_data(message));
+      }
+    }
   }
 
   pub(crate) fn framed_stream_socketpair()
@@ -857,18 +1003,7 @@ pub(crate) mod unix_transport {
   }
 
   fn set_nonblocking(descriptor: BorrowedFd<'_>) -> io::Result<()> {
-    let current_flags = loop {
-      // SAFETY: F_GETFL reads status flags from a live descriptor.
-      let result =
-        unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFL) };
-      if result >= 0 {
-        break result;
-      }
-      let error = io::Error::last_os_error();
-      if error.kind() != io::ErrorKind::Interrupted {
-        return Err(error);
-      }
-    };
+    let current_flags = descriptor_status_flags(descriptor)?;
     if current_flags & libc::O_NONBLOCK != 0 {
       return Ok(());
     }
@@ -883,6 +1018,38 @@ pub(crate) mod unix_transport {
       };
       if result == 0 {
         return Ok(());
+      }
+      let error = io::Error::last_os_error();
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(error);
+      }
+    }
+  }
+
+  fn descriptor_status_flags(
+    descriptor: BorrowedFd<'_>,
+  ) -> io::Result<libc::c_int> {
+    loop {
+      // SAFETY: F_GETFL reads status flags from a live descriptor.
+      let result =
+        unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFL) };
+      if result >= 0 {
+        return Ok(result);
+      }
+      let error = io::Error::last_os_error();
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(error);
+      }
+    }
+  }
+
+  fn descriptor_flags(descriptor: BorrowedFd<'_>) -> io::Result<libc::c_int> {
+    loop {
+      // SAFETY: F_GETFD reads descriptor flags from a live descriptor.
+      let result =
+        unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) };
+      if result >= 0 {
+        return Ok(result);
       }
       let error = io::Error::last_os_error();
       if error.kind() != io::ErrorKind::Interrupted {
@@ -991,6 +1158,8 @@ pub(crate) mod unix_transport {
     use std::io::SeekFrom;
     use std::io::Write;
     use std::os::fd::IntoRawFd;
+    use std::os::unix::net::UnixListener;
+    use std::os::unix::net::UnixStream;
     use std::ptr;
     use std::thread;
     use std::time::Duration;
@@ -1134,6 +1303,37 @@ pub(crate) mod unix_transport {
       contents.clear();
       received_second.read_to_string(&mut contents).unwrap();
       assert_eq!(contents, "second");
+    }
+
+    #[test]
+    fn received_connected_endpoint_accepts_unnamed_socketpair() {
+      let (candidate, peer) = framed_stream_socketpair().unwrap();
+      let adopted = FramedStreamEndpoint::from_received_connected_unix_stream(
+        candidate.into_owned_fd_for_test(),
+      )
+      .unwrap();
+      assert_cloexec(adopted.as_fd());
+      assert_nonblocking(adopted.as_fd());
+      drop(peer);
+    }
+
+    #[test]
+    fn received_connected_endpoint_refuses_pathname_socket() {
+      let temp = tempfile::tempdir().unwrap();
+      let path = temp.path().join("named.sock");
+      let listener = UnixListener::bind(&path).unwrap();
+      let stream = UnixStream::connect(&path).unwrap();
+      let (_server, _) = listener.accept().unwrap();
+      stream.set_nonblocking(true).unwrap();
+      let stream: OwnedFd = stream.into();
+      set_cloexec(stream.as_fd()).unwrap();
+      #[cfg(target_os = "macos")]
+      set_no_sigpipe(stream.as_fd()).unwrap();
+
+      let error =
+        FramedStreamEndpoint::from_received_connected_unix_stream(stream)
+          .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
