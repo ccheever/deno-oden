@@ -68,6 +68,8 @@ mod rev2_registry_generated;
 
 pub use oden_rev2_context::OdenRev2FilesystemError;
 #[doc(hidden)]
+pub use oden_rev2_context::OdenRev2LstatCandidateBinaryIdentity;
+#[doc(hidden)]
 pub use oden_rev2_context::OdenRev2LstatCandidateCapsule;
 #[doc(hidden)]
 pub use oden_rev2_context::OdenRev2LstatCandidateObservation;
@@ -76,6 +78,8 @@ pub use oden_rev2_context::OdenRev2LstatCandidateOpStateBinding;
 pub use oden_rev2_context::OdenRev2LstatDelivery;
 pub use oden_rev2_context::OdenRev2MkdirDelivery;
 pub use oden_rev2_context::OdenRev2RuntimeAuthorityContext;
+#[doc(hidden)]
+pub use oden_rev2_context::oden_capsec_rev2_join_lstat_candidate_binary_identity;
 #[doc(hidden)]
 pub use oden_rev2_context::oden_capsec_rev2_lstat_candidate_sync;
 pub use oden_rev2_context::oden_capsec_rev2_lstat_sync;

@@ -33,10 +33,11 @@ pub fn maybe_run_oden_capsec_filesystem_candidate(
   }
 
   // No row can currently reach this point. The dormant FD3 role protocol
-  // below still has no production constructor, process-fact collector,
-  // response-artifact assembler, or public-op executor. All three generated
-  // process admission tables therefore remain empty until the complete
-  // parent/supervisor/candidate capture and oracle barriers exist.
+  // below has a production-uncalled process-fact preflight, but no production
+  // constructor, descriptor reconstruction, response-artifact assembler, or
+  // public-op executor. All three generated process admission tables therefore
+  // remain empty until the complete parent/supervisor/candidate capture and
+  // oracle barriers exist.
   Some(REFUSAL_EXIT_CODE)
 }
 
@@ -51,6 +52,8 @@ mod fd3 {
   use std::os::fd::AsRawFd;
   use std::os::fd::BorrowedFd;
   use std::os::fd::OwnedFd;
+  #[cfg(target_os = "macos")]
+  use std::os::fd::RawFd;
   use std::sync::Arc;
   use std::time::Instant;
 
@@ -58,7 +61,11 @@ mod fd3 {
   use base64::engine::general_purpose::URL_SAFE_NO_PAD;
   use deno_core::serde_json::Map;
   use deno_core::serde_json::Value;
+  use deno_core::serde_json::json;
   use deno_runtime::deno_permissions;
+  use deno_runtime::deno_permissions::OdenRev2CompiledBuildIdentity;
+  use deno_runtime::deno_permissions::OdenRev2LstatCandidateBinaryIdentity;
+  use deno_runtime::deno_permissions::oden_capsec_rev2_join_lstat_candidate_binary_identity;
   use deno_runtime::deno_permissions::rev2::FilesystemCleanup;
   use deno_runtime::deno_permissions::rev2::FilesystemDecision;
   use deno_runtime::deno_permissions::rev2::FilesystemDelivery;
@@ -71,6 +78,14 @@ mod fd3 {
   use sha2::Digest;
   use sha2::Sha256;
 
+  #[cfg(target_os = "macos")]
+  use crate::oden_capsec_filesystem_parent::ProcessCredentials;
+  #[cfg(target_os = "macos")]
+  use crate::oden_capsec_filesystem_parent::candidate_fd_inventory;
+  #[cfg(target_os = "macos")]
+  use crate::oden_capsec_filesystem_parent::macos_platform_state_value;
+  #[cfg(target_os = "macos")]
+  use crate::oden_capsec_filesystem_parent::observe_blocked_child;
   use crate::oden_capsec_filesystem_protocol::is_canonical_identifier;
   use crate::oden_capsec_filesystem_protocol::is_canonical_sha256_digest;
   use crate::oden_capsec_filesystem_protocol::unix_transport::FrameByteLimit;
@@ -101,9 +116,18 @@ mod fd3 {
     "oden:capsec:filesystem-delivery-frame:2";
   const RESOURCE_INVENTORY_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-resource-inventory:2";
+  const ENGINE_BUILD_MARKER_SCHEMA: &str =
+    "oden/capsec-rev2-engine-build-marker/2";
+  const ENGINE_BUILD_MARKER_DIGEST_DOMAIN: &str =
+    "oden:capsec:rev2-engine-build-marker:2";
+  const ENGINE_BUILD_MARKER_PREFIX: &str = "oden-engine-v2-";
+  #[cfg(target_os = "macos")]
+  const CANDIDATE_MACOS_SEATBELT_DISPOSITION: &str = "unavailable";
   const ARENA_CAPACITY_BYTES: i64 = 8 * 1024 * 1024;
   const REQUIRED_CAPTURED_UMASK: u64 = 0o077;
   const EXPECTED_DESCRIPTOR_COUNT: usize = 2;
+  #[cfg(target_os = "macos")]
+  const CANDIDATE_CONTROL_FD: RawFd = 3;
 
   const COMMON_BINDING_FIELDS: &[&str] = &[
     "profile",
@@ -221,9 +245,9 @@ mod fd3 {
 
   // @ref LLP 0019#pre-promotion-conformance-candidate-execution
   // [implements] — Only the two exact public-edge lstat case identities and
-  // the two supported target names can parameterize the dormant candidate-side
-  // packet state machine. A later generated-row join must supply the remaining
-  // identity fields before any production caller may exist.
+  // the exact generated current-binary row can parameterize the dormant
+  // candidate-side packet state machine. This remains an equality projection,
+  // not image authentication or execution authority.
   #[derive(Clone, Copy, Debug, Eq, PartialEq)]
   pub(crate) enum CandidateLstatCase {
     Existing,
@@ -272,8 +296,84 @@ mod fd3 {
     execution_projection_digest: String,
   }
 
+  struct CandidateEngineBuildMarkerFacts<'a> {
+    target: &'a str,
+    rust_toolchain: &'a str,
+    cargo_features: &'a str,
+    rust_cfg_digest: &'a str,
+    cargo_feature_graph_digest: &'a str,
+    build_profile: &'a str,
+    panic_strategy: &'a str,
+    debug_assertions: bool,
+    fork_commit: &'a str,
+  }
+
   impl CandidateLstatProtocolIdentity {
-    pub(crate) fn new(
+    /// Production-compiled, production-uncalled constructor with no target,
+    /// feature-set, build-marker, fork, or projection choice at the callsite.
+    /// The fixture/case lookup only selects one exact pointer-backed generated
+    /// admission after the permissions crate has joined all current binary
+    /// build markers and native cfg facts to the same generated target row.
+    fn from_current_binary(
+      fixture_artifact_digest: &str,
+      case_id: &str,
+    ) -> io::Result<Self> {
+      let build_identity = current_binary_build_identity();
+      let generated = oden_capsec_rev2_join_lstat_candidate_binary_identity(
+        &build_identity,
+        fixture_artifact_digest,
+        case_id,
+      )
+      .map_err(|_| {
+        invalid_data(
+          "candidate binary does not join its exact generated lstat row",
+        )
+      })?;
+      let fork_commit = deno_lib::version::DENO_VERSION_INFO.git_hash;
+      Self::from_generated(&generated, &build_identity, fork_commit)
+    }
+
+    fn from_generated(
+      generated: &OdenRev2LstatCandidateBinaryIdentity,
+      build_identity: &OdenRev2CompiledBuildIdentity,
+      fork_commit: &str,
+    ) -> io::Result<Self> {
+      if !is_canonical_fork_commit(fork_commit) {
+        return Err(invalid_data(
+          "candidate binary fork identity is not exact lowercase Git SHA-1",
+        ));
+      }
+      let embedded_build_marker =
+        derive_engine_build_marker(&CandidateEngineBuildMarkerFacts {
+          target: generated.target(),
+          rust_toolchain: generated.rust_toolchain(),
+          cargo_features: generated.cargo_features(),
+          rust_cfg_digest: generated.rust_cfg_digest(),
+          cargo_feature_graph_digest: generated.cargo_feature_graph_digest(),
+          build_profile: generated.build_profile(),
+          panic_strategy: build_identity.actual_panic_strategy,
+          debug_assertions: build_identity.actual_debug_assertions,
+          fork_commit,
+        })?;
+      let case = CandidateLstatCase::from_id(generated.case_id())
+        .ok_or_else(|| invalid_data("candidate generated case is not lstat"))?;
+      Ok(Self {
+        target: generated.target().to_string(),
+        feature_set: generated.feature_set().to_string(),
+        embedded_build_marker,
+        fork_commit: fork_commit.to_string(),
+        fixture_artifact_digest: generated
+          .fixture_artifact_digest()
+          .to_string(),
+        case,
+        execution_projection_digest: generated
+          .execution_projection_digest()
+          .to_string(),
+      })
+    }
+
+    #[cfg(test)]
+    fn new_test_fixture(
       target: &str,
       feature_set: &str,
       embedded_build_marker: &str,
@@ -286,7 +386,7 @@ mod fd3 {
         .ok_or_else(|| invalid_input("candidate FD3 case is not admitted"))?;
       if !matches!(target, "aarch64-apple-darwin" | "x86_64-unknown-linux-gnu")
         || !is_canonical_identifier(feature_set)
-        || !is_canonical_identifier(embedded_build_marker)
+        || !is_canonical_engine_build_marker(embedded_build_marker)
         || !is_canonical_fork_commit(fork_commit)
         || !is_canonical_sha256_digest(fixture_artifact_digest)
         || !is_canonical_sha256_digest(execution_projection_digest)
@@ -313,6 +413,77 @@ mod fd3 {
         _ => unreachable!("constructor closes the target tuple"),
       }
     }
+  }
+
+  fn current_binary_build_identity() -> OdenRev2CompiledBuildIdentity {
+    OdenRev2CompiledBuildIdentity {
+      target: env!("ODEN_REV2_BUILD_TARGET"),
+      rust_toolchain: env!("ODEN_REV2_BUILD_RUST"),
+      cargo_features: env!("ODEN_REV2_BUILD_CARGO_FEATURES"),
+      rust_cfg_digest: env!("ODEN_REV2_BUILD_RUST_CFG_DIGEST"),
+      cargo_feature_graph_digest: env!("ODEN_REV2_BUILD_CARGO_GRAPH_DIGEST"),
+      build_profile: env!("ODEN_REV2_BUILD_PROFILE"),
+      marker_panic_strategy: env!("ODEN_REV2_BUILD_PANIC"),
+      marker_debug_assertions: env!("ODEN_REV2_BUILD_DEBUG_ASSERTIONS"),
+      actual_panic_strategy: if cfg!(panic = "abort") {
+        "abort"
+      } else {
+        "unwind"
+      },
+      actual_debug_assertions: cfg!(debug_assertions),
+    }
+  }
+
+  fn derive_engine_build_marker(
+    facts: &CandidateEngineBuildMarkerFacts<'_>,
+  ) -> io::Result<String> {
+    let cargo_features = facts.cargo_features.split(',').collect::<Vec<_>>();
+    if !matches!(
+      facts.target,
+      "aarch64-apple-darwin" | "x86_64-unknown-linux-gnu"
+    ) || !is_canonical_identifier(facts.rust_toolchain)
+      || !is_canonical_lower_hex_sha256(facts.rust_cfg_digest)
+      || !is_canonical_lower_hex_sha256(facts.cargo_feature_graph_digest)
+      || facts.build_profile != "release"
+      || facts.panic_strategy != "abort"
+      || facts.debug_assertions
+      || !is_canonical_fork_commit(facts.fork_commit)
+      || cargo_features.is_empty()
+      || cargo_features
+        .iter()
+        .any(|feature| feature.is_empty() || !is_canonical_identifier(feature))
+      || cargo_features
+        .windows(2)
+        .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+    {
+      return Err(invalid_data(
+        "candidate engine build marker facts are not exact",
+      ));
+    }
+    let value = json!({
+      "schema": ENGINE_BUILD_MARKER_SCHEMA,
+      "target": facts.target,
+      "rustToolchain": facts.rust_toolchain,
+      "cargoFeatures": cargo_features,
+      "rustCfgDigest": facts.rust_cfg_digest,
+      "cargoFeatureGraphDigest": facts.cargo_feature_graph_digest,
+      "profile": facts.build_profile,
+      "panicStrategy": facts.panic_strategy,
+      "debugAssertions": facts.debug_assertions,
+      "forkCommit": facts.fork_commit,
+    });
+    let digest = deno_permissions::rev2::hjcs_digest(
+      ENGINE_BUILD_MARKER_DIGEST_DOMAIN,
+      &value,
+    )
+    .map_err(|_| invalid_data("candidate engine build marker failed"))?;
+    let marker = format!("{ENGINE_BUILD_MARKER_PREFIX}{digest}");
+    if !is_canonical_engine_build_marker(&marker) {
+      return Err(invalid_data(
+        "candidate engine build marker result is not canonical",
+      ));
+    }
+    Ok(marker)
   }
 
   #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -396,6 +567,73 @@ mod fd3 {
     process_limit_readback: Value,
     pre_request_fd_inventory: Value,
     platform_state: Value,
+  }
+
+  struct CandidateReadyObservedFacts {
+    candidate_pid: String,
+    candidate_pgid: String,
+    candidate_start_identity: String,
+    identities: Value,
+    process_limit_readback: Value,
+    pre_request_fd_inventory: Value,
+    platform_state: Value,
+  }
+
+  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+  enum CandidateReadyPreflightRefusal {
+    ProcessIdentity,
+    ProcessCredentials,
+    ProcessLimit,
+    DescriptorInventory,
+    PlatformState,
+    LinuxContainmentUnavailable,
+    UnsupportedTarget,
+    CanonicalFrame,
+  }
+
+  /// A non-owning, non-cloneable preflight produced before FD 3 is
+  /// reconstructed as an owned endpoint. It retains only canonical ready
+  /// bytes and their already-validated fact projection. There is no session,
+  /// descriptor, public-op, response, evidence, admission, or authority
+  /// method on this value.
+  ///
+  /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+  /// [constrained-by] — Ready facts are candidate claims until the trusted
+  /// parent joins them to independent child and retained-image observations.
+  struct CandidateReadyPreflight {
+    raw_bytes: Vec<u8>,
+    _validated_facts: CandidateReadyFacts,
+  }
+
+  impl CandidateReadyPreflight {
+    fn collect(
+      identity: &CandidateLstatProtocolIdentity,
+    ) -> Result<Self, CandidateReadyPreflightRefusal> {
+      let observed = collect_current_ready_observed_facts()?;
+      Self::from_observed(identity, observed)
+    }
+
+    fn from_observed(
+      identity: &CandidateLstatProtocolIdentity,
+      observed: CandidateReadyObservedFacts,
+    ) -> Result<Self, CandidateReadyPreflightRefusal> {
+      let value = candidate_ready_value(identity, &observed);
+      let raw_bytes = deno_permissions::rev2::canonical_json(&value)
+        .map(String::into_bytes)
+        .map_err(|_| CandidateReadyPreflightRefusal::CanonicalFrame)?;
+      let reparsed = parse_canonical_jcs(&raw_bytes)
+        .map_err(|_| CandidateReadyPreflightRefusal::CanonicalFrame)?;
+      let validated_facts = validate_ready(&reparsed, identity)
+        .map_err(|_| CandidateReadyPreflightRefusal::CanonicalFrame)?;
+      Ok(Self {
+        raw_bytes,
+        _validated_facts: validated_facts,
+      })
+    }
+
+    fn raw_bytes(&self) -> &[u8] {
+      &self.raw_bytes
+    }
   }
 
   #[derive(Clone, Debug)]
@@ -826,6 +1064,390 @@ mod fd3 {
         retained.arena.as_raw_fd(),
       ]
     }
+  }
+
+  fn candidate_ready_value(
+    identity: &CandidateLstatProtocolIdentity,
+    observed: &CandidateReadyObservedFacts,
+  ) -> Value {
+    json!({
+      "schema": CANDIDATE_READY_SCHEMA,
+      "profile": CAPSEC_PROFILE,
+      "target": identity.target,
+      "featureSet": identity.feature_set,
+      "embeddedBuildMarker": identity.embedded_build_marker,
+      "forkCommit": identity.fork_commit,
+      "fixtureArtifactDigest": identity.fixture_artifact_digest,
+      "caseId": identity.case.case_id(),
+      "noDescendantProfile": identity.no_descendant_profile(),
+      "candidatePid": observed.candidate_pid,
+      "candidatePgid": observed.candidate_pgid,
+      "candidateStartIdentity": observed.candidate_start_identity,
+      "identities": observed.identities,
+      "processLimitReadback": observed.process_limit_readback,
+      "preRequestFdInventory": observed.pre_request_fd_inventory,
+      "platformState": observed.platform_state,
+    })
+  }
+
+  #[cfg(target_os = "macos")]
+  fn collect_current_ready_observed_facts()
+  -> Result<CandidateReadyObservedFacts, CandidateReadyPreflightRefusal> {
+    // SAFETY: these identity syscalls take no pointers and cannot fail.
+    let candidate_pid = unsafe { libc::getpid() };
+    // SAFETY: same as getpid.
+    let parent_pid = unsafe { libc::getppid() };
+    // SAFETY: getpgrp takes no arguments and cannot fail.
+    let candidate_pgid = unsafe { libc::getpgrp() };
+    if candidate_pid <= 0 || parent_pid <= 0 || candidate_pgid <= 0 {
+      return Err(CandidateReadyPreflightRefusal::ProcessIdentity);
+    }
+    let process = observe_blocked_child(candidate_pid, parent_pid)
+      .map_err(|_| CandidateReadyPreflightRefusal::ProcessIdentity)?;
+    if process.pid != candidate_pid
+      || process.parent_pid != parent_pid
+      || process.pgid != candidate_pgid
+      || !is_canonical_identifier(&process.start_identity)
+    {
+      return Err(CandidateReadyPreflightRefusal::ProcessIdentity);
+    }
+
+    let credentials = ProcessCredentials::read_own()
+      .map_err(|_| CandidateReadyPreflightRefusal::ProcessCredentials)?;
+    if process.real_uid != credentials.real_uid
+      || process.saved_uid != credentials.saved_uid
+    {
+      return Err(CandidateReadyPreflightRefusal::ProcessCredentials);
+    }
+    let identities = credentials
+      .to_identities_value()
+      .ok_or(CandidateReadyPreflightRefusal::ProcessCredentials)?;
+    let process_limit_readback = read_zero_process_limit()
+      .map_err(|_| CandidateReadyPreflightRefusal::ProcessLimit)?;
+    let pre_request_fd_inventory = collect_exact_candidate_fd_inventory()
+      .map_err(|_| CandidateReadyPreflightRefusal::DescriptorInventory)?;
+    let platform_state =
+      macos_platform_state_value(CANDIDATE_MACOS_SEATBELT_DISPOSITION)
+        .ok_or(CandidateReadyPreflightRefusal::PlatformState)?;
+
+    Ok(CandidateReadyObservedFacts {
+      candidate_pid: candidate_pid.to_string(),
+      candidate_pgid: candidate_pgid.to_string(),
+      candidate_start_identity: process.start_identity,
+      identities,
+      process_limit_readback,
+      pre_request_fd_inventory,
+      platform_state,
+    })
+  }
+
+  #[cfg(target_os = "linux")]
+  fn collect_current_ready_observed_facts()
+  -> Result<CandidateReadyObservedFacts, CandidateReadyPreflightRefusal> {
+    // The current fork has no candidate-role seccomp installer or retained
+    // profile digest and therefore cannot honestly produce the required Linux
+    // ready state. Do not substitute caller data or a syntactically valid
+    // digest for that missing native fact.
+    Err(CandidateReadyPreflightRefusal::LinuxContainmentUnavailable)
+  }
+
+  #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+  fn collect_current_ready_observed_facts()
+  -> Result<CandidateReadyObservedFacts, CandidateReadyPreflightRefusal> {
+    Err(CandidateReadyPreflightRefusal::UnsupportedTarget)
+  }
+
+  #[cfg(target_os = "macos")]
+  fn read_zero_process_limit() -> io::Result<Value> {
+    // SAFETY: zero is a valid initial representation for rlimit.
+    let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+    // SAFETY: limit is writable storage for the requested resource.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &mut limit) } != 0 {
+      return Err(io::Error::last_os_error());
+    }
+    if limit.rlim_cur != 0 || limit.rlim_max != 0 {
+      return Err(invalid_data(
+        "candidate process limit is not irreversibly zero",
+      ));
+    }
+    Ok(json!({ "soft": "0", "hard": "0" }))
+  }
+
+  #[cfg(target_os = "macos")]
+  fn collect_exact_candidate_fd_inventory() -> io::Result<Value> {
+    require_exact_macos_fd_numbers()?;
+    let prepared_control_identity =
+      prepare_candidate_control_fd(CANDIDATE_CONTROL_FD)?;
+    require_exact_macos_fd_numbers()?;
+    let before = snapshot_candidate_fd_inventory()?;
+    if before[3]["platformIdentity"]["value"]
+      != Value::String(prepared_control_identity)
+    {
+      return Err(invalid_data(
+        "candidate control descriptor identity changed after preparation",
+      ));
+    }
+    require_exact_macos_fd_numbers()?;
+    let after = snapshot_candidate_fd_inventory()?;
+    require_exact_macos_fd_numbers()?;
+    if before != after {
+      return Err(invalid_data(
+        "candidate descriptor inventory changed during ready preflight",
+      ));
+    }
+    Ok(before)
+  }
+
+  #[cfg(target_os = "macos")]
+  fn require_exact_macos_fd_numbers() -> io::Result<()> {
+    const MAX_OBSERVED_FDS: usize = 8;
+    // SAFETY: zero is a valid initial representation for this plain C array.
+    let mut entries: [libc::proc_fdinfo; MAX_OBSERVED_FDS] =
+      unsafe { std::mem::zeroed() };
+    let byte_capacity = std::mem::size_of_val(&entries);
+    let byte_capacity = libc::c_int::try_from(byte_capacity)
+      .map_err(|_| invalid_data("candidate descriptor scan bound overflow"))?;
+    // SAFETY: entries is writable for byte_capacity bytes and the flavor
+    // returns a dense array of proc_fdinfo records.
+    let written = unsafe {
+      libc::proc_pidinfo(
+        libc::getpid(),
+        libc::PROC_PIDLISTFDS,
+        0,
+        entries.as_mut_ptr().cast(),
+        byte_capacity,
+      )
+    };
+    let record_size = std::mem::size_of::<libc::proc_fdinfo>() as libc::c_int;
+    if written < 0
+      || written % record_size != 0
+      || written as usize >= byte_capacity as usize
+    {
+      return Err(invalid_data(
+        "candidate descriptor scan was refused or truncated",
+      ));
+    }
+    let count = usize::try_from(written / record_size)
+      .map_err(|_| invalid_data("candidate descriptor count is invalid"))?;
+    let mut fds = entries[..count]
+      .iter()
+      .map(|entry| entry.proc_fd)
+      .collect::<Vec<_>>();
+    fds.sort_unstable();
+    if fds.as_slice() != [0, 1, 2, CANDIDATE_CONTROL_FD] {
+      return Err(invalid_data(
+        "candidate inherited descriptors are not exactly 0,1,2,3",
+      ));
+    }
+    Ok(())
+  }
+
+  #[cfg(target_os = "macos")]
+  fn prepare_candidate_control_fd(fd: RawFd) -> io::Result<String> {
+    // SAFETY: the caller's exact descriptor scan proved this raw descriptor
+    // live, and this function neither closes nor transfers it.
+    let before_identity =
+      inspect_candidate_control_fd(unsafe { BorrowedFd::borrow_raw(fd) })?;
+    let descriptor_flags = get_fcntl_flags(fd, libc::F_GETFD)?;
+    if descriptor_flags & libc::FD_CLOEXEC == 0 {
+      set_fcntl_flags(fd, libc::F_SETFD, descriptor_flags | libc::FD_CLOEXEC)?;
+    }
+    let status_flags = get_fcntl_flags(fd, libc::F_GETFL)?;
+    if status_flags & libc::O_NONBLOCK == 0 {
+      set_fcntl_flags(fd, libc::F_SETFL, status_flags | libc::O_NONBLOCK)?;
+    }
+    let descriptor_flags = get_fcntl_flags(fd, libc::F_GETFD)?;
+    let status_flags = get_fcntl_flags(fd, libc::F_GETFL)?;
+    if descriptor_flags & libc::FD_CLOEXEC == 0
+      || status_flags & libc::O_NONBLOCK == 0
+    {
+      return Err(invalid_data(
+        "candidate control descriptor flags did not become exact",
+      ));
+    }
+    // SAFETY: the descriptor remains live; the surrounding exact scans and
+    // this identity comparison refuse replacement across flag preparation.
+    let after_identity =
+      inspect_candidate_control_fd(unsafe { BorrowedFd::borrow_raw(fd) })?;
+    if before_identity != after_identity {
+      return Err(invalid_data(
+        "candidate control descriptor changed during preparation",
+      ));
+    }
+    Ok(after_identity)
+  }
+
+  #[cfg(target_os = "macos")]
+  fn get_fcntl_flags(
+    fd: RawFd,
+    command: libc::c_int,
+  ) -> io::Result<libc::c_int> {
+    loop {
+      // SAFETY: command is a no-argument fcntl getter for the supplied raw fd.
+      let result = unsafe { libc::fcntl(fd, command) };
+      if result >= 0 {
+        return Ok(result);
+      }
+      let error = io::Error::last_os_error();
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(error);
+      }
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  fn set_fcntl_flags(
+    fd: RawFd,
+    command: libc::c_int,
+    flags: libc::c_int,
+  ) -> io::Result<()> {
+    loop {
+      // SAFETY: command is the matching integer fcntl setter for the supplied
+      // raw fd; flags came from the corresponding getter plus one known bit.
+      let result = unsafe { libc::fcntl(fd, command, flags) };
+      if result == 0 {
+        return Ok(());
+      }
+      let error = io::Error::last_os_error();
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(error);
+      }
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  fn snapshot_candidate_fd_inventory() -> io::Result<Value> {
+    let mut borrowed = Vec::with_capacity(4);
+    for fd in [0, 1, 2, CANDIDATE_CONTROL_FD] {
+      // SAFETY: the exact descriptor scan immediately before this call proved
+      // these four raw numbers are live. The borrow does not take ownership.
+      borrowed.push(unsafe { BorrowedFd::borrow_raw(fd) });
+    }
+    for (index, descriptor) in borrowed.iter().enumerate() {
+      let stat = fstat(*descriptor)?;
+      let descriptor_flags = get_fcntl_flags(index as RawFd, libc::F_GETFD)?;
+      let expected_kind = if index == CANDIDATE_CONTROL_FD as usize {
+        libc::S_IFSOCK
+      } else {
+        libc::S_IFCHR
+      };
+      let expected_cloexec = index == CANDIDATE_CONTROL_FD as usize;
+      if stat.st_mode & libc::S_IFMT != expected_kind
+        || (descriptor_flags & libc::FD_CLOEXEC != 0) != expected_cloexec
+      {
+        return Err(invalid_data(
+          "candidate descriptor kind or close-on-exec state is not exact",
+        ));
+      }
+    }
+    let inspected_control_identity = inspect_candidate_control_fd(borrowed[3])?;
+    let entries = candidate_fd_inventory(
+      borrowed[0],
+      borrowed[1],
+      borrowed[2],
+      borrowed[3],
+    )?;
+    let value = Value::Array(
+      entries
+        .iter()
+        .map(crate::oden_capsec_filesystem_parent::FdInventoryEntry::to_value)
+        .collect(),
+    );
+    if value[3]["platformIdentity"]["value"]
+      != Value::String(inspected_control_identity)
+    {
+      return Err(invalid_data(
+        "candidate control descriptor inventory identity is inexact",
+      ));
+    }
+    let control_identity = &value[3]["platformIdentity"];
+    if (0..3).any(|index| &value[index]["platformIdentity"] == control_identity)
+    {
+      return Err(invalid_data(
+        "candidate control descriptor aliases a standard stream",
+      ));
+    }
+    Ok(value)
+  }
+
+  #[cfg(target_os = "macos")]
+  fn inspect_candidate_control_fd(
+    descriptor: BorrowedFd<'_>,
+  ) -> io::Result<String> {
+    let stat = fstat(descriptor)?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+      return Err(invalid_data("candidate control descriptor is not a socket"));
+    }
+    require_unix_stream_socket(descriptor)?;
+    Ok(format!(
+      "unix-dev-ino:{:016x}{:016x}",
+      stat.st_dev as u64, stat.st_ino as u64
+    ))
+  }
+
+  #[cfg(target_os = "macos")]
+  fn require_unix_stream_socket(descriptor: BorrowedFd<'_>) -> io::Result<()> {
+    let mut socket_type: libc::c_int = 0;
+    let mut socket_type_len =
+      std::mem::size_of_val(&socket_type) as libc::socklen_t;
+    // SAFETY: socket_type and its length are valid output storage.
+    if unsafe {
+      libc::getsockopt(
+        descriptor.as_raw_fd(),
+        libc::SOL_SOCKET,
+        libc::SO_TYPE,
+        std::ptr::from_mut(&mut socket_type).cast(),
+        &mut socket_type_len,
+      )
+    } != 0
+      || socket_type_len as usize != std::mem::size_of_val(&socket_type)
+      || socket_type != libc::SOCK_STREAM
+    {
+      return Err(invalid_data(
+        "candidate control descriptor is not a stream socket",
+      ));
+    }
+    // SAFETY: zero is a valid initial representation for sockaddr_storage.
+    let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut address_len = std::mem::size_of_val(&address) as libc::socklen_t;
+    // SAFETY: address and its length are valid output storage.
+    if unsafe {
+      libc::getsockname(
+        descriptor.as_raw_fd(),
+        std::ptr::from_mut(&mut address).cast(),
+        &mut address_len,
+      )
+    } != 0
+      || address_len < std::mem::size_of::<libc::sa_family_t>() as _
+      || address.ss_family as libc::c_int != libc::AF_UNIX
+    {
+      return Err(invalid_data(
+        "candidate control descriptor is not an AF_UNIX socket",
+      ));
+    }
+    // A listener or otherwise unconnected stream is not the inherited
+    // socketpair endpoint required by the candidate protocol.
+    // SAFETY: zero is a valid initial representation for sockaddr_storage.
+    let mut peer_address: libc::sockaddr_storage =
+      unsafe { std::mem::zeroed() };
+    let mut peer_address_len =
+      std::mem::size_of_val(&peer_address) as libc::socklen_t;
+    // SAFETY: peer_address and its length are valid output storage.
+    if unsafe {
+      libc::getpeername(
+        descriptor.as_raw_fd(),
+        std::ptr::from_mut(&mut peer_address).cast(),
+        &mut peer_address_len,
+      )
+    } != 0
+      || peer_address_len < std::mem::size_of::<libc::sa_family_t>() as _
+      || peer_address.ss_family as libc::c_int != libc::AF_UNIX
+    {
+      return Err(invalid_data(
+        "candidate control descriptor has no connected AF_UNIX peer",
+      ));
+    }
+    Ok(())
   }
 
   fn validate_ready(
@@ -1630,6 +2252,18 @@ mod fd3 {
     is_lower_hex(value, 40)
   }
 
+  fn is_canonical_lower_hex_sha256(value: &str) -> bool {
+    value
+      .strip_prefix("sha256:")
+      .is_some_and(|payload| is_lower_hex(payload, 64))
+  }
+
+  fn is_canonical_engine_build_marker(value: &str) -> bool {
+    value
+      .strip_prefix(ENGINE_BUILD_MARKER_PREFIX)
+      .is_some_and(is_canonical_sha256_digest)
+  }
+
   fn is_platform_identity(value: &str) -> bool {
     value
       .strip_prefix("unix-dev-ino:")
@@ -1714,7 +2348,8 @@ mod fd3 {
       "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM";
     const FORK_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     const FEATURE_SET: &str = "rust:1.95.0;test:fd3";
-    const BUILD_MARKER: &str = "oden-test-build-marker";
+    const BUILD_MARKER: &str =
+      "oden-engine-v2-sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const ROOT_IDENTITY: &str = "unix-dev-ino:00000000000000010000000000000002";
     const CONTROL_IDENTITY: &str =
       "unix-dev-ino:00000000000000030000000000000004";
@@ -1806,7 +2441,7 @@ mod fd3 {
       target: &str,
       case: CandidateLstatCase,
     ) -> CandidateLstatProtocolIdentity {
-      CandidateLstatProtocolIdentity::new(
+      CandidateLstatProtocolIdentity::new_test_fixture(
         target,
         FEATURE_SET,
         BUILD_MARKER,
@@ -1835,7 +2470,9 @@ mod fd3 {
       })
     }
 
-    fn ready(identity: &CandidateLstatProtocolIdentity) -> Value {
+    fn ready_observed_facts(
+      identity: &CandidateLstatProtocolIdentity,
+    ) -> CandidateReadyObservedFacts {
       let platform_state = match identity.target.as_str() {
         "aarch64-apple-darwin" => json!({
           "platform": "macos",
@@ -1855,32 +2492,23 @@ mod fd3 {
         }),
         _ => unreachable!("test identity constructor closes the target"),
       };
-      json!({
-        "schema": CANDIDATE_READY_SCHEMA,
-        "profile": CAPSEC_PROFILE,
-        "target": identity.target,
-        "featureSet": identity.feature_set,
-        "embeddedBuildMarker": identity.embedded_build_marker,
-        "forkCommit": identity.fork_commit,
-        "fixtureArtifactDigest": identity.fixture_artifact_digest,
-        "caseId": identity.case.case_id(),
-        "noDescendantProfile": identity.no_descendant_profile(),
-        "candidatePid": "77",
-        "candidatePgid": "88",
-        "candidateStartIdentity": "start:test",
-        "identities": {
+      CandidateReadyObservedFacts {
+        candidate_pid: "77".to_string(),
+        candidate_pgid: "88".to_string(),
+        candidate_start_identity: "start:test".to_string(),
+        identities: json!({
           "realUid": "501",
           "effectiveUid": "501",
           "savedUid": "501",
           "realGid": "20",
           "effectiveGid": "20",
           "savedGid": "20",
-        },
-        "processLimitReadback": {
+        }),
+        process_limit_readback: json!({
           "soft": "0",
           "hard": "0",
-        },
-        "preRequestFdInventory": [
+        }),
+        pre_request_fd_inventory: json!([
           {
             "fd": 0,
             "role": "null-stdin",
@@ -1909,9 +2537,13 @@ mod fd3 {
             "objectKind": "socket",
             "platformIdentity": platform_identity(CONTROL_IDENTITY),
           },
-        ],
-        "platformState": platform_state,
-      })
+        ]),
+        platform_state,
+      }
+    }
+
+    fn ready(identity: &CandidateLstatProtocolIdentity) -> Value {
+      candidate_ready_value(identity, &ready_observed_facts(identity))
     }
 
     fn request(identity: &CandidateLstatProtocolIdentity) -> Value {
@@ -2225,6 +2857,193 @@ mod fd3 {
       )
     }
 
+    fn exact_engine_marker_facts() -> CandidateEngineBuildMarkerFacts<'static> {
+      CandidateEngineBuildMarkerFacts {
+        target: "aarch64-apple-darwin",
+        rust_toolchain: "1.95.0",
+        cargo_features: "__vendored_zlib_ng,default,upgrade",
+        rust_cfg_digest: "sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a",
+        cargo_feature_graph_digest: "sha256:62fc7ce277e35b03015efcb6c89461269dcc32c088e5e6c82419f31598473667",
+        build_profile: "release",
+        panic_strategy: "abort",
+        debug_assertions: false,
+        fork_commit: FORK_COMMIT,
+      }
+    }
+
+    #[test]
+    fn candidate_binary_engine_marker_has_the_exact_stable_preimage() {
+      let marker =
+        derive_engine_build_marker(&exact_engine_marker_facts()).unwrap();
+      assert_eq!(
+        marker,
+        "oden-engine-v2-sha256-_nB05NwgnJp4ELZv890rYh9vHwWIYm1K-JLzitgDCzY"
+      );
+      assert!(is_canonical_engine_build_marker(&marker));
+    }
+
+    #[test]
+    fn candidate_binary_engine_marker_refuses_alias_and_missing_facts() {
+      let mut target_alias = exact_engine_marker_facts();
+      target_alias.target = "arm64-apple-darwin";
+      let mut missing_feature = exact_engine_marker_facts();
+      missing_feature.cargo_features = "__vendored_zlib_ng,,upgrade";
+      let mut reordered_features = exact_engine_marker_facts();
+      reordered_features.cargo_features = "default,__vendored_zlib_ng,upgrade";
+      let mut missing_cfg = exact_engine_marker_facts();
+      missing_cfg.rust_cfg_digest = "";
+      let mut debug = exact_engine_marker_facts();
+      debug.debug_assertions = true;
+      let mut unwind = exact_engine_marker_facts();
+      unwind.panic_strategy = "unwind";
+      let mut missing_fork = exact_engine_marker_facts();
+      missing_fork.fork_commit = "";
+      for facts in [
+        target_alias,
+        missing_feature,
+        reordered_features,
+        missing_cfg,
+        debug,
+        unwind,
+        missing_fork,
+      ] {
+        assert!(derive_engine_build_marker(&facts).is_err());
+      }
+    }
+
+    #[test]
+    fn candidate_ready_preflight_closes_and_revalidates_exact_fact_bytes() {
+      for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
+        let identity = identity_for(target, CandidateLstatCase::FinalMissing);
+        let expected = canonical_bytes(&ready(&identity));
+        let preflight = CandidateReadyPreflight::from_observed(
+          &identity,
+          ready_observed_facts(&identity),
+        )
+        .unwrap();
+        assert_eq!(preflight.raw_bytes(), expected);
+        let reparsed = parse_canonical_jcs(preflight.raw_bytes()).unwrap();
+        validate_ready(&reparsed, &identity).unwrap();
+      }
+    }
+
+    #[test]
+    fn candidate_ready_preflight_refuses_missing_and_aliased_facts() {
+      let identity = identity(CandidateLstatCase::Existing);
+
+      let mut missing_limit = ready_observed_facts(&identity);
+      missing_limit.process_limit_readback = json!({ "soft": "0" });
+      let mut fd_alias = ready_observed_facts(&identity);
+      fd_alias.pre_request_fd_inventory[3]["platformIdentity"] =
+        platform_identity(ROOT_IDENTITY);
+      let mut missing_fd = ready_observed_facts(&identity);
+      missing_fd
+        .pre_request_fd_inventory
+        .as_array_mut()
+        .unwrap()
+        .pop();
+      let mut zero_saved_uid = ready_observed_facts(&identity);
+      zero_saved_uid.identities["savedUid"] = json!("0");
+
+      for observed in [missing_limit, fd_alias, missing_fd, zero_saved_uid] {
+        assert_eq!(
+          CandidateReadyPreflight::from_observed(&identity, observed).err(),
+          Some(CandidateReadyPreflightRefusal::CanonicalFrame)
+        );
+      }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_ready_actual_preflight_refuses_the_unprepared_test_process() {
+      let identity = identity(CandidateLstatCase::Existing);
+      assert_eq!(
+        CandidateReadyPreflight::collect(&identity).err(),
+        Some(CandidateReadyPreflightRefusal::ProcessLimit)
+      );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_ready_control_fd_is_verified_before_flag_mutation() {
+      let regular_file = tempfile::tempfile().unwrap();
+      let regular_fd = regular_file.as_raw_fd();
+      let regular_descriptor_flags =
+        get_fcntl_flags(regular_fd, libc::F_GETFD).unwrap();
+      let regular_status_flags =
+        get_fcntl_flags(regular_fd, libc::F_GETFL).unwrap();
+      assert!(prepare_candidate_control_fd(regular_fd).is_err());
+      assert_eq!(
+        get_fcntl_flags(regular_fd, libc::F_GETFD).unwrap(),
+        regular_descriptor_flags
+      );
+      assert_eq!(
+        get_fcntl_flags(regular_fd, libc::F_GETFL).unwrap(),
+        regular_status_flags
+      );
+
+      let listener_root = tempfile::tempdir().unwrap();
+      let listener =
+        std::os::unix::net::UnixListener::bind(listener_root.path().join("s"))
+          .unwrap();
+      let listener_fd = listener.as_raw_fd();
+      let listener_descriptor_flags =
+        get_fcntl_flags(listener_fd, libc::F_GETFD).unwrap();
+      let listener_status_flags =
+        get_fcntl_flags(listener_fd, libc::F_GETFL).unwrap();
+      assert!(prepare_candidate_control_fd(listener_fd).is_err());
+      assert_eq!(
+        get_fcntl_flags(listener_fd, libc::F_GETFD).unwrap(),
+        listener_descriptor_flags
+      );
+      assert_eq!(
+        get_fcntl_flags(listener_fd, libc::F_GETFL).unwrap(),
+        listener_status_flags
+      );
+
+      let (candidate_endpoint, _peer_endpoint) =
+        framed_stream_socketpair().unwrap();
+      let candidate_fd = candidate_endpoint.as_fd().as_raw_fd();
+      let descriptor_flags =
+        get_fcntl_flags(candidate_fd, libc::F_GETFD).unwrap();
+      set_fcntl_flags(
+        candidate_fd,
+        libc::F_SETFD,
+        descriptor_flags & !libc::FD_CLOEXEC,
+      )
+      .unwrap();
+      let status_flags = get_fcntl_flags(candidate_fd, libc::F_GETFL).unwrap();
+      set_fcntl_flags(
+        candidate_fd,
+        libc::F_SETFL,
+        status_flags & !libc::O_NONBLOCK,
+      )
+      .unwrap();
+      let identity = prepare_candidate_control_fd(candidate_fd).unwrap();
+      assert!(is_platform_identity(&identity));
+      assert_ne!(
+        get_fcntl_flags(candidate_fd, libc::F_GETFD).unwrap()
+          & libc::FD_CLOEXEC,
+        0
+      );
+      assert_ne!(
+        get_fcntl_flags(candidate_fd, libc::F_GETFL).unwrap()
+          & libc::O_NONBLOCK,
+        0
+      );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn candidate_ready_actual_preflight_refuses_absent_linux_containment() {
+      let identity =
+        identity_for("x86_64-unknown-linux-gnu", CandidateLstatCase::Existing);
+      assert_eq!(
+        CandidateReadyPreflight::collect(&identity).err(),
+        Some(CandidateReadyPreflightRefusal::LinuxContainmentUnavailable)
+      );
+    }
+
     #[test]
     fn candidate_fd3_accepts_both_exact_lstat_packet_sequences() {
       for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
@@ -2290,7 +3109,7 @@ mod fd3 {
     #[test]
     fn candidate_fd3_ready_refuses_noncanonical_or_open_schema_bytes() {
       assert!(
-        CandidateLstatProtocolIdentity::new(
+        CandidateLstatProtocolIdentity::new_test_fixture(
           "x86_64-apple-darwin",
           FEATURE_SET,
           BUILD_MARKER,
@@ -2302,7 +3121,7 @@ mod fd3 {
         .is_err()
       );
       assert!(
-        CandidateLstatProtocolIdentity::new(
+        CandidateLstatProtocolIdentity::new_test_fixture(
           "aarch64-apple-darwin",
           FEATURE_SET,
           BUILD_MARKER,

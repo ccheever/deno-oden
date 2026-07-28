@@ -21,6 +21,8 @@ use std::sync::atomic::Ordering;
 
 use super::OdenRev2NamespaceOperationGuard;
 use super::OdenRev2RuntimeAuthorityContext;
+use crate::oden_rev2_policy::OdenRev2CompiledBuildIdentity;
+use crate::oden_rev2_policy::validate_current_binary_candidate_build_identity;
 use crate::oden_rev2_policy::verify_unarmed_candidate_snapshot;
 use crate::oden_rev2_protocol::VerifiedPermissionActorSet;
 use crate::oden_rev2_runtime::OdenRev2HostFilesystemCompletion;
@@ -724,6 +726,21 @@ fn validate_lstat_execution_admission(
     return Err(refused("CANDIDATE-EXECUTION-ADMISSION"));
   }
   validate_lstat_candidate_context(target, feature_set, admission)?;
+  let generated_projection =
+    validate_lstat_generated_admission_projection(admission)?;
+  if input.case_projection != generated_projection
+    || input.case_projection_digest != admission.case_projection_digest
+  {
+    return Err(refused("CANDIDATE-GENERATED-PROJECTION"));
+  }
+
+  validate_filesystem_candidate_execution(input)
+    .map_err(|_| refused("CANDIDATE-EXECUTION-INPUT"))
+}
+
+fn validate_lstat_generated_admission_projection(
+  admission: &Rev2FilesystemLstatExecutionAdmission,
+) -> Result<FilesystemExecutionProjection, OdenRev2FilesystemError> {
   let generated_projection: FilesystemExecutionProjection =
     serde_json::from_str(admission.case_projection_json)
       .map_err(|_| refused("CANDIDATE-GENERATED-PROJECTION"))?;
@@ -738,14 +755,10 @@ fn validate_lstat_execution_admission(
     )
     .map_err(|_| refused("CANDIDATE-GENERATED-PROJECTION"))?
       != admission.case_projection_digest
-    || input.case_projection != generated_projection
-    || input.case_projection_digest != admission.case_projection_digest
   {
     return Err(refused("CANDIDATE-GENERATED-PROJECTION"));
   }
-
-  validate_filesystem_candidate_execution(input)
-    .map_err(|_| refused("CANDIDATE-EXECUTION-INPUT"))
+  Ok(generated_projection)
 }
 
 fn validate_lstat_existing_execution_admission(
@@ -1080,6 +1093,137 @@ fn compiled_lstat_target_status() -> Result<
     .iter()
     .find(|status| status.target == target)
     .ok_or_else(|| refused("CANDIDATE-TARGET"))
+}
+
+/// Opaque, authority-free equality projection of one generated lstat
+/// admission and the generated target row selected by this binary's native
+/// cfg and complete compiled build identity.
+///
+/// It intentionally exposes no generated table, projection bytes, public-op
+/// capsule, descriptor, runtime context, execution method, or serialization
+/// surface. A later candidate checkpoint may use these exact strings only as
+/// equality operands while reconstructing transferred descriptors.
+#[doc(hidden)]
+pub struct OdenRev2LstatCandidateBinaryIdentity {
+  fixture_artifact_digest: &'static str,
+  case_id: &'static str,
+  target: &'static str,
+  feature_set: &'static str,
+  rust_toolchain: &'static str,
+  cargo_features: &'static str,
+  rust_cfg_digest: &'static str,
+  cargo_feature_graph_digest: &'static str,
+  build_profile: &'static str,
+  execution_projection_digest: &'static str,
+}
+
+impl OdenRev2LstatCandidateBinaryIdentity {
+  pub fn fixture_artifact_digest(&self) -> &'static str {
+    self.fixture_artifact_digest
+  }
+
+  pub fn case_id(&self) -> &'static str {
+    self.case_id
+  }
+
+  pub fn target(&self) -> &'static str {
+    self.target
+  }
+
+  pub fn feature_set(&self) -> &'static str {
+    self.feature_set
+  }
+
+  pub fn rust_toolchain(&self) -> &'static str {
+    self.rust_toolchain
+  }
+
+  pub fn cargo_features(&self) -> &'static str {
+    self.cargo_features
+  }
+
+  pub fn rust_cfg_digest(&self) -> &'static str {
+    self.rust_cfg_digest
+  }
+
+  pub fn cargo_feature_graph_digest(&self) -> &'static str {
+    self.cargo_feature_graph_digest
+  }
+
+  pub fn build_profile(&self) -> &'static str {
+    self.build_profile
+  }
+
+  pub fn execution_projection_digest(&self) -> &'static str {
+    self.execution_projection_digest
+  }
+}
+
+/// Select one exact generated lstat admission only after joining the current
+/// binary's native cfg and complete embedded build-marker facts to the same
+/// generated target row.
+///
+/// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+/// [constrained-by] -- This is a dormant equality join before FD3 descriptor
+/// reconstruction. It authenticates no image or execution fact, constructs no
+/// runtime/public-op capsule, and grants no conformance or release authority.
+#[doc(hidden)]
+pub fn oden_capsec_rev2_join_lstat_candidate_binary_identity(
+  build_identity: &OdenRev2CompiledBuildIdentity,
+  fixture_artifact_digest: &str,
+  case_id: &str,
+) -> Result<OdenRev2LstatCandidateBinaryIdentity, OdenRev2FilesystemError> {
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  {
+    join_lstat_candidate_binary_identity_with_validator(
+      build_identity,
+      fixture_artifact_digest,
+      case_id,
+      validate_current_binary_candidate_build_identity,
+    )
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    let _ = (build_identity, fixture_artifact_digest, case_id);
+    Err(refused("PLATFORM-UNSUPPORTED"))
+  }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn join_lstat_candidate_binary_identity_with_validator(
+  build_identity: &OdenRev2CompiledBuildIdentity,
+  fixture_artifact_digest: &str,
+  case_id: &str,
+  validate_build: impl FnOnce(
+    &crate::rev2_registry_generated::Rev2TargetStatus,
+    &OdenRev2CompiledBuildIdentity,
+  ) -> Result<(), String>,
+) -> Result<OdenRev2LstatCandidateBinaryIdentity, OdenRev2FilesystemError> {
+  let target = compiled_lstat_target_status()?;
+  validate_build(target, build_identity)
+    .map_err(|_| refused("CANDIDATE-BINARY-IDENTITY"))?;
+  let admission = select_lstat_candidate_admission(
+    fixture_artifact_digest,
+    case_id,
+    target.target,
+    target.feature_set,
+  )?;
+  let projection = validate_lstat_generated_admission_projection(admission)?;
+  if projection.case_id != admission.case_id {
+    return Err(refused("CANDIDATE-GENERATED-PROJECTION"));
+  }
+  Ok(OdenRev2LstatCandidateBinaryIdentity {
+    fixture_artifact_digest: admission.fixture_artifact_digest,
+    case_id: admission.case_id,
+    target: target.target,
+    feature_set: target.feature_set,
+    rust_toolchain: target.rust_toolchain,
+    cargo_features: target.cargo_features,
+    rust_cfg_digest: target.rust_cfg_digest,
+    cargo_feature_graph_digest: target.cargo_feature_graph_digest,
+    build_profile: target.build_profile,
+    execution_projection_digest: admission.case_projection_digest,
+  })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3075,6 +3219,170 @@ mod tests {
           && admission.feature_set == compiled.feature_set
       })
       .unwrap()
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  fn exact_release_build_identity() -> OdenRev2CompiledBuildIdentity {
+    let target = policy_fixtures::embedded_compiled_target();
+    OdenRev2CompiledBuildIdentity {
+      target: target.target,
+      rust_toolchain: target.rust_toolchain,
+      cargo_features: target.cargo_features,
+      rust_cfg_digest: target.rust_cfg_digest,
+      cargo_feature_graph_digest: target.cargo_feature_graph_digest,
+      build_profile: target.build_profile,
+      marker_panic_strategy: "abort",
+      marker_debug_assertions: "false",
+      actual_panic_strategy: "abort",
+      actual_debug_assertions: false,
+    }
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  fn join_test_candidate_binary_identity(
+    build_identity: &OdenRev2CompiledBuildIdentity,
+    fixture_artifact_digest: &str,
+    case_id: &str,
+  ) -> Result<OdenRev2LstatCandidateBinaryIdentity, OdenRev2FilesystemError> {
+    join_lstat_candidate_binary_identity_with_validator(
+      build_identity,
+      fixture_artifact_digest,
+      case_id,
+      crate::oden_rev2_policy::validate_compiled_build_identity,
+    )
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  #[test]
+  fn candidate_binary_identity_join_selects_exact_generated_rows() {
+    let build_identity = exact_release_build_identity();
+    for admission in [
+      native_lstat_existing_execution_admission(),
+      native_lstat_final_missing_execution_admission(),
+    ] {
+      let identity = join_test_candidate_binary_identity(
+        &build_identity,
+        admission.fixture_artifact_digest,
+        admission.case_id,
+      )
+      .unwrap();
+      let target = policy_fixtures::embedded_compiled_target();
+      assert_eq!(
+        identity.fixture_artifact_digest(),
+        admission.fixture_artifact_digest
+      );
+      assert_eq!(identity.case_id(), admission.case_id);
+      assert_eq!(identity.target(), target.target);
+      assert_eq!(identity.feature_set(), target.feature_set);
+      assert_eq!(identity.rust_toolchain(), target.rust_toolchain);
+      assert_eq!(identity.cargo_features(), target.cargo_features);
+      assert_eq!(identity.rust_cfg_digest(), target.rust_cfg_digest);
+      assert_eq!(
+        identity.cargo_feature_graph_digest(),
+        target.cargo_feature_graph_digest
+      );
+      assert_eq!(identity.build_profile(), "release");
+      assert_eq!(
+        identity.execution_projection_digest(),
+        admission.case_projection_digest
+      );
+    }
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  #[test]
+  fn candidate_binary_identity_join_refuses_stale_alias_and_missing_facts() {
+    let exact = exact_release_build_identity();
+    let admission = native_lstat_existing_execution_admission();
+    for build_identity in [
+      OdenRev2CompiledBuildIdentity {
+        target: "arm64-apple-darwin",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        cargo_features: "__vendored_zlib_ng,default",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        rust_cfg_digest: "",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        cargo_feature_graph_digest: "sha256:stale",
+        ..exact
+      },
+    ] {
+      assert_eq!(
+        refusal(
+          join_test_candidate_binary_identity(
+            &build_identity,
+            admission.fixture_artifact_digest,
+            admission.case_id,
+          )
+          .err()
+          .expect("stale build identity must refuse")
+        ),
+        "OD-CAP-REV2-FILESYSTEM-CANDIDATE-BINARY-IDENTITY"
+      );
+    }
+
+    for (fixture_artifact_digest, case_id) in [
+      ("", admission.case_id),
+      (
+        "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        admission.case_id,
+      ),
+      (admission.fixture_artifact_digest, ""),
+      (
+        admission.fixture_artifact_digest,
+        "filesystem:lstat-sync:existing",
+      ),
+    ] {
+      assert_eq!(
+        refusal(
+          join_test_candidate_binary_identity(
+            &exact,
+            fixture_artifact_digest,
+            case_id,
+          )
+          .err()
+          .expect("alias or missing admission identity must refuse")
+        ),
+        "OD-CAP-REV2-FILESYSTEM-CANDIDATE-EXECUTION-ADMISSION"
+      );
+    }
   }
 
   #[cfg(any(

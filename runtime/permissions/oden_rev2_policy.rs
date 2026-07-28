@@ -672,7 +672,7 @@ fn parse_authenticated_snapshot(
   Ok(snapshot.clone())
 }
 
-fn validate_compiled_build_identity(
+pub(crate) fn validate_compiled_build_identity(
   expected: &crate::rev2_registry_generated::Rev2TargetStatus,
   actual: &OdenRev2CompiledBuildIdentity,
 ) -> Result<(), String> {
@@ -692,6 +692,58 @@ fn validate_compiled_build_identity(
     return Err("OD-CAP-REV2-FEATURE-BINARY-MISMATCH".to_string());
   }
   Ok(())
+}
+
+fn validate_compiled_build_identity_against_native_facts(
+  expected: &crate::rev2_registry_generated::Rev2TargetStatus,
+  actual: &OdenRev2CompiledBuildIdentity,
+  native_target: &str,
+  native_panic_strategy: &str,
+  native_debug_assertions: bool,
+) -> Result<(), String> {
+  validate_compiled_build_identity(expected, actual)?;
+  if actual.target != native_target
+    || actual.actual_panic_strategy != native_panic_strategy
+    || actual.actual_debug_assertions != native_debug_assertions
+    || actual.marker_panic_strategy != "abort"
+    || actual.marker_debug_assertions != "false"
+    || actual.build_profile != "release"
+  {
+    return Err("OD-CAP-REV2-FEATURE-BINARY-MISMATCH".to_string());
+  }
+  Ok(())
+}
+
+/// Candidate-only equality join between the CLI's embedded build-marker
+/// projection, this crate's native cfg facts, and one generated target row.
+///
+/// The caller-supplied structure is evidence, not authority: this function
+/// independently selects the native target and reads panic/debug cfg in this
+/// compiled crate. Its only consumer is a dormant pre-FD3 candidate identity
+/// projection; it does not authenticate an image, advertise a target, or arm
+/// a runtime context.
+///
+/// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+/// [constrained-by] -- Compiled marker equality is candidate preparation only;
+/// it grants no execution, conformance, admission, or release authority.
+pub(crate) fn validate_current_binary_candidate_build_identity(
+  expected: &crate::rev2_registry_generated::Rev2TargetStatus,
+  actual: &OdenRev2CompiledBuildIdentity,
+) -> Result<(), String> {
+  let native_target = compiled_target()
+    .ok_or_else(|| "OD-CAP-REV2-FEATURE-BINARY-MISMATCH".to_string())?;
+  let native_panic_strategy = if cfg!(panic = "abort") {
+    "abort"
+  } else {
+    "unwind"
+  };
+  validate_compiled_build_identity_against_native_facts(
+    expected,
+    actual,
+    native_target,
+    native_panic_strategy,
+    cfg!(debug_assertions),
+  )
 }
 
 fn compiled_target() -> Option<&'static str> {
@@ -2688,6 +2740,86 @@ pub(crate) mod tests {
     ] {
       assert_eq!(
         validate_compiled_build_identity(expected, &actual),
+        Err("OD-CAP-REV2-FEATURE-BINARY-MISMATCH".to_string())
+      );
+    }
+  }
+
+  #[test]
+  fn candidate_current_binary_join_requires_native_and_release_cfg_facts() {
+    let expected = embedded_compiled_target();
+    let exact = test_build_identity();
+    assert!(
+      validate_compiled_build_identity_against_native_facts(
+        expected,
+        &exact,
+        expected.target,
+        "abort",
+        false,
+      )
+      .is_ok()
+    );
+
+    for (native_target, panic_strategy, debug_assertions) in [
+      ("alias-target", "abort", false),
+      (expected.target, "unwind", false),
+      (expected.target, "abort", true),
+    ] {
+      assert_eq!(
+        validate_compiled_build_identity_against_native_facts(
+          expected,
+          &exact,
+          native_target,
+          panic_strategy,
+          debug_assertions,
+        ),
+        Err("OD-CAP-REV2-FEATURE-BINARY-MISMATCH".to_string())
+      );
+    }
+  }
+
+  #[test]
+  fn candidate_current_binary_join_refuses_stale_or_missing_marker_facts() {
+    let expected = embedded_compiled_target();
+    let exact = test_build_identity();
+    for actual in [
+      OdenRev2CompiledBuildIdentity {
+        rust_toolchain: "",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        cargo_features: "__vendored_zlib_ng,default",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        rust_cfg_digest: "sha256:stale",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        cargo_feature_graph_digest: "sha256:stale",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        build_profile: "",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        marker_panic_strategy: "",
+        ..exact
+      },
+      OdenRev2CompiledBuildIdentity {
+        marker_debug_assertions: "",
+        ..exact
+      },
+    ] {
+      assert_eq!(
+        validate_compiled_build_identity_against_native_facts(
+          expected,
+          &actual,
+          expected.target,
+          "abort",
+          false,
+        ),
         Err("OD-CAP-REV2-FEATURE-BINARY-MISMATCH".to_string())
       );
     }
