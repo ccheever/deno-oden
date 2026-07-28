@@ -394,19 +394,26 @@ pub(crate) mod unix_transport {
       expect_eof(self.fd.as_fd(), deadline)
     }
 
-    pub(crate) fn shutdown_write(&self) -> io::Result<()> {
-      loop {
+    pub(crate) fn shutdown_write(&self, deadline: Instant) -> io::Result<()> {
+      let mut deadline_check = || check_deadline(deadline);
+      self.shutdown_write_with_deadline(&mut deadline_check)
+    }
+
+    fn shutdown_write_with_deadline(
+      &self,
+      deadline_check: &mut impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+      let mut shutdown = || {
         // SAFETY: the endpoint owns a valid socket descriptor.
         let result =
           unsafe { libc::shutdown(self.fd.as_raw_fd(), libc::SHUT_WR) };
         if result == 0 {
-          return Ok(());
+          Ok(())
+        } else {
+          Err(io::Error::last_os_error())
         }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-          return Err(error);
-        }
-      }
+      };
+      retry_interrupted_with_deadline(&mut shutdown, deadline_check)
     }
   }
 
@@ -589,7 +596,8 @@ pub(crate) mod unix_transport {
       }
     };
 
-    ancillary.absorb(&message)?;
+    ancillary.absorb(&message, deadline)?;
+    check_deadline(deadline)?;
     validate_message_flags(message.msg_flags)?;
     Ok(bytes_read)
   }
@@ -609,6 +617,21 @@ pub(crate) mod unix_transport {
       Err(timed_out())
     } else {
       Ok(())
+    }
+  }
+
+  fn retry_interrupted_with_deadline<T>(
+    operation: &mut impl FnMut() -> io::Result<T>,
+    deadline_check: &mut impl FnMut() -> io::Result<()>,
+  ) -> io::Result<T> {
+    loop {
+      deadline_check()?;
+      let result = operation();
+      deadline_check()?;
+      match result {
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+        result => return result,
+      }
     }
   }
 
@@ -680,7 +703,13 @@ pub(crate) mod unix_transport {
       }
     }
 
-    fn absorb(&mut self, message: &libc::msghdr) -> io::Result<()> {
+    fn absorb(
+      &mut self,
+      message: &libc::msghdr,
+      deadline: Instant,
+    ) -> io::Result<()> {
+      #[cfg(any(target_os = "android", target_os = "linux"))]
+      let _ = deadline;
       let control_start = message.msg_control as usize;
       let returned_control_len = message.msg_controllen as usize;
       let bounded_control_len = returned_control_len.min(RECEIVE_CONTROL_BYTES);
@@ -742,8 +771,11 @@ pub(crate) mod unix_transport {
             for index in 0..(data_len / size_of::<RawFd>()) {
               let descriptor = OwnedFd::from_raw_fd(*data.add(index));
               #[cfg(not(any(target_os = "android", target_os = "linux")))]
-              if let Err(error) = set_cloexec(descriptor.as_fd()) {
-                cloexec_error.get_or_insert(error);
+              if cloexec_error.is_none()
+                && let Err(error) =
+                  set_cloexec_before(descriptor.as_fd(), deadline)
+              {
+                cloexec_error = Some(error);
               }
               self.descriptors.push(descriptor);
             }
@@ -860,22 +892,38 @@ pub(crate) mod unix_transport {
   }
 
   fn set_cloexec(descriptor: BorrowedFd<'_>) -> io::Result<()> {
-    let current_flags = loop {
+    let mut deadline_check = || Ok(());
+    set_cloexec_with_deadline(descriptor, &mut deadline_check)
+  }
+
+  fn set_cloexec_before(
+    descriptor: BorrowedFd<'_>,
+    deadline: Instant,
+  ) -> io::Result<()> {
+    let mut deadline_check = || check_deadline(deadline);
+    set_cloexec_with_deadline(descriptor, &mut deadline_check)
+  }
+
+  fn set_cloexec_with_deadline(
+    descriptor: BorrowedFd<'_>,
+    deadline_check: &mut impl FnMut() -> io::Result<()>,
+  ) -> io::Result<()> {
+    let mut get_flags = || {
       // SAFETY: F_GETFD reads flags from a live descriptor.
       let result =
         unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) };
       if result >= 0 {
-        break result;
-      }
-      let error = io::Error::last_os_error();
-      if error.kind() != io::ErrorKind::Interrupted {
-        return Err(error);
+        Ok(result)
+      } else {
+        Err(io::Error::last_os_error())
       }
     };
+    let current_flags =
+      retry_interrupted_with_deadline(&mut get_flags, deadline_check)?;
     if current_flags & libc::FD_CLOEXEC != 0 {
       return Ok(());
     }
-    loop {
+    let mut set_flags = || {
       // SAFETY: F_SETFD updates flags on a live descriptor.
       let result = unsafe {
         libc::fcntl(
@@ -885,13 +933,12 @@ pub(crate) mod unix_transport {
         )
       };
       if result == 0 {
-        return Ok(());
+        Ok(())
+      } else {
+        Err(io::Error::last_os_error())
       }
-      let error = io::Error::last_os_error();
-      if error.kind() != io::ErrorKind::Interrupted {
-        return Err(error);
-      }
-    }
+    };
+    retry_interrupted_with_deadline(&mut set_flags, deadline_check)
   }
 
   #[cfg(target_os = "macos")]
@@ -951,6 +998,102 @@ pub(crate) mod unix_transport {
     use super::*;
 
     #[test]
+    fn eintr_retry_expires_before_a_second_attempt_without_sleep() {
+      let mut attempts = 0usize;
+      let mut checks = 0usize;
+      let mut operation = || {
+        attempts += 1;
+        Err::<(), _>(io::Error::from(io::ErrorKind::Interrupted))
+      };
+      let mut deadline_check = || {
+        checks += 1;
+        if checks == 3 {
+          Err(timed_out())
+        } else {
+          Ok(())
+        }
+      };
+
+      let error =
+        retry_interrupted_with_deadline(&mut operation, &mut deadline_check)
+          .unwrap_err();
+
+      assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+      assert_eq!(attempts, 1);
+      assert_eq!(checks, 3);
+    }
+
+    #[test]
+    fn shutdown_write_expiry_after_syscall_is_rejected_without_sleep() {
+      let (sender, receiver) = framed_stream_socketpair().unwrap();
+      let mut checks = 0usize;
+      let mut deadline_check = || {
+        checks += 1;
+        if checks == 2 {
+          Err(timed_out())
+        } else {
+          Ok(())
+        }
+      };
+
+      let error = sender
+        .shutdown_write_with_deadline(&mut deadline_check)
+        .unwrap_err();
+
+      assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+      assert_eq!(checks, 2);
+      receiver.require_eof(deadline()).unwrap();
+    }
+
+    #[test]
+    fn cloexec_expiry_after_getfd_is_rejected_without_sleep() {
+      let descriptor = tempfile::tempfile().unwrap();
+      let mut checks = 0usize;
+      let mut deadline_check = || {
+        checks += 1;
+        if checks == 2 {
+          Err(timed_out())
+        } else {
+          Ok(())
+        }
+      };
+
+      let error =
+        set_cloexec_with_deadline(descriptor.as_fd(), &mut deadline_check)
+          .unwrap_err();
+
+      assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+      assert_eq!(checks, 2);
+    }
+
+    #[test]
+    fn cloexec_expiry_after_setfd_is_rejected_without_sleep() {
+      let descriptor = tempfile::tempfile().unwrap();
+      // SAFETY: F_SETFD updates flags on a live test descriptor.
+      assert_eq!(
+        unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, 0) },
+        0
+      );
+      let mut checks = 0usize;
+      let mut deadline_check = || {
+        checks += 1;
+        if checks == 4 {
+          Err(timed_out())
+        } else {
+          Ok(())
+        }
+      };
+
+      let error =
+        set_cloexec_with_deadline(descriptor.as_fd(), &mut deadline_check)
+          .unwrap_err();
+
+      assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+      assert_eq!(checks, 4);
+      assert_cloexec(descriptor.as_fd());
+    }
+
+    #[test]
     fn stream_socketpair_and_received_descriptors_are_cloexec_and_ordered() {
       let (sender, receiver) = framed_stream_socketpair().unwrap();
       assert_cloexec(sender.as_fd());
@@ -971,7 +1114,7 @@ pub(crate) mod unix_transport {
           deadline(),
         )
         .unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let received = receiver
         .receive_packet_with_exact_descriptors(2, deadline())
@@ -1011,7 +1154,7 @@ pub(crate) mod unix_transport {
       // run yet, so the transferred right cannot have reused this number.
       assert_eq!(unsafe { libc::fcntl(transferred_raw, libc::F_GETFD) }, -1);
       assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let received = receiver
         .receive_one_canonical_jcs_frame(
@@ -1033,7 +1176,7 @@ pub(crate) mod unix_transport {
       sender
         .send_packet_with_descriptors(b"request", &[], deadline())
         .unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let error = receiver
         .receive_packet_with_exact_descriptors(1, deadline())
@@ -1053,7 +1196,7 @@ pub(crate) mod unix_transport {
           deadline(),
         )
         .unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let error = receiver
         .receive_packet_with_exact_descriptors(1, deadline())
@@ -1072,7 +1215,7 @@ pub(crate) mod unix_transport {
           deadline(),
         )
         .unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let error = receiver
         .receive_packet_with_exact_descriptors(0, deadline())
@@ -1089,7 +1232,7 @@ pub(crate) mod unix_transport {
       send_raw(sender.as_fd(), &[0, 0, 0, 1]).unwrap();
       send_raw_with_descriptors(sender.as_fd(), b"x", &[write_end.as_fd()])
         .unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let error = receiver
         .receive_packet_with_exact_descriptors(1, deadline())
@@ -1110,7 +1253,7 @@ pub(crate) mod unix_transport {
         &[write_end.as_fd()],
       )
       .unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let error = receiver
         .receive_packet_with_exact_descriptors(1, deadline())
@@ -1132,7 +1275,7 @@ pub(crate) mod unix_transport {
           deadline(),
         )
         .unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let error = receiver
         .receive_packet_with_exact_descriptors(0, deadline())
@@ -1181,7 +1324,7 @@ pub(crate) mod unix_transport {
       }
 
       let mut ancillary = AncillaryState::new(0);
-      let error = ancillary.absorb(&message).unwrap_err();
+      let error = ancillary.absorb(&message, deadline()).unwrap_err();
       assert_eq!(error.kind(), io::ErrorKind::InvalidData);
       drop(ancillary);
       drop(write_end);
@@ -1200,6 +1343,42 @@ pub(crate) mod unix_transport {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn darwin_cloexec_expiry_still_owns_and_closes_received_rights() {
+      let (read_end, write_end) = pipe_pair().unwrap();
+      // SAFETY: dup receives a live descriptor and returns a new owned one.
+      let duplicated_raw = unsafe { libc::dup(write_end.as_raw_fd()) };
+      assert!(duplicated_raw >= 0);
+      // SAFETY: successful dup transferred ownership of duplicated_raw.
+      let duplicated = unsafe { OwnedFd::from_raw_fd(duplicated_raw) };
+      let transferred_raw = duplicated.into_raw_fd();
+
+      let returned_len = cmsg_len(size_of::<RawFd>()).unwrap();
+      let mut control =
+        aligned_control(cmsg_space(size_of::<RawFd>()).unwrap());
+      // SAFETY: zero is a valid initial state for msghdr.
+      let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+      message.msg_control = control.as_mut_ptr().cast();
+      message.msg_controllen = returned_len as _;
+      // SAFETY: control is aligned and large enough for one returned right.
+      unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&message);
+        assert!(!cmsg.is_null());
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = returned_len as _;
+        *libc::CMSG_DATA(cmsg).cast::<RawFd>() = transferred_raw;
+      }
+
+      let mut ancillary = AncillaryState::new(1);
+      let error = ancillary.absorb(&message, Instant::now()).unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+      drop(ancillary);
+      drop(write_end);
+      assert_no_pipe_writer(read_end.as_fd());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn darwin_over_254_raw_rights_are_rejected_and_closed() {
       let (sender, receiver) = framed_stream_socketpair().unwrap();
       let (read_end, write_end) = pipe_pair().unwrap();
@@ -1210,7 +1389,7 @@ pub(crate) mod unix_transport {
       send_raw_with_descriptors(sender.as_fd(), &[0, 0], &rights).unwrap();
       send_raw_with_descriptors(sender.as_fd(), &[0, 1], &rights).unwrap();
       send_raw(sender.as_fd(), b"x").unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let error = receiver
         .receive_packet_with_exact_descriptors(0, deadline())
@@ -1230,7 +1409,7 @@ pub(crate) mod unix_transport {
         send_raw(sender.as_fd(), &[0, 4, b'a', b'b']).unwrap();
         thread::sleep(Duration::from_millis(10));
         send_raw(sender.as_fd(), b"cd").unwrap();
-        sender.shutdown_write().unwrap();
+        sender.shutdown_write(deadline()).unwrap();
       });
 
       let received = receiver
@@ -1274,7 +1453,7 @@ pub(crate) mod unix_transport {
     fn premature_header_and_payload_eof_are_rejected() {
       let (sender, receiver) = framed_stream_socketpair().unwrap();
       send_raw(sender.as_fd(), &[0, 0]).unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
       let error = receiver
         .receive_packet_with_exact_descriptors(0, deadline())
         .unwrap_err();
@@ -1282,7 +1461,7 @@ pub(crate) mod unix_transport {
 
       let (sender, receiver) = framed_stream_socketpair().unwrap();
       send_raw(sender.as_fd(), &[0, 0, 0, 4, b'a', b'b']).unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
       let error = receiver
         .receive_packet_with_exact_descriptors(0, deadline())
         .unwrap_err();
@@ -1298,7 +1477,7 @@ pub(crate) mod unix_transport {
       sender
         .send_packet_with_descriptors(b"second", &[], deadline())
         .unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let error = receiver
         .receive_packet_with_exact_descriptors(0, deadline())
@@ -1324,7 +1503,7 @@ pub(crate) mod unix_transport {
           final_deadline,
         )
         .unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
 
       let ready = receiver
         .receive_one_canonical_jcs_frame(
@@ -1427,7 +1606,7 @@ pub(crate) mod unix_transport {
         .send_packet_with_descriptors(&oversized, &[], deadline())
         .unwrap_err();
       assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
       let error = receiver
         .receive_packet_with_exact_descriptors(0, deadline())
         .unwrap_err();
@@ -1436,7 +1615,7 @@ pub(crate) mod unix_transport {
       for header in [[0, 0, 0, 0], [0, 1, 0, 1]] {
         let (sender, receiver) = framed_stream_socketpair().unwrap();
         send_raw(sender.as_fd(), &header).unwrap();
-        sender.shutdown_write().unwrap();
+        sender.shutdown_write(deadline()).unwrap();
         let error = receiver
           .receive_packet_with_exact_descriptors(0, deadline())
           .unwrap_err();
@@ -1450,7 +1629,7 @@ pub(crate) mod unix_transport {
       sender
         .send_packet_with_descriptors(b"response", &[], deadline())
         .unwrap();
-      sender.shutdown_write().unwrap();
+      sender.shutdown_write(deadline()).unwrap();
       let received = receiver
         .receive_packet_with_exact_descriptors(0, deadline())
         .unwrap();

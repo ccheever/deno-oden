@@ -780,7 +780,7 @@ mod fd3 {
       }
       let shutdown_result = self
         .endpoint()
-        .and_then(FramedStreamEndpoint::shutdown_write);
+        .and_then(|endpoint| endpoint.shutdown_write(deadline));
       if let Err(error) = self
         .deadline
         .check(deadline, CandidateDeadlineCheckpoint::TransportComplete)
@@ -2154,7 +2154,7 @@ mod fd3 {
         )
         .unwrap();
       if shutdown {
-        supervisor.shutdown_write().unwrap();
+        supervisor.shutdown_write(deadline()).unwrap();
       }
       request_bytes
     }
@@ -2377,7 +2377,7 @@ mod fd3 {
                 deadline(),
               )
               .unwrap();
-            supervisor.shutdown_write().unwrap();
+            supervisor.shutdown_write(deadline()).unwrap();
           }
           Mutation::HardlinkedArena => {
             std::fs::hard_link(
@@ -2415,7 +2415,7 @@ mod fd3 {
                 deadline(),
               )
               .unwrap();
-            supervisor.shutdown_write().unwrap();
+            supervisor.shutdown_write(deadline()).unwrap();
           }
         }
         let request_deadline = if matches!(mutation, Mutation::MissingEof) {
