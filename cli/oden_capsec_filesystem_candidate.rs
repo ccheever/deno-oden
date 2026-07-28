@@ -324,6 +324,68 @@ mod fd3 {
     Refused,
   }
 
+  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+  enum CandidateDeadlineCheckpoint {
+    TransitionStart,
+    TransportComplete,
+    CpuValidationStart,
+    CpuValidationComplete,
+    ArenaReadAttempt,
+    ArenaReadComplete,
+  }
+
+  trait CandidateClock: Send + Sync {
+    fn now(&self, checkpoint: CandidateDeadlineCheckpoint) -> Instant;
+  }
+
+  struct SystemCandidateClock;
+
+  impl CandidateClock for SystemCandidateClock {
+    fn now(&self, _checkpoint: CandidateDeadlineCheckpoint) -> Instant {
+      Instant::now()
+    }
+  }
+
+  struct CandidateSessionDeadline {
+    absolute: Instant,
+    clock: Arc<dyn CandidateClock>,
+  }
+
+  impl CandidateSessionDeadline {
+    fn system(absolute: Instant) -> Self {
+      Self {
+        absolute,
+        clock: Arc::new(SystemCandidateClock),
+      }
+    }
+
+    #[cfg(test)]
+    fn with_clock(absolute: Instant, clock: Arc<dyn CandidateClock>) -> Self {
+      Self { absolute, clock }
+    }
+
+    fn effective(
+      &self,
+      requested: Instant,
+      checkpoint: CandidateDeadlineCheckpoint,
+    ) -> io::Result<Instant> {
+      let effective = requested.min(self.absolute);
+      self.check(effective, checkpoint)?;
+      Ok(effective)
+    }
+
+    fn check(
+      &self,
+      effective: Instant,
+      checkpoint: CandidateDeadlineCheckpoint,
+    ) -> io::Result<()> {
+      if self.clock.now(checkpoint) >= effective {
+        return Err(deadline_expired());
+      }
+      Ok(())
+    }
+  }
+
   #[derive(Clone, Debug)]
   struct CandidateReadyFacts {
     candidate_pid: String,
@@ -347,31 +409,41 @@ mod fd3 {
     request_frame_digest: String,
   }
 
-  /// The exact two transferred rights retained after one request has passed
-  /// schema, identity, ordering, type, size, zero-fill, CLOEXEC, and EOF
-  /// checks. This value has no execution, oracle, response, evidence, or
-  /// authority method.
   #[derive(Debug)]
-  pub(crate) struct CandidateLstatRequest {
+  struct CandidateLstatRequestMetadata {
     raw_bytes: Vec<u8>,
     request_frame_digest: String,
     descriptor_slots_digest: String,
-    request_identity: Arc<()>,
+  }
+
+  /// A non-cloneable identity token for the session-owned transferred rights
+  /// retained after one request has passed schema, identity, ordering, type,
+  /// size, point-in-time zero-fill, CLOEXEC, EOF, and deadline checks. The
+  /// token owns no descriptor and has no execution, oracle, response,
+  /// evidence, or authority method.
+  #[derive(Debug)]
+  pub(crate) struct CandidateLstatRequest {
+    metadata: Arc<CandidateLstatRequestMetadata>,
+  }
+
+  #[derive(Debug)]
+  struct CandidateRetainedLstatRequest {
+    metadata: Arc<CandidateLstatRequestMetadata>,
     project_root: OwnedFd,
     arena: OwnedFd,
   }
 
   impl CandidateLstatRequest {
     pub(crate) fn raw_bytes(&self) -> &[u8] {
-      &self.raw_bytes
+      &self.metadata.raw_bytes
     }
 
     pub(crate) fn request_frame_digest(&self) -> &str {
-      &self.request_frame_digest
+      &self.metadata.request_frame_digest
     }
 
     pub(crate) fn descriptor_slots_digest(&self) -> &str {
-      &self.descriptor_slots_digest
+      &self.metadata.descriptor_slots_digest
     }
   }
 
@@ -379,45 +451,70 @@ mod fd3 {
   ///
   /// This is deliberately only a protocol dependency. There is no production
   /// constructor or caller, it never creates an `OpState`, and it cannot call
-  /// the dormant public-op capsule. Any error is sticky: the endpoint and all
-  /// received rights are closed and no later transition is possible.
+  /// the dormant public-op capsule. Its absolute deadline is frozen at
+  /// construction; per-transition deadlines can only shorten it. Any error is
+  /// sticky: the endpoint and all session-owned received rights are closed and
+  /// no later transition is possible.
   ///
   /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
   /// [implements] — Candidate FD3 emits one ready frame, accepts one request
   /// plus exactly two rights and immediate peer write EOF, emits one response,
   /// then shuts down its own write direction.
   /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
-  /// [constrained-by] — Packet validity and an opaque retained-descriptor
-  /// request are candidate preparation, not execution or evidence.
+  /// [constrained-by] — Packet validity and an opaque request identity for
+  /// session-retained descriptors are candidate preparation, not execution or
+  /// evidence.
   pub(crate) struct CandidateFd3Session {
     endpoint: Option<FramedStreamEndpoint>,
     identity: CandidateLstatProtocolIdentity,
+    deadline: CandidateSessionDeadline,
     state: CandidateFd3State,
     ready_facts: Option<CandidateReadyFacts>,
     case_binding: Option<CandidateCaseBinding>,
-    request_identity: Option<Arc<()>>,
+    retained_request: Option<CandidateRetainedLstatRequest>,
   }
 
   impl CandidateFd3Session {
     pub(crate) fn new(
       endpoint: FramedStreamEndpoint,
       identity: CandidateLstatProtocolIdentity,
+      absolute_deadline: Instant,
+    ) -> Self {
+      Self::with_deadline(
+        endpoint,
+        identity,
+        CandidateSessionDeadline::system(absolute_deadline),
+      )
+    }
+
+    fn with_deadline(
+      endpoint: FramedStreamEndpoint,
+      identity: CandidateLstatProtocolIdentity,
+      deadline: CandidateSessionDeadline,
     ) -> Self {
       Self {
         endpoint: Some(endpoint),
         identity,
+        deadline,
         state: CandidateFd3State::ReadyPending,
         ready_facts: None,
         case_binding: None,
-        request_identity: None,
+        retained_request: None,
       }
     }
 
     pub(crate) fn send_ready(
       &mut self,
       raw_bytes: &[u8],
-      deadline: Instant,
+      requested_deadline: Instant,
     ) -> io::Result<()> {
+      let deadline = match self.deadline.effective(
+        requested_deadline,
+        CandidateDeadlineCheckpoint::TransitionStart,
+      ) {
+        Ok(deadline) => deadline,
+        Err(error) => return self.refuse(error),
+      };
       if self.state != CandidateFd3State::ReadyPending {
         return self.refuse(invalid_input(
           "candidate FD3 ready transition is out of order",
@@ -430,11 +527,23 @@ mod fd3 {
           "candidate FD3 ready frame exceeds its exact bound",
         ));
       }
-      let value = match parse_canonical_jcs(raw_bytes) {
-        Ok(value) => value,
-        Err(error) => return self.refuse(error),
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)
+      {
+        return self.refuse(error);
+      }
+      let validation_result = (|| {
+        let value = parse_canonical_jcs(raw_bytes)?;
+        validate_ready(&value, &self.identity)
+      })();
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)
+      {
+        return self.refuse(error);
       };
-      let ready_facts = match validate_ready(&value, &self.identity) {
+      let ready_facts = match validation_result {
         Ok(facts) => facts,
         Err(error) => return self.refuse(error),
       };
@@ -446,6 +555,12 @@ mod fd3 {
           deadline,
         )
       });
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::TransportComplete)
+      {
+        return self.refuse(error);
+      }
       if let Err(error) = send_result {
         return self.refuse(error);
       }
@@ -456,36 +571,72 @@ mod fd3 {
 
     pub(crate) fn receive_request(
       &mut self,
-      deadline: Instant,
+      requested_deadline: Instant,
     ) -> io::Result<CandidateLstatRequest> {
+      let deadline = match self.deadline.effective(
+        requested_deadline,
+        CandidateDeadlineCheckpoint::TransitionStart,
+      ) {
+        Ok(deadline) => deadline,
+        Err(error) => return self.refuse(error),
+      };
       if self.state != CandidateFd3State::RequestPending {
         return self.refuse(invalid_input(
           "candidate FD3 request transition is out of order",
         ));
       }
-      let packet = match self.endpoint().and_then(|endpoint| {
+      let packet_result = self.endpoint().and_then(|endpoint| {
         endpoint.receive_one_canonical_jcs_frame(
           FrameByteLimit::CONTROL,
           EXPECTED_DESCRIPTOR_COUNT,
           deadline,
         )
-      }) {
-        Ok(packet) => packet,
-        Err(error) => return self.refuse(error),
-      };
+      });
       if let Err(error) = self
-        .endpoint()
-        .and_then(|endpoint| endpoint.require_eof(deadline))
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::TransportComplete)
       {
         return self.refuse(error);
       }
-      let request_frame_digest =
-        raw_frame_digest(CANDIDATE_REQUEST_DIGEST_DOMAIN, &packet.raw_bytes);
-      let binding = match validate_request(
-        &packet.value,
-        &self.identity,
-        request_frame_digest.clone(),
-      ) {
+      let packet = match packet_result {
+        Ok(packet) => packet,
+        Err(error) => return self.refuse(error),
+      };
+      let eof_result = self
+        .endpoint()
+        .and_then(|endpoint| endpoint.require_eof(deadline));
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::TransportComplete)
+      {
+        return self.refuse(error);
+      }
+      if let Err(error) = eof_result {
+        return self.refuse(error);
+      }
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)
+      {
+        return self.refuse(error);
+      }
+      let validation_result = (|| {
+        let request_frame_digest =
+          raw_frame_digest(CANDIDATE_REQUEST_DIGEST_DOMAIN, &packet.raw_bytes);
+        let binding = validate_request(
+          &packet.value,
+          &self.identity,
+          request_frame_digest.clone(),
+        )?;
+        Ok::<_, io::Error>((request_frame_digest, binding))
+      })();
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)
+      {
+        return self.refuse(error);
+      }
+      let (request_frame_digest, binding) = match validation_result {
         Ok(binding) => binding,
         Err(error) => return self.refuse(error),
       };
@@ -498,21 +649,33 @@ mod fd3 {
             ));
           }
         };
-      if let Err(error) = validate_request_descriptors(&descriptors) {
+      if let Err(error) =
+        validate_request_descriptors(&descriptors, &self.deadline, deadline)
+      {
+        return self.refuse(error);
+      }
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)
+      {
         return self.refuse(error);
       }
       let [project_root, arena] = descriptors;
-      let request_identity = Arc::new(());
-      let request = CandidateLstatRequest {
+      let metadata = Arc::new(CandidateLstatRequestMetadata {
         raw_bytes: packet.raw_bytes,
         request_frame_digest,
         descriptor_slots_digest: binding.descriptor_slots_digest.clone(),
-        request_identity: Arc::clone(&request_identity),
+      });
+      let request = CandidateLstatRequest {
+        metadata: Arc::clone(&metadata),
+      };
+      let retained_request = CandidateRetainedLstatRequest {
+        metadata,
         project_root,
         arena,
       };
       self.case_binding = Some(binding);
-      self.request_identity = Some(request_identity);
+      self.retained_request = Some(retained_request);
       self.state = CandidateFd3State::ResponsePending;
       Ok(request)
     }
@@ -521,8 +684,15 @@ mod fd3 {
       &mut self,
       request: CandidateLstatRequest,
       raw_bytes: &[u8],
-      deadline: Instant,
+      requested_deadline: Instant,
     ) -> io::Result<()> {
+      let deadline = match self.deadline.effective(
+        requested_deadline,
+        CandidateDeadlineCheckpoint::TransitionStart,
+      ) {
+        Ok(deadline) => deadline,
+        Err(error) => return self.refuse(error),
+      };
       if self.state != CandidateFd3State::ResponsePending {
         return self.refuse(invalid_input(
           "candidate FD3 response transition is out of order",
@@ -536,40 +706,61 @@ mod fd3 {
       let case_binding = self
         .case_binding
         .as_ref()
-        .expect("response state retains request binding");
-      if request.request_frame_digest != case_binding.request_frame_digest
-        || request.descriptor_slots_digest
+        .expect("response state retains request binding")
+        .clone();
+      let retained_metadata = &self
+        .retained_request
+        .as_ref()
+        .expect("response state retains request rights")
+        .metadata;
+      if request.request_frame_digest() != case_binding.request_frame_digest
+        || request.descriptor_slots_digest()
           != case_binding.descriptor_slots_digest
-        || !Arc::ptr_eq(
-          &request.request_identity,
-          self
-            .request_identity
-            .as_ref()
-            .expect("response state retains request identity"),
-        )
+        || !Arc::ptr_eq(&request.metadata, retained_metadata)
       {
         return self.refuse(invalid_input(
           "candidate FD3 response consumed the wrong retained request",
         ));
       }
-      let value = match parse_canonical_jcs(raw_bytes) {
-        Ok(value) => value,
-        Err(error) => return self.refuse(error),
-      };
       let ready_facts = self
         .ready_facts
         .as_ref()
-        .expect("response state retains ready facts");
-      if let Err(error) =
-        validate_response(&value, &self.identity, ready_facts, case_binding)
+        .expect("response state retains ready facts")
+        .clone();
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)
       {
+        return self.refuse(error);
+      }
+      let validation_result = (|| {
+        let value = parse_canonical_jcs(raw_bytes)?;
+        validate_response(&value, &self.identity, &ready_facts, &case_binding)
+      })();
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)
+      {
+        return self.refuse(error);
+      };
+      if let Err(error) = validation_result {
         return self.refuse(error);
       }
       // The terminal-zero inventory and root-drop field remain untrusted
       // candidate claims, but this state machine cannot send them while it
       // retains either transferred right.
-      self.request_identity.take();
+      let retained_request = self
+        .retained_request
+        .take()
+        .expect("validated response state retains request rights");
+      drop(retained_request);
       drop(request);
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)
+      {
+        return self.refuse(error);
+      }
       let send_result = self.endpoint().and_then(|endpoint| {
         endpoint.send_packet_with_descriptors_bounded(
           raw_bytes,
@@ -578,13 +769,25 @@ mod fd3 {
           deadline,
         )
       });
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::TransportComplete)
+      {
+        return self.refuse(error);
+      }
       if let Err(error) = send_result {
         return self.refuse(error);
       }
-      if let Err(error) = self
+      let shutdown_result = self
         .endpoint()
-        .and_then(FramedStreamEndpoint::shutdown_write)
+        .and_then(FramedStreamEndpoint::shutdown_write);
+      if let Err(error) = self
+        .deadline
+        .check(deadline, CandidateDeadlineCheckpoint::TransportComplete)
       {
+        return self.refuse(error);
+      }
+      if let Err(error) = shutdown_result {
         return self.refuse(error);
       }
       self.endpoint.take();
@@ -602,7 +805,7 @@ mod fd3 {
       self.endpoint.take();
       self.ready_facts.take();
       self.case_binding.take();
-      self.request_identity.take();
+      self.retained_request.take();
       self.state = CandidateFd3State::Refused;
       Err(error)
     }
@@ -610,6 +813,18 @@ mod fd3 {
     #[cfg(test)]
     fn state(&self) -> CandidateFd3State {
       self.state
+    }
+
+    #[cfg(test)]
+    fn retained_descriptor_raw_fds(&self) -> [libc::c_int; 2] {
+      let retained = self
+        .retained_request
+        .as_ref()
+        .expect("test session retains request rights");
+      [
+        retained.project_root.as_raw_fd(),
+        retained.arena.as_raw_fd(),
+      ]
     }
   }
 
@@ -1026,26 +1241,47 @@ mod fd3 {
 
   fn validate_request_descriptors(
     descriptors: &[OwnedFd; EXPECTED_DESCRIPTOR_COUNT],
+    session_deadline: &CandidateSessionDeadline,
+    deadline: Instant,
   ) -> io::Result<()> {
-    for descriptor in descriptors {
-      require_cloexec(descriptor.as_fd())?;
-    }
-    let root = fstat(descriptors[0].as_fd())?;
-    let arena = fstat(descriptors[1].as_fd())?;
-    if root.st_mode & libc::S_IFMT != libc::S_IFDIR
-      || arena.st_mode & libc::S_IFMT != libc::S_IFREG
-      || arena.st_nlink != 1
-      || arena.st_size != ARENA_CAPACITY_BYTES
-      || (root.st_dev == arena.st_dev && root.st_ino == arena.st_ino)
-    {
-      return Err(invalid_data(
-        "candidate FD3 request descriptors have the wrong order or shape",
-      ));
-    }
-    require_zero_filled_arena(descriptors[1].as_fd())
+    session_deadline
+      .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)?;
+    let shape_result = (|| {
+      for descriptor in descriptors {
+        require_cloexec(descriptor.as_fd())?;
+      }
+      let root = fstat(descriptors[0].as_fd())?;
+      let arena = fstat(descriptors[1].as_fd())?;
+      // This read-only protocol dependency does not yet write the arena. The
+      // later actual writer must independently require exact O_RDWR access
+      // before it can execute or assemble an arena artifact.
+      if root.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || arena.st_mode & libc::S_IFMT != libc::S_IFREG
+        || arena.st_nlink != 1
+        || arena.st_size != ARENA_CAPACITY_BYTES
+        || (root.st_dev == arena.st_dev && root.st_ino == arena.st_ino)
+      {
+        return Err(invalid_data(
+          "candidate FD3 request descriptors have the wrong order or shape",
+        ));
+      }
+      Ok(())
+    })();
+    session_deadline
+      .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)?;
+    shape_result?;
+    require_zero_filled_arena(
+      descriptors[1].as_fd(),
+      session_deadline,
+      deadline,
+    )
   }
 
-  fn require_zero_filled_arena(descriptor: BorrowedFd<'_>) -> io::Result<()> {
+  fn require_zero_filled_arena(
+    descriptor: BorrowedFd<'_>,
+    session_deadline: &CandidateSessionDeadline,
+    deadline: Instant,
+  ) -> io::Result<()> {
     let mut buffer = [0_u8; 64 * 1024];
     let mut offset = 0_i64;
     while offset < ARENA_CAPACITY_BYTES {
@@ -1053,6 +1289,8 @@ mod fd3 {
         usize::try_from(ARENA_CAPACITY_BYTES - offset).unwrap_or(usize::MAX);
       let requested = remaining.min(buffer.len());
       let read = loop {
+        session_deadline
+          .check(deadline, CandidateDeadlineCheckpoint::ArenaReadAttempt)?;
         // SAFETY: buffer is writable for requested bytes and descriptor is a
         // retained regular-file right. pread does not alter its shared offset.
         let result = unsafe {
@@ -1063,6 +1301,8 @@ mod fd3 {
             offset,
           )
         };
+        session_deadline
+          .check(deadline, CandidateDeadlineCheckpoint::ArenaReadComplete)?;
         if result >= 0 {
           break result as usize;
         }
@@ -1076,7 +1316,12 @@ mod fd3 {
           "candidate arena ended before its fixed capacity",
         ));
       }
-      if buffer[..read].iter().any(|byte| *byte != 0) {
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)?;
+      let contains_nonzero = buffer[..read].iter().any(|byte| *byte != 0);
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)?;
+      if contains_nonzero {
         return Err(invalid_data(
           "candidate arena was not zero-filled at transfer",
         ));
@@ -1085,6 +1330,8 @@ mod fd3 {
     }
     let mut tail = 0_u8;
     let tail_read = loop {
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::ArenaReadAttempt)?;
       // SAFETY: tail is writable for one byte; the offset is the exact fixed
       // capacity. A successful read would contradict the size/EOF contract.
       let result = unsafe {
@@ -1095,6 +1342,8 @@ mod fd3 {
           ARENA_CAPACITY_BYTES,
         )
       };
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::ArenaReadComplete)?;
       if result >= 0 {
         break result;
       }
@@ -1103,7 +1352,9 @@ mod fd3 {
         return Err(error);
       }
     };
-    if tail_read == 0 {
+    session_deadline
+      .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)?;
+    let tail_result = if tail_read == 0 {
       Ok(())
     } else if tail_read > 0 {
       Err(invalid_data(
@@ -1111,7 +1362,10 @@ mod fd3 {
       ))
     } else {
       Err(io::Error::last_os_error())
-    }
+    };
+    session_deadline
+      .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)?;
+    tail_result
   }
 
   fn validate_identities(value: &Value) -> io::Result<()> {
@@ -1429,6 +1683,13 @@ mod fd3 {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
   }
 
+  fn deadline_expired() -> io::Error {
+    io::Error::new(
+      io::ErrorKind::TimedOut,
+      "candidate FD3 immutable session deadline expired",
+    )
+  }
+
   #[cfg(test)]
   mod tests {
     use std::fs::File;
@@ -1438,6 +1699,9 @@ mod fd3 {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use deno_core::serde_json::json;
@@ -1462,8 +1726,80 @@ mod fd3 {
       arena: File,
     }
 
+    struct TestClock {
+      before_deadline: Instant,
+      after_deadline: Instant,
+      expired: AtomicBool,
+      expire_on_arena_attempt: AtomicUsize,
+      arena_attempts: AtomicUsize,
+    }
+
+    impl TestClock {
+      fn new(absolute_deadline: Instant) -> Self {
+        Self {
+          before_deadline: absolute_deadline
+            .checked_sub(Duration::from_secs(1))
+            .unwrap(),
+          after_deadline: absolute_deadline + Duration::from_secs(1),
+          expired: AtomicBool::new(false),
+          expire_on_arena_attempt: AtomicUsize::new(usize::MAX),
+          arena_attempts: AtomicUsize::new(0),
+        }
+      }
+
+      fn expire_now(&self) {
+        self.expired.store(true, Ordering::SeqCst);
+      }
+
+      fn expire_on_arena_attempt(&self, attempt: usize) {
+        assert!(attempt > 0);
+        self
+          .expire_on_arena_attempt
+          .store(attempt, Ordering::SeqCst);
+      }
+
+      fn arena_attempts(&self) -> usize {
+        self.arena_attempts.load(Ordering::SeqCst)
+      }
+    }
+
+    impl CandidateClock for TestClock {
+      fn now(&self, checkpoint: CandidateDeadlineCheckpoint) -> Instant {
+        if checkpoint == CandidateDeadlineCheckpoint::ArenaReadAttempt {
+          let attempt = self.arena_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+          if attempt >= self.expire_on_arena_attempt.load(Ordering::SeqCst) {
+            self.expired.store(true, Ordering::SeqCst);
+          }
+        }
+        if self.expired.load(Ordering::SeqCst) {
+          self.after_deadline
+        } else {
+          self.before_deadline
+        }
+      }
+    }
+
     fn deadline() -> Instant {
       Instant::now() + Duration::from_secs(2)
+    }
+
+    fn assert_descriptors_open(descriptors: [libc::c_int; 2]) {
+      for descriptor in descriptors {
+        // SAFETY: F_GETFD only probes the supplied integer descriptor.
+        let result = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        assert!(result >= 0, "descriptor {descriptor} unexpectedly closed");
+      }
+    }
+
+    fn assert_descriptors_closed(descriptors: [libc::c_int; 2]) {
+      for descriptor in descriptors {
+        // SAFETY: F_GETFD safely reports EBADF for a closed integer
+        // descriptor; it does not dereference caller memory.
+        let result = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        let error = io::Error::last_os_error();
+        assert_eq!(result, -1, "descriptor {descriptor} remained open");
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+      }
     }
 
     fn identity_for(
@@ -1756,11 +2092,42 @@ mod fd3 {
     ) -> (CandidateFd3Session, FramedStreamEndpoint, Value, Vec<u8>) {
       let (candidate_endpoint, supervisor_endpoint) =
         framed_stream_socketpair().unwrap();
-      let mut session =
-        CandidateFd3Session::new(candidate_endpoint, identity.clone());
+      let mut session = CandidateFd3Session::new(
+        candidate_endpoint,
+        identity.clone(),
+        deadline(),
+      );
       let ready = ready(identity);
       let ready_bytes = canonical_bytes(&ready);
       session.send_ready(&ready_bytes, deadline()).unwrap();
+      let captured = supervisor_endpoint
+        .receive_one_canonical_jcs_frame(
+          FrameByteLimit::CANDIDATE_READY,
+          0,
+          deadline(),
+        )
+        .unwrap();
+      assert_eq!(captured.raw_bytes, ready_bytes);
+      (session, supervisor_endpoint, ready, captured.raw_bytes)
+    }
+
+    fn enter_request_pending_with_clock(
+      identity: &CandidateLstatProtocolIdentity,
+      absolute_deadline: Instant,
+      clock: Arc<TestClock>,
+    ) -> (CandidateFd3Session, FramedStreamEndpoint, Value, Vec<u8>) {
+      let (candidate_endpoint, supervisor_endpoint) =
+        framed_stream_socketpair().unwrap();
+      let mut session = CandidateFd3Session::with_deadline(
+        candidate_endpoint,
+        identity.clone(),
+        CandidateSessionDeadline::with_clock(absolute_deadline, clock),
+      );
+      let ready = ready(identity);
+      let ready_bytes = canonical_bytes(&ready);
+      session
+        .send_ready(&ready_bytes, absolute_deadline + Duration::from_secs(30))
+        .unwrap();
       let captured = supervisor_endpoint
         .receive_one_canonical_jcs_frame(
           FrameByteLimit::CANDIDATE_READY,
@@ -1823,6 +2190,41 @@ mod fd3 {
       )
     }
 
+    fn accepted_session_with_clock(
+      case: CandidateLstatCase,
+      absolute_deadline: Instant,
+      clock: Arc<TestClock>,
+    ) -> (
+      CandidateFd3Session,
+      FramedStreamEndpoint,
+      CandidateLstatProtocolIdentity,
+      Value,
+      Value,
+      Vec<u8>,
+      CandidateLstatRequest,
+      RequestFiles,
+    ) {
+      let identity = identity(case);
+      let (mut session, supervisor, ready, _) =
+        enter_request_pending_with_clock(&identity, absolute_deadline, clock);
+      let request = request(&identity);
+      let files = request_files();
+      let request_bytes = send_request(&supervisor, &request, &files, true);
+      let received = session
+        .receive_request(absolute_deadline + Duration::from_secs(30))
+        .unwrap();
+      (
+        session,
+        supervisor,
+        identity,
+        ready,
+        request,
+        request_bytes,
+        received,
+        files,
+      )
+    }
+
     #[test]
     fn candidate_fd3_accepts_both_exact_lstat_packet_sequences() {
       for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
@@ -1837,6 +2239,8 @@ mod fd3 {
           let files = request_files();
           let request_bytes = send_request(&supervisor, &request, &files, true);
           let received = session.receive_request(deadline()).unwrap();
+          let retained_descriptors = session.retained_descriptor_raw_fds();
+          assert_descriptors_open(retained_descriptors);
           assert_eq!(received.raw_bytes(), request_bytes);
           assert_eq!(
             received.request_frame_digest(),
@@ -1848,6 +2252,7 @@ mod fd3 {
           session
             .send_response(received, &response_bytes, deadline())
             .unwrap();
+          assert_descriptors_closed(retained_descriptors);
           assert_eq!(session.state(), CandidateFd3State::Complete);
           let captured = supervisor
             .receive_one_canonical_jcs_frame(
@@ -1867,8 +2272,11 @@ mod fd3 {
       let identity = identity(CandidateLstatCase::Existing);
       let (candidate_endpoint, supervisor) =
         framed_stream_socketpair().unwrap();
-      let mut session =
-        CandidateFd3Session::new(candidate_endpoint, identity.clone());
+      let mut session = CandidateFd3Session::new(
+        candidate_endpoint,
+        identity.clone(),
+        deadline(),
+      );
       let error = session.receive_request(deadline()).unwrap_err();
       assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
       assert_eq!(session.state(), CandidateFd3State::Refused);
@@ -1915,7 +2323,7 @@ mod fd3 {
         let (candidate_endpoint, supervisor) =
           framed_stream_socketpair().unwrap();
         let mut session =
-          CandidateFd3Session::new(candidate_endpoint, identity);
+          CandidateFd3Session::new(candidate_endpoint, identity, deadline());
         let error = session.send_ready(&bytes, deadline()).unwrap_err();
         assert!(
           matches!(
@@ -2028,6 +2436,86 @@ mod fd3 {
     }
 
     #[test]
+    fn candidate_fd3_session_deadline_cannot_be_extended_by_later_transition() {
+      let identity = identity(CandidateLstatCase::Existing);
+      let absolute_deadline = Instant::now() + Duration::from_secs(30);
+      let clock = Arc::new(TestClock::new(absolute_deadline));
+      let (mut session, supervisor, _, _) = enter_request_pending_with_clock(
+        &identity,
+        absolute_deadline,
+        Arc::clone(&clock),
+      );
+      let request = request(&identity);
+      let files = request_files();
+      send_request(&supervisor, &request, &files, true);
+      clock.expire_now();
+      let error = session
+        .receive_request(absolute_deadline + Duration::from_secs(300))
+        .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+      assert_eq!(session.state(), CandidateFd3State::Refused);
+      supervisor.require_eof(deadline()).unwrap();
+    }
+
+    #[test]
+    fn candidate_fd3_arena_scan_expiry_is_sticky_without_sleep() {
+      let identity = identity(CandidateLstatCase::Existing);
+      let absolute_deadline = Instant::now() + Duration::from_secs(30);
+      let clock = Arc::new(TestClock::new(absolute_deadline));
+      let (mut session, supervisor, _, _) = enter_request_pending_with_clock(
+        &identity,
+        absolute_deadline,
+        Arc::clone(&clock),
+      );
+      let request = request(&identity);
+      let files = request_files();
+      send_request(&supervisor, &request, &files, true);
+      clock.expire_on_arena_attempt(2);
+      let error = session
+        .receive_request(absolute_deadline + Duration::from_secs(300))
+        .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+      assert_eq!(clock.arena_attempts(), 2);
+      assert_eq!(session.state(), CandidateFd3State::Refused);
+      supervisor.require_eof(deadline()).unwrap();
+    }
+
+    #[test]
+    fn candidate_fd3_pre_response_expiry_closes_session_rights() {
+      let absolute_deadline = Instant::now() + Duration::from_secs(30);
+      let clock = Arc::new(TestClock::new(absolute_deadline));
+      let (
+        mut session,
+        supervisor,
+        identity,
+        ready,
+        request,
+        request_bytes,
+        received,
+        _files,
+      ) = accepted_session_with_clock(
+        CandidateLstatCase::Existing,
+        absolute_deadline,
+        Arc::clone(&clock),
+      );
+      let retained_descriptors = session.retained_descriptor_raw_fds();
+      assert_descriptors_open(retained_descriptors);
+      let response = response(&identity, &ready, &request, &request_bytes);
+      clock.expire_now();
+      let error = session
+        .send_response(
+          received,
+          &canonical_bytes(&response),
+          absolute_deadline + Duration::from_secs(300),
+        )
+        .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+      assert_eq!(session.state(), CandidateFd3State::Refused);
+      assert_descriptors_closed(retained_descriptors);
+      supervisor.require_eof(deadline()).unwrap();
+    }
+
+    #[test]
     fn candidate_fd3_response_refuses_relation_and_schema_mutations() {
       for mutation in
         ["request-digest", "delivery", "extra", "normalized-extra"]
@@ -2042,6 +2530,8 @@ mod fd3 {
           received,
           _files,
         ) = accepted_session(CandidateLstatCase::FinalMissing);
+        let retained_descriptors = session.retained_descriptor_raw_fds();
+        assert_descriptors_open(retained_descriptors);
         let mut response =
           response(&identity, &ready, &request, &request_bytes);
         match mutation {
@@ -2064,24 +2554,92 @@ mod fd3 {
           .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(session.state(), CandidateFd3State::Refused);
+        assert_descriptors_closed(retained_descriptors);
         supervisor.require_eof(deadline()).unwrap();
       }
+    }
+
+    #[test]
+    fn candidate_fd3_response_pending_reentry_closes_session_rights() {
+      enum Reentry {
+        Receive,
+        Ready,
+      }
+      for reentry in [Reentry::Receive, Reentry::Ready] {
+        let (mut session, supervisor, identity, ready, _, _, received, _files) =
+          accepted_session(CandidateLstatCase::Existing);
+        let retained_descriptors = session.retained_descriptor_raw_fds();
+        assert_descriptors_open(retained_descriptors);
+        let error = match reentry {
+          Reentry::Receive => {
+            session.receive_request(deadline()).map(|_| ()).unwrap_err()
+          }
+          Reentry::Ready => session
+            .send_ready(&canonical_bytes(&ready), deadline())
+            .unwrap_err(),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(session.state(), CandidateFd3State::Refused);
+        assert_descriptors_closed(retained_descriptors);
+        assert_eq!(received.descriptor_slots_digest(), DIGEST);
+        assert_eq!(identity.case, CandidateLstatCase::Existing);
+        supervisor.require_eof(deadline()).unwrap();
+      }
+    }
+
+    #[test]
+    fn candidate_fd3_incomplete_session_drop_closes_rights_not_token() {
+      let (
+        session,
+        supervisor,
+        _identity,
+        _ready,
+        _request,
+        request_bytes,
+        received,
+        _files,
+      ) = accepted_session(CandidateLstatCase::Existing);
+      let retained_descriptors = session.retained_descriptor_raw_fds();
+      assert_descriptors_open(retained_descriptors);
+      drop(session);
+      assert_descriptors_closed(retained_descriptors);
+      assert_eq!(received.raw_bytes(), request_bytes);
+      assert_eq!(received.descriptor_slots_digest(), DIGEST);
+      supervisor.require_eof(deadline()).unwrap();
     }
 
     #[test]
     fn candidate_fd3_response_consumes_request_and_shutdown_is_terminal() {
       let (mut first_session, first_supervisor, _, _, _, _, first_request, _) =
         accepted_session(CandidateLstatCase::Existing);
-      let (second_session, second_supervisor, _, _, _, _, second_request, _) =
-        accepted_session(CandidateLstatCase::Existing);
+      let (
+        mut second_session,
+        second_supervisor,
+        _,
+        _,
+        _,
+        _,
+        second_request,
+        _,
+      ) = accepted_session(CandidateLstatCase::Existing);
+      let first_descriptors = first_session.retained_descriptor_raw_fds();
+      let second_descriptors = second_session.retained_descriptor_raw_fds();
+      assert_descriptors_open(first_descriptors);
+      assert_descriptors_open(second_descriptors);
       let error = first_session
         .send_response(second_request, b"{}", deadline())
         .unwrap_err();
       assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
       assert_eq!(first_session.state(), CandidateFd3State::Refused);
+      assert_descriptors_closed(first_descriptors);
+      assert_descriptors_open(second_descriptors);
       first_supervisor.require_eof(deadline()).unwrap();
-      drop(first_request);
-      drop(second_session);
+      let error = second_session
+        .send_response(first_request, b"{}", deadline())
+        .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+      assert_eq!(second_session.state(), CandidateFd3State::Refused);
+      assert_descriptors_closed(second_descriptors);
       second_supervisor.require_eof(deadline()).unwrap();
 
       let (
@@ -2094,11 +2652,14 @@ mod fd3 {
         received,
         _files,
       ) = accepted_session(CandidateLstatCase::Existing);
+      let retained_descriptors = session.retained_descriptor_raw_fds();
+      assert_descriptors_open(retained_descriptors);
       let response = response(&identity, &ready, &request, &request_bytes);
       let response_bytes = canonical_bytes(&response);
       session
         .send_response(received, &response_bytes, deadline())
         .unwrap();
+      assert_descriptors_closed(retained_descriptors);
       let captured = supervisor
         .receive_one_canonical_jcs_frame(FrameByteLimit::CONTROL, 0, deadline())
         .unwrap();
