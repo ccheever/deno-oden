@@ -2213,67 +2213,28 @@ pub const REV2_FILESYSTEM_CANDIDATE_CASE_PLANS: &[Rev2FilesystemCandidateCasePla
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Rev2FilesystemLstatExistingObservationInput {
+pub struct Rev2FilesystemLstatExistingExecutionAdmission {
   pub fixture_artifact_digest: &'static str,
   pub target: &'static str,
   pub feature_set: &'static str,
-  pub case_id: &'static str,
-  pub edge_id: &'static str,
-  pub requirement_id: &'static str,
-  pub case_kind: &'static str,
-  pub logical_root: &'static str,
-  pub root_binding_id: &'static str,
-  pub root_descriptor_slot: usize,
-  pub fixture_root_identity: &'static str,
-  pub target_object_id: &'static str,
-  pub target_relative_path: &'static str,
-  pub target_content: &'static [u8],
-  pub target_content_digest: &'static str,
-  pub principal_key: &'static str,
-  pub authority_source_id: &'static str,
-  pub authority_capability: Rev2CapabilityId,
+  pub case_projection_json: &'static str,
+  pub case_projection_digest: &'static str,
 }
 
-pub const REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS: &[Rev2FilesystemLstatExistingObservationInput] = &[
-  Rev2FilesystemLstatExistingObservationInput {
+pub static REV2_FILESYSTEM_LSTAT_EXISTING_EXECUTION_ADMISSIONS: &[Rev2FilesystemLstatExistingExecutionAdmission] = &[
+  Rev2FilesystemLstatExistingExecutionAdmission {
     fixture_artifact_digest: "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM",
     target: "aarch64-apple-darwin",
     feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:62fc7ce277e35b03015efcb6c89461269dcc32c088e5e6c82419f31598473667;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
-    case_id: "filesystem:lstat-sync:lstat-existing",
-    edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
-    requirement_id: "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete",
-    case_kind: "lstat-existing",
-    logical_root: "$PROJECT",
-    root_binding_id: "root:project",
-    root_descriptor_slot: 0,
-    fixture_root_identity: "fixture:project-root",
-    target_object_id: "source",
-    target_relative_path: "input.txt",
-    target_content: b"",
-    target_content_digest: "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU",
-    principal_key: "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    authority_source_id: "case:static:0",
-    authority_capability: Rev2CapabilityId::FsList,
+    case_projection_json: "{\"authorityRows\":[{\"capability\":\"fs:list\",\"channel\":\"floor\",\"polarity\":\"positive\",\"principalKey\":\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"resource\":{\"kind\":\"path-exact\",\"path\":{\"encoding\":\"unicode\",\"value\":\"input.txt\"},\"root\":\"$PROJECT\"},\"sourceClass\":\"static-floor\",\"sourceId\":\"case:static:0\",\"state\":\"active\"}],\"caseId\":\"filesystem:lstat-sync:lstat-existing\",\"caseKind\":\"lstat-existing\",\"casePlanDigest\":\"sha256-zpN5I-pNUJHscCgmHDgsSJHkW-6xnC_kJGPnKKf7VyI\",\"constrainedPrincipalKeys\":[\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"],\"edgeId\":\"native-op:ext/fs/ops.rs#op_fs_lstat_sync\",\"effectOwnerKey\":\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"execution\":{\"actors\":[{\"actorId\":\"actor:list\",\"effectOwner\":\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"principalKey\":\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"slotId\":\"native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0\"}],\"resourceLifecycle\":[{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"harness-admitted\",\"resourceClass\":\"inherited-root\",\"resourceId\":\"inherited-root:root:project\",\"sequence\":0,\"transition\":\"acquire\"},{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"harness-admitted\",\"resourceClass\":\"arena\",\"resourceId\":\"arena:filesystem:lstat-sync:lstat-existing\",\"sequence\":1,\"transition\":\"acquire\"},{\"ownerAfter\":\"actor:list\",\"ownerBefore\":null,\"phase\":\"actors-captured\",\"resourceClass\":\"actor-token\",\"resourceId\":\"actor-token:actor:list\",\"sequence\":2,\"transition\":\"acquire\"},{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"namespace-gate-acquired\",\"resourceClass\":\"namespace-gate\",\"resourceId\":\"namespace-gate:$PROJECT\",\"sequence\":3,\"transition\":\"acquire\"},{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"discovery-complete\",\"resourceClass\":\"provisional-resource\",\"resourceId\":\"provisional-resource:source\",\"sequence\":4,\"transition\":\"acquire\"},{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"authorization-complete\",\"resourceClass\":\"authority-handle\",\"resourceId\":\"authority-handle:native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0\",\"sequence\":5,\"transition\":\"acquire\"},{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"operation-completed\",\"resourceClass\":\"delivery-lease\",\"resourceId\":\"delivery-lease:source\",\"sequence\":6,\"transition\":\"acquire\"},{\"ownerAfter\":\"delivery:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"delivery-serialized\",\"resourceClass\":\"delivery-lease\",\"resourceId\":\"delivery-lease:source\",\"sequence\":7,\"transition\":\"transfer\"},{\"ownerAfter\":null,\"ownerBefore\":\"delivery:filesystem:lstat-sync:lstat-existing\",\"phase\":\"delivery-serialized\",\"resourceClass\":\"delivery-lease\",\"resourceId\":\"delivery-lease:source\",\"sequence\":8,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"provisional-resources-released\",\"resourceClass\":\"provisional-resource\",\"resourceId\":\"provisional-resource:source\",\"sequence\":9,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"provisional-resources-released\",\"resourceClass\":\"authority-handle\",\"resourceId\":\"authority-handle:native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0\",\"sequence\":10,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"actor:list\",\"phase\":\"provisional-resources-released\",\"resourceClass\":\"actor-token\",\"resourceId\":\"actor-token:actor:list\",\"sequence\":11,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"namespace-gate-released\",\"resourceClass\":\"namespace-gate\",\"resourceId\":\"namespace-gate:$PROJECT\",\"sequence\":12,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"harness-exited\",\"resourceClass\":\"arena\",\"resourceId\":\"arena:filesystem:lstat-sync:lstat-existing\",\"sequence\":13,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"harness-exited\",\"resourceClass\":\"inherited-root\",\"resourceId\":\"inherited-root:root:project\",\"sequence\":14,\"transition\":\"release\"}],\"tracePhases\":[\"harness-admitted\",\"public-op-entered\",\"actors-captured\",\"namespace-gate-acquired\",\"discovery-complete\",\"authorization-complete\",\"sources-revalidated\",\"target-revalidated\",\"core-commit-recorded\",\"operation-completed\",\"delivery-serialized\",\"provisional-resources-released\",\"namespace-gate-released\",\"harness-exited\"]},\"faultPlan\":null,\"inputMutation\":\"none\",\"invocation\":{\"args\":[\"filesystem:lstat-sync:lstat-existing\"],\"command\":\"oden-capsec-filesystem-fixture\",\"cwdRoot\":\"$PROJECT\",\"entrypoint\":null,\"kind\":\"native-harness\"},\"mode\":\"enforce\",\"operationRequest\":{\"kind\":\"lstat-sync\",\"targetRef\":{\"objectId\":\"source\",\"parent\":{\"bindingId\":\"root:project\",\"kind\":\"logical-root\",\"root\":\"$PROJECT\"}}},\"principals\":[{\"key\":\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"kind\":\"package\"}],\"requirementId\":\"fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete\",\"setup\":{\"logicalRoots\":[{\"bindingId\":\"root:project\",\"descriptorSlot\":0,\"objectIdentity\":{\"kind\":\"opaque-token\",\"value\":\"fixture:project-root\"},\"root\":\"$PROJECT\"}],\"objects\":[{\"aliasTargetObjectId\":null,\"content\":{\"bytes\":\"\",\"kind\":\"inline-base64url\"},\"contentDigest\":\"sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU\",\"kind\":\"regular-file\",\"linkTargetObjectId\":null,\"objectId\":\"source\",\"objectIdentity\":{\"kind\":\"verified-content\",\"value\":\"sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU\"},\"path\":{\"encoding\":\"unicode\",\"value\":\"input.txt\"},\"root\":\"$PROJECT\"},{\"aliasTargetObjectId\":null,\"content\":null,\"contentDigest\":null,\"kind\":\"missing\",\"linkTargetObjectId\":null,\"objectId\":\"destination\",\"objectIdentity\":null,\"path\":{\"encoding\":\"unicode\",\"value\":\"output.txt\"},\"root\":\"$PROJECT\"}]},\"targetPredicate\":{\"candidates\":[{\"featureSet\":\"rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:62fc7ce277e35b03015efcb6c89461269dcc32c088e5e6c82419f31598473667;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate\",\"target\":\"aarch64-apple-darwin\"},{\"featureSet\":\"rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:3a41731043169db8c6a9452f6eb1150aeb1afb37ca223d87cf3c2bd974b66003;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate\",\"target\":\"x86_64-unknown-linux-gnu\"}]}}",
+    case_projection_digest: "sha256-eWjDpzfFdPc8fRJJ8d372YhZwyAHp_7M1E7bqhw1F0w",
   },
-  Rev2FilesystemLstatExistingObservationInput {
+  Rev2FilesystemLstatExistingExecutionAdmission {
     fixture_artifact_digest: "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM",
     target: "x86_64-unknown-linux-gnu",
     feature_set: "rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:3a41731043169db8c6a9452f6eb1150aeb1afb37ca223d87cf3c2bd974b66003;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate",
-    case_id: "filesystem:lstat-sync:lstat-existing",
-    edge_id: "native-op:ext/fs/ops.rs#op_fs_lstat_sync",
-    requirement_id: "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete",
-    case_kind: "lstat-existing",
-    logical_root: "$PROJECT",
-    root_binding_id: "root:project",
-    root_descriptor_slot: 0,
-    fixture_root_identity: "fixture:project-root",
-    target_object_id: "source",
-    target_relative_path: "input.txt",
-    target_content: b"",
-    target_content_digest: "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU",
-    principal_key: "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    authority_source_id: "case:static:0",
-    authority_capability: Rev2CapabilityId::FsList,
+    case_projection_json: "{\"authorityRows\":[{\"capability\":\"fs:list\",\"channel\":\"floor\",\"polarity\":\"positive\",\"principalKey\":\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"resource\":{\"kind\":\"path-exact\",\"path\":{\"encoding\":\"unicode\",\"value\":\"input.txt\"},\"root\":\"$PROJECT\"},\"sourceClass\":\"static-floor\",\"sourceId\":\"case:static:0\",\"state\":\"active\"}],\"caseId\":\"filesystem:lstat-sync:lstat-existing\",\"caseKind\":\"lstat-existing\",\"casePlanDigest\":\"sha256-zpN5I-pNUJHscCgmHDgsSJHkW-6xnC_kJGPnKKf7VyI\",\"constrainedPrincipalKeys\":[\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"],\"edgeId\":\"native-op:ext/fs/ops.rs#op_fs_lstat_sync\",\"effectOwnerKey\":\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"execution\":{\"actors\":[{\"actorId\":\"actor:list\",\"effectOwner\":\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"principalKey\":\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"slotId\":\"native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0\"}],\"resourceLifecycle\":[{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"harness-admitted\",\"resourceClass\":\"inherited-root\",\"resourceId\":\"inherited-root:root:project\",\"sequence\":0,\"transition\":\"acquire\"},{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"harness-admitted\",\"resourceClass\":\"arena\",\"resourceId\":\"arena:filesystem:lstat-sync:lstat-existing\",\"sequence\":1,\"transition\":\"acquire\"},{\"ownerAfter\":\"actor:list\",\"ownerBefore\":null,\"phase\":\"actors-captured\",\"resourceClass\":\"actor-token\",\"resourceId\":\"actor-token:actor:list\",\"sequence\":2,\"transition\":\"acquire\"},{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"namespace-gate-acquired\",\"resourceClass\":\"namespace-gate\",\"resourceId\":\"namespace-gate:$PROJECT\",\"sequence\":3,\"transition\":\"acquire\"},{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"discovery-complete\",\"resourceClass\":\"provisional-resource\",\"resourceId\":\"provisional-resource:source\",\"sequence\":4,\"transition\":\"acquire\"},{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"authorization-complete\",\"resourceClass\":\"authority-handle\",\"resourceId\":\"authority-handle:native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0\",\"sequence\":5,\"transition\":\"acquire\"},{\"ownerAfter\":\"operation:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":null,\"phase\":\"operation-completed\",\"resourceClass\":\"delivery-lease\",\"resourceId\":\"delivery-lease:source\",\"sequence\":6,\"transition\":\"acquire\"},{\"ownerAfter\":\"delivery:filesystem:lstat-sync:lstat-existing\",\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"delivery-serialized\",\"resourceClass\":\"delivery-lease\",\"resourceId\":\"delivery-lease:source\",\"sequence\":7,\"transition\":\"transfer\"},{\"ownerAfter\":null,\"ownerBefore\":\"delivery:filesystem:lstat-sync:lstat-existing\",\"phase\":\"delivery-serialized\",\"resourceClass\":\"delivery-lease\",\"resourceId\":\"delivery-lease:source\",\"sequence\":8,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"provisional-resources-released\",\"resourceClass\":\"provisional-resource\",\"resourceId\":\"provisional-resource:source\",\"sequence\":9,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"provisional-resources-released\",\"resourceClass\":\"authority-handle\",\"resourceId\":\"authority-handle:native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0\",\"sequence\":10,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"actor:list\",\"phase\":\"provisional-resources-released\",\"resourceClass\":\"actor-token\",\"resourceId\":\"actor-token:actor:list\",\"sequence\":11,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"namespace-gate-released\",\"resourceClass\":\"namespace-gate\",\"resourceId\":\"namespace-gate:$PROJECT\",\"sequence\":12,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"harness-exited\",\"resourceClass\":\"arena\",\"resourceId\":\"arena:filesystem:lstat-sync:lstat-existing\",\"sequence\":13,\"transition\":\"release\"},{\"ownerAfter\":null,\"ownerBefore\":\"operation:filesystem:lstat-sync:lstat-existing\",\"phase\":\"harness-exited\",\"resourceClass\":\"inherited-root\",\"resourceId\":\"inherited-root:root:project\",\"sequence\":14,\"transition\":\"release\"}],\"tracePhases\":[\"harness-admitted\",\"public-op-entered\",\"actors-captured\",\"namespace-gate-acquired\",\"discovery-complete\",\"authorization-complete\",\"sources-revalidated\",\"target-revalidated\",\"core-commit-recorded\",\"operation-completed\",\"delivery-serialized\",\"provisional-resources-released\",\"namespace-gate-released\",\"harness-exited\"]},\"faultPlan\":null,\"inputMutation\":\"none\",\"invocation\":{\"args\":[\"filesystem:lstat-sync:lstat-existing\"],\"command\":\"oden-capsec-filesystem-fixture\",\"cwdRoot\":\"$PROJECT\",\"entrypoint\":null,\"kind\":\"native-harness\"},\"mode\":\"enforce\",\"operationRequest\":{\"kind\":\"lstat-sync\",\"targetRef\":{\"objectId\":\"source\",\"parent\":{\"bindingId\":\"root:project\",\"kind\":\"logical-root\",\"root\":\"$PROJECT\"}}},\"principals\":[{\"key\":\"pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"kind\":\"package\"}],\"requirementId\":\"fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete\",\"setup\":{\"logicalRoots\":[{\"bindingId\":\"root:project\",\"descriptorSlot\":0,\"objectIdentity\":{\"kind\":\"opaque-token\",\"value\":\"fixture:project-root\"},\"root\":\"$PROJECT\"}],\"objects\":[{\"aliasTargetObjectId\":null,\"content\":{\"bytes\":\"\",\"kind\":\"inline-base64url\"},\"contentDigest\":\"sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU\",\"kind\":\"regular-file\",\"linkTargetObjectId\":null,\"objectId\":\"source\",\"objectIdentity\":{\"kind\":\"verified-content\",\"value\":\"sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU\"},\"path\":{\"encoding\":\"unicode\",\"value\":\"input.txt\"},\"root\":\"$PROJECT\"},{\"aliasTargetObjectId\":null,\"content\":null,\"contentDigest\":null,\"kind\":\"missing\",\"linkTargetObjectId\":null,\"objectId\":\"destination\",\"objectIdentity\":null,\"path\":{\"encoding\":\"unicode\",\"value\":\"output.txt\"},\"root\":\"$PROJECT\"}]},\"targetPredicate\":{\"candidates\":[{\"featureSet\":\"rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:716ae641104f6203efbaba01fa7181272951dd6125dc1eab8ae3179f2468973a;graph:sha256:62fc7ce277e35b03015efcb6c89461269dcc32c088e5e6c82419f31598473667;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate\",\"target\":\"aarch64-apple-darwin\"},{\"featureSet\":\"rust:1.95.0;cargo:__vendored_zlib_ng,default,upgrade;cfg:sha256:f209e57ad46ce6d21cb6a72f263d4ff25cbe67a7bfba89deeec1c997f9d4346c;graph:sha256:3a41731043169db8c6a9452f6eb1150aeb1afb37ca223d87cf3c2bd974b66003;profile:oden/capsec/1.1;semantics:oden-capsec-2026-07-10;capsec:action-sensitive-env,action-sensitive-network,canonical-fs,closed-op-inventory,compartment-principal-key-v2,default-closed-escape-hatches,layer2-run-fastpath,native-runtime-control-gates,node-http-connect-scheme-closure,protected-metadata-final-peer,resource-ownership,typed-local-import-gate\",\"target\":\"x86_64-unknown-linux-gnu\"}]}}",
+    case_projection_digest: "sha256-eWjDpzfFdPc8fRJJ8d372YhZwyAHp_7M1E7bqhw1F0w",
   },
 ];
 
@@ -102279,38 +102240,35 @@ mod tests {
   }
 
   #[test]
-  fn filesystem_lstat_existing_observation_inputs_are_exact_candidates_only() {
+  fn filesystem_lstat_existing_execution_admissions_are_exact_candidates_only() {
     let expected = [
-      ("aarch64-apple-darwin", "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM"),
-      ("x86_64-unknown-linux-gnu", "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM"),
+      ("aarch64-apple-darwin", "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM", "sha256-eWjDpzfFdPc8fRJJ8d372YhZwyAHp_7M1E7bqhw1F0w"),
+      ("x86_64-unknown-linux-gnu", "sha256-_z_uHneEtf-CblX6irBb_2qsDzhDhxLAaDZTCP2aWAM", "sha256-eWjDpzfFdPc8fRJJ8d372YhZwyAHp_7M1E7bqhw1F0w"),
     ];
-    assert_eq!(REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.len(), expected.len());
-    for (input, (target, fixture_artifact_digest)) in REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.iter().zip(expected) {
-      assert_eq!(input.target, target);
-      assert_eq!(input.fixture_artifact_digest, fixture_artifact_digest);
-      assert_eq!(input.case_id, "filesystem:lstat-sync:lstat-existing");
-      assert_eq!(input.edge_id, "native-op:ext/fs/ops.rs#op_fs_lstat_sync");
-      assert_eq!(input.requirement_id, "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete");
-      assert_eq!(input.case_kind, "lstat-existing");
-      assert_eq!(input.logical_root, "$PROJECT");
-      assert_eq!(input.root_binding_id, "root:project");
-      assert_eq!(input.root_descriptor_slot, 0);
-      assert_eq!(input.fixture_root_identity, "fixture:project-root");
-      assert_eq!(input.target_object_id, "source");
-      assert_eq!(input.target_relative_path, "input.txt");
-      assert_eq!(input.target_content, b"");
-      assert_eq!(input.principal_key, "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-      assert_eq!(input.authority_source_id, "case:static:0");
-      assert_eq!(input.target_content_digest, "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU");
-      assert_eq!(input.authority_capability, Rev2CapabilityId::FsList);
+    assert_eq!(REV2_FILESYSTEM_LSTAT_EXISTING_EXECUTION_ADMISSIONS.len(), expected.len());
+    for (admission, (target, fixture_artifact_digest, case_projection_digest)) in REV2_FILESYSTEM_LSTAT_EXISTING_EXECUTION_ADMISSIONS.iter().zip(expected) {
+      assert_eq!(admission.target, target);
+      assert_eq!(admission.fixture_artifact_digest, fixture_artifact_digest);
+      assert_eq!(admission.case_projection_digest, case_projection_digest);
+      let projection: serde_json::Value = serde_json::from_str(admission.case_projection_json).unwrap();
+      assert_eq!(serde_json::to_string(&projection).unwrap(), admission.case_projection_json);
+      assert_eq!(projection["caseId"], "filesystem:lstat-sync:lstat-existing");
+      assert_eq!(projection["edgeId"], "native-op:ext/fs/ops.rs#op_fs_lstat_sync");
+      assert_eq!(projection["requirementId"], "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete");
+      assert_eq!(projection["caseKind"], "lstat-existing");
+      assert_eq!(projection["operationRequest"]["kind"], "lstat-sync");
+      assert_eq!(projection["setup"]["objects"][0]["content"]["bytes"], "");
+      assert_eq!(projection["setup"]["objects"][0]["contentDigest"], "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU");
+      assert!(projection.get("expected").is_none());
       let status = REV2_TARGET_STATUS.iter().find(|row| row.target == target).unwrap();
-      assert_eq!(input.feature_set, status.feature_set);
+      assert_eq!(admission.feature_set, status.feature_set);
       assert_eq!((status.enforced, status.closed, status.absent, status.unsupported), (0, 0, 13, 983));
-      assert!(REV2_BACKEND_CELLS.iter().any(|(edge, cell_target, cell_status)| *edge == input.edge_id && *cell_target == target && *cell_status == "unsupported"));
+      assert!(REV2_BACKEND_CELLS.iter().any(|(edge, cell_target, cell_status)| *edge == "native-op:ext/fs/ops.rs#op_fs_lstat_sync" && *cell_target == target && *cell_status == "unsupported"));
       assert!(!REV2_ADVERTISED_TARGETS.contains(&target));
     }
+    assert_eq!(REV2_FILESYSTEM_LSTAT_EXISTING_EXECUTION_ADMISSIONS[0].case_projection_json, REV2_FILESYSTEM_LSTAT_EXISTING_EXECUTION_ADMISSIONS[1].case_projection_json);
     for unsupported in ["aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"] {
-      assert!(!REV2_FILESYSTEM_LSTAT_EXISTING_OBSERVATION_INPUTS.iter().any(|row| row.target == unsupported));
+      assert!(!REV2_FILESYSTEM_LSTAT_EXISTING_EXECUTION_ADMISSIONS.iter().any(|row| row.target == unsupported));
     }
   }
 
