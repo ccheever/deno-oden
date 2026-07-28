@@ -8,9 +8,9 @@ use crate::oden_capsec_filesystem_protocol::parse_reserved_request;
 const RESERVED_FLAG: &str = "--_oden-capsec-filesystem-supervise-v2";
 const RESERVED_PREFIX: &str = "--_oden-capsec-filesystem-supervise";
 
-// The supervisor table stays empty until it can create roots, own the private
-// peer/arena, validate the parent's exact candidate spawn result, and capture
-// response+EOF without exposing those facts to the external runner.
+// The supervisor table stays empty until a later checkpoint can capture the
+// exact parent terminal, reconcile exact candidate reap/lifetime facts, and
+// validate final cleanup without exposing candidate claims as authority.
 const SUPERVISED_CASES: &[(&str, &str)] = &[];
 
 // @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
@@ -60,6 +60,12 @@ mod topology {
   use deno_runtime::deno_permissions::OdenRev2CompiledBuildIdentity;
   use deno_runtime::deno_permissions::OdenRev2LstatCandidateBinaryIdentity;
   use deno_runtime::deno_permissions::oden_capsec_rev2_join_lstat_candidate_binary_identity;
+  use deno_runtime::deno_permissions::rev2::FilesystemCleanup;
+  use deno_runtime::deno_permissions::rev2::FilesystemDecision;
+  use deno_runtime::deno_permissions::rev2::FilesystemDelivery;
+  use deno_runtime::deno_permissions::rev2::FilesystemExpectedObservation;
+  use deno_runtime::deno_permissions::rev2::FilesystemFinalObjectState;
+  use deno_runtime::deno_permissions::rev2::FilesystemFollowMode;
   use deno_runtime::deno_permissions::rev2::FilesystemInlineContentKind;
   use deno_runtime::deno_permissions::rev2::FilesystemLogicalRoot;
   use deno_runtime::deno_permissions::rev2::FilesystemObjectIdentityKind;
@@ -98,6 +104,8 @@ mod topology {
     "oden/capsec-filesystem-candidate-spawn-result/2";
   const CANDIDATE_REQUEST_SCHEMA: &str =
     "oden/capsec-filesystem-candidate-request-frame/2";
+  const CANDIDATE_RESPONSE_SCHEMA: &str =
+    "oden/capsec-filesystem-candidate-response-frame/2";
   const DESCRIPTOR_SLOTS_SCHEMA: &str =
     "oden/capsec-filesystem-descriptor-slots/2";
   const SUPERVISOR_REQUEST_DIGEST_DOMAIN: &str =
@@ -110,11 +118,23 @@ mod topology {
     "oden:capsec:filesystem-candidate-spawn-result-frame:2";
   const CANDIDATE_REQUEST_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-candidate-request-frame:2";
+  const CANDIDATE_RESPONSE_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-candidate-response-frame:2";
+  const OBSERVED_RESULT_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-observed-result:2";
+  const DELIVERY_FRAME_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-delivery-frame:2";
+  const RESOURCE_INVENTORY_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-resource-inventory:2";
   const DESCRIPTOR_SLOTS_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-descriptor-slots:2";
   const LSTAT_EDGE_ID: &str = "native-op:ext/fs/ops.rs#op_fs_lstat_sync";
   const LSTAT_REQUIREMENT_ID: &str =
     "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete";
+  const LSTAT_SLOT_ID: &str =
+    "native-op:ext/fs/ops.rs#op_fs_lstat_sync:effect-slot:0";
+  const LSTAT_EFFECT_OWNER: &str =
+    "pkg:sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
   const LSTAT_ROOT_BINDING_ID: &str = "root:project";
   const LSTAT_ROOT_FIXTURE_IDENTITY: &str = "fixture:project-root";
   const LSTAT_SOURCE_OBJECT_ID: &str = "source";
@@ -206,6 +226,53 @@ mod topology {
     "admitted",
   ];
 
+  const CANDIDATE_RESPONSE_FIELDS: &[&str] = &[
+    "schema",
+    "profile",
+    "runNonce",
+    "target",
+    "featureSet",
+    "parentStandaloneDigest",
+    "engineDigest",
+    "forkCommit",
+    "fixtureArtifactDigest",
+    "executionIdentityDigest",
+    "sourceClosureDigest",
+    "caseId",
+    "edgeId",
+    "requirementId",
+    "caseKind",
+    "candidateRequestFrameDigest",
+    "acceptedDescriptorSlotsDigest",
+    "capturedUmask",
+    "normalizedObservedResult",
+    "observedResultDigest",
+    "candidateArenaDigest",
+    "engineTraceDigest",
+    "deliveryFrame",
+    "deliveryFrameDigest",
+    "resourceInventory",
+    "resourceInventoryDigest",
+    "faultObservation",
+    "faultObservationDigest",
+    "noDescendantClaims",
+    "rootDescriptorsDroppedClaim",
+  ];
+
+  const NO_DESCENDANT_CLAIM_FIELDS: &[&str] = &[
+    "noDescendantProfile",
+    "sourceClosureDigest",
+    "candidatePid",
+    "candidatePgid",
+    "candidateStartIdentity",
+    "expectedPgid",
+    "pgidCheckpoints",
+    "processLimitReadback",
+    "identities",
+    "preRequestFdInventory",
+    "platformState",
+  ];
+
   #[derive(Clone, Copy, Debug, Eq, PartialEq)]
   pub(crate) enum SupervisorLstatCase {
     Existing,
@@ -232,6 +299,13 @@ mod topology {
       match self {
         Self::Existing => "lstat-existing",
         Self::FinalMissing => "lstat-final-missing",
+      }
+    }
+
+    fn native_result_class(self) -> &'static str {
+      match self {
+        Self::Existing => "lstat-complete",
+        Self::FinalMissing => "lstat-not-found",
       }
     }
 
@@ -748,13 +822,13 @@ mod topology {
   }
 
   /// Opaque, non-cloneable cutoff after the candidate request has been sent.
-  /// It intentionally exposes no method: the retained descriptors, immutable
-  /// identity, deadlines, and raw frames can only feed a later separately
-  /// reviewed response/terminal transition.
+  /// Its only transition captures one exact candidate response and immediate
+  /// EOF; it cannot interpret candidate claims as observations or evidence.
   ///
   /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
   /// [constrained-by] — Topology preparation is neither execution evidence nor
-  /// authority; the production case table and all response paths stay closed.
+  /// authority; the production case table stays empty and the sole response
+  /// transition stops at retained, unauthenticated candidate claims.
   pub(crate) struct SupervisorAwaitingCandidateOutcome {
     _fd4: FramedStreamEndpoint,
     _candidate_peer: FramedStreamEndpoint,
@@ -772,6 +846,117 @@ mod topology {
     _candidate_request_frame_digest: String,
     _descriptor_slots_raw_bytes: Vec<u8>,
     _descriptor_slots_digest: String,
+  }
+
+  struct SupervisorCandidateResponseFacts {
+    raw_bytes: Vec<u8>,
+    value: Value,
+    frame_digest: String,
+    observed_result_digest: String,
+    candidate_arena_digest: String,
+    engine_trace_digest: String,
+  }
+
+  /// Opaque, non-cloneable cutoff after the supervisor has captured exactly
+  /// one candidate response and immediate FD3 EOF. It intentionally exposes no
+  /// method: every retained response field is still an unauthenticated
+  /// candidate claim, and FD4 terminal capture requires separate review.
+  ///
+  /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
+  /// [constrained-by] — Candidate response framing and internal consistency do
+  /// not establish parent reconciliation, an oracle result, evidence, or
+  /// release authority.
+  pub(crate) struct SupervisorAwaitingParentTerminal {
+    _fd4: FramedStreamEndpoint,
+    _resources: SupervisorLstatResources,
+    _identity: SupervisorGeneratedLstatIdentity,
+    _binding: SupervisorCaseBinding,
+    _entry: SupervisorEntryFacts,
+    _deadline: SupervisorDeadline,
+    _supervisor_request_raw_bytes: Vec<u8>,
+    _supervisor_request_frame_digest: String,
+    _spawn_request_raw_bytes: Vec<u8>,
+    _spawn_request_frame_digest: String,
+    _spawn_result: SupervisorSpawnResultFacts,
+    _candidate_request_raw_bytes: Vec<u8>,
+    _candidate_request_frame_digest: String,
+    _descriptor_slots_raw_bytes: Vec<u8>,
+    _descriptor_slots_digest: String,
+    _candidate_response: SupervisorCandidateResponseFacts,
+    _candidate_response_eof_observed: bool,
+    _candidate_peer_closed: bool,
+  }
+
+  impl SupervisorAwaitingCandidateOutcome {
+    pub(crate) fn capture_candidate_response(
+      self,
+    ) -> io::Result<SupervisorAwaitingParentTerminal> {
+      self
+        ._deadline
+        .check(SupervisorDeadlineCheckpoint::TransitionStart)?;
+      let packet = self._candidate_peer.receive_one_canonical_jcs_frame(
+        FrameByteLimit::CONTROL,
+        0,
+        self._deadline.work_instant,
+      )?;
+      self
+        ._candidate_peer
+        .require_eof(self._deadline.work_instant)?;
+      self
+        ._deadline
+        .check(SupervisorDeadlineCheckpoint::TransportComplete)?;
+      let SupervisorAwaitingCandidateOutcome {
+        _fd4,
+        _candidate_peer,
+        _resources,
+        _identity,
+        _binding,
+        _entry,
+        _deadline,
+        _supervisor_request_raw_bytes,
+        _supervisor_request_frame_digest,
+        _spawn_request_raw_bytes,
+        _spawn_request_frame_digest,
+        _spawn_result,
+        _candidate_request_raw_bytes,
+        _candidate_request_frame_digest,
+        _descriptor_slots_raw_bytes,
+        _descriptor_slots_digest,
+      } = self;
+      // Both directions are now closed; do not retain FD3 while validating
+      // candidate-controlled claims.
+      drop(_candidate_peer);
+      let candidate_response = validate_candidate_response(
+        &packet.raw_bytes,
+        &packet.value,
+        &_identity,
+        &_binding,
+        &_spawn_result,
+        &_candidate_request_frame_digest,
+        &_descriptor_slots_digest,
+      )?;
+      _deadline.check(SupervisorDeadlineCheckpoint::ValidationComplete)?;
+      Ok(SupervisorAwaitingParentTerminal {
+        _fd4,
+        _resources,
+        _identity,
+        _binding,
+        _entry,
+        _deadline,
+        _supervisor_request_raw_bytes,
+        _supervisor_request_frame_digest,
+        _spawn_request_raw_bytes,
+        _spawn_request_frame_digest,
+        _spawn_result,
+        _candidate_request_raw_bytes,
+        _candidate_request_frame_digest,
+        _descriptor_slots_raw_bytes,
+        _descriptor_slots_digest,
+        _candidate_response: candidate_response,
+        _candidate_response_eof_observed: true,
+        _candidate_peer_closed: true,
+      })
+    }
   }
 
   #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1780,6 +1965,308 @@ mod topology {
   }
 
   #[allow(clippy::too_many_arguments)]
+  fn validate_candidate_response(
+    raw_bytes: &[u8],
+    value: &Value,
+    identity: &SupervisorGeneratedLstatIdentity,
+    binding: &SupervisorCaseBinding,
+    spawn_result: &SupervisorSpawnResultFacts,
+    candidate_request_frame_digest: &str,
+    descriptor_slots_digest: &str,
+  ) -> io::Result<SupervisorCandidateResponseFacts> {
+    let object =
+      exact_object(value, CANDIDATE_RESPONSE_FIELDS, "candidate response")?;
+    require_text_eq(object, "schema", CANDIDATE_RESPONSE_SCHEMA)?;
+    binding.validate_common(object, identity)?;
+    require_text_eq(
+      object,
+      "candidateRequestFrameDigest",
+      candidate_request_frame_digest,
+    )?;
+    require_text_eq(
+      object,
+      "acceptedDescriptorSlotsDigest",
+      descriptor_slots_digest,
+    )?;
+    if required_value(object, "capturedUmask")?.as_u64()
+      != Some(u64::from(PINNED_CHILD_UMASK))
+    {
+      return Err(invalid_data(
+        "candidate response capturedUmask is not exact",
+      ));
+    }
+    let candidate_arena_digest =
+      require_digest(object, "candidateArenaDigest")?;
+    let engine_trace_digest = require_digest(object, "engineTraceDigest")?;
+    let normalized_observation =
+      required_value(object, "normalizedObservedResult")?;
+    validate_normalized_observation(normalized_observation, identity)?;
+    let observed_result_digest = deno_permissions::rev2::hjcs_digest(
+      OBSERVED_RESULT_DIGEST_DOMAIN,
+      normalized_observation,
+    )
+    .map_err(|_| invalid_data("candidate observed result is not canonical"))?;
+    require_text_eq(object, "observedResultDigest", &observed_result_digest)?;
+    validate_delivery(
+      required_value(object, "deliveryFrame")?,
+      required_value(object, "deliveryFrameDigest")?,
+      normalized_observation,
+    )?;
+    let resource_inventory = required_value(object, "resourceInventory")?;
+    validate_resource_inventory(resource_inventory)?;
+    let resource_inventory_digest = deno_permissions::rev2::hjcs_digest(
+      RESOURCE_INVENTORY_DIGEST_DOMAIN,
+      resource_inventory,
+    )
+    .map_err(|_| {
+      invalid_data("candidate resource inventory is not canonical")
+    })?;
+    require_text_eq(
+      object,
+      "resourceInventoryDigest",
+      &resource_inventory_digest,
+    )?;
+    if !required_value(object, "faultObservation")?.is_null()
+      || !required_value(object, "faultObservationDigest")?.is_null()
+    {
+      return Err(invalid_data(
+        "candidate lstat response contains a fault observation",
+      ));
+    }
+    validate_no_descendant_claims(
+      required_value(object, "noDescendantClaims")?,
+      spawn_result,
+      binding,
+      identity,
+    )?;
+    if required_value(object, "rootDescriptorsDroppedClaim")?.as_bool()
+      != Some(true)
+    {
+      return Err(invalid_data(
+        "candidate response root-descriptor drop claim is not exact",
+      ));
+    }
+    Ok(SupervisorCandidateResponseFacts {
+      raw_bytes: raw_bytes.to_vec(),
+      value: value.clone(),
+      frame_digest: raw_frame_digest(
+        CANDIDATE_RESPONSE_DIGEST_DOMAIN,
+        raw_bytes,
+      ),
+      observed_result_digest,
+      candidate_arena_digest,
+      engine_trace_digest,
+    })
+  }
+
+  fn validate_normalized_observation(
+    value: &Value,
+    identity: &SupervisorGeneratedLstatIdentity,
+  ) -> io::Result<()> {
+    let observation: FilesystemExpectedObservation =
+      deno_core::serde_json::from_value(value.clone()).map_err(|_| {
+        invalid_data("candidate normalized observation schema is invalid")
+      })?;
+    let exact_value =
+      deno_core::serde_json::to_value(&observation).map_err(|_| {
+        invalid_data("candidate normalized observation is not serializable")
+      })?;
+    if exact_value != *value {
+      return Err(invalid_data(
+        "candidate normalized observation omitted required null fields",
+      ));
+    }
+    if observation.case_id != identity.case.case_id()
+      || observation.edge_id != LSTAT_EDGE_ID
+      || observation.requirement_id != LSTAT_REQUIREMENT_ID
+      || observation.case_kind != identity.case.case_kind()
+      || observation.decision != FilesystemDecision::Allow
+      || observation.result.class != identity.case.native_result_class()
+      || !observation.side_effects.is_empty()
+      || observation.delivery != FilesystemDelivery::Delivered
+      || observation.cleanup != FilesystemCleanup::Complete
+      || observation.slots.len() != 1
+    {
+      return Err(invalid_data(
+        "candidate normalized observation is not the exact lstat result",
+      ));
+    }
+    match (identity.case, observation.result.digest.as_deref()) {
+      (SupervisorLstatCase::Existing, Some(digest))
+        if is_canonical_sha256_digest(digest) => {}
+      (SupervisorLstatCase::FinalMissing, None) => {}
+      _ => {
+        return Err(invalid_data(
+          "candidate normalized lstat result digest is not exact",
+        ));
+      }
+    }
+    let slot = &observation.slots[0];
+    if slot.slot_id != LSTAT_SLOT_ID
+      || slot.capability != "fs:list"
+      || slot.effect_owner != LSTAT_EFFECT_OWNER
+      || slot.occurrence.root != FilesystemLogicalRoot::Project
+      || slot.occurrence.root_binding_id != LSTAT_ROOT_BINDING_ID
+      || slot.occurrence.lexical_path.encoding
+        != FilesystemPlatformPathEncoding::Unicode
+      || slot.occurrence.lexical_path.value != LSTAT_SOURCE_NAME
+      || slot.occurrence.follow_mode != FilesystemFollowMode::NoFollowFinal
+      || slot.occurrence.effect_owner != LSTAT_EFFECT_OWNER
+      || slot.occurrence.parent_identity.kind
+        != FilesystemObjectIdentityKind::PlatformObject
+      || !is_platform_identity_text(&slot.occurrence.parent_identity.value)
+    {
+      return Err(invalid_data("candidate normalized lstat slot is not exact"));
+    }
+    match (identity.case, &slot.occurrence.final_object_state) {
+      (
+        SupervisorLstatCase::Existing,
+        FilesystemFinalObjectState::Existing {
+          identity: final_identity,
+        },
+      ) if final_identity.kind
+        == FilesystemObjectIdentityKind::PlatformObject
+        && is_platform_identity_text(&final_identity.value)
+        && final_identity.value != slot.occurrence.parent_identity.value => {}
+      (
+        SupervisorLstatCase::FinalMissing,
+        FilesystemFinalObjectState::Missing,
+      ) => {}
+      _ => {
+        return Err(invalid_data(
+          "candidate normalized lstat final-object state is not exact",
+        ));
+      }
+    }
+    Ok(())
+  }
+
+  fn validate_delivery(
+    delivery: &Value,
+    delivery_digest: &Value,
+    observation: &Value,
+  ) -> io::Result<()> {
+    let delivery = exact_object(
+      delivery,
+      &["encoding", "bytes"],
+      "candidate delivery frame",
+    )?;
+    require_text_eq(delivery, "encoding", "base64url")?;
+    let encoded = require_identifier(delivery, "bytes")?;
+    let decoded = URL_SAFE_NO_PAD
+      .decode(encoded.as_bytes())
+      .map_err(|_| invalid_data("candidate delivery frame is not base64url"))?;
+    if URL_SAFE_NO_PAD.encode(&decoded) != encoded {
+      return Err(invalid_data(
+        "candidate delivery frame is not canonical base64url",
+      ));
+    }
+    let canonical = deno_permissions::rev2::canonical_json(observation)
+      .map_err(|_| {
+        invalid_data("candidate normalized observation is not canonical")
+      })?;
+    if decoded != canonical.as_bytes() {
+      return Err(invalid_data(
+        "candidate delivery bytes do not equal the normalized observation",
+      ));
+    }
+    let expected = raw_frame_digest(DELIVERY_FRAME_DIGEST_DOMAIN, &decoded);
+    if delivery_digest.as_str() != Some(expected.as_str()) {
+      return Err(invalid_data(
+        "candidate delivery frame digest does not match its bytes",
+      ));
+    }
+    Ok(())
+  }
+
+  fn validate_resource_inventory(value: &Value) -> io::Result<()> {
+    let object = exact_object(
+      value,
+      &[
+        "provisionalResources",
+        "actorTokens",
+        "deliveryLeases",
+        "inheritedRootDescriptorsOpen",
+        "namespaceGateHeld",
+      ],
+      "candidate resource inventory",
+    )?;
+    for field in [
+      "provisionalResources",
+      "actorTokens",
+      "deliveryLeases",
+      "inheritedRootDescriptorsOpen",
+    ] {
+      if required_value(object, field)?.as_u64() != Some(0) {
+        return Err(invalid_data(
+          "candidate resource inventory is not terminal zero-state",
+        ));
+      }
+    }
+    if required_value(object, "namespaceGateHeld")?.as_bool() != Some(false) {
+      return Err(invalid_data(
+        "candidate resource inventory retains the namespace gate",
+      ));
+    }
+    Ok(())
+  }
+
+  fn validate_no_descendant_claims(
+    value: &Value,
+    spawn_result: &SupervisorSpawnResultFacts,
+    binding: &SupervisorCaseBinding,
+    identity: &SupervisorGeneratedLstatIdentity,
+  ) -> io::Result<()> {
+    let object = exact_object(
+      value,
+      NO_DESCENDANT_CLAIM_FIELDS,
+      "candidate no-descendant claims",
+    )?;
+    let ready = parse_canonical_jcs(&spawn_result.ready_raw_bytes)?;
+    validate_candidate_ready(
+      &ready,
+      identity,
+      &spawn_result.candidate_pid,
+      &spawn_result.candidate_pgid,
+      &spawn_result.candidate_start_identity,
+    )?;
+    let ready = ready
+      .as_object()
+      .ok_or_else(|| invalid_data("candidate ready frame is not an object"))?;
+    for field in [
+      "noDescendantProfile",
+      "candidatePid",
+      "candidatePgid",
+      "candidateStartIdentity",
+      "processLimitReadback",
+      "identities",
+      "preRequestFdInventory",
+      "platformState",
+    ] {
+      if required_value(object, field)? != required_value(ready, field)? {
+        return Err(invalid_data(
+          "candidate no-descendant claim diverges from its ready frame",
+        ));
+      }
+    }
+    require_text_eq(
+      object,
+      "sourceClosureDigest",
+      &binding.source_closure_digest,
+    )?;
+    require_text_eq(object, "expectedPgid", &spawn_result.candidate_pgid)?;
+    let checkpoints = exact_object(
+      required_value(object, "pgidCheckpoints")?,
+      &["entry", "preOperation", "postOperation", "preExit"],
+      "candidate PGID checkpoints",
+    )?;
+    for field in ["entry", "preOperation", "postOperation", "preExit"] {
+      require_text_eq(checkpoints, field, &spawn_result.candidate_pgid)?;
+    }
+    Ok(())
+  }
+
+  #[allow(clippy::too_many_arguments)]
   fn validate_spawn_result(
     raw_bytes: &[u8],
     value: &Value,
@@ -2230,6 +2717,15 @@ mod topology {
       return Err(invalid_data(context));
     }
     Ok(object)
+  }
+
+  fn required_value<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+  ) -> io::Result<&'a Value> {
+    object
+      .get(field)
+      .ok_or_else(|| invalid_data("required value is missing"))
   }
 
   fn require_text<'a>(
@@ -2993,6 +3489,305 @@ mod topology {
       (outcome, temp, peer.join().unwrap())
     }
 
+    fn response_value(
+      outcome: &SupervisorAwaitingCandidateOutcome,
+      observation: &PeerObservation,
+    ) -> Value {
+      let request = &observation.candidate_request;
+      let ready =
+        parse_canonical_jcs(&outcome._spawn_result.ready_raw_bytes).unwrap();
+      let parent_identity = SupervisorDescriptorSnapshot::capture(
+        observation.descriptors[0].as_fd(),
+      )
+      .unwrap()
+      .platform_identity();
+      let (final_state, result_digest) = match outcome._identity.case {
+        SupervisorLstatCase::Existing => {
+          let source = openat(
+            observation.descriptors[0].as_fd(),
+            LSTAT_SOURCE_NAME,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            None,
+          )
+          .unwrap();
+          let final_identity =
+            SupervisorDescriptorSnapshot::capture(source.as_fd())
+              .unwrap()
+              .platform_identity();
+          (
+            json!({
+              "kind": "existing",
+              "identity": final_identity,
+            }),
+            Value::String(DIGEST.to_string()),
+          )
+        }
+        SupervisorLstatCase::FinalMissing => {
+          (json!({ "kind": "missing" }), Value::Null)
+        }
+      };
+      let normalized_observation = json!({
+        "caseId": outcome._identity.case.case_id(),
+        "edgeId": LSTAT_EDGE_ID,
+        "requirementId": LSTAT_REQUIREMENT_ID,
+        "caseKind": outcome._identity.case.case_kind(),
+        "slots": [{
+          "slotId": LSTAT_SLOT_ID,
+          "capability": "fs:list",
+          "effectOwner": LSTAT_EFFECT_OWNER,
+          "occurrence": {
+            "root": "$PROJECT",
+            "rootBindingId": LSTAT_ROOT_BINDING_ID,
+            "lexicalPath": {
+              "encoding": "unicode",
+              "value": LSTAT_SOURCE_NAME,
+            },
+            "followMode": "no-follow-final",
+            "parentIdentity": parent_identity,
+            "finalObjectState": final_state,
+            "effectOwner": LSTAT_EFFECT_OWNER,
+          },
+        }],
+        "decision": "allow",
+        "result": {
+          "class": outcome._identity.case.native_result_class(),
+          "digest": result_digest,
+        },
+        "sideEffects": [],
+        "delivery": "delivered",
+        "cleanup": "complete",
+      });
+      let observed_result_digest = deno_permissions::rev2::hjcs_digest(
+        OBSERVED_RESULT_DIGEST_DOMAIN,
+        &normalized_observation,
+      )
+      .unwrap();
+      let normalized_bytes =
+        canonical_json_bytes(&normalized_observation).unwrap();
+      let resource_inventory = json!({
+        "provisionalResources": 0,
+        "actorTokens": 0,
+        "deliveryLeases": 0,
+        "inheritedRootDescriptorsOpen": 0,
+        "namespaceGateHeld": false,
+      });
+      let resource_inventory_digest = deno_permissions::rev2::hjcs_digest(
+        RESOURCE_INVENTORY_DIGEST_DOMAIN,
+        &resource_inventory,
+      )
+      .unwrap();
+      json!({
+        "schema": CANDIDATE_RESPONSE_SCHEMA,
+        "profile": request["profile"],
+        "runNonce": request["runNonce"],
+        "target": request["target"],
+        "featureSet": request["featureSet"],
+        "parentStandaloneDigest": request["parentStandaloneDigest"],
+        "engineDigest": request["engineDigest"],
+        "forkCommit": request["forkCommit"],
+        "fixtureArtifactDigest": request["fixtureArtifactDigest"],
+        "executionIdentityDigest": request["executionIdentityDigest"],
+        "sourceClosureDigest": request["sourceClosureDigest"],
+        "caseId": request["caseId"],
+        "edgeId": request["edgeId"],
+        "requirementId": request["requirementId"],
+        "caseKind": request["caseKind"],
+        "candidateRequestFrameDigest":
+          outcome._candidate_request_frame_digest,
+        "acceptedDescriptorSlotsDigest": outcome._descriptor_slots_digest,
+        "capturedUmask": PINNED_CHILD_UMASK,
+        "normalizedObservedResult": normalized_observation,
+        "observedResultDigest": observed_result_digest,
+        "candidateArenaDigest": DIGEST,
+        "engineTraceDigest": DIGEST,
+        "deliveryFrame": {
+          "encoding": "base64url",
+          "bytes": URL_SAFE_NO_PAD.encode(&normalized_bytes),
+        },
+        "deliveryFrameDigest":
+          raw_frame_digest(DELIVERY_FRAME_DIGEST_DOMAIN, &normalized_bytes),
+        "resourceInventory": resource_inventory,
+        "resourceInventoryDigest": resource_inventory_digest,
+        "faultObservation": null,
+        "faultObservationDigest": null,
+        "noDescendantClaims": {
+          "noDescendantProfile": ready["noDescendantProfile"],
+          "sourceClosureDigest": request["sourceClosureDigest"],
+          "candidatePid": ready["candidatePid"],
+          "candidatePgid": ready["candidatePgid"],
+          "candidateStartIdentity": ready["candidateStartIdentity"],
+          "expectedPgid": ready["candidatePgid"],
+          "pgidCheckpoints": {
+            "entry": ready["candidatePgid"],
+            "preOperation": ready["candidatePgid"],
+            "postOperation": ready["candidatePgid"],
+            "preExit": ready["candidatePgid"],
+          },
+          "processLimitReadback": ready["processLimitReadback"],
+          "identities": ready["identities"],
+          "preRequestFdInventory": ready["preRequestFdInventory"],
+          "platformState": ready["platformState"],
+        },
+        "rootDescriptorsDroppedClaim": true,
+      })
+    }
+
+    fn send_response(
+      endpoint: &FramedStreamEndpoint,
+      response: &Value,
+      descriptors: &[BorrowedFd<'_>],
+    ) -> Vec<u8> {
+      let raw_bytes = canonical_json_bytes(response).unwrap();
+      let deadline = Instant::now() + Duration::from_secs(3);
+      endpoint
+        .send_packet_with_descriptors(&raw_bytes, descriptors, deadline)
+        .unwrap();
+      raw_bytes
+    }
+
+    fn send_response_and_eof(
+      endpoint: &FramedStreamEndpoint,
+      response: &Value,
+    ) -> Vec<u8> {
+      let raw_bytes = send_response(endpoint, response, &[]);
+      endpoint
+        .shutdown_write(Instant::now() + Duration::from_secs(3))
+        .unwrap();
+      raw_bytes
+    }
+
+    #[derive(Clone, Copy)]
+    enum ResponseMutation {
+      Schema,
+      ExtraField,
+      Binding,
+      RequestDigest,
+      DescriptorDigest,
+      ObservedDigest,
+      MissingResultDigest,
+      ArenaDigestSyntax,
+      EngineTraceDigestSyntax,
+      DeliveryEncoding,
+      DeliveryBytes,
+      DeliveryDigest,
+      Inventory,
+      InventoryDigest,
+      FaultObservation,
+      NoDescendant,
+      NoDescendantSource,
+      PgidCheckpoint,
+      RootDrop,
+    }
+
+    fn aliased_digest(value: &Value) -> Value {
+      let mut bytes = value.as_str().unwrap().as_bytes().to_vec();
+      bytes[7] = if bytes[7] == b'A' { b'B' } else { b'A' };
+      Value::String(String::from_utf8(bytes).unwrap())
+    }
+
+    fn mutate_response(response: &mut Value, mutation: ResponseMutation) {
+      match mutation {
+        ResponseMutation::Schema => {
+          response["schema"] = json!("oden/capsec-filesystem-response/2");
+        }
+        ResponseMutation::ExtraField => {
+          response["extra"] = json!(true);
+        }
+        ResponseMutation::Binding => {
+          response["runNonce"] = json!("run:alias");
+        }
+        ResponseMutation::RequestDigest => {
+          response["candidateRequestFrameDigest"] =
+            aliased_digest(&response["candidateRequestFrameDigest"]);
+        }
+        ResponseMutation::DescriptorDigest => {
+          response["acceptedDescriptorSlotsDigest"] =
+            aliased_digest(&response["acceptedDescriptorSlotsDigest"]);
+        }
+        ResponseMutation::ObservedDigest => {
+          response["observedResultDigest"] =
+            aliased_digest(&response["observedResultDigest"]);
+        }
+        ResponseMutation::MissingResultDigest => {
+          response["normalizedObservedResult"]["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("digest");
+          let normalized = response["normalizedObservedResult"].clone();
+          let normalized_bytes = canonical_json_bytes(&normalized).unwrap();
+          response["observedResultDigest"] = json!(
+            deno_permissions::rev2::hjcs_digest(
+              OBSERVED_RESULT_DIGEST_DOMAIN,
+              &normalized,
+            )
+            .unwrap()
+          );
+          response["deliveryFrame"]["bytes"] =
+            json!(URL_SAFE_NO_PAD.encode(&normalized_bytes));
+          response["deliveryFrameDigest"] = json!(raw_frame_digest(
+            DELIVERY_FRAME_DIGEST_DOMAIN,
+            &normalized_bytes,
+          ));
+        }
+        ResponseMutation::ArenaDigestSyntax => {
+          response["candidateArenaDigest"] = json!("sha256-not-canonical");
+        }
+        ResponseMutation::EngineTraceDigestSyntax => {
+          response["engineTraceDigest"] = json!("sha256-not-canonical");
+        }
+        ResponseMutation::DeliveryEncoding => {
+          response["deliveryFrame"]["encoding"] = json!("base64");
+        }
+        ResponseMutation::DeliveryBytes => {
+          response["deliveryFrame"]["bytes"] = json!("e30");
+        }
+        ResponseMutation::DeliveryDigest => {
+          response["deliveryFrameDigest"] =
+            aliased_digest(&response["deliveryFrameDigest"]);
+        }
+        ResponseMutation::Inventory => {
+          response["resourceInventory"]["actorTokens"] = json!(1);
+        }
+        ResponseMutation::InventoryDigest => {
+          response["resourceInventoryDigest"] =
+            aliased_digest(&response["resourceInventoryDigest"]);
+        }
+        ResponseMutation::FaultObservation => {
+          response["faultObservation"] = json!({"kind": "alias"});
+        }
+        ResponseMutation::NoDescendant => {
+          response["noDescendantClaims"]["candidatePid"] = json!("103");
+        }
+        ResponseMutation::NoDescendantSource => {
+          response["noDescendantClaims"]["sourceClosureDigest"] =
+            aliased_digest(
+              &response["noDescendantClaims"]["sourceClosureDigest"],
+            );
+        }
+        ResponseMutation::PgidCheckpoint => {
+          response["noDescendantClaims"]["pgidCheckpoints"]["preExit"] =
+            json!("101");
+        }
+        ResponseMutation::RootDrop => {
+          response["rootDescriptorsDroppedClaim"] = json!(false);
+        }
+      }
+    }
+
+    fn refusal_for_response_mutation(
+      mutation: ResponseMutation,
+    ) -> io::ErrorKind {
+      let (outcome, _temp, observation) =
+        run_positive(SupervisorLstatCase::Existing);
+      let mut response = response_value(&outcome, &observation);
+      mutate_response(&mut response, mutation);
+      send_response_and_eof(&observation.candidate_endpoint, &response);
+      match outcome.capture_candidate_response() {
+        Ok(_) => panic!("mutated candidate response was accepted"),
+        Err(error) => error.kind(),
+      }
+    }
+
     fn assert_ordered_lstat_rights(
       observation: &PeerObservation,
       case: SupervisorLstatCase,
@@ -3035,6 +3830,181 @@ mod topology {
         )
         .unwrap();
       }
+    }
+
+    #[test]
+    fn supervisor_candidate_response_accepts_both_exact_lstat_results_and_eof()
+    {
+      for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
+        for case in [
+          SupervisorLstatCase::Existing,
+          SupervisorLstatCase::FinalMissing,
+        ] {
+          let (outcome, _temp, observation) =
+            run_positive_for_target(target, case);
+          let response = response_value(&outcome, &observation);
+          send_response_and_eof(&observation.candidate_endpoint, &response);
+          let terminal = outcome.capture_candidate_response().unwrap();
+          assert!(terminal._candidate_response_eof_observed);
+          assert!(terminal._candidate_peer_closed);
+          assert_eq!(terminal._identity.target, target);
+          assert_eq!(terminal._identity.case, case);
+        }
+      }
+    }
+
+    #[test]
+    fn supervisor_candidate_response_retains_raw_digest_and_parent_terminal_state()
+     {
+      let (outcome, temp, observation) =
+        run_positive(SupervisorLstatCase::Existing);
+      let request_digest = outcome._candidate_request_frame_digest.clone();
+      let descriptor_digest = outcome._descriptor_slots_digest.clone();
+      let response = response_value(&outcome, &observation);
+      let raw =
+        send_response_and_eof(&observation.candidate_endpoint, &response);
+      let terminal = outcome.capture_candidate_response().unwrap();
+      assert_eq!(terminal._candidate_response.raw_bytes, raw);
+      assert_eq!(terminal._candidate_response.value, response);
+      assert_eq!(
+        terminal._candidate_response.frame_digest,
+        raw_frame_digest(CANDIDATE_RESPONSE_DIGEST_DOMAIN, &raw),
+      );
+      assert_eq!(
+        terminal._candidate_response.observed_result_digest,
+        response["observedResultDigest"],
+      );
+      assert_eq!(terminal._candidate_response.candidate_arena_digest, DIGEST);
+      assert_eq!(terminal._candidate_response.engine_trace_digest, DIGEST);
+      assert_eq!(terminal._candidate_request_frame_digest, request_digest);
+      assert_eq!(terminal._descriptor_slots_digest, descriptor_digest);
+      assert!(temp.path().join(ROOT_NAME).exists());
+      assert!(temp.path().join(ARENA_NAME).exists());
+      drop(terminal);
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
+    }
+
+    #[test]
+    fn supervisor_candidate_response_refuses_schema_binding_and_digest_mutations()
+     {
+      for mutation in [
+        ResponseMutation::Schema,
+        ResponseMutation::ExtraField,
+        ResponseMutation::Binding,
+        ResponseMutation::RequestDigest,
+        ResponseMutation::DescriptorDigest,
+        ResponseMutation::ObservedDigest,
+        ResponseMutation::MissingResultDigest,
+        ResponseMutation::ArenaDigestSyntax,
+        ResponseMutation::EngineTraceDigestSyntax,
+      ] {
+        assert_eq!(
+          refusal_for_response_mutation(mutation),
+          io::ErrorKind::InvalidData,
+        );
+      }
+    }
+
+    #[test]
+    fn supervisor_candidate_response_refuses_delivery_inventory_and_claim_aliases()
+     {
+      for mutation in [
+        ResponseMutation::DeliveryEncoding,
+        ResponseMutation::DeliveryBytes,
+        ResponseMutation::DeliveryDigest,
+        ResponseMutation::Inventory,
+        ResponseMutation::InventoryDigest,
+        ResponseMutation::FaultObservation,
+        ResponseMutation::NoDescendant,
+        ResponseMutation::NoDescendantSource,
+        ResponseMutation::PgidCheckpoint,
+        ResponseMutation::RootDrop,
+      ] {
+        assert_eq!(
+          refusal_for_response_mutation(mutation),
+          io::ErrorKind::InvalidData,
+        );
+      }
+    }
+
+    #[test]
+    fn supervisor_candidate_response_refuses_rights_and_bytes_after_frame() {
+      let (outcome, _temp, observation) =
+        run_positive(SupervisorLstatCase::Existing);
+      let response = response_value(&outcome, &observation);
+      let (read_end, _write_end) = pipe_pair().unwrap();
+      send_response(
+        &observation.candidate_endpoint,
+        &response,
+        &[read_end.as_fd()],
+      );
+      observation
+        .candidate_endpoint
+        .shutdown_write(Instant::now() + Duration::from_secs(3))
+        .unwrap();
+      assert_eq!(
+        match outcome.capture_candidate_response() {
+          Ok(_) => panic!("candidate response with a right was accepted"),
+          Err(error) => error.kind(),
+        },
+        io::ErrorKind::InvalidData,
+      );
+
+      let (outcome, _temp, observation) =
+        run_positive(SupervisorLstatCase::FinalMissing);
+      let response = response_value(&outcome, &observation);
+      send_response(&observation.candidate_endpoint, &response, &[]);
+      send_response(
+        &observation.candidate_endpoint,
+        &json!({"trailing": true}),
+        &[],
+      );
+      observation
+        .candidate_endpoint
+        .shutdown_write(Instant::now() + Duration::from_secs(3))
+        .unwrap();
+      assert_eq!(
+        match outcome.capture_candidate_response() {
+          Ok(_) => {
+            panic!("candidate response with trailing frame bytes was accepted")
+          }
+          Err(error) => error.kind(),
+        },
+        io::ErrorKind::InvalidData,
+      );
+    }
+
+    #[test]
+    fn supervisor_candidate_response_deadline_refusal_and_drop_are_terminal() {
+      let (mut outcome, temp, observation) =
+        run_positive(SupervisorLstatCase::Existing);
+      let response = response_value(&outcome, &observation);
+      send_response_and_eof(&observation.candidate_endpoint, &response);
+      let expiry = outcome._deadline.work_instant;
+      outcome
+        ._deadline
+        .replace_clock(Arc::new(ExpiredClock { now: expiry }));
+      assert_eq!(
+        match outcome.capture_candidate_response() {
+          Ok(_) => panic!("expired candidate response was accepted"),
+          Err(error) => error.kind(),
+        },
+        io::ErrorKind::TimedOut,
+      );
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
+
+      let (outcome, temp, observation) =
+        run_positive(SupervisorLstatCase::FinalMissing);
+      let response = response_value(&outcome, &observation);
+      send_response_and_eof(&observation.candidate_endpoint, &response);
+      let terminal = outcome.capture_candidate_response().unwrap();
+      assert!(temp.path().join(ROOT_NAME).exists());
+      assert!(temp.path().join(ARENA_NAME).exists());
+      drop(terminal);
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
     }
 
     #[test]
