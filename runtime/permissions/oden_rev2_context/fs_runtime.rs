@@ -1101,8 +1101,9 @@ fn compiled_lstat_target_status() -> Result<
 ///
 /// It intentionally exposes no generated table, projection bytes, public-op
 /// capsule, descriptor, runtime context, execution method, or serialization
-/// surface. A later candidate checkpoint may use these exact strings only as
-/// equality operands while reconstructing transferred descriptors.
+/// surface. Its typed expected-free projection is retained only so the
+/// candidate can reconstruct transferred descriptor facts without reselecting
+/// an admission from caller-provided strings.
 #[doc(hidden)]
 pub struct OdenRev2LstatCandidateBinaryIdentity {
   fixture_artifact_digest: &'static str,
@@ -1115,6 +1116,7 @@ pub struct OdenRev2LstatCandidateBinaryIdentity {
   cargo_feature_graph_digest: &'static str,
   build_profile: &'static str,
   execution_projection_digest: &'static str,
+  execution_projection: FilesystemExecutionProjection,
 }
 
 impl OdenRev2LstatCandidateBinaryIdentity {
@@ -1156,6 +1158,10 @@ impl OdenRev2LstatCandidateBinaryIdentity {
 
   pub fn execution_projection_digest(&self) -> &'static str {
     self.execution_projection_digest
+  }
+
+  pub fn execution_projection(&self) -> &FilesystemExecutionProjection {
+    &self.execution_projection
   }
 }
 
@@ -1223,6 +1229,7 @@ fn join_lstat_candidate_binary_identity_with_validator(
     cargo_feature_graph_digest: target.cargo_feature_graph_digest,
     build_profile: target.build_profile,
     execution_projection_digest: admission.case_projection_digest,
+    execution_projection: projection,
   })
 }
 
@@ -3310,6 +3317,8 @@ mod tests {
         identity.execution_projection_digest(),
         admission.case_projection_digest
       );
+      assert_eq!(identity.execution_projection().case_id, admission.case_id);
+      assert_eq!(identity.execution_projection().edge_id, LSTAT_EDGE);
     }
   }
 

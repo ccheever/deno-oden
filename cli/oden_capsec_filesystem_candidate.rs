@@ -33,11 +33,11 @@ pub fn maybe_run_oden_capsec_filesystem_candidate(
   }
 
   // No row can currently reach this point. The dormant FD3 role protocol
-  // below has a production-uncalled process-fact preflight, but no production
-  // constructor, descriptor reconstruction, response-artifact assembler, or
-  // public-op executor. All three generated process admission tables therefore
-  // remain empty until the complete parent/supervisor/candidate capture and
-  // oracle barriers exist.
+  // below has production-uncalled preflight, construction, and descriptor-slot
+  // preparation boundaries, but no response-artifact assembler, public-op
+  // executor, or production caller. All three generated process admission
+  // tables therefore remain empty until the complete
+  // parent/supervisor/candidate capture and oracle barriers exist.
   Some(REFUSAL_EXIT_CODE)
 }
 
@@ -47,10 +47,13 @@ pub fn maybe_run_oden_capsec_filesystem_candidate(
   reason = "the exact candidate FD3 role stays dormant while all case tables are empty"
 )]
 mod fd3 {
+  use std::ffi::CString;
   use std::io;
   use std::os::fd::AsFd;
   use std::os::fd::AsRawFd;
   use std::os::fd::BorrowedFd;
+  use std::os::fd::FromRawFd;
+  use std::os::fd::IntoRawFd;
   use std::os::fd::OwnedFd;
   #[cfg(target_os = "macos")]
   use std::os::fd::RawFd;
@@ -69,12 +72,18 @@ mod fd3 {
   use deno_runtime::deno_permissions::rev2::FilesystemCleanup;
   use deno_runtime::deno_permissions::rev2::FilesystemDecision;
   use deno_runtime::deno_permissions::rev2::FilesystemDelivery;
+  use deno_runtime::deno_permissions::rev2::FilesystemExecutionProjection;
   use deno_runtime::deno_permissions::rev2::FilesystemExpectedObservation;
   use deno_runtime::deno_permissions::rev2::FilesystemFinalObjectState;
   use deno_runtime::deno_permissions::rev2::FilesystemFollowMode;
+  use deno_runtime::deno_permissions::rev2::FilesystemInlineContentKind;
   use deno_runtime::deno_permissions::rev2::FilesystemLogicalRoot;
+  use deno_runtime::deno_permissions::rev2::FilesystemObjectIdentity;
   use deno_runtime::deno_permissions::rev2::FilesystemObjectIdentityKind;
+  use deno_runtime::deno_permissions::rev2::FilesystemObjectKind;
+  use deno_runtime::deno_permissions::rev2::FilesystemOperationRequest;
   use deno_runtime::deno_permissions::rev2::FilesystemPlatformPathEncoding;
+  use deno_runtime::deno_permissions::rev2::FilesystemTargetParentRef;
   use sha2::Digest;
   use sha2::Sha256;
 
@@ -116,6 +125,10 @@ mod fd3 {
     "oden:capsec:filesystem-delivery-frame:2";
   const RESOURCE_INVENTORY_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-resource-inventory:2";
+  const DESCRIPTOR_SLOTS_SCHEMA: &str =
+    "oden/capsec-filesystem-descriptor-slots/2";
+  const DESCRIPTOR_SLOTS_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-descriptor-slots:2";
   const ENGINE_BUILD_MARKER_SCHEMA: &str =
     "oden/capsec-rev2-engine-build-marker/2";
   const ENGINE_BUILD_MARKER_DIGEST_DOMAIN: &str =
@@ -126,6 +139,14 @@ mod fd3 {
   const ARENA_CAPACITY_BYTES: i64 = 8 * 1024 * 1024;
   const REQUIRED_CAPTURED_UMASK: u64 = 0o077;
   const EXPECTED_DESCRIPTOR_COUNT: usize = 2;
+  const LSTAT_ROOT_BINDING_ID: &str = "root:project";
+  const LSTAT_ROOT_FIXTURE_IDENTITY: &str = "fixture:project-root";
+  const LSTAT_SOURCE_OBJECT_ID: &str = "source";
+  const LSTAT_SOURCE_NAME: &str = "input.txt";
+  const LSTAT_DESTINATION_OBJECT_ID: &str = "destination";
+  const LSTAT_DESTINATION_NAME: &str = "output.txt";
+  const EMPTY_CONTENT_DIGEST: &str =
+    "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
   #[cfg(target_os = "macos")]
   const CANDIDATE_CONTROL_FD: RawFd = 3;
 
@@ -285,8 +306,9 @@ mod fd3 {
     }
   }
 
-  #[derive(Clone, Debug)]
   pub(crate) struct CandidateLstatProtocolIdentity {
+    generated_seal: CandidateGeneratedSeal,
+    generated_topology: CandidateGeneratedLstatTopology,
     target: String,
     feature_set: String,
     embedded_build_marker: String,
@@ -294,6 +316,24 @@ mod fd3 {
     fixture_artifact_digest: String,
     case: CandidateLstatCase,
     execution_projection_digest: String,
+  }
+
+  enum CandidateGeneratedSeal {
+    Exact(OdenRev2LstatCandidateBinaryIdentity),
+    #[cfg(test)]
+    Fixture,
+  }
+
+  #[derive(Clone)]
+  struct CandidateGeneratedLstatTopology {
+    root_fixture_identity: FilesystemObjectIdentity,
+    expected_source: CandidateGeneratedSourceTopology,
+  }
+
+  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+  enum CandidateGeneratedSourceTopology {
+    ExistingEmptyFile,
+    FinalMissing,
   }
 
   struct CandidateEngineBuildMarkerFacts<'a> {
@@ -330,11 +370,11 @@ mod fd3 {
         )
       })?;
       let fork_commit = deno_lib::version::DENO_VERSION_INFO.git_hash;
-      Self::from_generated(&generated, &build_identity, fork_commit)
+      Self::from_generated(generated, &build_identity, fork_commit)
     }
 
     fn from_generated(
-      generated: &OdenRev2LstatCandidateBinaryIdentity,
+      generated: OdenRev2LstatCandidateBinaryIdentity,
       build_identity: &OdenRev2CompiledBuildIdentity,
       fork_commit: &str,
     ) -> io::Result<Self> {
@@ -355,9 +395,14 @@ mod fd3 {
           debug_assertions: build_identity.actual_debug_assertions,
           fork_commit,
         })?;
+      let generated_topology = validate_generated_lstat_topology(
+        generated.execution_projection(),
+        generated.case_id(),
+      )?;
       let case = CandidateLstatCase::from_id(generated.case_id())
         .ok_or_else(|| invalid_data("candidate generated case is not lstat"))?;
       Ok(Self {
+        generated_topology,
         target: generated.target().to_string(),
         feature_set: generated.feature_set().to_string(),
         embedded_build_marker,
@@ -369,6 +414,7 @@ mod fd3 {
         execution_projection_digest: generated
           .execution_projection_digest()
           .to_string(),
+        generated_seal: CandidateGeneratedSeal::Exact(generated),
       })
     }
 
@@ -393,7 +439,23 @@ mod fd3 {
       {
         return Err(invalid_input("candidate FD3 identity is not canonical"));
       }
+      let expected_source = match case {
+        CandidateLstatCase::Existing => {
+          CandidateGeneratedSourceTopology::ExistingEmptyFile
+        }
+        CandidateLstatCase::FinalMissing => {
+          CandidateGeneratedSourceTopology::FinalMissing
+        }
+      };
       Ok(Self {
+        generated_seal: CandidateGeneratedSeal::Fixture,
+        generated_topology: CandidateGeneratedLstatTopology {
+          root_fixture_identity: FilesystemObjectIdentity {
+            kind: FilesystemObjectIdentityKind::OpaqueToken,
+            value: LSTAT_ROOT_FIXTURE_IDENTITY.to_string(),
+          },
+          expected_source,
+        },
         target: target.to_string(),
         feature_set: feature_set.to_string(),
         embedded_build_marker: embedded_build_marker.to_string(),
@@ -402,6 +464,25 @@ mod fd3 {
         case,
         execution_projection_digest: execution_projection_digest.to_string(),
       })
+    }
+
+    #[cfg(test)]
+    fn duplicate_test_fixture(&self) -> Self {
+      assert!(matches!(
+        self.generated_seal,
+        CandidateGeneratedSeal::Fixture
+      ));
+      Self {
+        generated_seal: CandidateGeneratedSeal::Fixture,
+        generated_topology: self.generated_topology.clone(),
+        target: self.target.clone(),
+        feature_set: self.feature_set.clone(),
+        embedded_build_marker: self.embedded_build_marker.clone(),
+        fork_commit: self.fork_commit.clone(),
+        fixture_artifact_digest: self.fixture_artifact_digest.clone(),
+        case: self.case,
+        execution_projection_digest: self.execution_projection_digest.clone(),
+      }
     }
 
     fn no_descendant_profile(&self) -> &'static str {
@@ -413,6 +494,117 @@ mod fd3 {
         _ => unreachable!("constructor closes the target tuple"),
       }
     }
+  }
+
+  fn validate_generated_lstat_topology(
+    projection: &FilesystemExecutionProjection,
+    case_id: &str,
+  ) -> io::Result<CandidateGeneratedLstatTopology> {
+    let case = CandidateLstatCase::from_id(case_id)
+      .ok_or_else(|| invalid_data("candidate generated case is not lstat"))?;
+    if projection.case_id != case_id
+      || projection.edge_id != LSTAT_EDGE_ID
+      || projection.requirement_id != LSTAT_REQUIREMENT_ID
+      || projection.case_kind != case.case_kind()
+      || projection.setup.logical_roots.len() != 1
+      || projection.setup.objects.len() != 2
+    {
+      return Err(invalid_data(
+        "candidate generated lstat topology is not exact",
+      ));
+    }
+    let root = &projection.setup.logical_roots[0];
+    if root.root != FilesystemLogicalRoot::Project
+      || root.binding_id != LSTAT_ROOT_BINDING_ID
+      || root.descriptor_slot != 0
+      || root.object_identity.kind != FilesystemObjectIdentityKind::OpaqueToken
+      || root.object_identity.value != LSTAT_ROOT_FIXTURE_IDENTITY
+    {
+      return Err(invalid_data(
+        "candidate generated logical root is not exact",
+      ));
+    }
+    let target_ref = match &projection.operation_request {
+      FilesystemOperationRequest::LstatSync { target_ref } => target_ref,
+      _ => {
+        return Err(invalid_data("candidate generated operation is not lstat"));
+      }
+    };
+    if target_ref.object_id != LSTAT_SOURCE_OBJECT_ID
+      || !matches!(
+        &target_ref.parent,
+        FilesystemTargetParentRef::LogicalRoot { root, binding_id }
+          if *root == FilesystemLogicalRoot::Project
+            && binding_id == LSTAT_ROOT_BINDING_ID
+      )
+    {
+      return Err(invalid_data(
+        "candidate generated lstat target is not exact",
+      ));
+    }
+
+    let source = &projection.setup.objects[0];
+    if source.object_id != LSTAT_SOURCE_OBJECT_ID
+      || source.root != FilesystemLogicalRoot::Project
+      || source.path.encoding != FilesystemPlatformPathEncoding::Unicode
+      || source.path.value != LSTAT_SOURCE_NAME
+      || source.alias_target_object_id.is_some()
+      || source.link_target_object_id.is_some()
+    {
+      return Err(invalid_data(
+        "candidate generated source object is not exact",
+      ));
+    }
+    let expected_source = match case {
+      CandidateLstatCase::Existing
+        if source.kind == FilesystemObjectKind::RegularFile
+          && source.object_identity.as_ref().is_some_and(|identity| {
+            identity.kind == FilesystemObjectIdentityKind::VerifiedContent
+              && identity.value == EMPTY_CONTENT_DIGEST
+          })
+          && source.content.as_ref().is_some_and(|content| {
+            content.kind == FilesystemInlineContentKind::InlineBase64url
+              && content.bytes.is_empty()
+          })
+          && source.content_digest.as_deref() == Some(EMPTY_CONTENT_DIGEST) =>
+      {
+        CandidateGeneratedSourceTopology::ExistingEmptyFile
+      }
+      CandidateLstatCase::FinalMissing
+        if source.kind == FilesystemObjectKind::Missing
+          && source.object_identity.is_none()
+          && source.content.is_none()
+          && source.content_digest.is_none() =>
+      {
+        CandidateGeneratedSourceTopology::FinalMissing
+      }
+      _ => {
+        return Err(invalid_data(
+          "candidate generated source state is not exact",
+        ));
+      }
+    };
+
+    let destination = &projection.setup.objects[1];
+    if destination.object_id != LSTAT_DESTINATION_OBJECT_ID
+      || destination.root != FilesystemLogicalRoot::Project
+      || destination.path.encoding != FilesystemPlatformPathEncoding::Unicode
+      || destination.path.value != LSTAT_DESTINATION_NAME
+      || destination.kind != FilesystemObjectKind::Missing
+      || destination.object_identity.is_some()
+      || destination.content.is_some()
+      || destination.content_digest.is_some()
+      || destination.alias_target_object_id.is_some()
+      || destination.link_target_object_id.is_some()
+    {
+      return Err(invalid_data(
+        "candidate generated destination state is not exact",
+      ));
+    }
+    Ok(CandidateGeneratedLstatTopology {
+      root_fixture_identity: root.object_identity.clone(),
+      expected_source,
+    })
   }
 
   fn current_binary_build_identity() -> OdenRev2CompiledBuildIdentity {
@@ -557,7 +749,7 @@ mod fd3 {
     }
   }
 
-  #[derive(Clone, Debug)]
+  #[derive(Clone, Debug, Eq, PartialEq)]
   struct CandidateReadyFacts {
     candidate_pid: String,
     candidate_pgid: String,
@@ -600,9 +792,9 @@ mod fd3 {
   /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
   /// [constrained-by] — Ready facts are candidate claims until the trusted
   /// parent joins them to independent child and retained-image observations.
-  struct CandidateReadyPreflight {
+  pub(crate) struct CandidateReadyPreflight {
     raw_bytes: Vec<u8>,
-    _validated_facts: CandidateReadyFacts,
+    validated_facts: CandidateReadyFacts,
   }
 
   impl CandidateReadyPreflight {
@@ -627,7 +819,7 @@ mod fd3 {
         .map_err(|_| CandidateReadyPreflightRefusal::CanonicalFrame)?;
       Ok(Self {
         raw_bytes,
-        _validated_facts: validated_facts,
+        validated_facts,
       })
     }
 
@@ -671,6 +863,30 @@ mod fd3 {
     arena: OwnedFd,
   }
 
+  /// A non-cloneable, opaque prepared request. It owns the exact generated
+  /// identity seal, the consumed ready preflight, both transferred rights,
+  /// and the reconstructed descriptor-slot artifact. This D1 boundary has no
+  /// execution, public-op, arena-write, trace, response, evidence, policy, or
+  /// authority method.
+  ///
+  /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+  /// [constrained-by] — Descriptor reconstruction and exact generated
+  /// topology checks prepare one request; they do not authorize or perform
+  /// the native operation.
+  pub(crate) struct CandidatePreparedLstatRequest {
+    _endpoint: FramedStreamEndpoint,
+    _identity: CandidateLstatProtocolIdentity,
+    _ready_raw_bytes: Vec<u8>,
+    _ready_facts: CandidateReadyFacts,
+    _binding: CandidateCaseBinding,
+    _request_metadata: Arc<CandidateLstatRequestMetadata>,
+    _project_root: OwnedFd,
+    _arena: OwnedFd,
+    _descriptor_slots_raw_bytes: Vec<u8>,
+    _descriptor_slots_digest: String,
+    _captured_umask: u64,
+  }
+
   impl CandidateLstatRequest {
     pub(crate) fn raw_bytes(&self) -> &[u8] {
       &self.metadata.raw_bytes
@@ -687,12 +903,13 @@ mod fd3 {
 
   /// Candidate-owned FD3 packet ordering for one exact lstat request.
   ///
-  /// This is deliberately only a protocol dependency. There is no production
-  /// constructor or caller, it never creates an `OpState`, and it cannot call
-  /// the dormant public-op capsule. Its absolute deadline is frozen at
-  /// construction; per-transition deadlines can only shorten it. Any error is
-  /// sticky: the endpoint and all session-owned received rights are closed and
-  /// no later transition is possible.
+  /// This is deliberately only a protocol dependency. Its constructors and
+  /// prepared-request transition have no production caller, it never creates
+  /// an `OpState`, and it cannot call the dormant public-op capsule. Its
+  /// absolute deadline is frozen at construction; per-transition deadlines
+  /// can only shorten it. Any error is sticky: the endpoint and all
+  /// session-owned received rights are closed and no later transition is
+  /// possible.
   ///
   /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
   /// [implements] — Candidate FD3 emits one ready frame, accepts one request
@@ -708,11 +925,24 @@ mod fd3 {
     deadline: CandidateSessionDeadline,
     state: CandidateFd3State,
     ready_facts: Option<CandidateReadyFacts>,
+    ready_raw_bytes: Option<Vec<u8>>,
+    ready_from_preflight: bool,
     case_binding: Option<CandidateCaseBinding>,
     retained_request: Option<CandidateRetainedLstatRequest>,
   }
 
   impl CandidateFd3Session {
+    pub(crate) fn begin_from_preflight(
+      endpoint: FramedStreamEndpoint,
+      identity: CandidateLstatProtocolIdentity,
+      preflight: CandidateReadyPreflight,
+      absolute_deadline: Instant,
+    ) -> io::Result<Self> {
+      let mut session = Self::new(endpoint, identity, absolute_deadline);
+      session.send_ready_preflight(preflight, absolute_deadline)?;
+      Ok(session)
+    }
+
     pub(crate) fn new(
       endpoint: FramedStreamEndpoint,
       identity: CandidateLstatProtocolIdentity,
@@ -736,6 +966,8 @@ mod fd3 {
         deadline,
         state: CandidateFd3State::ReadyPending,
         ready_facts: None,
+        ready_raw_bytes: None,
+        ready_from_preflight: false,
         case_binding: None,
         retained_request: None,
       }
@@ -803,7 +1035,67 @@ mod fd3 {
         return self.refuse(error);
       }
       self.ready_facts = Some(ready_facts);
+      self.ready_raw_bytes = Some(raw_bytes.to_vec());
       self.state = CandidateFd3State::RequestPending;
+      Ok(())
+    }
+
+    fn send_ready_preflight(
+      &mut self,
+      preflight: CandidateReadyPreflight,
+      requested_deadline: Instant,
+    ) -> io::Result<()> {
+      let reparsed = match parse_canonical_jcs(&preflight.raw_bytes) {
+        Ok(value) => value,
+        Err(error) => return self.refuse(error),
+      };
+      let revalidated = match validate_ready(&reparsed, &self.identity) {
+        Ok(facts) => facts,
+        Err(error) => return self.refuse(error),
+      };
+      if revalidated != preflight.validated_facts {
+        return self.refuse(invalid_data(
+          "candidate ready preflight facts changed before FD3 send",
+        ));
+      }
+      let expected_control_identity =
+        revalidated.pre_request_fd_inventory[3]["platformIdentity"]["value"]
+          .as_str()
+          .ok_or_else(|| {
+            invalid_data(
+              "candidate ready preflight omitted its control identity",
+            )
+          });
+      let expected_control_identity = match expected_control_identity {
+        Ok(identity) => identity,
+        Err(error) => return self.refuse(error),
+      };
+      let before_control_identity = match self
+        .endpoint()
+        .and_then(|endpoint| inspect_candidate_control_fd(endpoint.as_fd()))
+      {
+        Ok(identity) => identity,
+        Err(error) => return self.refuse(error),
+      };
+      if before_control_identity != expected_control_identity {
+        return self.refuse(invalid_data(
+          "candidate ready preflight does not bind the consumed FD3 endpoint",
+        ));
+      }
+      self.send_ready(&preflight.raw_bytes, requested_deadline)?;
+      let after_control_identity = match self
+        .endpoint()
+        .and_then(|endpoint| inspect_candidate_control_fd(endpoint.as_fd()))
+      {
+        Ok(identity) => identity,
+        Err(error) => return self.refuse(error),
+      };
+      if after_control_identity != before_control_identity {
+        return self.refuse(invalid_data(
+          "candidate FD3 endpoint changed while sending ready preflight",
+        ));
+      }
+      self.ready_from_preflight = true;
       Ok(())
     }
 
@@ -916,6 +1208,146 @@ mod fd3 {
       self.retained_request = Some(retained_request);
       self.state = CandidateFd3State::ResponsePending;
       Ok(request)
+    }
+
+    pub(crate) fn receive_prepared_request(
+      self,
+      requested_deadline: Instant,
+    ) -> io::Result<CandidatePreparedLstatRequest> {
+      self.receive_prepared_request_with_umask_observer_and_hook(
+        requested_deadline,
+        capture_inherited_umask,
+        || Ok(()),
+      )
+    }
+
+    #[cfg(test)]
+    fn receive_prepared_request_with_observed_umask_and_hook<F>(
+      self,
+      requested_deadline: Instant,
+      captured_umask: u64,
+      between_observations: F,
+    ) -> io::Result<CandidatePreparedLstatRequest>
+    where
+      F: FnOnce() -> io::Result<()>,
+    {
+      self.receive_prepared_request_with_umask_observer_and_hook(
+        requested_deadline,
+        move || CandidateCapturedUmask::from_observed_for_test(captured_umask),
+        between_observations,
+      )
+    }
+
+    fn receive_prepared_request_with_umask_observer_and_hook<U, F>(
+      mut self,
+      requested_deadline: Instant,
+      observe_umask: U,
+      between_observations: F,
+    ) -> io::Result<CandidatePreparedLstatRequest>
+    where
+      U: FnOnce() -> CandidateCapturedUmask,
+      F: FnOnce() -> io::Result<()>,
+    {
+      if !self.ready_from_preflight
+        || self.ready_facts.is_none()
+        || self.ready_raw_bytes.is_none()
+      {
+        return self.refuse(invalid_input(
+          "candidate prepared request requires a consumed ready preflight",
+        ));
+      }
+      let request = match self.receive_request(requested_deadline) {
+        Ok(request) => request,
+        Err(error) => return Err(error),
+      };
+      let captured_umask = observe_umask();
+      if captured_umask.value() != REQUIRED_CAPTURED_UMASK {
+        return self.refuse(invalid_data(
+          "candidate inherited umask is not exactly 0077",
+        ));
+      }
+      let reconstruction_deadline = match self.deadline.effective(
+        requested_deadline,
+        CandidateDeadlineCheckpoint::CpuValidationStart,
+      ) {
+        Ok(deadline) => deadline,
+        Err(error) => return self.refuse(error),
+      };
+      let retained_metadata = &self
+        .retained_request
+        .as_ref()
+        .expect("accepted request retains transferred rights")
+        .metadata;
+      if !Arc::ptr_eq(&request.metadata, retained_metadata) {
+        return self.refuse(invalid_input(
+          "candidate prepared request identity does not own retained rights",
+        ));
+      }
+      let reconstruction = {
+        let retained = self
+          .retained_request
+          .as_ref()
+          .expect("accepted request retains transferred rights");
+        let binding = self
+          .case_binding
+          .as_ref()
+          .expect("accepted request retains its exact binding");
+        reconstruct_descriptor_slots(
+          &self.identity,
+          binding,
+          retained.project_root.as_fd(),
+          retained.arena.as_fd(),
+          &self.deadline,
+          reconstruction_deadline,
+          between_observations,
+        )
+      };
+      let (descriptor_slots_raw_bytes, descriptor_slots_digest) =
+        match reconstruction {
+          Ok(reconstruction) => reconstruction,
+          Err(error) => return self.refuse(error),
+        };
+      if request.descriptor_slots_digest() != descriptor_slots_digest {
+        return self.refuse(invalid_data(
+          "candidate reconstructed descriptor slots do not match request",
+        ));
+      }
+      drop(request);
+
+      let endpoint = self
+        .endpoint
+        .take()
+        .expect("prepared request retains its FD3 endpoint");
+      let ready_raw_bytes = self
+        .ready_raw_bytes
+        .take()
+        .expect("prepared request retains exact ready bytes");
+      let ready_facts = self
+        .ready_facts
+        .take()
+        .expect("prepared request retains exact ready facts");
+      let binding = self
+        .case_binding
+        .take()
+        .expect("prepared request retains exact case binding");
+      let retained = self
+        .retained_request
+        .take()
+        .expect("prepared request retains transferred rights");
+      self.state = CandidateFd3State::Complete;
+      Ok(CandidatePreparedLstatRequest {
+        _endpoint: endpoint,
+        _identity: self.identity,
+        _ready_raw_bytes: ready_raw_bytes,
+        _ready_facts: ready_facts,
+        _binding: binding,
+        _request_metadata: retained.metadata,
+        _project_root: retained.project_root,
+        _arena: retained.arena,
+        _descriptor_slots_raw_bytes: descriptor_slots_raw_bytes,
+        _descriptor_slots_digest: descriptor_slots_digest,
+        _captured_umask: captured_umask.value(),
+      })
     }
 
     pub(crate) fn send_response(
@@ -1042,6 +1474,8 @@ mod fd3 {
     fn refuse<T>(&mut self, error: io::Error) -> io::Result<T> {
       self.endpoint.take();
       self.ready_facts.take();
+      self.ready_raw_bytes.take();
+      self.ready_from_preflight = false;
       self.case_binding.take();
       self.retained_request.take();
       self.state = CandidateFd3State::Refused;
@@ -1370,7 +1804,7 @@ mod fd3 {
     Ok(value)
   }
 
-  #[cfg(target_os = "macos")]
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   fn inspect_candidate_control_fd(
     descriptor: BorrowedFd<'_>,
   ) -> io::Result<String> {
@@ -1385,7 +1819,16 @@ mod fd3 {
     ))
   }
 
-  #[cfg(target_os = "macos")]
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  fn inspect_candidate_control_fd(
+    _descriptor: BorrowedFd<'_>,
+  ) -> io::Result<String> {
+    Err(invalid_data(
+      "candidate control descriptor target is unsupported",
+    ))
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   fn require_unix_stream_socket(descriptor: BorrowedFd<'_>) -> io::Result<()> {
     let mut socket_type: libc::c_int = 0;
     let mut socket_type_len =
@@ -1874,6 +2317,7 @@ mod fd3 {
       }
       let root = fstat(descriptors[0].as_fd())?;
       let arena = fstat(descriptors[1].as_fd())?;
+      require_exact_root_status_flags(descriptors[0].as_fd())?;
       // This read-only protocol dependency does not yet write the arena. The
       // later actual writer must independently require exact O_RDWR access
       // before it can execute or assemble an arena artifact.
@@ -1897,6 +2341,46 @@ mod fd3 {
       session_deadline,
       deadline,
     )
+  }
+
+  fn descriptor_status_flags(
+    descriptor: BorrowedFd<'_>,
+  ) -> io::Result<libc::c_int> {
+    loop {
+      // SAFETY: F_GETFL only reads status flags from the live descriptor.
+      let flags = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFL) };
+      if flags >= 0 {
+        return Ok(flags);
+      }
+      let error = io::Error::last_os_error();
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(error);
+      }
+    }
+  }
+
+  fn require_exact_root_status_flags(
+    descriptor: BorrowedFd<'_>,
+  ) -> io::Result<libc::c_int> {
+    let flags = descriptor_status_flags(descriptor)?;
+    #[cfg(target_os = "linux")]
+    let path_only = flags & libc::O_PATH != 0;
+    #[cfg(not(target_os = "linux"))]
+    let path_only = false;
+    #[cfg(target_os = "macos")]
+    let alternate_only = flags & (libc::O_EVTONLY | libc::O_EXEC) != 0;
+    #[cfg(not(target_os = "macos"))]
+    let alternate_only = false;
+    if flags & libc::O_ACCMODE != libc::O_RDONLY
+      || flags & libc::O_APPEND != 0
+      || path_only
+      || alternate_only
+    {
+      return Err(invalid_data(
+        "candidate project-root right is not exact read-only directory access",
+      ));
+    }
+    Ok(flags)
   }
 
   fn require_zero_filled_arena(
@@ -1988,6 +2472,619 @@ mod fd3 {
     session_deadline
       .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)?;
     tail_result
+  }
+
+  struct CandidateCapturedUmask {
+    value: u64,
+  }
+
+  impl CandidateCapturedUmask {
+    fn value(&self) -> u64 {
+      self.value
+    }
+
+    #[cfg(test)]
+    fn from_observed_for_test(value: u64) -> Self {
+      Self { value }
+    }
+  }
+
+  fn capture_inherited_umask() -> CandidateCapturedUmask {
+    // SAFETY: umask takes and returns a value, touches no caller memory, and
+    // setting the already-required 0077 value leaves a conforming process
+    // unchanged while making a nonconforming process fail closed.
+    let value =
+      unsafe { libc::umask(REQUIRED_CAPTURED_UMASK as libc::mode_t) as u64 };
+    CandidateCapturedUmask { value }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[derive(Clone, Debug, Eq, PartialEq)]
+  struct CandidateDescriptorSnapshot {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    links: u64,
+    uid: u64,
+    gid: u64,
+    size: i64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+    #[cfg(target_os = "macos")]
+    generation: u32,
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  impl CandidateDescriptorSnapshot {
+    fn capture(descriptor: BorrowedFd<'_>) -> io::Result<Self> {
+      let stat = fstat(descriptor)?;
+      Ok(Self {
+        device: stat.st_dev as u64,
+        inode: stat.st_ino as u64,
+        mode: stat.st_mode as u32,
+        links: stat.st_nlink as u64,
+        uid: stat.st_uid as u64,
+        gid: stat.st_gid as u64,
+        size: stat.st_size as i64,
+        modified_seconds: stat.st_mtime as i64,
+        modified_nanoseconds: stat.st_mtime_nsec as i64,
+        changed_seconds: stat.st_ctime as i64,
+        changed_nanoseconds: stat.st_ctime_nsec as i64,
+        #[cfg(target_os = "macos")]
+        generation: stat.st_gen,
+      })
+    }
+
+    fn platform_identity(&self) -> Value {
+      json!({
+        "kind": "platform-object",
+        "value": format!(
+          "unix-dev-ino:{:016x}{:016x}",
+          self.device, self.inode
+        ),
+      })
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[derive(Debug, Eq, PartialEq)]
+  struct CandidateLstatTopologyObservation {
+    root_empty: bool,
+    source: Option<CandidateDescriptorSnapshot>,
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  struct CandidateDirectoryStream {
+    raw: *mut libc::DIR,
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  impl CandidateDirectoryStream {
+    fn from_owned(descriptor: OwnedFd) -> io::Result<Self> {
+      let raw_descriptor = descriptor.into_raw_fd();
+      // SAFETY: raw_descriptor is a uniquely owned independent directory
+      // description. fdopendir takes ownership only on success.
+      let raw = unsafe { libc::fdopendir(raw_descriptor) };
+      if raw.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: fdopendir failed and did not take ownership.
+        unsafe { libc::close(raw_descriptor) };
+        return Err(error);
+      }
+      Ok(Self { raw })
+    }
+
+    fn close(mut self) -> io::Result<()> {
+      let raw = std::mem::replace(&mut self.raw, std::ptr::null_mut());
+      // SAFETY: raw is the live stream uniquely owned by this value.
+      if unsafe { libc::closedir(raw) } != 0 {
+        return Err(io::Error::last_os_error());
+      }
+      Ok(())
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  impl Drop for CandidateDirectoryStream {
+    fn drop(&mut self) {
+      if !self.raw.is_null() {
+        // SAFETY: this is the error-path close of the uniquely owned stream.
+        unsafe { libc::closedir(self.raw) };
+        self.raw = std::ptr::null_mut();
+      }
+    }
+  }
+
+  #[cfg(target_os = "linux")]
+  fn clear_candidate_readdir_errno() {
+    // SAFETY: libc exposes the calling thread's writable errno cell.
+    unsafe { *libc::__errno_location() = 0 };
+  }
+
+  #[cfg(target_os = "macos")]
+  fn clear_candidate_readdir_errno() {
+    // SAFETY: libc exposes the calling thread's writable errno cell.
+    unsafe { *libc::__error() = 0 };
+  }
+
+  #[cfg(target_os = "linux")]
+  fn candidate_readdir_errno() -> libc::c_int {
+    // SAFETY: libc exposes the calling thread's readable errno cell.
+    unsafe { *libc::__errno_location() }
+  }
+
+  #[cfg(target_os = "macos")]
+  fn candidate_readdir_errno() -> libc::c_int {
+    // SAFETY: libc exposes the calling thread's readable errno cell.
+    unsafe { *libc::__error() }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn candidate_fixed_array_length<T, const N: usize>(
+    _: *const [T; N],
+  ) -> usize {
+    N
+  }
+
+  #[cfg(target_os = "linux")]
+  unsafe fn candidate_dirent_name(
+    entry: *const libc::dirent,
+  ) -> io::Result<Vec<u8>> {
+    // SAFETY: the caller guarantees the fixed d_reclen header is accessible.
+    let record_length_pointer =
+      unsafe { std::ptr::addr_of!((*entry).d_reclen) };
+    // SAFETY: readdir supplied the record; an unaligned read avoids forming a
+    // full-size dirent reference for a short record.
+    let record_length =
+      unsafe { std::ptr::read_unaligned(record_length_pointer) } as usize;
+    let name_offset = std::mem::offset_of!(libc::dirent, d_name);
+    let record_name_bytes = record_length
+      .checked_sub(name_offset)
+      .ok_or_else(|| invalid_data("candidate directory entry is malformed"))?;
+    // SAFETY: only the field address is formed; the slice is capped below.
+    let name_array_pointer = unsafe { std::ptr::addr_of!((*entry).d_name) };
+    let bound =
+      record_name_bytes.min(candidate_fixed_array_length(name_array_pointer));
+    // SAFETY: bound is capped by both d_reclen and the declared array.
+    let name = unsafe {
+      std::slice::from_raw_parts(name_array_pointer.cast::<u8>(), bound)
+    };
+    let name_end = name
+      .iter()
+      .position(|unit| *unit == 0)
+      .ok_or_else(|| invalid_data("candidate directory entry is malformed"))?;
+    Ok(name[..name_end].to_vec())
+  }
+
+  #[cfg(target_os = "macos")]
+  unsafe fn candidate_dirent_name(
+    entry: *const libc::dirent,
+  ) -> io::Result<Vec<u8>> {
+    // SAFETY: the caller guarantees the fixed header fields are accessible.
+    let record_length_pointer =
+      unsafe { std::ptr::addr_of!((*entry).d_reclen) };
+    // SAFETY: same fixed-header guarantee as d_reclen.
+    let name_length_pointer = unsafe { std::ptr::addr_of!((*entry).d_namlen) };
+    // SAFETY: readdir supplied both values; unaligned reads avoid forming a
+    // full-size dirent reference.
+    let record_length =
+      unsafe { std::ptr::read_unaligned(record_length_pointer) } as usize;
+    // SAFETY: same fixed-header guarantee as above.
+    let name_length =
+      unsafe { std::ptr::read_unaligned(name_length_pointer) } as usize;
+    // SAFETY: only the field address is formed; the slice is capped below.
+    let name_array_pointer = unsafe { std::ptr::addr_of!((*entry).d_name) };
+    let capacity = candidate_fixed_array_length(name_array_pointer);
+    let name_offset = std::mem::offset_of!(libc::dirent, d_name);
+    let record_name_bytes = record_length
+      .checked_sub(name_offset)
+      .ok_or_else(|| invalid_data("candidate directory entry is malformed"))?;
+    let terminated_length = name_length
+      .checked_add(1)
+      .ok_or_else(|| invalid_data("candidate directory entry is malformed"))?;
+    if name_length >= capacity || terminated_length > record_name_bytes {
+      return Err(invalid_data("candidate directory entry is malformed"));
+    }
+    // SAFETY: terminated_length is within d_reclen and the fixed array.
+    let name = unsafe {
+      std::slice::from_raw_parts(
+        name_array_pointer.cast::<u8>(),
+        terminated_length,
+      )
+    };
+    if name[name_length] != 0 || name[..name_length].contains(&0) {
+      return Err(invalid_data("candidate directory entry is malformed"));
+    }
+    Ok(name[..name_length].to_vec())
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn open_candidate_at(
+    directory: BorrowedFd<'_>,
+    name: &str,
+    flags: libc::c_int,
+  ) -> io::Result<OwnedFd> {
+    let name = CString::new(name.as_bytes())
+      .map_err(|_| invalid_data("candidate generated name contains NUL"))?;
+    loop {
+      // SAFETY: directory is live, name is one NUL-terminated component, and
+      // successful openat returns a new uniquely owned descriptor.
+      let raw =
+        unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+      if raw >= 0 {
+        // SAFETY: successful openat returned a new uniquely owned descriptor.
+        return Ok(unsafe { OwnedFd::from_raw_fd(raw) });
+      }
+      let error = io::Error::last_os_error();
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(error);
+      }
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn scan_exact_lstat_root(
+    root: BorrowedFd<'_>,
+    expected_root: &CandidateDescriptorSnapshot,
+    expected_source: CandidateGeneratedSourceTopology,
+    session_deadline: &CandidateSessionDeadline,
+    deadline: Instant,
+  ) -> io::Result<CandidateLstatTopologyObservation> {
+    session_deadline
+      .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)?;
+    let scan_descriptor = open_candidate_at(
+      root,
+      ".",
+      libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+    )?;
+    let scan_snapshot =
+      CandidateDescriptorSnapshot::capture(scan_descriptor.as_fd())?;
+    if &scan_snapshot != expected_root {
+      return Err(invalid_data(
+        "candidate independent root scan descriptor changed identity",
+      ));
+    }
+    let stream = CandidateDirectoryStream::from_owned(scan_descriptor)?;
+    let expected_non_dot = usize::from(matches!(
+      expected_source,
+      CandidateGeneratedSourceTopology::ExistingEmptyFile
+    ));
+    let scan_result = (|| {
+      let mut saw_dot = false;
+      let mut saw_dot_dot = false;
+      let mut non_dot = 0_usize;
+      let mut records = 0_usize;
+      loop {
+        session_deadline
+          .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)?;
+        clear_candidate_readdir_errno();
+        // SAFETY: stream.raw is live and uniquely owned. The returned record
+        // is copied with record bounds before the next call.
+        let entry = unsafe { libc::readdir(stream.raw) };
+        if entry.is_null() {
+          let errno = candidate_readdir_errno();
+          if errno != 0 {
+            return Err(io::Error::from_raw_os_error(errno));
+          }
+          break;
+        }
+        records = records.saturating_add(1);
+        if records > expected_non_dot + 2 {
+          return Err(invalid_data(
+            "candidate project root contains unexpected directory entries",
+          ));
+        }
+        // SAFETY: readdir returned a record with its fixed header accessible;
+        // the helper copies only record-bounded name bytes.
+        let name = unsafe { candidate_dirent_name(entry) }?;
+        match name.as_slice() {
+          b"." if !saw_dot => saw_dot = true,
+          b".." if !saw_dot_dot => saw_dot_dot = true,
+          name
+            if name == LSTAT_SOURCE_NAME.as_bytes()
+              && matches!(
+                expected_source,
+                CandidateGeneratedSourceTopology::ExistingEmptyFile
+              ) =>
+          {
+            non_dot = non_dot.saturating_add(1);
+          }
+          _ => {
+            return Err(invalid_data(
+              "candidate project root topology is not exact",
+            ));
+          }
+        }
+      }
+      if !saw_dot || !saw_dot_dot || non_dot != expected_non_dot {
+        return Err(invalid_data(
+          "candidate project root topology is not exact",
+        ));
+      }
+      Ok(())
+    })();
+    let close_result = stream.close();
+    if let Err(error) = scan_result {
+      let _ = close_result;
+      return Err(error);
+    }
+    close_result?;
+
+    let source = match expected_source {
+      CandidateGeneratedSourceTopology::ExistingEmptyFile => {
+        let source = open_candidate_at(
+          root,
+          LSTAT_SOURCE_NAME,
+          libc::O_RDONLY
+            | libc::O_NONBLOCK
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC,
+        )
+        .map_err(|_| {
+          invalid_data("candidate existing lstat source could not be opened")
+        })?;
+        let before = CandidateDescriptorSnapshot::capture(source.as_fd())?;
+        if before.mode & libc::S_IFMT as u32 != libc::S_IFREG as u32
+          || before.links != 1
+          || before.size != 0
+          || (before.device == expected_root.device
+            && before.inode == expected_root.inode)
+        {
+          return Err(invalid_data(
+            "candidate existing lstat source is not one exact empty file",
+          ));
+        }
+        let mut byte = 0_u8;
+        let read = loop {
+          session_deadline
+            .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)?;
+          // SAFETY: byte is writable, source is live, and pread does not
+          // change its shared file offset.
+          let result = unsafe {
+            libc::pread(
+              source.as_raw_fd(),
+              std::ptr::from_mut(&mut byte).cast(),
+              1,
+              0,
+            )
+          };
+          if result >= 0 {
+            break result;
+          }
+          let error = io::Error::last_os_error();
+          if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+          }
+        };
+        if read != 0 {
+          return Err(invalid_data(
+            "candidate existing lstat source is not exactly empty",
+          ));
+        }
+        let after = CandidateDescriptorSnapshot::capture(source.as_fd())?;
+        if after != before {
+          return Err(invalid_data(
+            "candidate existing lstat source changed while inspected",
+          ));
+        }
+        Some(before)
+      }
+      CandidateGeneratedSourceTopology::FinalMissing => {
+        let result = open_candidate_at(
+          root,
+          LSTAT_SOURCE_NAME,
+          libc::O_RDONLY
+            | libc::O_NONBLOCK
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC,
+        );
+        match result {
+          Err(error) if error.raw_os_error() == Some(libc::ENOENT) => None,
+          Ok(descriptor) => {
+            drop(descriptor);
+            return Err(invalid_data(
+              "candidate final-missing lstat source unexpectedly exists",
+            ));
+          }
+          Err(_) => {
+            return Err(invalid_data(
+              "candidate final-missing lstat source is not exactly absent",
+            ));
+          }
+        }
+      }
+    };
+    session_deadline
+      .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)?;
+    Ok(CandidateLstatTopologyObservation {
+      root_empty: expected_non_dot == 0,
+      source,
+    })
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn candidate_descriptor_slots_value(
+    identity: &CandidateLstatProtocolIdentity,
+    binding: &CandidateCaseBinding,
+    root: &CandidateDescriptorSnapshot,
+    arena: &CandidateDescriptorSnapshot,
+    root_empty: bool,
+  ) -> Value {
+    json!({
+      "schema": DESCRIPTOR_SLOTS_SCHEMA,
+      "profile": CAPSEC_PROFILE,
+      "runNonce": binding.run_nonce,
+      "target": identity.target,
+      "featureSet": identity.feature_set,
+      "parentStandaloneDigest": binding.parent_standalone_digest,
+      "engineDigest": binding.engine_digest,
+      "forkCommit": identity.fork_commit,
+      "fixtureArtifactDigest": identity.fixture_artifact_digest,
+      "executionIdentityDigest": binding.execution_identity_digest,
+      "sourceClosureDigest": binding.source_closure_digest,
+      "caseId": identity.case.case_id(),
+      "edgeId": LSTAT_EDGE_ID,
+      "requirementId": LSTAT_REQUIREMENT_ID,
+      "caseKind": identity.case.case_kind(),
+      "slots": [
+        {
+          "transferIndex": 0,
+          "role": "logical-root",
+          "descriptorSlot": 0,
+          "root": "$PROJECT",
+          "bindingId": LSTAT_ROOT_BINDING_ID,
+          "fixtureIdentity": {
+            "kind": "opaque-token",
+            "value": identity.generated_topology.root_fixture_identity.value,
+          },
+          "platformIdentity": root.platform_identity(),
+          "objectKind": "directory",
+          "mode": root.mode,
+          "uid": root.uid.to_string(),
+          "gid": root.gid.to_string(),
+          "emptyAtTransfer": root_empty,
+        },
+        {
+          "transferIndex": 1,
+          "role": "arena",
+          "platformIdentity": arena.platform_identity(),
+          "objectKind": "regular-file",
+          "mode": arena.mode,
+          "uid": arena.uid.to_string(),
+          "gid": arena.gid.to_string(),
+          "capacityBytes": ARENA_CAPACITY_BYTES,
+          "zeroFilledAtTransfer": true,
+        },
+      ],
+    })
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn reconstruct_descriptor_slots<F>(
+    identity: &CandidateLstatProtocolIdentity,
+    binding: &CandidateCaseBinding,
+    root: BorrowedFd<'_>,
+    arena: BorrowedFd<'_>,
+    session_deadline: &CandidateSessionDeadline,
+    deadline: Instant,
+    between_observations: F,
+  ) -> io::Result<(Vec<u8>, String)>
+  where
+    F: FnOnce() -> io::Result<()>,
+  {
+    session_deadline
+      .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)?;
+    let root_before = CandidateDescriptorSnapshot::capture(root)?;
+    let arena_before = CandidateDescriptorSnapshot::capture(arena)?;
+    let root_flags_before = require_exact_root_status_flags(root)?;
+    if root_before.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32
+      || arena_before.mode & libc::S_IFMT as u32 != libc::S_IFREG as u32
+      || arena_before.links != 1
+      || arena_before.size != ARENA_CAPACITY_BYTES
+      || (root_before.device == arena_before.device
+        && root_before.inode == arena_before.inode)
+    {
+      return Err(invalid_data(
+        "candidate descriptor-slot reconstruction has inexact rights",
+      ));
+    }
+    // This D1 value still performs no arena write, but preparation must retain
+    // only the exact read/write right required by the later, separate writer.
+    let arena_flags_before = descriptor_status_flags(arena)?;
+    if arena_flags_before & libc::O_ACCMODE != libc::O_RDWR
+      || arena_flags_before & libc::O_APPEND != 0
+    {
+      return Err(invalid_data(
+        "candidate arena right is not exact seekable read/write access",
+      ));
+    }
+    require_zero_filled_arena(arena, session_deadline, deadline)?;
+    let topology_before = scan_exact_lstat_root(
+      root,
+      &root_before,
+      identity.generated_topology.expected_source,
+      session_deadline,
+      deadline,
+    )?;
+    between_observations()?;
+    let topology_after = scan_exact_lstat_root(
+      root,
+      &root_before,
+      identity.generated_topology.expected_source,
+      session_deadline,
+      deadline,
+    )?;
+    require_zero_filled_arena(arena, session_deadline, deadline)?;
+    let root_after = CandidateDescriptorSnapshot::capture(root)?;
+    let arena_after = CandidateDescriptorSnapshot::capture(arena)?;
+    let root_flags_after = require_exact_root_status_flags(root)?;
+    let arena_flags_after = descriptor_status_flags(arena)?;
+    if topology_after != topology_before
+      || root_after != root_before
+      || arena_after != arena_before
+      || root_flags_after != root_flags_before
+      || arena_flags_after != arena_flags_before
+    {
+      return Err(invalid_data(
+        "candidate descriptor topology or identity changed during preparation",
+      ));
+    }
+    if identity.generated_topology.root_fixture_identity.kind
+      != FilesystemObjectIdentityKind::OpaqueToken
+      || identity.generated_topology.root_fixture_identity.value
+        != LSTAT_ROOT_FIXTURE_IDENTITY
+    {
+      return Err(invalid_data(
+        "candidate generated root fixture identity is not exact",
+      ));
+    }
+    let value = candidate_descriptor_slots_value(
+      identity,
+      binding,
+      &root_before,
+      &arena_before,
+      topology_before.root_empty,
+    );
+    let raw_bytes = deno_permissions::rev2::canonical_json(&value)
+      .map(String::into_bytes)
+      .map_err(|_| {
+        invalid_data("candidate descriptor-slot artifact is not canonical")
+      })?;
+    let digest = deno_permissions::rev2::hjcs_digest(
+      DESCRIPTOR_SLOTS_DIGEST_DOMAIN,
+      &value,
+    )
+    .map_err(|_| {
+      invalid_data("candidate descriptor-slot digest could not be derived")
+    })?;
+    if digest != binding.descriptor_slots_digest {
+      return Err(invalid_data(
+        "candidate reconstructed descriptor-slot digest is inexact",
+      ));
+    }
+    session_deadline
+      .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)?;
+    Ok((raw_bytes, digest))
+  }
+
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  fn reconstruct_descriptor_slots<F>(
+    _identity: &CandidateLstatProtocolIdentity,
+    _binding: &CandidateCaseBinding,
+    _root: BorrowedFd<'_>,
+    _arena: BorrowedFd<'_>,
+    _session_deadline: &CandidateSessionDeadline,
+    _deadline: Instant,
+    _between_observations: F,
+  ) -> io::Result<(Vec<u8>, String)>
+  where
+    F: FnOnce() -> io::Result<()>,
+  {
+    Err(invalid_data(
+      "candidate descriptor-slot reconstruction target is unsupported",
+    ))
   }
 
   fn validate_identities(value: &Value) -> io::Result<()> {
@@ -2719,6 +3816,97 @@ mod fd3 {
       }
     }
 
+    fn prepared_request_files(case: CandidateLstatCase) -> RequestFiles {
+      let files = request_files();
+      if case == CandidateLstatCase::Existing {
+        File::create(files._temp.path().join("project/input.txt")).unwrap();
+      }
+      files
+    }
+
+    fn request_bound_to_descriptors(
+      identity: &CandidateLstatProtocolIdentity,
+      files: &RequestFiles,
+    ) -> Value {
+      let mut request = request(identity);
+      let request_bytes = canonical_bytes(&request);
+      let binding = validate_request(
+        &request,
+        identity,
+        raw_frame_digest(CANDIDATE_REQUEST_DIGEST_DOMAIN, &request_bytes),
+      )
+      .unwrap();
+      let root =
+        CandidateDescriptorSnapshot::capture(files.root.as_fd()).unwrap();
+      let arena =
+        CandidateDescriptorSnapshot::capture(files.arena.as_fd()).unwrap();
+      let value = candidate_descriptor_slots_value(
+        identity,
+        &binding,
+        &root,
+        &arena,
+        identity.case == CandidateLstatCase::FinalMissing,
+      );
+      request["descriptorSlotsDigest"] = Value::String(
+        deno_permissions::rev2::hjcs_digest(
+          DESCRIPTOR_SLOTS_DIGEST_DOMAIN,
+          &value,
+        )
+        .unwrap(),
+      );
+      request
+    }
+
+    fn enter_preflight_request_pending(
+      identity: &CandidateLstatProtocolIdentity,
+    ) -> (CandidateFd3Session, FramedStreamEndpoint, Vec<u8>) {
+      let (candidate_endpoint, supervisor_endpoint) =
+        framed_stream_socketpair().unwrap();
+      let mut observed = ready_observed_facts(identity);
+      observed.pre_request_fd_inventory[3]["platformIdentity"] =
+        platform_identity(
+          &inspect_candidate_control_fd(candidate_endpoint.as_fd()).unwrap(),
+        );
+      let preflight =
+        CandidateReadyPreflight::from_observed(identity, observed).unwrap();
+      let expected_ready = preflight.raw_bytes().to_vec();
+      let session = CandidateFd3Session::begin_from_preflight(
+        candidate_endpoint,
+        identity.duplicate_test_fixture(),
+        preflight,
+        deadline(),
+      )
+      .unwrap();
+      let captured = supervisor_endpoint
+        .receive_one_canonical_jcs_frame(
+          FrameByteLimit::CANDIDATE_READY,
+          0,
+          deadline(),
+        )
+        .unwrap();
+      assert_eq!(captured.raw_bytes, expected_ready);
+      (session, supervisor_endpoint, captured.raw_bytes)
+    }
+
+    fn receive_prepared_with_hook<F>(
+      identity: &CandidateLstatProtocolIdentity,
+      files: &RequestFiles,
+      captured_umask: u64,
+      between_observations: F,
+    ) -> io::Result<CandidatePreparedLstatRequest>
+    where
+      F: FnOnce() -> io::Result<()>,
+    {
+      let (session, supervisor, _) = enter_preflight_request_pending(identity);
+      let request = request_bound_to_descriptors(identity, files);
+      send_request(&supervisor, &request, files, true);
+      session.receive_prepared_request_with_observed_umask_and_hook(
+        deadline(),
+        captured_umask,
+        between_observations,
+      )
+    }
+
     fn enter_request_pending(
       identity: &CandidateLstatProtocolIdentity,
     ) -> (CandidateFd3Session, FramedStreamEndpoint, Value, Vec<u8>) {
@@ -2726,7 +3914,7 @@ mod fd3 {
         framed_stream_socketpair().unwrap();
       let mut session = CandidateFd3Session::new(
         candidate_endpoint,
-        identity.clone(),
+        identity.duplicate_test_fixture(),
         deadline(),
       );
       let ready = ready(identity);
@@ -2752,7 +3940,7 @@ mod fd3 {
         framed_stream_socketpair().unwrap();
       let mut session = CandidateFd3Session::with_deadline(
         candidate_endpoint,
-        identity.clone(),
+        identity.duplicate_test_fixture(),
         CandidateSessionDeadline::with_clock(absolute_deadline, clock),
       );
       let ready = ready(identity);
@@ -2953,6 +4141,464 @@ mod fd3 {
       }
     }
 
+    #[test]
+    fn candidate_ready_preflight_refuses_fd3_endpoint_substitution() {
+      let identity = identity(CandidateLstatCase::FinalMissing);
+      let (observed_endpoint, _observed_peer) =
+        framed_stream_socketpair().unwrap();
+      let mut observed = ready_observed_facts(&identity);
+      observed.pre_request_fd_inventory[3]["platformIdentity"] =
+        platform_identity(
+          &inspect_candidate_control_fd(observed_endpoint.as_fd()).unwrap(),
+        );
+      let preflight =
+        CandidateReadyPreflight::from_observed(&identity, observed).unwrap();
+
+      let (substituted_endpoint, substituted_peer) =
+        framed_stream_socketpair().unwrap();
+      let error = CandidateFd3Session::begin_from_preflight(
+        substituted_endpoint,
+        identity,
+        preflight,
+        deadline(),
+      )
+      .err()
+      .unwrap();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      substituted_peer.require_eof(deadline()).unwrap();
+    }
+
+    #[test]
+    fn candidate_prepared_request_accepts_exact_two_target_lstat_topologies() {
+      for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
+        for case in [
+          CandidateLstatCase::Existing,
+          CandidateLstatCase::FinalMissing,
+        ] {
+          let identity = identity_for(target, case);
+          let files = prepared_request_files(case);
+          let (session, supervisor, ready_raw_bytes) =
+            enter_preflight_request_pending(&identity);
+          let request = request_bound_to_descriptors(&identity, &files);
+          let expected_digest = request["descriptorSlotsDigest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+          let request_raw_bytes =
+            send_request(&supervisor, &request, &files, true);
+          let prepared = session
+            .receive_prepared_request_with_observed_umask_and_hook(
+              deadline(),
+              REQUIRED_CAPTURED_UMASK,
+              || Ok(()),
+            )
+            .unwrap();
+          assert_eq!(prepared._ready_raw_bytes, ready_raw_bytes);
+          assert_eq!(prepared._captured_umask, REQUIRED_CAPTURED_UMASK);
+          assert_eq!(prepared._descriptor_slots_digest, expected_digest);
+          assert_eq!(prepared._request_metadata.raw_bytes, request_raw_bytes);
+          assert_eq!(
+            raw_frame_digest(
+              CANDIDATE_REQUEST_DIGEST_DOMAIN,
+              &request_raw_bytes
+            ),
+            prepared._request_metadata.request_frame_digest
+          );
+          let artifact =
+            parse_canonical_jcs(&prepared._descriptor_slots_raw_bytes).unwrap();
+          assert_eq!(artifact["schema"], DESCRIPTOR_SLOTS_SCHEMA);
+          assert_eq!(
+            artifact["slots"][0]["emptyAtTransfer"],
+            case == CandidateLstatCase::FinalMissing
+          );
+          assert_eq!(
+            deno_permissions::rev2::hjcs_digest(
+              DESCRIPTOR_SLOTS_DIGEST_DOMAIN,
+              &artifact
+            )
+            .unwrap(),
+            expected_digest
+          );
+          assert_descriptors_open([
+            prepared._project_root.as_raw_fd(),
+            prepared._arena.as_raw_fd(),
+          ]);
+          drop(prepared);
+          supervisor.require_eof(deadline()).unwrap();
+        }
+      }
+    }
+
+    #[test]
+    fn candidate_prepared_request_requires_consumed_preflight_and_exact_umask()
+    {
+      let identity = identity(CandidateLstatCase::FinalMissing);
+      let files = prepared_request_files(identity.case);
+      assert!(
+        receive_prepared_with_hook(&identity, &files, 0o022, || Ok(()))
+          .is_err()
+      );
+
+      let (legacy_session, supervisor, _, _) = enter_request_pending(&identity);
+      let request = request_bound_to_descriptors(&identity, &files);
+      send_request(&supervisor, &request, &files, true);
+      let observed_umask = AtomicBool::new(false);
+      assert!(
+        legacy_session
+          .receive_prepared_request_with_umask_observer_and_hook(
+            deadline(),
+            || {
+              observed_umask.store(true, Ordering::SeqCst);
+              CandidateCapturedUmask::from_observed_for_test(
+                REQUIRED_CAPTURED_UMASK,
+              )
+            },
+            || Ok(())
+          )
+          .is_err()
+      );
+      assert!(!observed_umask.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn candidate_prepared_request_refuses_wrong_descriptor_digest_and_access() {
+      let identity = identity(CandidateLstatCase::FinalMissing);
+      let files = prepared_request_files(identity.case);
+      let (session, supervisor, _) = enter_preflight_request_pending(&identity);
+      let request = request(&identity);
+      send_request(&supervisor, &request, &files, true);
+      assert!(
+        session
+          .receive_prepared_request_with_observed_umask_and_hook(
+            deadline(),
+            REQUIRED_CAPTURED_UMASK,
+            || Ok(())
+          )
+          .is_err()
+      );
+
+      let read_only_files = {
+        let mut files = prepared_request_files(identity.case);
+        let arena_path = files._temp.path().join("arena");
+        files.arena = OpenOptions::new()
+          .read(true)
+          .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+          .open(arena_path)
+          .unwrap();
+        files
+      };
+      assert!(
+        receive_prepared_with_hook(
+          &identity,
+          &read_only_files,
+          REQUIRED_CAPTURED_UMASK,
+          || Ok(())
+        )
+        .is_err()
+      );
+
+      let append_files = {
+        let mut files = prepared_request_files(identity.case);
+        let arena_path = files._temp.path().join("arena");
+        files.arena = OpenOptions::new()
+          .read(true)
+          .append(true)
+          .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+          .open(arena_path)
+          .unwrap();
+        files
+      };
+      assert!(
+        receive_prepared_with_hook(
+          &identity,
+          &append_files,
+          REQUIRED_CAPTURED_UMASK,
+          || Ok(())
+        )
+        .is_err()
+      );
+
+      let append_root_files = {
+        let files = prepared_request_files(identity.case);
+        let flags = descriptor_status_flags(files.root.as_fd()).unwrap();
+        // SAFETY: F_SETFL updates only mutable status flags on the live
+        // retained test descriptor.
+        assert!(
+          unsafe {
+            libc::fcntl(
+              files.root.as_raw_fd(),
+              libc::F_SETFL,
+              flags | libc::O_APPEND,
+            )
+          } >= 0
+        );
+        assert_ne!(
+          descriptor_status_flags(files.root.as_fd()).unwrap() & libc::O_APPEND,
+          0
+        );
+        files
+      };
+      assert!(
+        receive_prepared_with_hook(
+          &identity,
+          &append_root_files,
+          REQUIRED_CAPTURED_UMASK,
+          || Ok(())
+        )
+        .is_err()
+      );
+
+      #[cfg(target_os = "linux")]
+      {
+        let path_root_files = {
+          let mut files = prepared_request_files(identity.case);
+          let path_only = open_candidate_at(
+            files.root.as_fd(),
+            ".",
+            libc::O_PATH
+              | libc::O_DIRECTORY
+              | libc::O_NOFOLLOW
+              | libc::O_CLOEXEC,
+          )
+          .unwrap();
+          files.root = File::from(path_only);
+          files
+        };
+        assert!(
+          receive_prepared_with_hook(
+            &identity,
+            &path_root_files,
+            REQUIRED_CAPTURED_UMASK,
+            || Ok(())
+          )
+          .is_err()
+        );
+      }
+
+      #[cfg(target_os = "macos")]
+      for alternate_access in [libc::O_EVTONLY, libc::O_SEARCH] {
+        let alternate_root_files = {
+          let mut files = prepared_request_files(identity.case);
+          let alternate = open_candidate_at(
+            files.root.as_fd(),
+            ".",
+            alternate_access
+              | libc::O_DIRECTORY
+              | libc::O_NOFOLLOW
+              | libc::O_CLOEXEC,
+          )
+          .unwrap();
+          files.root = File::from(alternate);
+          files
+        };
+        assert_ne!(
+          descriptor_status_flags(alternate_root_files.root.as_fd()).unwrap()
+            & alternate_access,
+          0
+        );
+        assert!(
+          receive_prepared_with_hook(
+            &identity,
+            &alternate_root_files,
+            REQUIRED_CAPTURED_UMASK,
+            || Ok(())
+          )
+          .is_err()
+        );
+      }
+    }
+
+    #[test]
+    fn candidate_prepared_request_refuses_inexact_existing_source_shapes() {
+      let identity = identity(CandidateLstatCase::Existing);
+
+      let nonempty = prepared_request_files(identity.case);
+      std::fs::write(nonempty._temp.path().join("project/input.txt"), b"x")
+        .unwrap();
+      assert!(
+        receive_prepared_with_hook(
+          &identity,
+          &nonempty,
+          REQUIRED_CAPTURED_UMASK,
+          || Ok(())
+        )
+        .is_err()
+      );
+
+      let hard_linked = prepared_request_files(identity.case);
+      std::fs::hard_link(
+        hard_linked._temp.path().join("project/input.txt"),
+        hard_linked._temp.path().join("outside-link"),
+      )
+      .unwrap();
+      assert!(
+        receive_prepared_with_hook(
+          &identity,
+          &hard_linked,
+          REQUIRED_CAPTURED_UMASK,
+          || Ok(())
+        )
+        .is_err()
+      );
+
+      let directory = prepared_request_files(identity.case);
+      let source = directory._temp.path().join("project/input.txt");
+      std::fs::remove_file(&source).unwrap();
+      std::fs::create_dir(&source).unwrap();
+      assert!(
+        receive_prepared_with_hook(
+          &identity,
+          &directory,
+          REQUIRED_CAPTURED_UMASK,
+          || Ok(())
+        )
+        .is_err()
+      );
+
+      let symlinked = prepared_request_files(identity.case);
+      let source = symlinked._temp.path().join("project/input.txt");
+      std::fs::remove_file(&source).unwrap();
+      File::create(symlinked._temp.path().join("outside")).unwrap();
+      std::os::unix::fs::symlink(
+        symlinked._temp.path().join("outside"),
+        source,
+      )
+      .unwrap();
+      assert!(
+        receive_prepared_with_hook(
+          &identity,
+          &symlinked,
+          REQUIRED_CAPTURED_UMASK,
+          || Ok(())
+        )
+        .is_err()
+      );
+    }
+
+    #[test]
+    fn candidate_prepared_request_refuses_extras_aliases_and_mutation() {
+      let existing = identity(CandidateLstatCase::Existing);
+      let extra = prepared_request_files(existing.case);
+      File::create(extra._temp.path().join("project/output.txt")).unwrap();
+      assert!(
+        receive_prepared_with_hook(
+          &existing,
+          &extra,
+          REQUIRED_CAPTURED_UMASK,
+          || Ok(())
+        )
+        .is_err()
+      );
+
+      let final_missing = identity(CandidateLstatCase::FinalMissing);
+      let alias = prepared_request_files(final_missing.case);
+      File::create(alias._temp.path().join("project/Input.txt")).unwrap();
+      assert!(
+        receive_prepared_with_hook(
+          &final_missing,
+          &alias,
+          REQUIRED_CAPTURED_UMASK,
+          || Ok(())
+        )
+        .is_err()
+      );
+
+      let replaced = prepared_request_files(existing.case);
+      let source = replaced._temp.path().join("project/input.txt");
+      assert!(
+        receive_prepared_with_hook(
+          &existing,
+          &replaced,
+          REQUIRED_CAPTURED_UMASK,
+          || {
+            std::fs::remove_file(&source)?;
+            File::create(&source)?;
+            Ok(())
+          }
+        )
+        .is_err()
+      );
+
+      let arena_mutated = prepared_request_files(final_missing.case);
+      let arena = arena_mutated.arena.try_clone().unwrap();
+      assert!(
+        receive_prepared_with_hook(
+          &final_missing,
+          &arena_mutated,
+          REQUIRED_CAPTURED_UMASK,
+          move || {
+            let byte = [1_u8];
+            // SAFETY: byte is readable and arena is a live regular file.
+            let written = unsafe {
+              libc::pwrite(
+                arena.as_raw_fd(),
+                byte.as_ptr().cast(),
+                byte.len(),
+                0,
+              )
+            };
+            if written == 1 {
+              Ok(())
+            } else if written < 0 {
+              Err(io::Error::last_os_error())
+            } else {
+              Err(invalid_data("test arena mutation was short"))
+            }
+          }
+        )
+        .is_err()
+      );
+
+      let root_flags_mutated = prepared_request_files(final_missing.case);
+      let root = root_flags_mutated.root.try_clone().unwrap();
+      assert!(
+        receive_prepared_with_hook(
+          &final_missing,
+          &root_flags_mutated,
+          REQUIRED_CAPTURED_UMASK,
+          move || {
+            let flags = descriptor_status_flags(root.as_fd())?;
+            // SAFETY: F_SETFL updates only mutable status flags on this live
+            // duplicate of the transferred root open-file description.
+            if unsafe {
+              libc::fcntl(
+                root.as_raw_fd(),
+                libc::F_SETFL,
+                flags | libc::O_APPEND,
+              )
+            } < 0
+            {
+              return Err(io::Error::last_os_error());
+            }
+            Ok(())
+          }
+        )
+        .is_err()
+      );
+    }
+
+    #[test]
+    fn candidate_prepared_dirent_name_is_record_bounded() {
+      // SAFETY: zero is a valid representation for this C record.
+      let mut entry: libc::dirent = unsafe { std::mem::zeroed() };
+      let name_offset = std::mem::offset_of!(libc::dirent, d_name);
+      entry.d_name[0] = b'x' as _;
+      entry.d_name[1] = 0;
+      #[cfg(target_os = "macos")]
+      {
+        entry.d_namlen = 1;
+      }
+      entry.d_reclen = (name_offset + 2).try_into().unwrap();
+      // SAFETY: the local record contains the fixed header and the bounded
+      // name plus NUL described above.
+      assert_eq!(unsafe { candidate_dirent_name(&entry) }.unwrap(), b"x");
+
+      entry.d_reclen = (name_offset + 1).try_into().unwrap();
+      // SAFETY: the fixed header remains accessible; the helper must refuse
+      // because the NUL now lies outside the declared record.
+      assert!(unsafe { candidate_dirent_name(&entry) }.is_err());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn candidate_ready_actual_preflight_refuses_the_unprepared_test_process() {
@@ -3093,7 +4739,7 @@ mod fd3 {
         framed_stream_socketpair().unwrap();
       let mut session = CandidateFd3Session::new(
         candidate_endpoint,
-        identity.clone(),
+        identity.duplicate_test_fixture(),
         deadline(),
       );
       let error = session.receive_request(deadline()).unwrap_err();
