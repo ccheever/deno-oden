@@ -18,9 +18,10 @@ mod fs_runtime;
 pub(crate) use fs_runtime::OdenRev2FilesystemDeliveryWitness;
 pub use fs_runtime::OdenRev2FilesystemError;
 pub(crate) use fs_runtime::OdenRev2FilesystemNativeCommitWitness;
+pub use fs_runtime::OdenRev2LstatCandidateArtifacts;
 pub use fs_runtime::OdenRev2LstatCandidateBinaryIdentity;
 pub use fs_runtime::OdenRev2LstatCandidateCapsule;
-pub use fs_runtime::OdenRev2LstatCandidateObservation;
+pub(crate) use fs_runtime::OdenRev2LstatCandidateDescriptorRootMode;
 pub use fs_runtime::OdenRev2LstatCandidateOpStateBinding;
 pub use fs_runtime::OdenRev2LstatDelivery;
 pub use fs_runtime::OdenRev2MkdirDelivery;
@@ -819,6 +820,44 @@ impl OdenRev2RuntimeAuthorityContext {
 
   pub fn authority_state(&self) -> &RuntimeAuthorityState {
     &self.authority_state
+  }
+
+  /// Consume only the sealed lstat Candidate after every operation graph and
+  /// namespace guard has been released.
+  ///
+  /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+  /// [constrained-by] -- Terminal decomposition is private, one-shot, and
+  /// yields no installed context or authority surface.
+  fn into_lstat_candidate_terminal_parts(
+    self,
+  ) -> Result<
+    (
+      Arc<fs_runtime::OdenRev2LstatCandidateHarness>,
+      Arc<[OdenRev2RetainedObject]>,
+    ),
+    String,
+  > {
+    if self.execution_role != OdenRev2ExecutionRole::Candidate
+      || self.mode != Mode::Enforce
+      || self.lstat_candidate.is_none()
+      || self.retained_objects.len() != 1
+      || Arc::strong_count(&self.retained_objects) != 1
+    {
+      return Err(format!("{CONTEXT_ERROR}-CANDIDATE-TERMINAL"));
+    }
+    let namespace = self
+      .namespace_gate
+      .into_inner()
+      .map_err(|_| format!("{CONTEXT_ERROR}-CANDIDATE-TERMINAL"))?;
+    if namespace.fail_closed {
+      return Err(format!("{CONTEXT_ERROR}-CANDIDATE-TERMINAL"));
+    }
+    Ok((
+      self
+        .lstat_candidate
+        .expect("candidate terminal shape checked above"),
+      self.retained_objects,
+    ))
   }
 
   /// Acquire namespace then authority, minting one operation identity only

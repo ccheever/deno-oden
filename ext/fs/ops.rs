@@ -180,10 +180,20 @@ fn complete_rev2_lstat_delivery(
   stat_out_buf: &mut [u32],
   delivery: deno_permissions::OdenRev2LstatDelivery<'_>,
 ) -> Result<(), FsOpsError> {
+  let candidate = state
+    .try_borrow::<std::sync::Arc<
+      deno_permissions::OdenRev2LstatCandidateOpStateBinding,
+    >>()
+    .is_some();
   let result = if let Some(metadata) = delivery.metadata() {
     SerializableStat::from(FsStat::from_std(metadata.clone()))
       .write(stat_out_buf);
     Ok(())
+  } else if candidate {
+    debug_assert!(delivery.is_not_found());
+    Err(
+      FsOpsErrorKind::Io(io::Error::from_raw_os_error(libc::ENOENT)).into_box(),
+    )
   } else {
     debug_assert!(delivery.is_not_found());
     map_rev2_filesystem_result(
@@ -195,11 +205,10 @@ fn complete_rev2_lstat_delivery(
       "Deno.lstatSync()",
     )
   };
-  let candidate_delivery = if let Some(binding) = state
-    .try_borrow::<std::sync::Arc<
+  let candidate_delivery = if let Some(binding) =
+    state.try_borrow::<std::sync::Arc<
       deno_permissions::OdenRev2LstatCandidateOpStateBinding,
     >>()
-    .cloned()
   {
     map_rev2_filesystem_result(
       binding.observe_delivery(requested_path, &delivery),
@@ -849,12 +858,9 @@ pub(crate) fn op_fs_lstat_sync_impl(
   stat_out_buf: &mut [u32],
 ) -> Result<(), FsOpsError> {
   let requested_path = Path::new(path);
-  if let Some(binding) = state
-    .try_borrow::<std::sync::Arc<
-      deno_permissions::OdenRev2LstatCandidateOpStateBinding,
-    >>()
-    .cloned()
-  {
+  if let Some(binding) = state.try_borrow::<std::sync::Arc<
+    deno_permissions::OdenRev2LstatCandidateOpStateBinding,
+  >>() {
     let state_mode = state
       .try_borrow::<deno_permissions::OdenRev2ProcessMode>()
       .copied();
@@ -878,6 +884,12 @@ pub(crate) fn op_fs_lstat_sync_impl(
         "Deno.lstatSync()",
       ));
     }
+    map_rev2_filesystem_result(
+      binding.enter_lstat_public_op_impl(requested_path),
+      "lstat",
+      requested_path,
+      "Deno.lstatSync()",
+    )?;
     let delivery = map_rev2_filesystem_result(
       deno_permissions::oden_capsec_rev2_lstat_candidate_sync(
         &binding,

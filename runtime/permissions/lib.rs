@@ -68,11 +68,11 @@ mod rev2_registry_generated;
 
 pub use oden_rev2_context::OdenRev2FilesystemError;
 #[doc(hidden)]
+pub use oden_rev2_context::OdenRev2LstatCandidateArtifacts;
+#[doc(hidden)]
 pub use oden_rev2_context::OdenRev2LstatCandidateBinaryIdentity;
 #[doc(hidden)]
 pub use oden_rev2_context::OdenRev2LstatCandidateCapsule;
-#[doc(hidden)]
-pub use oden_rev2_context::OdenRev2LstatCandidateObservation;
 #[doc(hidden)]
 pub use oden_rev2_context::OdenRev2LstatCandidateOpStateBinding;
 pub use oden_rev2_context::OdenRev2LstatDelivery;

@@ -455,6 +455,7 @@ struct OdenRev2FsRootState {
   adapter: OdenRev2FsCanonicalizerAdapter,
   retained: Arc<File>,
   named: Arc<File>,
+  _candidate_graph_sentinel: Option<Arc<()>>,
 }
 
 /// An authenticated logical root backed by both the C03-retained descriptor
@@ -512,6 +513,7 @@ impl OdenRev2FsAuthenticatedRoot {
       Some(canonical_path),
       expected_identity,
       retained,
+      None,
     )
   }
 
@@ -519,7 +521,12 @@ impl OdenRev2FsAuthenticatedRoot {
   /// descriptor. It carries no ambient pathname and therefore cannot claim
   /// named-root replacement coverage; those cases require an anchor-relative
   /// reopener before they can become executable.
+  ///
+  /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+  /// [constrained-by] -- This descriptor mode is available only through the
+  /// sealed lstat Candidate token and produces no promoted runtime authority.
   pub(crate) fn authenticate_descriptor_parts(
+    mode: &crate::oden_rev2_context::OdenRev2LstatCandidateDescriptorRootMode,
     source_id: String,
     logical_root: String,
     binding_id: String,
@@ -533,6 +540,7 @@ impl OdenRev2FsAuthenticatedRoot {
       None,
       expected_identity,
       retained,
+      Some(mode),
     )
   }
 
@@ -543,6 +551,9 @@ impl OdenRev2FsAuthenticatedRoot {
     canonical_path: Option<PathBuf>,
     expected_identity: &str,
     retained: File,
+    descriptor_mode: Option<
+      &crate::oden_rev2_context::OdenRev2LstatCandidateDescriptorRootMode,
+    >,
   ) -> Result<Self, OdenRev2FsError> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -553,6 +564,7 @@ impl OdenRev2FsAuthenticatedRoot {
         canonical_path,
         expected_identity,
         retained,
+        descriptor_mode,
       );
       return Err(OdenRev2FsError::UnsupportedPlatform);
     }
@@ -592,6 +604,12 @@ impl OdenRev2FsAuthenticatedRoot {
       {
         return Err(OdenRev2FsError::RootReplacement);
       }
+      let candidate_graph_sentinel = descriptor_mode
+        .map(|mode| mode.register_graph())
+        .transpose()
+        .map_err(|_| {
+          OdenRev2FsError::InvalidBinding("candidate root graph tracker")
+        })?;
       Ok(Self {
         state: Arc::new(OdenRev2FsRootState {
           source_id,
@@ -602,6 +620,7 @@ impl OdenRev2FsAuthenticatedRoot {
           adapter: platform_adapter(),
           retained: Arc::new(retained),
           named: Arc::new(named),
+          _candidate_graph_sentinel: candidate_graph_sentinel,
         }),
       })
     }
@@ -3404,7 +3423,10 @@ mod tests {
         .unwrap()
         .identity
         .canonical_value();
+    let mode =
+      crate::oden_rev2_context::OdenRev2LstatCandidateDescriptorRootMode::new_for_test();
     OdenRev2FsAuthenticatedRoot::authenticate_descriptor_parts(
+      &mode,
       source_id.to_string(),
       logical_root.to_string(),
       binding_id.to_string(),

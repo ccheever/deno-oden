@@ -121,6 +121,14 @@ impl OdenRev2RetainedObject {
     self.provenance_digest.as_deref()
   }
 
+  pub(crate) fn candidate_file_strong_count(&self) -> usize {
+    Arc::strong_count(&self.file)
+  }
+
+  pub(crate) fn candidate_file_weak(&self) -> std::sync::Weak<File> {
+    Arc::downgrade(&self.file)
+  }
+
   #[cfg(test)]
   pub(crate) fn executable_for_test(
     binding_id: impl Into<String>,
@@ -293,75 +301,6 @@ impl OdenRev2LoadedPolicyContext {
     self
       .installed_executables
       .install_once(&self.retained_objects, control_root)
-  }
-
-  /// Transfer the parent-supplied retained project-root descriptor into one
-  /// VerifiedUnarmed Candidate after independently opening and validating the
-  /// same named root through normal snapshot verification.
-  pub(crate) fn replace_candidate_root_descriptor(
-    &mut self,
-    canonical_path: &std::path::Path,
-    file: File,
-  ) -> Result<(), String> {
-    if self.state != OdenRev2LoadState::VerifiedUnarmed
-      || self.execution_role != "candidate"
-      || self.retained_objects.len() != 1
-      || self.retained_objects[0].role().is_some()
-      || self.retained_objects[0].canonical_path() != canonical_path
-    {
-      return Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string());
-    }
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::MetadataExt;
-
-      let named = std::fs::symlink_metadata(canonical_path)
-        .map_err(|_| "OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())?;
-      let independently_opened = self.retained_objects[0]
-        .file()
-        .metadata()
-        .map_err(|_| "OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())?;
-      let supplied = file
-        .metadata()
-        .map_err(|_| "OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())?;
-      if !named.is_dir()
-        || !independently_opened.is_dir()
-        || !supplied.is_dir()
-        || named.dev() != independently_opened.dev()
-        || named.ino() != independently_opened.ino()
-        || named.dev() != supplied.dev()
-        || named.ino() != supplied.ino()
-      {
-        return Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string());
-      }
-      let expected = format!(
-        "unix-dev-ino:{:016x}{:016x}",
-        supplied.dev(),
-        supplied.ino()
-      );
-      if self.retained_objects[0].object_identity() != expected {
-        return Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string());
-      }
-      let mut retained = self.retained_objects.to_vec();
-      retained[0].file = Arc::new(file);
-      let transferred = retained[0]
-        .file()
-        .metadata()
-        .map_err(|_| "OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())?;
-      if transferred.dev() != supplied.dev()
-        || transferred.ino() != supplied.ino()
-        || !transferred.is_dir()
-      {
-        return Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string());
-      }
-      self.retained_objects = retained.into();
-      Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-      let _ = (canonical_path, file);
-      Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())
-    }
   }
 
   /// Refuse a C03-authenticated execution shape that the initial C04 run
@@ -593,17 +532,23 @@ pub fn verify_authenticated_envelope(
   )
 }
 
-/// Verify one internally assembled, unauthenticated Candidate snapshot against
-/// the exact generated status for this binary. The result is deliberately
-/// `VerifiedUnarmed`: it cannot enter the process-global C04 installer and
-/// carries no executable image or conformance report.
+struct CandidateDescriptorSnapshotRoot {
+  synthetic_path: PathBuf,
+  file: File,
+}
+
+/// Verify the same closed Candidate snapshot while sourcing its sole root
+/// binding from an already-retained descriptor. The synthetic path is used
+/// only by the internal lexical selector; this verifier never opens it.
 ///
 /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
-/// [constrained-by] -- Candidate execution may reuse closed snapshot parsing
-/// and retained-root validation, but unsupported/non-advertised target status
-/// must remain literal and cannot become release or runtime authority.
-pub(crate) fn verify_unarmed_candidate_snapshot(
+/// [constrained-by] -- Descriptor authentication is confined to the sealed,
+/// production-uncalled lstat Candidate. It does not authenticate a repository
+/// path, image, fixture execution, or release fact.
+pub(crate) fn verify_unarmed_descriptor_candidate_snapshot(
   snapshot: &Value,
+  synthetic_path: PathBuf,
+  file: File,
 ) -> Result<OdenRev2LoadedPolicyContext, String> {
   let compiled = compiled_target()
     .ok_or_else(|| "OD-CAP-REV2-TARGET-UNKNOWN".to_string())?;
@@ -611,7 +556,7 @@ pub(crate) fn verify_unarmed_candidate_snapshot(
     .iter()
     .find(|status| status.target == compiled)
     .ok_or_else(|| "OD-CAP-REV2-TARGET-UNKNOWN".to_string())?;
-  let loaded = verify_snapshot(
+  let loaded = verify_snapshot_with_candidate_root(
     snapshot,
     TargetStatus {
       target: embedded.target,
@@ -625,6 +570,10 @@ pub(crate) fn verify_unarmed_candidate_snapshot(
       advertised: REV2_ADVERTISED_TARGETS.contains(&embedded.target),
       hermetic: false,
     },
+    Some(CandidateDescriptorSnapshotRoot {
+      synthetic_path,
+      file,
+    }),
   )?;
   if loaded.state != OdenRev2LoadState::VerifiedUnarmed
     || loaded.execution_role != "candidate"
@@ -803,6 +752,14 @@ fn verify_snapshot(
   snapshot: &Value,
   target_status: TargetStatus<'_>,
 ) -> Result<OdenRev2LoadedPolicyContext, String> {
+  verify_snapshot_with_candidate_root(snapshot, target_status, None)
+}
+
+fn verify_snapshot_with_candidate_root(
+  snapshot: &Value,
+  target_status: TargetStatus<'_>,
+  candidate_root: Option<CandidateDescriptorSnapshotRoot>,
+) -> Result<OdenRev2LoadedPolicyContext, String> {
   let snapshot_object = exact_object(
     snapshot,
     &[
@@ -935,8 +892,12 @@ fn verify_snapshot(
   if receipt_set_digest != computed_receipt_set {
     return Err("OD-CAP-REV2-RECEIPT-DIGEST-MISMATCH".to_string());
   }
-  let retained_objects =
-    validate_snapshot_bindings(snapshot_object, &policy_facts, project_digest)?;
+  let retained_objects = validate_snapshot_bindings(
+    snapshot_object,
+    &policy_facts,
+    project_digest,
+    candidate_root,
+  )?;
 
   reject_display_or_source_fields(snapshot)?;
   let armed_snapshot_digest =
@@ -1291,6 +1252,7 @@ fn validate_snapshot_bindings(
   snapshot: &Map<String, Value>,
   facts: &PolicyFacts,
   project_digest: &str,
+  candidate_root: Option<CandidateDescriptorSnapshotRoot>,
 ) -> Result<Vec<OdenRev2RetainedObject>, String> {
   let mut retained = validate_root_bindings(
     snapshot
@@ -1298,6 +1260,7 @@ fn validate_snapshot_bindings(
       .and_then(Value::as_array)
       .ok_or_else(|| "OD-CAP-REV2-rootBindings-SHAPE".to_string())?,
     facts,
+    candidate_root,
   )?;
   retained.extend(validate_executable_bindings(
     snapshot
@@ -1342,7 +1305,11 @@ fn validate_snapshot_bindings(
 fn validate_root_bindings(
   bindings: &[Value],
   facts: &PolicyFacts,
+  mut candidate_root: Option<CandidateDescriptorSnapshotRoot>,
 ) -> Result<Vec<OdenRev2RetainedObject>, String> {
+  if candidate_root.is_some() && bindings.len() != 1 {
+    return Err("OD-CAP-REV2-CANDIDATE-ROOT-COVERAGE".to_string());
+  }
   let mut required = HashSet::new();
   for fact in &facts.rows {
     let mut roots = HashSet::new();
@@ -1404,11 +1371,19 @@ fn validate_root_bindings(
       .ok_or_else(|| "OD-CAP-REV2-ROOT-BINDING-OBJECT".to_string())?;
     let canonical_path = parse_tagged_path(canonical_path_value)?;
     let object_identity = platform_object_identity(object_identity_value)?;
-    let file = validate_and_open_bound_object(
-      canonical_path_value,
-      object_identity_value,
-      true,
-    )?;
+    let file = if let Some(candidate) = candidate_root.take() {
+      if canonical_path != candidate.synthetic_path {
+        return Err("OD-CAP-REV2-CANDIDATE-ROOT-PATH".to_string());
+      }
+      validate_candidate_descriptor_root(&candidate.file, &object_identity)?;
+      candidate.file
+    } else {
+      validate_and_open_bound_object(
+        canonical_path_value,
+        object_identity_value,
+        true,
+      )?
+    };
     retained.push(OdenRev2RetainedObject {
       binding_id: binding_id.to_string(),
       source_id: source_id.to_string(),
@@ -1424,7 +1399,58 @@ fn validate_root_bindings(
   if required != supplied {
     return Err("OD-CAP-REV2-ROOT-BINDING-COVERAGE".to_string());
   }
+  if candidate_root.is_some() {
+    return Err("OD-CAP-REV2-CANDIDATE-ROOT-COVERAGE".to_string());
+  }
   Ok(retained)
+}
+
+fn validate_candidate_descriptor_root(
+  file: &File,
+  expected_identity: &str,
+) -> Result<(), String> {
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    let _ = (file, expected_identity);
+    return Err("OD-CAP-REV2-CANDIDATE-ROOT-PLATFORM".to_string());
+  }
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file
+      .metadata()
+      .map_err(|_| "OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())?;
+    let identity = format!(
+      "unix-dev-ino:{:016x}{:016x}",
+      metadata.dev(),
+      metadata.ino()
+    );
+    // SAFETY: both fcntl commands only inspect the live retained descriptor.
+    let descriptor_flags =
+      unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+    // SAFETY: F_GETFL only inspects the live retained descriptor.
+    let status_flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    #[cfg(target_os = "linux")]
+    let alternate_access =
+      status_flags >= 0 && status_flags & libc::O_PATH != 0;
+    #[cfg(target_os = "macos")]
+    let alternate_access =
+      status_flags >= 0 && status_flags & (libc::O_EVTONLY | libc::O_EXEC) != 0;
+    if !metadata.is_dir()
+      || identity != expected_identity
+      || descriptor_flags < 0
+      || descriptor_flags & libc::FD_CLOEXEC == 0
+      || status_flags < 0
+      || status_flags & libc::O_ACCMODE != libc::O_RDONLY
+      || status_flags & libc::O_APPEND != 0
+      || alternate_access
+    {
+      return Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string());
+    }
+    Ok(())
+  }
 }
 
 fn validate_executable_bindings(
