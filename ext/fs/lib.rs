@@ -28,12 +28,15 @@ pub const UNSTABLE_FEATURE_NAME: &str = "fs";
 /// Consume one dormant Candidate capsule through the exact registered
 /// synchronous public-op implementation. No production dispatcher calls this
 /// seam, and its opaque result carries no expectation or release authority.
+/// This symbol is public only so the separate `deno` crate can consume the
+/// unforgeable one-shot capsule. It is call-graph/state-machine enforcement,
+/// not hostile-linker call-origin attestation.
 ///
 /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
 /// [constrained-by]
 #[doc(hidden)]
 #[allow(dead_code)]
-pub(crate) fn oden_capsec_rev2_execute_lstat_candidate(
+pub fn oden_capsec_rev2_execute_lstat_candidate(
   capsule: deno_permissions::OdenRev2LstatCandidateCapsule,
 ) -> Result<
   deno_permissions::OdenRev2LstatCandidateArtifacts,

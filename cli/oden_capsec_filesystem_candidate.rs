@@ -33,10 +33,10 @@ pub fn maybe_run_oden_capsec_filesystem_candidate(
   }
 
   // No row can currently reach this point. The dormant FD3 role protocol
-  // below has production-uncalled preflight, construction, and descriptor-slot
-  // preparation boundaries, but no response-artifact assembler, public-op
-  // executor, or production caller. All three generated process admission
-  // tables therefore remain empty until the complete
+  // below has production-uncalled preflight, construction, descriptor-slot
+  // preparation, and exact D1-to-D2 execution-join boundaries, but no
+  // response-artifact assembler or production caller. All three generated
+  // process admission tables therefore remain empty until the complete
   // parent/supervisor/candidate capture and oracle barriers exist.
   Some(REFUSAL_EXIT_CODE)
 }
@@ -48,6 +48,7 @@ pub fn maybe_run_oden_capsec_filesystem_candidate(
 )]
 mod fd3 {
   use std::ffi::CString;
+  use std::fs::File;
   use std::io;
   use std::os::fd::AsFd;
   use std::os::fd::AsRawFd;
@@ -324,7 +325,7 @@ mod fd3 {
     Fixture,
   }
 
-  #[derive(Clone)]
+  #[derive(Clone, Debug, Eq, PartialEq)]
   struct CandidateGeneratedLstatTopology {
     root_fixture_identity: FilesystemObjectIdentity,
     expected_source: CandidateGeneratedSourceTopology,
@@ -492,6 +493,34 @@ mod fd3 {
         }
         "x86_64-unknown-linux-gnu" => "linux-rlimit-nproc-zero-seccomp-v1",
         _ => unreachable!("constructor closes the target tuple"),
+      }
+    }
+
+    fn require_exact_execution_join(&self) -> io::Result<()> {
+      match &self.generated_seal {
+        CandidateGeneratedSeal::Exact(generated) => {
+          let generated_topology = validate_generated_lstat_topology(
+            generated.execution_projection(),
+            generated.case_id(),
+          )?;
+          if generated.fixture_artifact_digest() != self.fixture_artifact_digest
+            || generated.case_id() != self.case.case_id()
+            || generated.target() != self.target
+            || generated.feature_set() != self.feature_set
+            || generated.execution_projection_digest()
+              != self.execution_projection_digest
+            || generated_topology != self.generated_topology
+          {
+            return Err(invalid_data(
+              "candidate prepared identity diverges from generated admission",
+            ));
+          }
+          Ok(())
+        }
+        #[cfg(test)]
+        CandidateGeneratedSeal::Fixture => Err(invalid_data(
+          "candidate execution requires an exact generated admission",
+        )),
       }
     }
   }
@@ -695,6 +724,8 @@ mod fd3 {
     CpuValidationComplete,
     ArenaReadAttempt,
     ArenaReadComplete,
+    ExecutionStart,
+    ExecutionComplete,
   }
 
   trait CandidateClock: Send + Sync {
@@ -828,7 +859,7 @@ mod fd3 {
     }
   }
 
-  #[derive(Clone, Debug)]
+  #[derive(Clone, Debug, Eq, PartialEq)]
   struct CandidateCaseBinding {
     run_nonce: String,
     parent_standalone_digest: String,
@@ -865,9 +896,9 @@ mod fd3 {
 
   /// A non-cloneable, opaque prepared request. It owns the exact generated
   /// identity seal, the consumed ready preflight, both transferred rights,
-  /// and the reconstructed descriptor-slot artifact. This D1 boundary has no
-  /// execution, public-op, arena-write, trace, response, evidence, policy, or
-  /// authority method.
+  /// and the reconstructed descriptor-slot artifact. It can only be consumed
+  /// by the dormant D3 equality join; it has no arena-write, response, send,
+  /// oracle, evidence, policy, admission, or authority method.
   ///
   /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
   /// [constrained-by] — Descriptor reconstruction and exact generated
@@ -885,6 +916,230 @@ mod fd3 {
     _descriptor_slots_raw_bytes: Vec<u8>,
     _descriptor_slots_digest: String,
     _captured_umask: u64,
+    _session_deadline: CandidateSessionDeadline,
+  }
+
+  /// A consumed D1 request joined to exactly one completed D2 public-op
+  /// execution. The original FD 3 endpoint and original arena remain owned
+  /// here for a later output checkpoint; the project-root descriptor has
+  /// already been consumed and dropped by D2. This type exposes no arena
+  /// write, artifact serialization, response, send, oracle, evidence, policy,
+  /// admission, or authority method.
+  ///
+  /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+  /// [constrained-by] — This is only a production-uncalled equality and
+  /// ownership join between two dormant candidate checkpoints.
+  /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
+  /// [constrained-by] — The endpoint and arena remain unconsumed; D3 emits no
+  /// packet and writes no arena byte.
+  pub(crate) struct CandidateExecutedLstatRequest {
+    _endpoint: FramedStreamEndpoint,
+    _identity: CandidateLstatProtocolIdentity,
+    _ready_raw_bytes: Vec<u8>,
+    _ready_facts: CandidateReadyFacts,
+    _binding: CandidateCaseBinding,
+    _request_metadata: Arc<CandidateLstatRequestMetadata>,
+    _arena: File,
+    _descriptor_slots_raw_bytes: Vec<u8>,
+    _descriptor_slots_digest: String,
+    _captured_umask: u64,
+    _session_deadline: CandidateSessionDeadline,
+    _artifacts: deno_permissions::OdenRev2LstatCandidateArtifacts,
+  }
+
+  impl CandidatePreparedLstatRequest {
+    /// Consume one prepared request through the exact D2 public-op capsule.
+    /// There is deliberately no production caller while `CANDIDATE_CASES`
+    /// remains empty.
+    ///
+    /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+    /// [constrained-by]
+    #[allow(dead_code)]
+    pub(crate) fn execute_lstat_candidate(
+      self,
+      requested_deadline: Instant,
+    ) -> io::Result<CandidateExecutedLstatRequest> {
+      self.execute_lstat_candidate_with_hook(requested_deadline, |_| Ok(()))
+    }
+
+    fn execute_lstat_candidate_with_hook<F>(
+      self,
+      requested_deadline: Instant,
+      after_execution: F,
+    ) -> io::Result<CandidateExecutedLstatRequest>
+    where
+      F: FnOnce(&File) -> io::Result<()>,
+    {
+      let effective_deadline = self._session_deadline.effective(
+        requested_deadline,
+        CandidateDeadlineCheckpoint::ExecutionStart,
+      )?;
+      validate_prepared_execution_relation(
+        &self._identity,
+        &self._binding,
+        &self._request_metadata,
+        &self._descriptor_slots_raw_bytes,
+        &self._descriptor_slots_digest,
+      )?;
+      let (reconstructed_bytes, reconstructed_digest) =
+        reconstruct_descriptor_slots(
+          &self._identity,
+          &self._binding,
+          self._project_root.as_fd(),
+          self._arena.as_fd(),
+          &self._session_deadline,
+          effective_deadline,
+          || Ok(()),
+        )?;
+      if reconstructed_bytes != self._descriptor_slots_raw_bytes
+        || reconstructed_digest != self._descriptor_slots_digest
+      {
+        return Err(invalid_data(
+          "candidate prepared descriptors changed before execution",
+        ));
+      }
+
+      let CandidatePreparedLstatRequest {
+        _endpoint: endpoint,
+        _identity: identity,
+        _ready_raw_bytes: ready_raw_bytes,
+        _ready_facts: ready_facts,
+        _binding: binding,
+        _request_metadata: request_metadata,
+        _project_root: project_root,
+        _arena: arena,
+        _descriptor_slots_raw_bytes: descriptor_slots_raw_bytes,
+        _descriptor_slots_digest: descriptor_slots_digest,
+        _captured_umask: captured_umask,
+        _session_deadline: session_deadline,
+      } = self;
+      let project_root = File::from(project_root);
+      let arena = File::from(arena);
+      require_cloexec(project_root.as_fd())?;
+      require_cloexec(arena.as_fd())?;
+      let arena_raw_fd = arena.as_raw_fd();
+      let arena_snapshot = CandidateDescriptorSnapshot::capture(arena.as_fd())?;
+      let arena_status_flags = descriptor_status_flags(arena.as_fd())?;
+      let execution_arena = arena.try_clone()?;
+      require_cloexec(execution_arena.as_fd())?;
+      if execution_arena.as_raw_fd() == arena_raw_fd
+        || CandidateDescriptorSnapshot::capture(execution_arena.as_fd())?
+          != arena_snapshot
+        || descriptor_status_flags(execution_arena.as_fd())?
+          != arena_status_flags
+      {
+        return Err(invalid_data(
+          "candidate execution arena duplicate is not exact",
+        ));
+      }
+
+      let capsule = deno_permissions::oden_capsec_rev2_prepare_lstat_candidate(
+        &identity.fixture_artifact_digest,
+        identity.case.case_id(),
+        project_root,
+        execution_arena,
+      )
+      .map_err(|_| {
+        invalid_data("candidate prepared request was refused by D2")
+      })?;
+      let artifacts =
+        deno_runtime::deno_fs::oden_capsec_rev2_execute_lstat_candidate(
+          capsule,
+        )
+        .map_err(|_| {
+          invalid_data("candidate D2 public-op execution refused")
+        })?;
+      after_execution(&arena)?;
+      session_deadline.check(
+        effective_deadline,
+        CandidateDeadlineCheckpoint::ExecutionComplete,
+      )?;
+      validate_prepared_execution_relation(
+        &identity,
+        &binding,
+        &request_metadata,
+        &descriptor_slots_raw_bytes,
+        &descriptor_slots_digest,
+      )?;
+      require_cloexec(arena.as_fd())?;
+      if arena.as_raw_fd() != arena_raw_fd
+        || CandidateDescriptorSnapshot::capture(arena.as_fd())?
+          != arena_snapshot
+        || descriptor_status_flags(arena.as_fd())? != arena_status_flags
+      {
+        return Err(invalid_data(
+          "candidate retained arena changed during execution",
+        ));
+      }
+      require_zero_filled_arena(
+        arena.as_fd(),
+        &session_deadline,
+        effective_deadline,
+      )?;
+
+      Ok(CandidateExecutedLstatRequest {
+        _endpoint: endpoint,
+        _identity: identity,
+        _ready_raw_bytes: ready_raw_bytes,
+        _ready_facts: ready_facts,
+        _binding: binding,
+        _request_metadata: request_metadata,
+        _arena: arena,
+        _descriptor_slots_raw_bytes: descriptor_slots_raw_bytes,
+        _descriptor_slots_digest: descriptor_slots_digest,
+        _captured_umask: captured_umask,
+        _session_deadline: session_deadline,
+        _artifacts: artifacts,
+      })
+    }
+  }
+
+  fn validate_prepared_execution_relation(
+    identity: &CandidateLstatProtocolIdentity,
+    binding: &CandidateCaseBinding,
+    request_metadata: &Arc<CandidateLstatRequestMetadata>,
+    descriptor_slots_raw_bytes: &[u8],
+    descriptor_slots_digest: &str,
+  ) -> io::Result<()> {
+    identity.require_exact_execution_join()?;
+    if Arc::strong_count(request_metadata) != 1 {
+      return Err(invalid_data(
+        "candidate prepared request metadata is not uniquely owned",
+      ));
+    }
+    let request_value = parse_canonical_jcs(&request_metadata.raw_bytes)?;
+    let request_frame_digest = raw_frame_digest(
+      CANDIDATE_REQUEST_DIGEST_DOMAIN,
+      &request_metadata.raw_bytes,
+    );
+    let revalidated_binding =
+      validate_request(&request_value, identity, request_frame_digest.clone())?;
+    if request_frame_digest != request_metadata.request_frame_digest
+      || request_metadata.descriptor_slots_digest != descriptor_slots_digest
+      || revalidated_binding != *binding
+      || binding.request_frame_digest != request_frame_digest
+      || binding.descriptor_slots_digest != descriptor_slots_digest
+    {
+      return Err(invalid_data(
+        "candidate prepared request relation is not exact",
+      ));
+    }
+    let descriptor_slots = parse_canonical_jcs(descriptor_slots_raw_bytes)?;
+    let recomputed_descriptor_slots_digest =
+      deno_permissions::rev2::hjcs_digest(
+        DESCRIPTOR_SLOTS_DIGEST_DOMAIN,
+        &descriptor_slots,
+      )
+      .map_err(|_| invalid_data("candidate descriptor slots are not exact"))?;
+    if recomputed_descriptor_slots_digest != descriptor_slots_digest
+      || descriptor_slots.get("schema")
+        != Some(&Value::String(DESCRIPTOR_SLOTS_SCHEMA.to_string()))
+    {
+      return Err(invalid_data(
+        "candidate descriptor-slot digest is not exact",
+      ));
+    }
+    Ok(())
   }
 
   impl CandidateLstatRequest {
@@ -1347,6 +1602,7 @@ mod fd3 {
         _descriptor_slots_raw_bytes: descriptor_slots_raw_bytes,
         _descriptor_slots_digest: descriptor_slots_digest,
         _captured_umask: captured_umask.value(),
+        _session_deadline: self.deadline,
       })
     }
 
@@ -3515,6 +3771,10 @@ mod fd3 {
       Instant::now() + Duration::from_secs(2)
     }
 
+    fn execution_session_deadline() -> Instant {
+      Instant::now() + Duration::from_secs(30)
+    }
+
     fn assert_descriptors_open(descriptors: [libc::c_int; 2]) {
       for descriptor in descriptors {
         // SAFETY: F_GETFD only probes the supplied integer descriptor.
@@ -3532,6 +3792,33 @@ mod fd3 {
         assert_eq!(result, -1, "descriptor {descriptor} remained open");
         assert_eq!(error.raw_os_error(), Some(libc::EBADF));
       }
+    }
+
+    fn assert_descriptor_closed(descriptor: libc::c_int) {
+      // SAFETY: F_GETFD safely reports EBADF for a closed integer
+      // descriptor; it does not dereference caller memory.
+      let result = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+      let error = io::Error::last_os_error();
+      assert_eq!(result, -1, "descriptor {descriptor} remained open");
+      assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+    }
+
+    fn clear_cloexec_for_test(descriptor: BorrowedFd<'_>) -> io::Result<()> {
+      // SAFETY: F_GETFD and F_SETFD operate only on the supplied live
+      // descriptor.
+      let flags = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) };
+      if flags < 0
+        || unsafe {
+          libc::fcntl(
+            descriptor.as_raw_fd(),
+            libc::F_SETFD,
+            flags & !libc::FD_CLOEXEC,
+          )
+        } < 0
+      {
+        return Err(io::Error::last_os_error());
+      }
+      Ok(())
     }
 
     fn identity_for(
@@ -3552,6 +3839,26 @@ mod fd3 {
 
     fn identity(case: CandidateLstatCase) -> CandidateLstatProtocolIdentity {
       identity_for("aarch64-apple-darwin", case)
+    }
+
+    fn native_execution_identity(
+      case: CandidateLstatCase,
+    ) -> CandidateLstatProtocolIdentity {
+      let build_identity = current_binary_build_identity();
+      let fork_commit = deno_lib::version::DENO_VERSION_INFO.git_hash;
+      assert!(is_canonical_fork_commit(fork_commit));
+      let generated = oden_capsec_rev2_join_lstat_candidate_binary_identity(
+        &build_identity,
+        FIXTURE_DIGEST,
+        case.case_id(),
+      )
+      .unwrap();
+      CandidateLstatProtocolIdentity::from_generated(
+        generated,
+        &build_identity,
+        fork_commit,
+      )
+      .unwrap()
     }
 
     fn canonical_bytes(value: &Value) -> Vec<u8> {
@@ -3905,6 +4212,74 @@ mod fd3 {
         captured_umask,
         between_observations,
       )
+    }
+
+    fn prepared_execution_request(
+      case: CandidateLstatCase,
+    ) -> (
+      CandidatePreparedLstatRequest,
+      FramedStreamEndpoint,
+      RequestFiles,
+    ) {
+      let identity = native_execution_identity(case);
+      let files = prepared_request_files(case);
+      let request = request_bound_to_descriptors(&identity, &files);
+      let (candidate_endpoint, supervisor) =
+        framed_stream_socketpair().unwrap();
+      let absolute_deadline = execution_session_deadline();
+      let mut observed = ready_observed_facts(&identity);
+      observed.pre_request_fd_inventory[3]["platformIdentity"] =
+        platform_identity(
+          &inspect_candidate_control_fd(candidate_endpoint.as_fd()).unwrap(),
+        );
+      let preflight =
+        CandidateReadyPreflight::from_observed(&identity, observed).unwrap();
+      let expected_ready = preflight.raw_bytes().to_vec();
+      let session = CandidateFd3Session::begin_from_preflight(
+        candidate_endpoint,
+        identity,
+        preflight,
+        absolute_deadline,
+      )
+      .unwrap();
+      let captured = supervisor
+        .receive_one_canonical_jcs_frame(
+          FrameByteLimit::CANDIDATE_READY,
+          0,
+          deadline(),
+        )
+        .unwrap();
+      assert_eq!(captured.raw_bytes, expected_ready);
+      send_request(&supervisor, &request, &files, true);
+      let prepared = session
+        .receive_prepared_request_with_observed_umask_and_hook(
+          absolute_deadline,
+          REQUIRED_CAPTURED_UMASK,
+          || Ok(()),
+        )
+        .unwrap();
+      (prepared, supervisor, files)
+    }
+
+    fn assert_no_candidate_response(endpoint: &FramedStreamEndpoint) {
+      let mut byte = 0_u8;
+      // SAFETY: byte is a writable one-byte buffer and the endpoint remains
+      // live for the duration of this non-consuming peek.
+      let result = unsafe {
+        libc::recv(
+          endpoint.as_fd().as_raw_fd(),
+          (&mut byte as *mut u8).cast(),
+          1,
+          libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+      };
+      let error = io::Error::last_os_error();
+      assert_eq!(result, -1);
+      assert_eq!(
+        error.kind(),
+        io::ErrorKind::WouldBlock,
+        "unexpected candidate response state: {error}"
+      );
     }
 
     fn enter_request_pending(
@@ -4597,6 +4972,229 @@ mod fd3 {
       // SAFETY: the fixed header remains accessible; the helper must refuse
       // because the NUL now lies outside the declared record.
       assert!(unsafe { candidate_dirent_name(&entry) }.is_err());
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      any(debug_assertions, not(panic = "abort"))
+    ))]
+    #[test]
+    fn candidate_executed_request_exact_join_refuses_nonrelease_test_binary() {
+      let build_identity = current_binary_build_identity();
+      for case in [
+        CandidateLstatCase::Existing,
+        CandidateLstatCase::FinalMissing,
+      ] {
+        assert!(
+          oden_capsec_rev2_join_lstat_candidate_binary_identity(
+            &build_identity,
+            FIXTURE_DIGEST,
+            case.case_id(),
+          )
+          .is_err(),
+          "a non-release test binary must not obtain an exact generated seal"
+        );
+      }
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      not(debug_assertions),
+      panic = "abort"
+    ))]
+    #[test]
+    fn candidate_executed_request_consumes_exact_cases_without_output() {
+      for case in [
+        CandidateLstatCase::Existing,
+        CandidateLstatCase::FinalMissing,
+      ] {
+        let (prepared, supervisor, files) = prepared_execution_request(case);
+        let root_fd = prepared._project_root.as_raw_fd();
+        let arena_fd = prepared._arena.as_raw_fd();
+        let arena_snapshot =
+          CandidateDescriptorSnapshot::capture(prepared._arena.as_fd())
+            .unwrap();
+        let request_metadata = Arc::as_ptr(&prepared._request_metadata);
+
+        let executed = prepared.execute_lstat_candidate(deadline()).unwrap();
+
+        assert_descriptor_closed(root_fd);
+        assert_eq!(executed._arena.as_raw_fd(), arena_fd);
+        assert_eq!(
+          CandidateDescriptorSnapshot::capture(executed._arena.as_fd())
+            .unwrap(),
+          arena_snapshot
+        );
+        assert_eq!(Arc::as_ptr(&executed._request_metadata), request_metadata);
+        assert_eq!(Arc::strong_count(&executed._request_metadata), 1);
+        assert_eq!(executed._identity.case, case);
+        assert_no_candidate_response(&supervisor);
+        match case {
+          CandidateLstatCase::Existing => {
+            assert_eq!(
+              std::fs::read(files._temp.path().join("project/input.txt"))
+                .unwrap(),
+              b""
+            );
+          }
+          CandidateLstatCase::FinalMissing => {
+            assert_eq!(
+              std::fs::read_dir(files._temp.path().join("project"))
+                .unwrap()
+                .count(),
+              0
+            );
+          }
+        }
+
+        drop(executed);
+        supervisor.require_eof(deadline()).unwrap();
+      }
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      not(debug_assertions),
+      panic = "abort"
+    ))]
+    #[test]
+    fn candidate_executed_request_refuses_metadata_clone_and_substitution() {
+      let (prepared, supervisor, _files) =
+        prepared_execution_request(CandidateLstatCase::Existing);
+      let metadata_alias = Arc::clone(&prepared._request_metadata);
+      let error = prepared.execute_lstat_candidate(deadline()).err().unwrap();
+      assert_eq!(
+        error.kind(),
+        io::ErrorKind::InvalidData,
+        "a surviving prepared-request metadata clone must refuse exactly"
+      );
+      drop(metadata_alias);
+      supervisor.require_eof(deadline()).unwrap();
+
+      let (prepared, supervisor, _files) =
+        prepared_execution_request(CandidateLstatCase::Existing);
+      clear_cloexec_for_test(prepared._project_root.as_fd()).unwrap();
+      let error = prepared.execute_lstat_candidate(deadline()).err().unwrap();
+      assert_eq!(
+        error.kind(),
+        io::ErrorKind::InvalidData,
+        "a mutated retained-root descriptor must refuse exactly"
+      );
+      supervisor.require_eof(deadline()).unwrap();
+
+      let (mut existing, existing_supervisor, _existing_files) =
+        prepared_execution_request(CandidateLstatCase::Existing);
+      let (mut missing, missing_supervisor, _missing_files) =
+        prepared_execution_request(CandidateLstatCase::FinalMissing);
+      std::mem::swap(&mut existing._identity, &mut missing._identity);
+      let error = existing.execute_lstat_candidate(deadline()).err().unwrap();
+      assert_eq!(
+        error.kind(),
+        io::ErrorKind::InvalidData,
+        "a substituted prepared identity must refuse exactly"
+      );
+      drop(missing);
+      existing_supervisor.require_eof(deadline()).unwrap();
+      missing_supervisor.require_eof(deadline()).unwrap();
+
+      let (mut first, first_supervisor, _first_files) =
+        prepared_execution_request(CandidateLstatCase::FinalMissing);
+      let (mut second, second_supervisor, _second_files) =
+        prepared_execution_request(CandidateLstatCase::FinalMissing);
+      std::mem::swap(&mut first._arena, &mut second._arena);
+      let error = first.execute_lstat_candidate(deadline()).err().unwrap();
+      assert_eq!(
+        error.kind(),
+        io::ErrorKind::InvalidData,
+        "a substituted retained arena must refuse exactly"
+      );
+      drop(second);
+      first_supervisor.require_eof(deadline()).unwrap();
+      second_supervisor.require_eof(deadline()).unwrap();
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      not(debug_assertions),
+      panic = "abort"
+    ))]
+    #[test]
+    fn candidate_executed_request_refuses_post_execution_arena_mutation() {
+      let (prepared, supervisor, _files) =
+        prepared_execution_request(CandidateLstatCase::FinalMissing);
+      let error = prepared
+        .execute_lstat_candidate_with_hook(deadline(), |arena| {
+          let byte = [1_u8];
+          // SAFETY: byte is readable and arena is the live retained regular
+          // file supplied by this test.
+          let written = unsafe {
+            libc::pwrite(arena.as_raw_fd(), byte.as_ptr().cast(), byte.len(), 0)
+          };
+          if written == 1 {
+            Ok(())
+          } else if written < 0 {
+            Err(io::Error::last_os_error())
+          } else {
+            Err(invalid_data("test arena mutation was short"))
+          }
+        })
+        .err()
+        .unwrap();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      supervisor.require_eof(deadline()).unwrap();
+
+      let (prepared, supervisor, _files) =
+        prepared_execution_request(CandidateLstatCase::FinalMissing);
+      let error = prepared
+        .execute_lstat_candidate_with_hook(deadline(), |arena| {
+          clear_cloexec_for_test(arena.as_fd())
+        })
+        .err()
+        .unwrap();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      supervisor.require_eof(deadline()).unwrap();
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      not(debug_assertions),
+      panic = "abort"
+    ))]
+    #[test]
+    fn candidate_executed_request_refuses_post_execution_deadline_expiry() {
+      let (mut prepared, supervisor, _files) =
+        prepared_execution_request(CandidateLstatCase::FinalMissing);
+      let absolute_deadline = Instant::now() + Duration::from_secs(30);
+      let clock = Arc::new(TestClock::new(absolute_deadline));
+      prepared._session_deadline =
+        CandidateSessionDeadline::with_clock(absolute_deadline, clock.clone());
+      let error = prepared
+        .execute_lstat_candidate_with_hook(
+          absolute_deadline + Duration::from_secs(30),
+          |_| {
+            clock.expire_now();
+            Ok(())
+          },
+        )
+        .err()
+        .unwrap();
+      assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+      supervisor.require_eof(deadline()).unwrap();
     }
 
     #[cfg(target_os = "macos")]
