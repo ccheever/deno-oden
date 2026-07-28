@@ -18,10 +18,15 @@ mod fs_runtime;
 pub(crate) use fs_runtime::OdenRev2FilesystemDeliveryWitness;
 pub use fs_runtime::OdenRev2FilesystemError;
 pub(crate) use fs_runtime::OdenRev2FilesystemNativeCommitWitness;
+pub use fs_runtime::OdenRev2LstatCandidateCapsule;
+pub use fs_runtime::OdenRev2LstatCandidateObservation;
+pub use fs_runtime::OdenRev2LstatCandidateOpStateBinding;
 pub use fs_runtime::OdenRev2LstatDelivery;
 pub use fs_runtime::OdenRev2MkdirDelivery;
+pub use fs_runtime::oden_capsec_rev2_lstat_candidate_sync;
 pub use fs_runtime::oden_capsec_rev2_lstat_sync;
 pub use fs_runtime::oden_capsec_rev2_mkdir_sync;
+pub use fs_runtime::oden_capsec_rev2_prepare_lstat_candidate;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -642,6 +647,7 @@ pub struct OdenRev2RuntimeAuthorityContext {
   bindings: OdenRev2StaticBindings,
   retained_objects: Arc<[OdenRev2RetainedObject]>,
   installed_executables: OdenRev2InstalledExecutableContext,
+  lstat_candidate: Option<Arc<fs_runtime::OdenRev2LstatCandidateHarness>>,
   authority_state: RuntimeAuthorityState,
   namespace_gate: Mutex<OdenRev2NamespaceGateState>,
   permission_batch_sequence: AtomicU64,
@@ -677,6 +683,23 @@ impl OdenRev2RuntimeAuthorityContext {
   ) -> Result<Self, String> {
     installer.claim()?;
     let parts = loaded.into_runtime_parts()?;
+    Self::install_parts(parts, None)
+  }
+
+  fn install_lstat_candidate(
+    loaded: OdenRev2LoadedPolicyContext,
+    harness: Arc<fs_runtime::OdenRev2LstatCandidateHarness>,
+  ) -> Result<Self, String> {
+    let installer = RuntimeAuthorityInstaller::new();
+    installer.claim()?;
+    let parts = loaded.into_candidate_runtime_parts()?;
+    Self::install_parts(parts, Some(harness))
+  }
+
+  fn install_parts(
+    parts: crate::oden_rev2_policy::OdenRev2LoadedPolicyParts,
+    lstat_candidate: Option<Arc<fs_runtime::OdenRev2LstatCandidateHarness>>,
+  ) -> Result<Self, String> {
     let snapshot: SnapshotWire = serde_json::from_value(parts.snapshot)
       .map_err(|_| format!("{CONTEXT_ERROR}-SNAPSHOT-SHAPE"))?;
     if snapshot.snapshot_schema != SNAPSHOT_SCHEMA
@@ -757,6 +780,7 @@ impl OdenRev2RuntimeAuthorityContext {
       bindings,
       retained_objects: parts.retained_objects,
       installed_executables: parts.installed_executables,
+      lstat_candidate,
       authority_state,
       namespace_gate: Mutex::new(OdenRev2NamespaceGateState::new()),
       permission_batch_sequence: AtomicU64::new(1),

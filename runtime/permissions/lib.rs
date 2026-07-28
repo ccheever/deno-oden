@@ -67,11 +67,21 @@ pub mod rev2;
 mod rev2_registry_generated;
 
 pub use oden_rev2_context::OdenRev2FilesystemError;
+#[doc(hidden)]
+pub use oden_rev2_context::OdenRev2LstatCandidateCapsule;
+#[doc(hidden)]
+pub use oden_rev2_context::OdenRev2LstatCandidateObservation;
+#[doc(hidden)]
+pub use oden_rev2_context::OdenRev2LstatCandidateOpStateBinding;
 pub use oden_rev2_context::OdenRev2LstatDelivery;
 pub use oden_rev2_context::OdenRev2MkdirDelivery;
 pub use oden_rev2_context::OdenRev2RuntimeAuthorityContext;
+#[doc(hidden)]
+pub use oden_rev2_context::oden_capsec_rev2_lstat_candidate_sync;
 pub use oden_rev2_context::oden_capsec_rev2_lstat_sync;
 pub use oden_rev2_context::oden_capsec_rev2_mkdir_sync;
+#[doc(hidden)]
+pub use oden_rev2_context::oden_capsec_rev2_prepare_lstat_candidate;
 #[doc(hidden)]
 pub use oden_rev2_executable::OdenRev2HarnessExecutableImage;
 #[doc(hidden)]

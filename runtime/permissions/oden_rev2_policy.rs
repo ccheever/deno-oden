@@ -180,6 +180,57 @@ pub(crate) struct OdenRev2LoadedPolicyParts {
   pub(crate) snapshot: Value,
 }
 
+fn candidate_runtime_snapshot_closed(snapshot: &Value) -> bool {
+  let empty = |field| {
+    snapshot
+      .get(field)
+      .and_then(Value::as_array)
+      .is_some_and(Vec::is_empty)
+  };
+  let Some([_root]) = snapshot
+    .get("rootBindings")
+    .and_then(Value::as_array)
+    .map(Vec::as_slice)
+  else {
+    return false;
+  };
+  let Some(policy) = snapshot.get("canonicalPolicy") else {
+    return false;
+  };
+  let Some([principal]) = policy
+    .get("principals")
+    .and_then(Value::as_array)
+    .map(Vec::as_slice)
+  else {
+    return false;
+  };
+  let one_floor = principal
+    .get("floor")
+    .and_then(Value::as_array)
+    .is_some_and(|rows| rows.len() == 1);
+  let empty_principal = |field| {
+    principal
+      .get(field)
+      .and_then(Value::as_array)
+      .is_some_and(Vec::is_empty)
+  };
+  snapshot.get("effectiveMode").and_then(Value::as_str) == Some("enforce")
+    && policy.get("mode").and_then(Value::as_str) == Some("enforce")
+    && policy
+      .get("processDenials")
+      .and_then(Value::as_array)
+      .is_some_and(Vec::is_empty)
+    && one_floor
+    && empty_principal("escalationCeiling")
+    && empty_principal("denials")
+    && empty("denyCeiling")
+    && empty("executableBindings")
+    && empty("routeBindings")
+    && empty("classifierBindings")
+    && empty("protectedPredicateVersions")
+    && empty("protectedReceiptBindings")
+}
+
 impl OdenRev2LoadedPolicyContext {
   pub fn state(&self) -> OdenRev2LoadState {
     self.state.clone()
@@ -242,6 +293,75 @@ impl OdenRev2LoadedPolicyContext {
     self
       .installed_executables
       .install_once(&self.retained_objects, control_root)
+  }
+
+  /// Transfer the parent-supplied retained project-root descriptor into one
+  /// VerifiedUnarmed Candidate after independently opening and validating the
+  /// same named root through normal snapshot verification.
+  pub(crate) fn replace_candidate_root_descriptor(
+    &mut self,
+    canonical_path: &std::path::Path,
+    file: File,
+  ) -> Result<(), String> {
+    if self.state != OdenRev2LoadState::VerifiedUnarmed
+      || self.execution_role != "candidate"
+      || self.retained_objects.len() != 1
+      || self.retained_objects[0].role().is_some()
+      || self.retained_objects[0].canonical_path() != canonical_path
+    {
+      return Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string());
+    }
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::MetadataExt;
+
+      let named = std::fs::symlink_metadata(canonical_path)
+        .map_err(|_| "OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())?;
+      let independently_opened = self.retained_objects[0]
+        .file()
+        .metadata()
+        .map_err(|_| "OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())?;
+      let supplied = file
+        .metadata()
+        .map_err(|_| "OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())?;
+      if !named.is_dir()
+        || !independently_opened.is_dir()
+        || !supplied.is_dir()
+        || named.dev() != independently_opened.dev()
+        || named.ino() != independently_opened.ino()
+        || named.dev() != supplied.dev()
+        || named.ino() != supplied.ino()
+      {
+        return Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string());
+      }
+      let expected = format!(
+        "unix-dev-ino:{:016x}{:016x}",
+        supplied.dev(),
+        supplied.ino()
+      );
+      if self.retained_objects[0].object_identity() != expected {
+        return Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string());
+      }
+      let mut retained = self.retained_objects.to_vec();
+      retained[0].file = Arc::new(file);
+      let transferred = retained[0]
+        .file()
+        .metadata()
+        .map_err(|_| "OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())?;
+      if transferred.dev() != supplied.dev()
+        || transferred.ino() != supplied.ino()
+        || !transferred.is_dir()
+      {
+        return Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string());
+      }
+      self.retained_objects = retained.into();
+      Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+      let _ = (canonical_path, file);
+      Err("OD-CAP-REV2-CANDIDATE-ROOT-DESCRIPTOR".to_string())
+    }
   }
 
   /// Refuse a C03-authenticated execution shape that the initial C04 run
@@ -316,6 +436,28 @@ impl OdenRev2LoadedPolicyContext {
         "OD-CAP-REV2-RUNTIME-CONTEXT-EXECUTABLES-UNINSTALLED".to_string(),
       );
     }
+    self.into_parts()
+  }
+
+  pub(crate) fn into_candidate_runtime_parts(
+    self,
+  ) -> Result<OdenRev2LoadedPolicyParts, String> {
+    if self.state != OdenRev2LoadState::VerifiedUnarmed
+      || self.execution_role != "candidate"
+      || self.conformant
+      || self.advertised
+      || self.conformance_report_digest.is_some()
+      || self.installed_executables.is_installed()
+      || self.retained_objects.len() != 1
+      || self.retained_objects[0].role().is_some()
+      || !candidate_runtime_snapshot_closed(&self.snapshot)
+    {
+      return Err("OD-CAP-REV2-RUNTIME-CONTEXT-CANDIDATE-BOUNDARY".to_string());
+    }
+    self.into_parts()
+  }
+
+  fn into_parts(self) -> Result<OdenRev2LoadedPolicyParts, String> {
     let snapshot = Arc::try_unwrap(self.snapshot)
       .map_err(|_| "OD-CAP-REV2-RUNTIME-CONTEXT-SNAPSHOT-SHARED".to_string())?;
     Ok(OdenRev2LoadedPolicyParts {
@@ -449,6 +591,50 @@ pub fn verify_authenticated_envelope(
       hermetic: false,
     },
   )
+}
+
+/// Verify one internally assembled, unauthenticated Candidate snapshot against
+/// the exact generated status for this binary. The result is deliberately
+/// `VerifiedUnarmed`: it cannot enter the process-global C04 installer and
+/// carries no executable image or conformance report.
+///
+/// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+/// [constrained-by] -- Candidate execution may reuse closed snapshot parsing
+/// and retained-root validation, but unsupported/non-advertised target status
+/// must remain literal and cannot become release or runtime authority.
+pub(crate) fn verify_unarmed_candidate_snapshot(
+  snapshot: &Value,
+) -> Result<OdenRev2LoadedPolicyContext, String> {
+  let compiled = compiled_target()
+    .ok_or_else(|| "OD-CAP-REV2-TARGET-UNKNOWN".to_string())?;
+  let embedded = REV2_TARGET_STATUS
+    .iter()
+    .find(|status| status.target == compiled)
+    .ok_or_else(|| "OD-CAP-REV2-TARGET-UNKNOWN".to_string())?;
+  let loaded = verify_snapshot(
+    snapshot,
+    TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: embedded.profile_claim,
+      conformance_report_digest: None,
+      enforced: embedded.enforced,
+      closed: embedded.closed,
+      absent: embedded.absent,
+      unsupported: embedded.unsupported,
+      advertised: REV2_ADVERTISED_TARGETS.contains(&embedded.target),
+      hermetic: false,
+    },
+  )?;
+  if loaded.state != OdenRev2LoadState::VerifiedUnarmed
+    || loaded.execution_role != "candidate"
+    || loaded.conformant
+    || loaded.advertised
+    || loaded.conformance_report_digest.is_some()
+  {
+    return Err("OD-CAP-REV2-CANDIDATE-SNAPSHOT-ARMABLE".to_string());
+  }
+  Ok(loaded)
 }
 
 fn parse_authenticated_snapshot(

@@ -121,7 +121,7 @@ fn rev2_filesystem_refusal(
   .into_box()
 }
 
-fn resolve_rev2_filesystem_context(
+pub(crate) fn resolve_rev2_filesystem_context(
   state: &OpState,
   path: &Path,
   api_name: &'static str,
@@ -137,6 +137,18 @@ fn resolve_rev2_filesystem_context(
       deno_permissions::OdenRev2RuntimeAuthorityContext,
     >>()
     .cloned();
+  if state
+    .try_borrow::<std::sync::Arc<
+      deno_permissions::OdenRev2LstatCandidateOpStateBinding,
+    >>()
+    .is_some()
+  {
+    return Err(rev2_filesystem_refusal(
+      "candidate-opstate-wrong-edge",
+      path,
+      api_name,
+    ));
+  }
   deno_permissions::oden_capsec_rev2_resolve_op_state_context(
     state_mode,
     state_context,
@@ -160,6 +172,47 @@ fn map_rev2_filesystem_result<T>(
       Err(rev2_filesystem_refusal(reason, path, api_name))
     }
   }
+}
+
+fn complete_rev2_lstat_delivery(
+  state: &OpState,
+  requested_path: &Path,
+  stat_out_buf: &mut [u32],
+  delivery: deno_permissions::OdenRev2LstatDelivery<'_>,
+) -> Result<(), FsOpsError> {
+  let result = if let Some(metadata) = delivery.metadata() {
+    SerializableStat::from(FsStat::from_std(metadata.clone()))
+      .write(stat_out_buf);
+    Ok(())
+  } else {
+    debug_assert!(delivery.is_not_found());
+    map_rev2_filesystem_result(
+      Err(deno_permissions::OdenRev2FilesystemError::Io(
+        io::Error::from_raw_os_error(libc::ENOENT),
+      )),
+      "lstat",
+      requested_path,
+      "Deno.lstatSync()",
+    )
+  };
+  let candidate_delivery = if let Some(binding) = state
+    .try_borrow::<std::sync::Arc<
+      deno_permissions::OdenRev2LstatCandidateOpStateBinding,
+    >>()
+    .cloned()
+  {
+    map_rev2_filesystem_result(
+      binding.observe_delivery(requested_path, &delivery),
+      "lstat",
+      requested_path,
+      "Deno.lstatSync()",
+    )
+  } else {
+    Ok(())
+  };
+  delivery.finish();
+  candidate_delivery?;
+  result
 }
 
 #[derive(Debug)]
@@ -780,7 +833,67 @@ pub fn op_fs_lstat_sync(
   #[string] path: &str,
   #[buffer] stat_out_buf: &mut [u32],
 ) -> Result<(), FsOpsError> {
+  op_fs_lstat_sync_impl(state, path, stat_out_buf)
+}
+
+/// The direct implementation behind the registered public op. The dormant
+/// native Candidate calls this same body because the `op2` macro replaces the
+/// surface function name with an `OpDecl`; it does not create a second policy
+/// or filesystem path.
+///
+/// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+/// [constrained-by]
+pub(crate) fn op_fs_lstat_sync_impl(
+  state: &mut OpState,
+  path: &str,
+  stat_out_buf: &mut [u32],
+) -> Result<(), FsOpsError> {
   let requested_path = Path::new(path);
+  if let Some(binding) = state
+    .try_borrow::<std::sync::Arc<
+      deno_permissions::OdenRev2LstatCandidateOpStateBinding,
+    >>()
+    .cloned()
+  {
+    let state_mode = state
+      .try_borrow::<deno_permissions::OdenRev2ProcessMode>()
+      .copied();
+    let state_context = state.try_borrow::<std::sync::Arc<
+      deno_permissions::OdenRev2RuntimeAuthorityContext,
+    >>();
+    if state_mode.is_some() || state_context.is_some() {
+      return Err(rev2_filesystem_refusal(
+        "candidate-opstate-mixed",
+        requested_path,
+        "Deno.lstatSync()",
+      ));
+    }
+    if !state
+      .try_borrow::<FileSystemRc>()
+      .is_some_and(|fs| fs.oden_capsec_rev2_host_path_backend())
+    {
+      return Err(rev2_filesystem_refusal(
+        "backend",
+        requested_path,
+        "Deno.lstatSync()",
+      ));
+    }
+    let delivery = map_rev2_filesystem_result(
+      deno_permissions::oden_capsec_rev2_lstat_candidate_sync(
+        &binding,
+        requested_path,
+      ),
+      "lstat",
+      requested_path,
+      "Deno.lstatSync()",
+    )?;
+    return complete_rev2_lstat_delivery(
+      state,
+      requested_path,
+      stat_out_buf,
+      delivery,
+    );
+  }
   if let Some(context) =
     resolve_rev2_filesystem_context(state, requested_path, "Deno.lstatSync()")?
   {
@@ -800,23 +913,12 @@ pub fn op_fs_lstat_sync(
       requested_path,
       "Deno.lstatSync()",
     )?;
-    let result = if let Some(metadata) = delivery.metadata() {
-      SerializableStat::from(FsStat::from_std(metadata.clone()))
-        .write(stat_out_buf);
-      Ok(())
-    } else {
-      debug_assert!(delivery.is_not_found());
-      map_rev2_filesystem_result(
-        Err(deno_permissions::OdenRev2FilesystemError::Io(
-          io::Error::from_raw_os_error(libc::ENOENT),
-        )),
-        "lstat",
-        requested_path,
-        "Deno.lstatSync()",
-      )
-    };
-    delivery.finish();
-    return result;
+    return complete_rev2_lstat_delivery(
+      state,
+      requested_path,
+      stat_out_buf,
+      delivery,
+    );
   }
 
   let path = state
