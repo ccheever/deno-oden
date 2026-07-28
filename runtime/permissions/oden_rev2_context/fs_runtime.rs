@@ -19,6 +19,7 @@ use crate::oden_rev2_runtime::OdenRev2HostFilesystemCompletion;
 use crate::rev2::FilesystemCandidateOracleInput;
 use crate::rev2::FilesystemExecutionMode;
 use crate::rev2::FilesystemExecutionProjection;
+use crate::rev2::FilesystemFinalObjectState;
 use crate::rev2::FilesystemInputMutation;
 use crate::rev2::FilesystemLogicalRoot;
 use crate::rev2::FilesystemMetadataProjection;
@@ -32,7 +33,8 @@ use crate::rev2::canonical_json;
 use crate::rev2::hjcs_digest;
 use crate::rev2::validate_filesystem_candidate_execution;
 use crate::rev2_registry_generated::REV2_FILESYSTEM_LSTAT_EXISTING_EXECUTION_ADMISSIONS;
-use crate::rev2_registry_generated::Rev2FilesystemLstatExistingExecutionAdmission;
+use crate::rev2_registry_generated::REV2_FILESYSTEM_LSTAT_FINAL_MISSING_EXECUTION_ADMISSIONS;
+use crate::rev2_registry_generated::Rev2FilesystemLstatExecutionAdmission;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OdenRev2FilesystemError {
@@ -243,10 +245,44 @@ impl OdenRev2LstatExistingCandidateObservation {
   }
 }
 
-fn validate_lstat_existing_candidate_context(
+/// One unauthenticated native not-found observation of the dormant
+/// `lstat-final-missing` fixture candidate. This opaque type intentionally has
+/// no metadata, serialization, oracle, verdict, receipt, report, promotion,
+/// or publication API.
+///
+/// @ref LLP 0019#generated-outputs-and-ci-invariants [constrained-by] --
+/// Generated fixture identity is candidate provenance, not observed
+/// conformance or promotion authority.
+#[allow(dead_code)]
+struct OdenRev2LstatFinalMissingCandidateObservation {
+  fixture_artifact_digest: &'static str,
+  case_id: String,
+  target: &'static str,
+}
+
+#[allow(dead_code)]
+impl OdenRev2LstatFinalMissingCandidateObservation {
+  fn fixture_artifact_digest(&self) -> &'static str {
+    self.fixture_artifact_digest
+  }
+
+  fn case_id(&self) -> &str {
+    &self.case_id
+  }
+
+  fn target(&self) -> &'static str {
+    self.target
+  }
+
+  fn is_not_found(&self) -> bool {
+    true
+  }
+}
+
+fn validate_lstat_candidate_context(
   target: &str,
   feature_set: &str,
-  admission: &Rev2FilesystemLstatExistingExecutionAdmission,
+  admission: &Rev2FilesystemLstatExecutionAdmission,
 ) -> Result<(), OdenRev2FilesystemError> {
   if target != admission.target {
     return Err(refused("CANDIDATE-TARGET"));
@@ -257,9 +293,27 @@ fn validate_lstat_existing_candidate_context(
   Ok(())
 }
 
+fn validate_lstat_existing_candidate_context(
+  target: &str,
+  feature_set: &str,
+  admission: &Rev2FilesystemLstatExecutionAdmission,
+) -> Result<(), OdenRev2FilesystemError> {
+  validate_lstat_candidate_context(target, feature_set, admission)
+}
+
+fn validate_lstat_final_missing_candidate_context(
+  target: &str,
+  feature_set: &str,
+  admission: &Rev2FilesystemLstatExecutionAdmission,
+) -> Result<(), OdenRev2FilesystemError> {
+  validate_lstat_candidate_context(target, feature_set, admission)
+}
+
 const FILESYSTEM_EXECUTION_PROJECTION_DIGEST_DOMAIN: &str =
   "oden:capsec:filesystem-execution-projection:2";
 const LSTAT_EXISTING_CASE_ID: &str = "filesystem:lstat-sync:lstat-existing";
+const LSTAT_FINAL_MISSING_CASE_ID: &str =
+  "filesystem:lstat-sync:lstat-final-missing";
 const LSTAT_EXISTING_REQUIREMENT_ID: &str =
   "fixture-requirement:native-op:ext/fs/ops.rs#op_fs_lstat_sync:complete";
 const LSTAT_EXISTING_CONTENT_DIGEST: &str =
@@ -270,18 +324,19 @@ const LSTAT_EXISTING_CONTENT_DIGEST: &str =
 // authenticate the repository, content tree, fixture definition, runner,
 // process, caller-assembled inventory, or any execution fact and grants no
 // runtime or release authority.
-fn validate_lstat_existing_execution_admission(
+fn validate_lstat_execution_admission(
   context: &OdenRev2RuntimeAuthorityContext,
-  admission: &'static Rev2FilesystemLstatExistingExecutionAdmission,
+  registered_admissions: &'static [Rev2FilesystemLstatExecutionAdmission],
+  admission: &'static Rev2FilesystemLstatExecutionAdmission,
   input: FilesystemCandidateOracleInput,
 ) -> Result<ValidatedFilesystemCandidateExecution, OdenRev2FilesystemError> {
-  if !REV2_FILESYSTEM_LSTAT_EXISTING_EXECUTION_ADMISSIONS
+  if !registered_admissions
     .iter()
     .any(|registered| std::ptr::eq(registered, admission))
   {
     return Err(refused("CANDIDATE-EXECUTION-ADMISSION"));
   }
-  validate_lstat_existing_candidate_context(
+  validate_lstat_candidate_context(
     context.target(),
     context.feature_set(),
     admission,
@@ -309,13 +364,27 @@ fn validate_lstat_existing_execution_admission(
     return Err(refused("CANDIDATE-GENERATED-PROJECTION"));
   }
 
-  let validated = validate_filesystem_candidate_execution(input)
-    .map_err(|_| refused("CANDIDATE-EXECUTION-INPUT"))?;
+  validate_filesystem_candidate_execution(input)
+    .map_err(|_| refused("CANDIDATE-EXECUTION-INPUT"))
+}
+
+fn validate_lstat_existing_execution_admission(
+  context: &OdenRev2RuntimeAuthorityContext,
+  admission: &'static Rev2FilesystemLstatExecutionAdmission,
+  input: FilesystemCandidateOracleInput,
+) -> Result<ValidatedFilesystemCandidateExecution, OdenRev2FilesystemError> {
+  let validated = validate_lstat_execution_admission(
+    context,
+    REV2_FILESYSTEM_LSTAT_EXISTING_EXECUTION_ADMISSIONS,
+    admission,
+    input,
+  )?;
   let projection = validated.execution_projection();
   let target_setup = validated.target_setup();
   let target_initial = validated.target_initial();
   let target_content = target_setup.content.as_ref();
-  if projection.case_id != LSTAT_EXISTING_CASE_ID
+  if admission.case_id != LSTAT_EXISTING_CASE_ID
+    || projection.case_id != LSTAT_EXISTING_CASE_ID
     || projection.edge_id != LSTAT_EDGE
     || projection.requirement_id != LSTAT_EXISTING_REQUIREMENT_ID
     || projection.case_kind != "lstat-existing"
@@ -344,6 +413,67 @@ fn validate_lstat_existing_execution_admission(
     || validated.runtime_slots().len() != 1
     || validated.runtime_slots()[0].slot_id != LSTAT_LIST_SLOT
     || validated.runtime_slots()[0].capability != "fs:list"
+  {
+    return Err(refused("CANDIDATE-EXECUTION-CASE"));
+  }
+  Ok(validated)
+}
+
+fn validate_lstat_final_missing_execution_admission(
+  context: &OdenRev2RuntimeAuthorityContext,
+  admission: &'static Rev2FilesystemLstatExecutionAdmission,
+  input: FilesystemCandidateOracleInput,
+) -> Result<ValidatedFilesystemCandidateExecution, OdenRev2FilesystemError> {
+  let validated = validate_lstat_execution_admission(
+    context,
+    REV2_FILESYSTEM_LSTAT_FINAL_MISSING_EXECUTION_ADMISSIONS,
+    admission,
+    input,
+  )?;
+  let projection = validated.execution_projection();
+  let target_setup = validated.target_setup();
+  let target_initial = validated.target_initial();
+  let initial_sandbox = validated.initial_sandbox();
+  if admission.case_id != LSTAT_FINAL_MISSING_CASE_ID
+    || projection.case_id != LSTAT_FINAL_MISSING_CASE_ID
+    || projection.edge_id != LSTAT_EDGE
+    || projection.requirement_id != LSTAT_EXISTING_REQUIREMENT_ID
+    || projection.case_kind != "lstat-final-missing"
+    || projection.mode != FilesystemExecutionMode::Enforce
+    || projection.input_mutation != FilesystemInputMutation::None
+    || target_setup.object_id != "source"
+    || target_setup.root != FilesystemLogicalRoot::Project
+    || target_setup.path.encoding != FilesystemPlatformPathEncoding::Unicode
+    || target_setup.path.value != "input.txt"
+    || target_setup.object_identity.is_some()
+    || target_setup.kind != FilesystemObjectKind::Missing
+    || target_setup.content.is_some()
+    || target_setup.content_digest.is_some()
+    || target_setup.alias_target_object_id.is_some()
+    || target_setup.link_target_object_id.is_some()
+    || target_initial.state.kind != FilesystemObjectKind::Missing
+    || target_initial.state.identity.is_some()
+    || target_initial.state.metadata.is_some()
+    || target_initial.state.content_digest.is_some()
+    || target_initial.state.alias_target_object_id.is_some()
+    || target_initial.state.link_target_object_id.is_some()
+    || initial_sandbox.objects.len() != 2
+    || !initial_sandbox.unexpected_entries.is_empty()
+    || initial_sandbox.objects.iter().any(|object| {
+      object.state.kind != FilesystemObjectKind::Missing
+        || object.state.identity.is_some()
+        || object.state.metadata.is_some()
+        || object.state.content_digest.is_some()
+        || object.state.alias_target_object_id.is_some()
+        || object.state.link_target_object_id.is_some()
+    })
+    || validated.runtime_slots().len() != 1
+    || validated.runtime_slots()[0].slot_id != LSTAT_LIST_SLOT
+    || validated.runtime_slots()[0].capability != "fs:list"
+    || !matches!(
+      validated.runtime_slots()[0].occurrence.final_object_state,
+      FilesystemFinalObjectState::Missing
+    )
   {
     return Err(refused("CANDIDATE-EXECUTION-CASE"));
   }
@@ -483,6 +613,55 @@ fn reconcile_lstat_existing_host_inventory(
   Ok(target_metadata)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+// This preparatory missing-entry reconciliation has the same candidate-only
+// path-observation limit as the existing-entry variant above. It exact-closes
+// every observed directory entry and repeats the check while delivery remains
+// pinned, but cannot prove continuous absence between kernel observations.
+fn reconcile_lstat_final_missing_host_inventory(
+  parent_root: &Path,
+  validated: &ValidatedFilesystemCandidateExecution,
+) -> Result<(), OdenRev2FilesystemError> {
+  let canonical_parent = std::fs::canonicalize(parent_root)
+    .map_err(|_| refused("CANDIDATE-PARENT-ROOT-CANONICAL"))?;
+  if canonical_parent != parent_root {
+    return Err(refused("CANDIDATE-PARENT-ROOT-CANONICAL"));
+  }
+  let parent_metadata = std::fs::symlink_metadata(parent_root)
+    .map_err(|_| refused("CANDIDATE-PARENT-ROOT-IDENTITY"))?;
+  if !parent_metadata.is_dir() {
+    return Err(refused("CANDIDATE-PARENT-ROOT-IDENTITY"));
+  }
+  let realized_root = validated
+    .initial_sandbox()
+    .logical_roots
+    .iter()
+    .find(|root| root.root == FilesystemLogicalRoot::Project)
+    .ok_or_else(|| refused("CANDIDATE-PARENT-ROOT-IDENTITY"))?;
+  if realized_root.platform_identity
+    != candidate_platform_identity(&parent_metadata)
+  {
+    return Err(refused("CANDIDATE-PARENT-ROOT-IDENTITY"));
+  }
+
+  let mut entry_names = std::fs::read_dir(parent_root)
+    .map_err(|_| refused("CANDIDATE-INITIAL-INVENTORY"))?
+    .map(|entry| {
+      entry
+        .map(|entry| entry.file_name())
+        .map_err(|_| refused("CANDIDATE-INITIAL-INVENTORY"))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+  entry_names.sort();
+  if !entry_names.is_empty() {
+    return Err(refused("CANDIDATE-INITIAL-INVENTORY"));
+  }
+  match std::fs::symlink_metadata(parent_root.join("input.txt")) {
+    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+    _ => Err(refused("CANDIDATE-TARGET-IDENTITY")),
+  }
+}
+
 /// Execute only the real checked-lstat seam for one exact generated candidate.
 /// The caller owns fixture setup, supplies the already-canonical absolute
 /// project root, and passes the complete expected-free core input. This
@@ -509,7 +688,7 @@ fn reconcile_lstat_existing_host_inventory(
 fn oden_capsec_rev2_observe_lstat_existing_candidate(
   context: &OdenRev2RuntimeAuthorityContext,
   parent_root: &Path,
-  admission: &'static Rev2FilesystemLstatExistingExecutionAdmission,
+  admission: &'static Rev2FilesystemLstatExecutionAdmission,
   input: FilesystemCandidateOracleInput,
 ) -> Result<OdenRev2LstatExistingCandidateObservation, OdenRev2FilesystemError>
 {
@@ -550,6 +729,65 @@ fn oden_capsec_rev2_observe_lstat_existing_candidate(
       case_id: validated.execution_projection().case_id.clone(),
       target: admission.target,
       metadata,
+    });
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    let _ = (parent_root, validated);
+    Err(refused("PLATFORM-UNSUPPORTED"))
+  }
+}
+
+/// Execute only the real checked-lstat seam for one exact generated
+/// final-entry-missing candidate. The caller owns fixture setup, supplies the
+/// already-canonical absolute project root, and passes the complete
+/// expected-free core input. This function neither creates inputs nor emits
+/// evidence.
+///
+/// @ref LLP 0019#paths [implements] -- The retained project root and exact
+/// missing `input.txt` lexical child stay coupled to the checked operation.
+/// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+/// [constrained-by] -- This hidden candidate consumes only its separate
+/// digest-bound generated admission and shared-core validation token.
+/// Definition, runner, expected result, oracle, verdict, receipt, report, and
+/// authentication identities remain absent.
+///
+/// The pre/post scans are unauthenticated point observations and cannot prove
+/// continuous absence between syscalls. This module-private, production-
+/// uncalled result remains a development candidate rather than conformance
+/// evidence or release authority.
+#[allow(dead_code)]
+fn oden_capsec_rev2_observe_lstat_final_missing_candidate(
+  context: &OdenRev2RuntimeAuthorityContext,
+  parent_root: &Path,
+  admission: &'static Rev2FilesystemLstatExecutionAdmission,
+  input: FilesystemCandidateOracleInput,
+) -> Result<
+  OdenRev2LstatFinalMissingCandidateObservation,
+  OdenRev2FilesystemError,
+> {
+  if !parent_root.is_absolute() {
+    return Err(refused("CANDIDATE-PARENT-ROOT-ABSOLUTE"));
+  }
+  let validated = validate_lstat_final_missing_execution_admission(
+    context, admission, input,
+  )?;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  {
+    reconcile_lstat_final_missing_host_inventory(parent_root, &validated)?;
+    let delivery =
+      oden_capsec_rev2_lstat_sync(context, &parent_root.join("input.txt"))?;
+    if !delivery.is_not_found() {
+      return Err(refused("CANDIDATE-TARGET-PRESENT"));
+    }
+    // Keep the delivery lease and namespace gate pinned through the repeated
+    // root/inventory/ENOENT observation.
+    reconcile_lstat_final_missing_host_inventory(parent_root, &validated)?;
+    delivery.finish();
+    return Ok(OdenRev2LstatFinalMissingCandidateObservation {
+      fixture_artifact_digest: admission.fixture_artifact_digest,
+      case_id: validated.execution_projection().case_id.clone(),
+      target: admission.target,
     });
   }
   #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1781,6 +2019,21 @@ mod tests {
     OdenRev2RuntimeAuthorityContext::install_for_test(loaded).unwrap()
   }
 
+  fn lstat_final_missing_candidate_context(
+    root: &Path,
+    projection: &FilesystemExecutionProjection,
+  ) -> OdenRev2RuntimeAuthorityContext {
+    lstat_existing_candidate_context_with_mode(root, projection, "enforce")
+  }
+
+  fn lstat_final_missing_candidate_context_with_mode(
+    root: &Path,
+    projection: &FilesystemExecutionProjection,
+    mode: &str,
+  ) -> OdenRev2RuntimeAuthorityContext {
+    lstat_existing_candidate_context_with_mode(root, projection, mode)
+  }
+
   #[cfg(any(
     all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
     all(
@@ -1791,12 +2044,13 @@ mod tests {
     )
   ))]
   fn native_lstat_existing_execution_admission()
-  -> &'static Rev2FilesystemLstatExistingExecutionAdmission {
+  -> &'static Rev2FilesystemLstatExecutionAdmission {
     let compiled = policy_fixtures::embedded_compiled_target();
     REV2_FILESYSTEM_LSTAT_EXISTING_EXECUTION_ADMISSIONS
       .iter()
       .find(|admission| {
-        admission.target == compiled.target
+        admission.case_id == LSTAT_EXISTING_CASE_ID
+          && admission.target == compiled.target
           && admission.feature_set == compiled.feature_set
       })
       .unwrap()
@@ -1811,9 +2065,31 @@ mod tests {
       target_env = "gnu"
     )
   ))]
-  fn lstat_existing_candidate_input(
+  fn native_lstat_final_missing_execution_admission()
+  -> &'static Rev2FilesystemLstatExecutionAdmission {
+    let compiled = policy_fixtures::embedded_compiled_target();
+    REV2_FILESYSTEM_LSTAT_FINAL_MISSING_EXECUTION_ADMISSIONS
+      .iter()
+      .find(|admission| {
+        admission.case_id == LSTAT_FINAL_MISSING_CASE_ID
+          && admission.target == compiled.target
+          && admission.feature_set == compiled.feature_set
+      })
+      .unwrap()
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  fn lstat_candidate_input(
     root: &Path,
-    admission: &Rev2FilesystemLstatExistingExecutionAdmission,
+    admission: &Rev2FilesystemLstatExecutionAdmission,
   ) -> FilesystemCandidateOracleInput {
     let projection: FilesystemExecutionProjection =
       serde_json::from_str(admission.case_projection_json).unwrap();
@@ -1856,7 +2132,7 @@ mod tests {
               link_target_object_id: None,
             }
           }
-          other => panic!("unexpected lstat-existing setup kind {other:?}"),
+          other => panic!("unexpected lstat candidate setup kind {other:?}"),
         };
         FilesystemInitialSandboxObject {
           object_id: object.object_id.clone(),
@@ -2106,7 +2382,7 @@ mod tests {
     let target = project.join("input.txt");
     std::fs::write(&target, b"").unwrap();
     let before = std::fs::read(&target).unwrap();
-    let input = lstat_existing_candidate_input(&project, admission);
+    let input = lstat_candidate_input(&project, admission);
     let context =
       lstat_existing_candidate_context(&project, &input.case_projection);
     let _actors = ActorCapture::install(principal());
@@ -2155,7 +2431,7 @@ mod tests {
     std::fs::write(&wrong_target, b"wrong-root").unwrap();
     let root_before = std::fs::read(&root_target).unwrap();
     let wrong_before = std::fs::read(&wrong_target).unwrap();
-    let input = lstat_existing_candidate_input(&project, admission);
+    let input = lstat_candidate_input(&project, admission);
     let context =
       lstat_existing_candidate_context(&project, &input.case_projection);
     let _actors = ActorCapture::install(principal());
@@ -2198,7 +2474,7 @@ mod tests {
     let root = TempRoot::new("lstat-existing-candidate-preflight");
     let project = root.0.join("data");
     std::fs::write(project.join("input.txt"), b"").unwrap();
-    let base = lstat_existing_candidate_input(&project, admission);
+    let base = lstat_candidate_input(&project, admission);
     let context =
       lstat_existing_candidate_context(&project, &base.case_projection);
     let audit_context = lstat_existing_candidate_context_with_mode(
@@ -2290,12 +2566,12 @@ mod tests {
   #[test]
   fn lstat_existing_candidate_requires_registered_admission_identity() {
     let admission = native_lstat_existing_execution_admission();
-    let forged: &'static Rev2FilesystemLstatExistingExecutionAdmission =
+    let forged: &'static Rev2FilesystemLstatExecutionAdmission =
       Box::leak(Box::new(*admission));
     let root = TempRoot::new("lstat-existing-candidate-forged-admission");
     let project = root.0.join("data");
     std::fs::write(project.join("input.txt"), b"").unwrap();
-    let input = lstat_existing_candidate_input(&project, admission);
+    let input = lstat_candidate_input(&project, admission);
     let context =
       lstat_existing_candidate_context(&project, &input.case_projection);
     assert_eq!(
@@ -2364,7 +2640,9 @@ mod tests {
       let project = root.0.join("data");
       let target = project.join("input.txt");
       std::fs::write(&target, b"").unwrap();
-      let input = lstat_existing_candidate_input(&project, admission);
+      std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+        .unwrap();
+      let input = lstat_candidate_input(&project, admission);
       let context =
         lstat_existing_candidate_context(&project, &input.case_projection);
       match mutation {
@@ -2422,6 +2700,355 @@ mod tests {
         0,
         "{mutation} must refuse before checked-op actor capture"
       );
+    }
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  #[test]
+  fn lstat_final_missing_candidate_context_requires_exact_target_and_feature_set()
+   {
+    let admission = native_lstat_final_missing_execution_admission();
+    super::validate_lstat_final_missing_candidate_context(
+      admission.target,
+      admission.feature_set,
+      admission,
+    )
+    .unwrap();
+    for near_miss in [
+      "arm64e-apple-darwin",
+      "x86_64-unknown-linux-gnuasan",
+      "x86_64-unknown-linux-gnux32",
+    ] {
+      assert_eq!(
+        refusal(
+          super::validate_lstat_final_missing_candidate_context(
+            near_miss,
+            admission.feature_set,
+            admission,
+          )
+          .unwrap_err()
+        ),
+        "OD-CAP-REV2-FILESYSTEM-CANDIDATE-TARGET"
+      );
+    }
+    assert_eq!(
+      refusal(
+        super::validate_lstat_final_missing_candidate_context(
+          admission.target,
+          "rust:wrong-feature-set",
+          admission,
+        )
+        .unwrap_err()
+      ),
+      "OD-CAP-REV2-FILESYSTEM-CANDIDATE-FEATURE-SET"
+    );
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  #[test]
+  fn lstat_final_missing_candidate_observes_real_absence_without_mutation() {
+    let admission = native_lstat_final_missing_execution_admission();
+    let root = TempRoot::new("lstat-final-missing-candidate");
+    let project = root.0.join("data");
+    let input = lstat_candidate_input(&project, admission);
+    let context =
+      lstat_final_missing_candidate_context(&project, &input.case_projection);
+    let _actors = ActorCapture::install(principal());
+    crate::oden_rev2_reset_permission_actor_capture_count_for_test();
+
+    let observation =
+      super::oden_capsec_rev2_observe_lstat_final_missing_candidate(
+        &context, &project, admission, input,
+      )
+      .unwrap();
+
+    assert_eq!(
+      observation.fixture_artifact_digest(),
+      admission.fixture_artifact_digest
+    );
+    assert_eq!(observation.case_id(), LSTAT_FINAL_MISSING_CASE_ID);
+    assert_eq!(observation.target(), admission.target);
+    assert!(observation.is_not_found());
+    assert_eq!(
+      crate::oden_rev2_permission_actor_capture_count_for_test(),
+      1
+    );
+    assert!(project.is_dir());
+    assert_eq!(std::fs::read_dir(&project).unwrap().count(), 0);
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  #[test]
+  fn lstat_final_missing_candidate_refuses_wrong_parent_without_entering_checked_op()
+   {
+    let admission = native_lstat_final_missing_execution_admission();
+    let root = TempRoot::new("lstat-final-missing-candidate-root");
+    let wrong = TempRoot::new("lstat-final-missing-candidate-wrong");
+    let project = root.0.join("data");
+    let wrong_project = wrong.0.join("data");
+    let input = lstat_candidate_input(&project, admission);
+    let context =
+      lstat_final_missing_candidate_context(&project, &input.case_projection);
+    let _actors = ActorCapture::install(principal());
+    crate::oden_rev2_reset_permission_actor_capture_count_for_test();
+
+    assert_eq!(
+      refusal(
+        super::oden_capsec_rev2_observe_lstat_final_missing_candidate(
+          &context,
+          &wrong_project,
+          admission,
+          input,
+        )
+        .err()
+        .expect("wrong root must refuse")
+      ),
+      "OD-CAP-REV2-FILESYSTEM-CANDIDATE-PARENT-ROOT-IDENTITY"
+    );
+    assert_eq!(
+      crate::oden_rev2_permission_actor_capture_count_for_test(),
+      0
+    );
+    assert_eq!(std::fs::read_dir(&project).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&wrong_project).unwrap().count(), 0);
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  #[test]
+  fn lstat_final_missing_candidate_refuses_projection_and_core_tampering_before_io()
+   {
+    let admission = native_lstat_final_missing_execution_admission();
+    let root = TempRoot::new("lstat-final-missing-candidate-preflight");
+    let project = root.0.join("data");
+    let base = lstat_candidate_input(&project, admission);
+    let context =
+      lstat_final_missing_candidate_context(&project, &base.case_projection);
+    let audit_context = lstat_final_missing_candidate_context_with_mode(
+      &project,
+      &base.case_projection,
+      "audit",
+    );
+    let nonexistent = root.0.join("nonexistent-project");
+    let _actors = ActorCapture::install(principal());
+    crate::oden_rev2_reset_permission_actor_capture_count_for_test();
+
+    assert_eq!(
+      refusal(
+        super::oden_capsec_rev2_observe_lstat_final_missing_candidate(
+          &audit_context,
+          &nonexistent,
+          admission,
+          base.clone(),
+        )
+        .err()
+        .expect("audit mode must refuse")
+      ),
+      "OD-CAP-REV2-FILESYSTEM-CANDIDATE-EXECUTION-MODE"
+    );
+    assert_eq!(
+      crate::oden_rev2_permission_actor_capture_count_for_test(),
+      0
+    );
+
+    let mut projection_tamper = base.clone();
+    projection_tamper.case_projection.case_id =
+      "filesystem:lstat-sync:lstat-final-missing-tampered".to_string();
+    assert_eq!(
+      refusal(
+        super::oden_capsec_rev2_observe_lstat_final_missing_candidate(
+          &context,
+          &nonexistent,
+          admission,
+          projection_tamper,
+        )
+        .err()
+        .expect("projection tamper must refuse")
+      ),
+      "OD-CAP-REV2-FILESYSTEM-CANDIDATE-GENERATED-PROJECTION"
+    );
+    assert_eq!(
+      crate::oden_rev2_permission_actor_capture_count_for_test(),
+      0
+    );
+
+    let mut inventory_tamper = base;
+    inventory_tamper
+      .initial_sandbox
+      .unexpected_entries
+      .push("extra".to_string());
+    inventory_tamper.initial_inventory_digest = hjcs_digest(
+      "oden:capsec:filesystem-sandbox-inventory:2",
+      &serde_json::to_value(&inventory_tamper.initial_sandbox).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+      refusal(
+        super::oden_capsec_rev2_observe_lstat_final_missing_candidate(
+          &context,
+          &nonexistent,
+          admission,
+          inventory_tamper,
+        )
+        .err()
+        .expect("inventory tamper must refuse")
+      ),
+      "OD-CAP-REV2-FILESYSTEM-CANDIDATE-EXECUTION-INPUT"
+    );
+    assert_eq!(
+      crate::oden_rev2_permission_actor_capture_count_for_test(),
+      0
+    );
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  #[test]
+  fn lstat_final_missing_candidate_requires_registered_admission_identity() {
+    let admission = native_lstat_final_missing_execution_admission();
+    let forged: &'static Rev2FilesystemLstatExecutionAdmission =
+      Box::leak(Box::new(*admission));
+    let existing = native_lstat_existing_execution_admission();
+    let root = TempRoot::new("lstat-final-missing-candidate-admission");
+    let project = root.0.join("data");
+    let input = lstat_candidate_input(&project, admission);
+    let context =
+      lstat_final_missing_candidate_context(&project, &input.case_projection);
+    for candidate in [forged, existing] {
+      assert_eq!(
+        refusal(
+          super::oden_capsec_rev2_observe_lstat_final_missing_candidate(
+            &context,
+            &project,
+            candidate,
+            input.clone(),
+          )
+          .err()
+          .expect("copied or wrong-table admission must refuse")
+        ),
+        "OD-CAP-REV2-FILESYSTEM-CANDIDATE-EXECUTION-ADMISSION"
+      );
+    }
+    assert_eq!(std::fs::read_dir(&project).unwrap().count(), 0);
+  }
+
+  #[cfg(any(
+    all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos"),
+    all(
+      target_arch = "x86_64",
+      target_vendor = "unknown",
+      target_os = "linux",
+      target_env = "gnu"
+    )
+  ))]
+  #[test]
+  fn lstat_final_missing_candidate_refuses_present_entries_and_inventory_aliases()
+   {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    let admission = native_lstat_final_missing_execution_admission();
+    let _actors = ActorCapture::install(principal());
+    for mutation in [
+      "empty-file",
+      "nonempty-file",
+      "symlink",
+      "hardlink",
+      "directory",
+      "fifo",
+      "case-alias",
+      "destination",
+      "extra-entry",
+    ] {
+      let root = TempRoot::new(&format!("lstat-final-missing-host-{mutation}"));
+      let project = root.0.join("data");
+      let target = project.join("input.txt");
+      let input = lstat_candidate_input(&project, admission);
+      let context =
+        lstat_final_missing_candidate_context(&project, &input.case_projection);
+      match mutation {
+        "empty-file" => std::fs::write(&target, b"").unwrap(),
+        "nonempty-file" => std::fs::write(&target, b"x").unwrap(),
+        "symlink" => {
+          std::fs::write(root.0.join("outside.txt"), b"").unwrap();
+          symlink("../outside.txt", &target).unwrap();
+        }
+        "hardlink" => {
+          std::fs::write(&target, b"").unwrap();
+          std::fs::hard_link(&target, root.0.join("outside-link")).unwrap();
+        }
+        "directory" => std::fs::create_dir(&target).unwrap(),
+        "fifo" => {
+          let target_c =
+            std::ffi::CString::new(target.as_os_str().as_bytes()).unwrap();
+          // SAFETY: target_c is NUL-terminated and mkfifo does not retain it.
+          assert_eq!(unsafe { libc::mkfifo(target_c.as_ptr(), 0o600) }, 0);
+        }
+        "case-alias" => std::fs::write(project.join("INPUT.txt"), b"").unwrap(),
+        "destination" => {
+          std::fs::write(project.join("output.txt"), b"").unwrap()
+        }
+        "extra-entry" => {
+          std::fs::write(project.join("unexpected.txt"), b"").unwrap()
+        }
+        _ => unreachable!(),
+      }
+      crate::oden_rev2_reset_permission_actor_capture_count_for_test();
+      assert_eq!(
+        refusal(
+          super::oden_capsec_rev2_observe_lstat_final_missing_candidate(
+            &context, &project, admission, input,
+          )
+          .err()
+          .expect("present entry must refuse")
+        ),
+        "OD-CAP-REV2-FILESYSTEM-CANDIDATE-INITIAL-INVENTORY",
+        "{mutation}"
+      );
+      assert_eq!(
+        crate::oden_rev2_permission_actor_capture_count_for_test(),
+        0,
+        "{mutation} must refuse before checked-op actor capture"
+      );
+      assert!(std::fs::read_dir(&project).unwrap().next().is_some());
     }
   }
 
