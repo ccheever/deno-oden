@@ -108,5 +108,8 @@ nix.workspace = true
 # Used in benchmark
 test_util.workspace = true
 
+[target.'cfg(unix)'.dev-dependencies]
+deno_permissions = { workspace = true, features = ["capsec_fixture_test"] }
+
 [package.metadata.docs.rs]
 features = ["docsrs"]

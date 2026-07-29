@@ -13,6 +13,11 @@ description = "Provides the deno permissions implementation."
 name = "deno_permissions"
 path = "lib.rs"
 
+[features]
+# Test-only Rev2 fixture contexts and canaries. The deno_runtime crate enables
+# this only through its dev-dependency while exercising registered native ops.
+capsec_fixture_test = []
+
 [dependencies]
 base64.workspace = true
 capacity_builder.workspace = true

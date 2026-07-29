@@ -665,7 +665,10 @@ impl OdenRev2RuntimeAuthorityContext {
     Self::install_with(&RUNTIME_AUTHORITY_INSTALLER, loaded)
   }
 
-  #[cfg(test)]
+  #[cfg(any(
+    test,
+    all(feature = "capsec_fixture_test", debug_assertions, unix)
+  ))]
   pub(crate) fn install_for_test(
     loaded: OdenRev2LoadedPolicyContext,
   ) -> Result<Self, String> {

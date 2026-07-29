@@ -52,6 +52,8 @@ mod oden_rev2_context;
 mod oden_rev2_executable;
 pub(crate) mod oden_rev2_fs;
 mod oden_rev2_permission;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+mod oden_rev2_permission_fixture;
 mod oden_rev2_policy;
 mod oden_rev2_protocol;
 mod oden_rev2_runtime;
@@ -93,6 +95,36 @@ pub use oden_rev2_executable::oden_rev2_stage_harness_executable_image;
 pub use oden_rev2_permission::OdenRev2PermissionError;
 pub use oden_rev2_permission::OdenRev2PermissionOperation;
 pub use oden_rev2_permission::oden_capsec_rev2_permission_operation;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission_fixture::OdenRev2PermissionFixtureContext;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission_fixture::OdenRev2PermissionFixtureObservation;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission_fixture::oden_capsec_rev2_permission_fixture_compiled_target;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission_fixture::oden_capsec_rev2_permission_fixture_context;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission_fixture::oden_capsec_rev2_permission_fixture_observe;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission_fixture::oden_capsec_rev2_permission_fixture_record_event;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission_fixture::oden_capsec_rev2_permission_fixture_seed_positive;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission_fixture::oden_capsec_rev2_permission_fixture_seed_revocation;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission_fixture::oden_capsec_rev2_permission_fixture_set_actors;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission_fixture::oden_capsec_rev2_permission_fixture_take_trace;
 pub use oden_rev2_policy::OdenRev2CompiledBuildIdentity;
 pub use oden_rev2_policy::OdenRev2LoadState;
 pub use oden_rev2_policy::OdenRev2LoadedPolicyContext;
@@ -5361,13 +5393,13 @@ pub fn oden_rev2_capture_live_principals() -> Vec<rev2::PrincipalRef> {
   oden_rev2_capture_live_permission_actors().0
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "capsec_fixture_test", debug_assertions, unix)))]
 thread_local! {
   static ODEN_REV2_PERMISSION_ACTORS_FOR_TEST: std::cell::RefCell<Option<(Vec<rev2::PrincipalRef>, rev2::PrincipalRef)>> = const { std::cell::RefCell::new(None) };
   static ODEN_REV2_PERMISSION_ACTOR_CAPTURE_COUNT_FOR_TEST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "capsec_fixture_test", debug_assertions, unix)))]
 pub(crate) fn oden_rev2_set_permission_actors_for_test(
   actors: Option<(Vec<rev2::PrincipalRef>, rev2::PrincipalRef)>,
 ) {
@@ -5376,12 +5408,12 @@ pub(crate) fn oden_rev2_set_permission_actors_for_test(
   });
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "capsec_fixture_test", debug_assertions, unix)))]
 pub(crate) fn oden_rev2_reset_permission_actor_capture_count_for_test() {
   ODEN_REV2_PERMISSION_ACTOR_CAPTURE_COUNT_FOR_TEST.with(|count| count.set(0));
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "capsec_fixture_test", debug_assertions, unix)))]
 pub(crate) fn oden_rev2_permission_actor_capture_count_for_test() -> u64 {
   ODEN_REV2_PERMISSION_ACTOR_CAPTURE_COUNT_FOR_TEST.with(std::cell::Cell::get)
 }
@@ -5391,10 +5423,16 @@ pub(crate) fn oden_rev2_permission_actor_capture_count_for_test() -> u64 {
 /// cannot substitute JavaScript-provided attribution between the two fields.
 pub(crate) fn oden_rev2_capture_live_permission_actors()
 -> (Vec<rev2::PrincipalRef>, rev2::PrincipalRef) {
-  #[cfg(test)]
+  #[cfg(any(
+    test,
+    all(feature = "capsec_fixture_test", debug_assertions, unix)
+  ))]
   ODEN_REV2_PERMISSION_ACTOR_CAPTURE_COUNT_FOR_TEST
     .with(|count| count.set(count.get().saturating_add(1)));
-  #[cfg(test)]
+  #[cfg(any(
+    test,
+    all(feature = "capsec_fixture_test", debug_assertions, unix)
+  ))]
   if let Some(actors) = ODEN_REV2_PERMISSION_ACTORS_FOR_TEST
     .with(|current| current.borrow().clone())
   {

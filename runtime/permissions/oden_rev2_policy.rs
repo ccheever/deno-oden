@@ -2392,6 +2392,162 @@ fn reject_display_or_source_fields(value: &Value) -> Result<(), String> {
   Ok(())
 }
 
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+pub(crate) mod fixture_support {
+  use super::*;
+
+  fn embedded_target()
+  -> &'static crate::rev2_registry_generated::Rev2TargetStatus {
+    let target =
+      compiled_target().expect("fixture host has a generated Rev2 target");
+    REV2_TARGET_STATUS
+      .iter()
+      .find(|status| status.target == target)
+      .expect("compiled fixture target is present in the generated registry")
+  }
+
+  fn hermetic_target() -> TargetStatus<'static> {
+    let embedded = embedded_target();
+    TargetStatus {
+      target: embedded.target,
+      feature_set: embedded.feature_set,
+      profile_claim: "test-conformant",
+      conformance_report_digest: Some(REV2_REGISTRY_DIGEST),
+      enforced: 996,
+      closed: 0,
+      absent: 0,
+      unsupported: 0,
+      advertised: false,
+      hermetic: true,
+    }
+  }
+
+  pub(crate) fn candidate_snapshot(mode: &str) -> Value {
+    assert!(matches!(mode, "permissive" | "audit" | "enforce"));
+    let target = hermetic_target();
+    let mut policy = serde_json::json!({
+      "policySchema": POLICY_SCHEMA,
+      "capsVocab": REV2_PROFILE,
+      "vocabDigest": REV2_VOCAB_DIGEST,
+      "policyDigest": "",
+      "mode": mode,
+      "principals": [],
+      "processDenials": [],
+    });
+    let mut policy_basis = policy.clone();
+    policy_basis.as_object_mut().unwrap().remove("policyDigest");
+    let policy_digest =
+      domain_digest("oden:capsec:policy:2", &policy_basis).unwrap();
+    policy["policyDigest"] = Value::String(policy_digest.clone());
+    let receipts = Value::Array(Vec::new());
+    let receipt_digest = domain_digest(RECEIPT_SET_DOMAIN, &receipts).unwrap();
+    let mut snapshot = serde_json::json!({
+      "snapshotSchema": SNAPSHOT_SCHEMA,
+      "capsVocab": REV2_PROFILE,
+      "vocabDigest": REV2_VOCAB_DIGEST,
+      "registryDigest": REV2_REGISTRY_DIGEST,
+      "policyDigest": policy_digest,
+      "projectDigest": REV2_REGISTRY_DIGEST,
+      "armedSnapshotDigest": "",
+      "engineTarget": target.target,
+      "engineFeatureSet": target.feature_set,
+      "executionRole": "probe",
+      "conformanceReportDigest": REV2_REGISTRY_DIGEST,
+      "effectiveMode": mode,
+      "runNonce": "run:dynamic-permission-fixture",
+      "channelEpoch": "channel:dynamic-permission-fixture",
+      "canonicalPolicy": policy,
+      "rootBindings": [],
+      "denyCeiling": [],
+      "executableBindings": [],
+      "routeBindings": [],
+      "classifierBindings": [],
+      "protectedPredicateVersions": [],
+      "protectedReceiptBindings": receipts,
+      "protectedReceiptSetDigest": receipt_digest,
+    });
+    refresh_digests(&mut snapshot);
+    snapshot
+  }
+
+  pub(crate) fn refresh_digests(snapshot: &mut Value) {
+    let policy = snapshot["canonicalPolicy"].as_object_mut().unwrap();
+    policy.remove("policyDigest");
+    let policy_digest =
+      domain_digest("oden:capsec:policy:2", &Value::Object(policy.clone()))
+        .unwrap();
+    policy.insert(
+      "policyDigest".to_string(),
+      Value::String(policy_digest.clone()),
+    );
+    snapshot["policyDigest"] = Value::String(policy_digest);
+    snapshot
+      .as_object_mut()
+      .unwrap()
+      .remove("armedSnapshotDigest");
+    snapshot["armedSnapshotDigest"] =
+      Value::String(domain_digest("oden:capsec:armed:2", snapshot).unwrap());
+  }
+
+  fn envelope(snapshot: Value, key: &[u8; 32]) -> Vec<u8> {
+    let key_id =
+      format!("sha256-{}", URL_SAFE_NO_PAD.encode(Sha256::digest(key)));
+    let mut signer = <Hmac<Sha256> as Mac>::new_from_slice(key).unwrap();
+    signer.update(ENVELOPE_AUTH_DOMAIN.as_bytes());
+    signer.update(key_id.as_bytes());
+    signer.update(canonical_json(&snapshot).unwrap().as_bytes());
+    let tag = URL_SAFE_NO_PAD.encode(signer.finalize().into_bytes());
+    serde_json::to_vec(&serde_json::json!({
+      "schema": ENVELOPE_SCHEMA,
+      "snapshot": snapshot,
+      "mac": {
+        "algorithm": "hmac-sha256",
+        "keyId": key_id,
+        "tag": tag,
+      },
+    }))
+    .unwrap()
+  }
+
+  pub(crate) fn load_snapshot(
+    mut snapshot: Value,
+    key: &[u8; 32],
+  ) -> OdenRev2LoadedPolicyContext {
+    snapshot["conformanceReportDigest"] =
+      Value::String(REV2_REGISTRY_DIGEST.to_string());
+    refresh_digests(&mut snapshot);
+    let authenticated =
+      parse_authenticated_snapshot(&envelope(snapshot, key), key).unwrap();
+    verify_snapshot(&authenticated, hermetic_target()).unwrap()
+  }
+
+  #[cfg(unix)]
+  pub(crate) fn file_digest(path: &std::path::Path) -> String {
+    format!(
+      "sha256-{}",
+      URL_SAFE_NO_PAD.encode(Sha256::digest(std::fs::read(path).unwrap()))
+    )
+  }
+
+  #[cfg(unix)]
+  pub(crate) fn object_identity(path: &std::path::Path) -> Value {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).unwrap();
+    serde_json::json!({
+      "kind": "platform-object",
+      "value": format!(
+        "unix-dev-ino:{:016x}{:016x}",
+        metadata.dev(),
+        metadata.ino(),
+      ),
+    })
+  }
+
+  pub(crate) fn target() -> &'static str {
+    embedded_target().target
+  }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
   use super::*;

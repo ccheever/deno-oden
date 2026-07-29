@@ -50,6 +50,73 @@ use crate::rev2::StageDecision;
 use crate::rev2_registry_generated::REV2_RUNTIME_PERMISSION_BRANCHES;
 use crate::rev2_registry_generated::REV2_RUNTIME_SEMANTIC_PAYLOAD_JSON;
 
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+thread_local! {
+  static PERMISSION_FIXTURE_TRACE: std::cell::RefCell<Vec<String>> =
+    const { std::cell::RefCell::new(Vec::new()) };
+  static PERMISSION_FIXTURE_ACTIVE_HOST_EFFECTS: std::cell::Cell<usize> =
+    const { std::cell::Cell::new(0) };
+  static PERMISSION_FIXTURE_MODE_FALLBACK_COUNT: std::cell::Cell<u64> =
+    const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+pub(crate) fn permission_fixture_trace(event: impl Into<String>) {
+  PERMISSION_FIXTURE_TRACE.with(|trace| trace.borrow_mut().push(event.into()));
+}
+
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+pub(crate) fn permission_fixture_reset_trace() {
+  PERMISSION_FIXTURE_ACTIVE_HOST_EFFECTS.with(|active| {
+    assert_eq!(
+      active.get(),
+      0,
+      "a prior permission fixture retained host verification state"
+    )
+  });
+  PERMISSION_FIXTURE_TRACE.with(|trace| trace.borrow_mut().clear());
+  PERMISSION_FIXTURE_MODE_FALLBACK_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+pub(crate) fn permission_fixture_take_trace() -> (Vec<String>, usize, u64) {
+  let trace = PERMISSION_FIXTURE_TRACE
+    .with(|trace| std::mem::take(&mut *trace.borrow_mut()));
+  let active =
+    PERMISSION_FIXTURE_ACTIVE_HOST_EFFECTS.with(std::cell::Cell::get);
+  let mode_fallback =
+    PERMISSION_FIXTURE_MODE_FALLBACK_COUNT.with(std::cell::Cell::get);
+  (trace, active, mode_fallback)
+}
+
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+struct PermissionFixtureHostEffectLease;
+
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+impl PermissionFixtureHostEffectLease {
+  fn new() -> Self {
+    PERMISSION_FIXTURE_ACTIVE_HOST_EFFECTS
+      .with(|active| active.set(active.get().saturating_add(1)));
+    permission_fixture_trace("host-effect-retained");
+    Self
+  }
+}
+
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+impl Drop for PermissionFixtureHostEffectLease {
+  fn drop(&mut self) {
+    PERMISSION_FIXTURE_ACTIVE_HOST_EFFECTS.with(|active| {
+      active.set(
+        active
+          .get()
+          .checked_sub(1)
+          .expect("fixture host-effect lease underflow"),
+      )
+    });
+    permission_fixture_trace("host-effect-released");
+  }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OdenRev2PermissionOperation {
   Query,
@@ -137,6 +204,16 @@ fn select_branch(
       "no unique generated branch matches the exact field set".to_string(),
     ));
   };
+  #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+  {
+    permission_fixture_trace(format!("branch-selected:{}", branch.id));
+    if let Some(slot) = branch.slot_order.first() {
+      permission_fixture_trace(format!(
+        "capability-selected:{}",
+        slot.capability
+      ));
+    }
+  }
   if branch.descriptor_scope_requirement == "required-nonempty" {
     let Some(field) = branch.descriptor_scope_field else {
       return Err(OdenRev2PermissionError::DescriptorInvalid(
@@ -152,6 +229,10 @@ fn select_branch(
       _ => None,
     };
     if value.is_none_or(|value| value.is_empty()) {
+      #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+      permission_fixture_trace(format!(
+        "descriptor-refused:required-nonempty-{field}"
+      ));
       return Err(OdenRev2PermissionError::DescriptorInvalid(format!(
         "{field} must be nonempty"
       )));
@@ -202,12 +283,14 @@ fn evaluate_phase<'batch>(
   phase: PermissionNegativeReentryPhase,
   evaluation_view: PermissionEvaluationView,
 ) -> Result<SealedPermissionNegativeReentry<'batch>, OdenRev2PermissionError> {
+  #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+  permission_fixture_trace(format!("phase-entered:{}", phase.id()));
   let mut facts = OdenRev2OperationAuthorityFacts::new(
     overlay_owner.clone(),
     format!("permission:{}", phase.id()),
   );
   facts = facts.with_path_bindings(path_bindings.iter().cloned());
-  context
+  let result = context
     .evaluate_permission_negative_reentry(
       batch,
       view,
@@ -217,7 +300,12 @@ fn evaluate_phase<'batch>(
       0,
       None,
     )
-    .map_err(OdenRev2PermissionError::from)
+    .map_err(OdenRev2PermissionError::from);
+  #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+  if result.is_ok() {
+    permission_fixture_trace(format!("phase-completed:{}", phase.id()));
+  }
+  result
 }
 
 fn permission_effect_result(
@@ -242,6 +330,15 @@ fn permission_effect_result(
     .dimensions
     .iter()
     .map(|dimension| {
+      #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+      if dimension
+        .positive_source
+        .as_ref()
+        .is_some_and(|source| source.kind == "mode-fallback")
+      {
+        PERMISSION_FIXTURE_MODE_FALLBACK_COUNT
+          .with(|count| count.set(count.get().saturating_add(1)));
+      }
       let mut inside_escalation_ceiling = false;
       if dynamically_authorable
         && dimension.outcome == Outcome::Deny
@@ -296,6 +393,8 @@ struct VerifiedHostEffect {
   _retained_handles: Vec<File>,
   _installed_bindings:
     Vec<crate::oden_rev2_executable::OdenRev2InstalledExecutable>,
+  #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+  _fixture_host_effect_lease: PermissionFixtureHostEffectLease,
 }
 
 fn evaluate_singleton_permission(
@@ -331,10 +430,14 @@ fn evaluate_singleton_permission(
 
   let (principals, overlay_owner) =
     crate::oden_rev2_capture_live_permission_actors();
+  #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+  permission_fixture_trace("actors-capture-attempted");
   let actors = VerifiedPermissionActorSet::capture_host(
     &principals,
     overlay_owner.clone(),
   )?;
+  #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+  permission_fixture_trace("actors-validated");
   let host_effect = build_host_effect(&principals, &overlay_owner)?;
   let core = Rev2Core::embedded()
     .map_err(|error| OdenRev2PermissionError::Core(error.to_string()))?;
@@ -509,6 +612,8 @@ fn evaluate_singleton_permission(
         });
       match committed {
         Ok(committed) => {
+          #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+          permission_fixture_trace("authority-publication-completed");
           Ok(protocol_state_to_public(committed.output().state()))
         }
         Err(_) if validation_error.is_some() => {
@@ -595,6 +700,8 @@ fn system_information_effect(
     session_path_binding: None,
     _retained_handles: Vec::new(),
     _installed_bindings: Vec::new(),
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    _fixture_host_effect_lease: PermissionFixtureHostEffectLease::new(),
   }
 }
 
@@ -1248,6 +1355,8 @@ fn verified_path_effect(
     session_path_binding: Some(session_path_binding),
     _retained_handles: handles,
     _installed_bindings: Vec::new(),
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    _fixture_host_effect_lease: PermissionFixtureHostEffectLease::new(),
   })
 }
 
@@ -1424,6 +1533,8 @@ fn verified_installed_effect(
     session_path_binding: None,
     _retained_handles: Vec::new(),
     _installed_bindings: installed_bindings,
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    _fixture_host_effect_lease: PermissionFixtureHostEffectLease::new(),
   })
 }
 
