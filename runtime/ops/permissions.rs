@@ -164,21 +164,41 @@ fn rev2_permission(
   args: &PermissionArgs,
   operation: ::deno_permissions::OdenRev2PermissionOperation,
 ) -> Option<Result<PermissionState, PermissionError>> {
+  #[cfg(all(test, debug_assertions, unix))]
+  let fixture_call = state
+    .try_borrow::<NativePermissionFixtureLocalContext>()
+    .map(|local| local.call.clone());
   let context = match resolve_rev2_context(state) {
     Ok(Some(context)) => context,
     Ok(None) => return None,
     Err(error) => return Some(Err(error)),
   };
   let permissions = state.borrow::<PermissionsContainer>();
-  Some(
+  #[cfg(all(test, debug_assertions, unix))]
+  let permission = if let Some(call) = fixture_call {
+    ::deno_permissions::oden_capsec_rev2_permission_fixture_operation(
+      &call,
+      context.as_ref(),
+      permissions,
+      operation,
+      &dynamic_descriptor(args),
+    )
+  } else {
     ::deno_permissions::oden_capsec_rev2_permission_operation(
       context.as_ref(),
       permissions,
       operation,
       &dynamic_descriptor(args),
     )
-    .map_err(|error| PermissionError::Rev2(error.to_string())),
-  )
+  };
+  #[cfg(not(all(test, debug_assertions, unix)))]
+  let permission = ::deno_permissions::oden_capsec_rev2_permission_operation(
+    context.as_ref(),
+    permissions,
+    operation,
+    &dynamic_descriptor(args),
+  );
+  Some(permission.map_err(|error| PermissionError::Rev2(error.to_string())))
 }
 
 fn resolve_rev2_context(
@@ -210,7 +230,7 @@ fn resolve_rev2_context(
         "OD-CAP-REV2-FIXTURE-OPSTATE-BINDING".to_string(),
       ));
     }
-    return Ok(Some(local.0.clone()));
+    return Ok(Some(local.authority.clone()));
   }
   let state_mode = state.try_borrow::<OdenRev2ProcessMode>().copied();
   let state_context = state
@@ -226,9 +246,11 @@ fn resolve_rev2_context(
 }
 
 #[cfg(all(test, debug_assertions, unix))]
-struct NativePermissionFixtureLocalContext(
-  std::sync::Arc<::deno_permissions::OdenRev2RuntimeAuthorityContext>,
-);
+struct NativePermissionFixtureLocalContext {
+  authority:
+    std::sync::Arc<::deno_permissions::OdenRev2RuntimeAuthorityContext>,
+  call: ::deno_permissions::OdenRev2PermissionFixtureCall,
+}
 
 #[cfg(all(test, debug_assertions, unix))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -494,7 +516,7 @@ mod native_capsec_tests {
   const REPORT_PREFIX: &str = "ODEN_REV2_DYNAMIC_PERMISSION_FIXTURE_REPORT ";
   const MODES: [&str; 3] = ["permissive", "audit", "enforce"];
 
-  const QUERY_CASES: [&str; 21] = [
+  const QUERY_CASES: [&str; 23] = [
     "alternative-branch:effect-10-run:run:authorized",
     "alternative-branch:effect-10-run:run:denied",
     "alternative-branch:effect-11-sys:read:authorized",
@@ -516,8 +538,10 @@ mod native_capsec_tests {
     "authorable-wrong-principal-denial",
     "malformed-resource-refusal",
     "staged-barrier:authorization",
+    "staged-barrier:cancellation",
+    "staged-barrier:cleanup",
   ];
-  const REQUEST_CASES: [&str; 17] = [
+  const REQUEST_CASES: [&str; 19] = [
     "alternative-branch:effect-11-sys:read:authorized",
     "alternative-branch:effect-11-sys:read:denied",
     "alternative-branch:effect-4-fs:read:authorized",
@@ -535,8 +559,10 @@ mod native_capsec_tests {
     "authorable-wrong-principal-denial",
     "malformed-resource-refusal",
     "staged-barrier:authorization",
+    "staged-barrier:cancellation",
+    "staged-barrier:cleanup",
   ];
-  const REVOKE_CASES: [&str; 22] = [
+  const REVOKE_CASES: [&str; 24] = [
     "alternative-branch:effect-10-run:run:authorized",
     "alternative-branch:effect-10-run:run:denied",
     "alternative-branch:effect-11-sys:read:authorized",
@@ -558,6 +584,8 @@ mod native_capsec_tests {
     "authorable-wrong-principal-denial",
     "malformed-resource-refusal",
     "staged-barrier:authorization",
+    "staged-barrier:cancellation",
+    "staged-barrier:cleanup",
     "staged-barrier:revocation",
   ];
 
@@ -688,7 +716,9 @@ mod native_capsec_tests {
   fn is_refused(case_kind: &str) -> bool {
     matches!(
       case_kind,
-      "malformed-resource-refusal" | "authorable-missing-principal-denial"
+      "malformed-resource-refusal"
+        | "authorable-missing-principal-denial"
+        | "staged-barrier:cancellation"
     )
   }
 
@@ -703,6 +733,7 @@ mod native_capsec_tests {
 
   fn is_authorized(case_kind: &str) -> bool {
     case_kind == "authorable-positive"
+      || case_kind == "staged-barrier:cleanup"
       || case_kind == "alternative-no-unselected-branch-commit"
       || (case_kind.starts_with("alternative-branch:")
         && case_kind.ends_with(":authorized"))
@@ -734,7 +765,7 @@ mod native_capsec_tests {
     }
   }
 
-  fn baseline_plan(case_kind: &str) -> &'static str {
+  fn baseline_plan(operation: &str, case_kind: &str) -> &'static str {
     match case_kind {
       "authorable-missing-principal-denial" => {
         "empty-constrained-principal-set"
@@ -744,6 +775,15 @@ mod native_capsec_tests {
         "exact-selected-and-unrelated-session-revocations-plus-ceiling"
       }
       "staged-barrier:revocation" => "one-exact-session-positive-plus-ceiling",
+      "staged-barrier:cancellation" if operation == "revoke" => {
+        "one-exact-path-fact-bound-session-positive-plus-static-floor-and-ceiling"
+      }
+      "staged-barrier:cleanup" if operation == "revoke" => {
+        "one-exact-selected-fs-read-static-floor"
+      }
+      "staged-barrier:cancellation" | "staged-barrier:cleanup" => {
+        "one-exact-selected-fs-read-static-floor"
+      }
       "staged-barrier:authorization" => {
         "exact-static-floor-plus-process-denial"
       }
@@ -814,11 +854,25 @@ mod native_capsec_tests {
         "staged-barrier:authorization" => {
           "negative-reentry-precedes-public-result-and-overlay-publication"
         }
+        "staged-barrier:cancellation" => {
+          "cancellation-releases-retained-fs-descriptor-ownership-without-result-or-publication"
+        }
+        "staged-barrier:cleanup" => {
+          "normal-cleanup-releases-retained-fs-descriptor-ownership-before-v8-delivery"
+        }
         "staged-barrier:revocation" => {
           "revoke-publication-rechecks-proposed-negative-before-result"
         }
         _ => panic!("closed case list omitted a semantic assertion"),
       }
+    }
+  }
+
+  fn lifecycle_descriptor_count(operation: &str, case_kind: &str) -> usize {
+    if operation == "revoke" && case_kind == "staged-barrier:cancellation" {
+      11
+    } else {
+      7
     }
   }
 
@@ -849,9 +903,49 @@ mod native_capsec_tests {
     trace.extend([
       "actors-validated".to_string(),
       "host-effect-retained".to_string(),
+    ]);
+    let lifecycle = matches!(
+      case_kind,
+      "staged-barrier:cancellation" | "staged-barrier:cleanup"
+    );
+    if lifecycle {
+      trace.push(format!(
+        "host-descriptors-retained:{}",
+        lifecycle_descriptor_count(operation, case_kind)
+      ));
+    }
+    trace.extend([
       "phase-entered:initial-query-or-request".to_string(),
       "phase-completed:initial-query-or-request".to_string(),
     ]);
+    if case_kind == "staged-barrier:cancellation" {
+      match operation {
+        "query" => trace
+          .push("cancellation-observed:before-result-production".to_string()),
+        "request" => trace.extend([
+          "phase-entered:already-granted-check".to_string(),
+          "phase-completed:already-granted-check".to_string(),
+          "cancellation-observed:before-result-production".to_string(),
+        ]),
+        "revoke" => trace.extend([
+          "authority-transaction-proposed".to_string(),
+          "cancellation-observed:before-overlay-publication".to_string(),
+          "authority-transaction-discarded".to_string(),
+        ]),
+        _ => unreachable!(),
+      }
+      trace.extend([
+        "cleanup-boundary-entered".to_string(),
+        format!(
+          "host-descriptors-released:{}",
+          lifecycle_descriptor_count(operation, case_kind)
+        ),
+        "host-effect-released".to_string(),
+        "cleanup-completed".to_string(),
+        "op-returned:refused".to_string(),
+      ]);
+      return trace;
+    }
     match operation {
       "query" => {}
       "request" => trace.extend([
@@ -870,6 +964,19 @@ mod native_capsec_tests {
     ]);
     if operation == "revoke" {
       trace.push("authority-publication-completed".to_string());
+    }
+    if case_kind == "staged-barrier:cleanup" {
+      trace.extend([
+        "cleanup-boundary-entered".to_string(),
+        format!(
+          "host-descriptors-released:{}",
+          lifecycle_descriptor_count(operation, case_kind)
+        ),
+        "host-effect-released".to_string(),
+        "cleanup-completed".to_string(),
+        format!("op-returned:{state}"),
+      ]);
+      return trace;
     }
     trace.extend([
       "host-effect-released".to_string(),
@@ -903,9 +1010,10 @@ mod native_capsec_tests {
       let state = runtime.op_state();
       let mut state = state.borrow_mut();
       state.put(::deno_permissions::OdenRev2ProcessMode::Rev2Installed);
-      state.put(NativePermissionFixtureLocalContext(
-        fixture.authority.clone(),
-      ));
+      state.put(NativePermissionFixtureLocalContext {
+        authority: fixture.authority.clone(),
+        call: fixture.fixture_call(),
+      });
       let parser = ::deno_permissions::RuntimePermissionDescriptorParser::new(
         sys_traits::impls::RealSys,
       );
@@ -953,6 +1061,10 @@ mod native_capsec_tests {
         "Rev2 permission protocol refused: empty constrainedPrincipals",
         "protocol-refused:empty-constrained-principals",
       )),
+      "staged-barrier:cancellation" => Some((
+        "Rev2 permission protocol refused: OD-CAP-REV2-FIXTURE-CANCELLED",
+        "fixture-cancelled-before-delivery-or-publication",
+      )),
       _ => None,
     }
   }
@@ -972,11 +1084,20 @@ mod native_capsec_tests {
         operation, case_kind, mode, root,
       )
       .unwrap();
+    if operation == "revoke" && case_kind == "staged-barrier:cancellation" {
+      assert_eq!(
+        fixture.exact_selected_ceiling_and_root_binding_counts(),
+        (1, 1),
+        "revoke lifecycle baseline lacks its exact authenticated path ceiling"
+      );
+    }
     if case_kind == "alternative-no-unselected-branch-commit" {
       ::deno_permissions::oden_capsec_rev2_permission_fixture_seed_revocation(
         &fixture,
       );
-    } else if case_kind == "staged-barrier:revocation" {
+    } else if case_kind == "staged-barrier:revocation"
+      || (operation == "revoke" && case_kind == "staged-barrier:cancellation")
+    {
       ::deno_permissions::oden_capsec_rev2_permission_fixture_seed_positive(
         &fixture,
       );
@@ -990,12 +1111,49 @@ mod native_capsec_tests {
     let call = run_registered_op(operation, &fixture);
     let after =
       ::deno_permissions::oden_capsec_rev2_permission_fixture_observe(&fixture);
-    let (trace, active_host_effects, mode_fallback_count, actor_captures) =
-      ::deno_permissions::oden_capsec_rev2_permission_fixture_take_trace();
+    let (
+      trace,
+      active_host_effects,
+      mode_fallback_count,
+      retained_descriptor_count,
+      released_descriptor_count,
+      active_retained_descriptors,
+      actor_captures,
+    ) = ::deno_permissions::oden_capsec_rev2_permission_fixture_take_trace();
     let native_fallback = native_permission_fixture_fallback_counters();
     ::deno_permissions::oden_capsec_rev2_permission_fixture_set_actors(None);
 
     assert_eq!(active_host_effects, 0, "host effect lease leaked");
+    assert_eq!(
+      active_retained_descriptors, 0,
+      "retained descriptor ownership leaked"
+    );
+    let lifecycle = matches!(
+      case_kind,
+      "staged-barrier:cancellation" | "staged-barrier:cleanup"
+    );
+    assert_eq!(
+      retained_descriptor_count,
+      if lifecycle {
+        lifecycle_descriptor_count(operation, case_kind)
+      } else {
+        0
+      },
+      "retained descriptor ledger drifted"
+    );
+    assert_eq!(
+      released_descriptor_count, retained_descriptor_count,
+      "retained descriptor ownership was not released exactly once"
+    );
+    assert_eq!(
+      fixture.lifecycle_hook_consumed(),
+      true,
+      "the exact fixture call binding was not consumed"
+    );
+    if lifecycle {
+      assert_eq!(fixture.selected_branch, "permission.read.scoped/2");
+      assert_eq!(fixture.selected_capability, "fs:read");
+    }
     assert_eq!(
       actor_captures,
       if case_kind == "malformed-resource-refusal" {
@@ -1064,7 +1222,9 @@ mod native_capsec_tests {
       session: i64::from(revoke_mutation),
     };
     let expected_rows = RowDelta {
-      session_positive: if case_kind == "staged-barrier:revocation" {
+      session_positive: if operation == "revoke"
+        && case_kind == "staged-barrier:revocation"
+      {
         -1
       } else {
         0
@@ -1110,7 +1270,26 @@ mod native_capsec_tests {
       after.negative_overlay_row_ids
     );
     assert_eq!(before.revocation_row_ids, after.revocation_row_ids);
-    if case_kind == "alternative-no-unselected-branch-commit" {
+    if operation == "revoke" && case_kind == "staged-barrier:cancellation" {
+      assert_eq!(before.selected_session_positive_row_ids.len(), 1);
+      assert_eq!(
+        before.selected_session_positive_row_ids,
+        before.expected_selected_session_positive_row_ids,
+        "cancellation baseline positive is not the exact runtime-selector pair"
+      );
+      assert_eq!(
+        before.session_positive_row_ids,
+        before.selected_session_positive_row_ids,
+        "cancellation baseline is not the only session positive"
+      );
+      assert_eq!(
+        before.selected_session_positive_row_ids,
+        after.selected_session_positive_row_ids,
+        "cancelled revoke changed the exact positive row"
+      );
+      assert!(before.session_revocation_row_ids.is_empty());
+      assert!(after.session_revocation_row_ids.is_empty());
+    } else if case_kind == "alternative-no-unselected-branch-commit" {
       assert_eq!(before.session_positive_row_ids.len(), 0);
       assert_eq!(before.session_revocation_row_ids.len(), 2);
       assert_eq!(before.selected_session_revocation_row_ids.len(), 1);
@@ -1347,7 +1526,7 @@ mod native_capsec_tests {
     let report = NativeReport {
       schema: "oden/capsec-dynamic-permission-fixture-report/2",
       case_id: format!("native-permission:{operation}:{case_kind}"),
-      operation_id: operation,
+      operation_id: operation.clone(),
       requirement_id: format!("fixture-requirement:{edge_id}:complete"),
       edge_id,
       case_kind,
@@ -1355,6 +1534,7 @@ mod native_capsec_tests {
       modes: MODES,
       assertions,
       baseline_plan: baseline_plan(
+        &operation,
         &std::env::var(CASE_ENV).expect("fixture case remains present"),
       ),
       selected_branch: results.permissive.selected_branch.clone(),

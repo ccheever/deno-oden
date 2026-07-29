@@ -14,7 +14,11 @@ use serde_json::Value;
 use serde_json::json;
 
 use crate::OdenRev2RuntimeAuthorityContext;
+use crate::oden_rev2_authority::AuthorityPathFact;
 use crate::oden_rev2_authority::AuthorityRowKind;
+use crate::oden_rev2_permission::OdenRev2PermissionFixtureCall;
+use crate::oden_rev2_permission::OdenRev2PermissionOperation;
+use crate::oden_rev2_permission::permission_fixture_capture_path_fact;
 use crate::oden_rev2_permission::permission_fixture_reset_trace;
 use crate::oden_rev2_permission::permission_fixture_take_trace;
 use crate::oden_rev2_permission::permission_fixture_trace;
@@ -51,7 +55,12 @@ enum FixtureBranch {
 
 impl FixtureBranch {
   fn from_case_kind(case_kind: &str) -> Self {
-    if case_kind.starts_with("alternative-branch:effect-10-run:") {
+    if matches!(
+      case_kind,
+      "staged-barrier:cancellation" | "staged-barrier:cleanup"
+    ) {
+      Self::Read
+    } else if case_kind.starts_with("alternative-branch:effect-10-run:") {
       Self::Run
     } else if case_kind.starts_with("alternative-branch:effect-3-ffi:") {
       Self::Ffi
@@ -387,11 +396,49 @@ pub struct OdenRev2PermissionFixtureContext {
   pub descriptor: Value,
   pub selected_branch: &'static str,
   pub selected_capability: &'static str,
+  fixture_call: OdenRev2PermissionFixtureCall,
   actors: Vec<PrincipalRef>,
   overlay_owner: PrincipalRef,
+  selected_policy_positive: CanonicalAuthoritySelector,
   selected_positive: CanonicalAuthoritySelector,
   selected_session_revocation: CanonicalAuthoritySelector,
+  selected_path_fact: Option<AuthorityPathFact>,
   unselected_session_revocation: CanonicalAuthoritySelector,
+}
+
+impl OdenRev2PermissionFixtureContext {
+  pub fn fixture_call(&self) -> OdenRev2PermissionFixtureCall {
+    self.fixture_call.clone()
+  }
+
+  pub fn lifecycle_hook_consumed(&self) -> bool {
+    self.fixture_call.is_claimed()
+  }
+
+  pub fn exact_selected_ceiling_and_root_binding_counts(
+    &self,
+  ) -> (usize, usize) {
+    let ceiling_count = self
+      .authority
+      .static_policy()
+      .principals()
+      .iter()
+      .filter(|principal| principal.principal() == &self.overlay_owner)
+      .flat_map(|principal| principal.escalation_ceiling())
+      .filter(|row| {
+        row.source_id() == "ceiling:fixture:selected"
+          && row.selector() == &self.selected_policy_positive
+      })
+      .count();
+    let root_binding_count = self
+      .authority
+      .bindings()
+      .roots()
+      .iter()
+      .filter(|binding| binding.source_id() == "ceiling:fixture:selected")
+      .count();
+    (ceiling_count, root_binding_count)
+  }
 }
 
 /// One exact authority-state observation used before and after registered-op
@@ -455,9 +502,6 @@ pub fn oden_capsec_rev2_permission_fixture_context(
     );
   }
   if matches!(
-    case_kind,
-    "staged-barrier:cancellation" | "staged-barrier:cleanup"
-  ) || matches!(
     (operation, case_kind),
     ("query" | "request", "staged-barrier:revocation")
   ) {
@@ -581,10 +625,13 @@ pub fn oden_capsec_rev2_permission_fixture_context(
     }
   };
   let mut snapshot = fixture_support::candidate_snapshot(mode);
+  let revoke_cancellation =
+    operation == "revoke" && case_kind == "staged-barrier:cancellation";
   let escalation_ceiling = if matches!(
     case_kind,
     "alternative-no-unselected-branch-commit" | "staged-barrier:revocation"
-  ) {
+  ) || revoke_cancellation
+  {
     vec![ceiling_row]
   } else {
     Vec::new()
@@ -621,6 +668,9 @@ pub fn oden_capsec_rev2_permission_fixture_context(
   if plan == FixtureAuthorityPlan::FloorAndProcessDenial {
     root_source_ids.push("process-deny:fixture:selected");
   }
+  if revoke_cancellation {
+    root_source_ids.push("ceiling:fixture:selected");
+  }
   let mut root_bindings =
     root_bindings_for_selected(branch, &root, &root_source_ids, &row_owner);
   sort_values(&mut root_bindings);
@@ -635,6 +685,31 @@ pub fn oden_capsec_rev2_permission_fixture_context(
     OdenRev2RuntimeAuthorityContext::install_for_test(loaded)
       .map_err(|error| error.to_string())?,
   );
+  let selected_path_fact = if matches!(branch, FixtureBranch::Read) {
+    Some(
+      permission_fixture_capture_path_fact(
+        &authority,
+        &actors,
+        &overlay_owner,
+        &selected_positive,
+        &root.join("data"),
+      )
+      .map_err(|error| error.to_string())?,
+    )
+  } else {
+    None
+  };
+  let operation = match operation {
+    "query" => OdenRev2PermissionOperation::Query,
+    "request" => OdenRev2PermissionOperation::Request,
+    "revoke" => OdenRev2PermissionOperation::Revoke,
+    _ => unreachable!("validated above"),
+  };
+  let fixture_call = OdenRev2PermissionFixtureCall::capture(
+    authority.clone(),
+    operation,
+    case_kind,
+  );
   Ok(OdenRev2PermissionFixtureContext {
     authority,
     descriptor: descriptor(
@@ -644,17 +719,21 @@ pub fn oden_capsec_rev2_permission_fixture_context(
     ),
     selected_branch: branch.branch_id(),
     selected_capability: branch.capability(),
+    fixture_call,
     actors,
     overlay_owner,
+    selected_policy_positive: policy_positive,
     selected_positive,
     selected_session_revocation,
+    selected_path_fact,
     unselected_session_revocation,
   })
 }
 
-/// Seed one exact positive session row as a visible synthetic baseline. Only
-/// the staged-revocation fixture uses this; the evidence operation remains the
-/// registered revoke op which must replace this exact row atomically.
+/// Seed one exact positive session row as a visible synthetic baseline. The
+/// staged-revocation and revoke-lifecycle fixtures use this; the evidence
+/// operation remains the registered revoke op. Path cases attach an
+/// independently host-verified fact for the exact retained object.
 pub fn oden_capsec_rev2_permission_fixture_seed_positive(
   fixture: &OdenRev2PermissionFixtureContext,
 ) {
@@ -669,7 +748,7 @@ pub fn oden_capsec_rev2_permission_fixture_seed_positive(
       &fixture.overlay_owner,
       &fixture.selected_positive,
       &fixture.selected_session_revocation,
-      None,
+      fixture.selected_path_fact.as_ref(),
     )
     .unwrap();
   fixture
@@ -859,15 +938,24 @@ pub fn oden_capsec_rev2_permission_fixture_record_event(event: &str) {
 }
 
 pub fn oden_capsec_rev2_permission_fixture_take_trace()
--> (Vec<String>, usize, u64, u64) {
+-> (Vec<String>, usize, u64, usize, usize, usize, u64) {
   let actor_captures =
     crate::oden_rev2_permission_actor_capture_count_for_test();
-  let (trace, active_host_effects, mode_fallback_count) =
-    permission_fixture_take_trace();
+  let (
+    trace,
+    active_host_effects,
+    mode_fallback_count,
+    retained_descriptor_count,
+    released_descriptor_count,
+    active_retained_descriptors,
+  ) = permission_fixture_take_trace();
   (
     trace,
     active_host_effects,
     mode_fallback_count,
+    retained_descriptor_count,
+    released_descriptor_count,
+    active_retained_descriptors,
     actor_captures,
   )
 }

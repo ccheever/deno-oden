@@ -93,7 +93,13 @@ pub use oden_rev2_executable::OdenRev2HarnessExecutableImage;
 #[doc(hidden)]
 pub use oden_rev2_executable::oden_rev2_stage_harness_executable_image;
 pub use oden_rev2_permission::OdenRev2PermissionError;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission::OdenRev2PermissionFixtureCall;
 pub use oden_rev2_permission::OdenRev2PermissionOperation;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_permission::oden_capsec_rev2_permission_fixture_operation;
 pub use oden_rev2_permission::oden_capsec_rev2_permission_operation;
 #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
 #[doc(hidden)]
