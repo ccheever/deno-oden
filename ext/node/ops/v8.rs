@@ -1768,8 +1768,14 @@ mod native_capsec_tests {
     });
 
     // @ref LLP 0019#pre-promotion-conformance-candidate-execution [tests] --
-    // These five development cases exercise one exact deny-only edge. They
-    // produce no authenticated receipt and cannot change backend status.
+    // These five development cases exercise one exact, synchronous,
+    // single-effect deny-only edge. It has no provisional resource or
+    // delivery phase: cancellation is therefore the proof that refusal
+    // precedes the only mutation and leaves root continuity intact, while
+    // cleanup is the non-authorizing ambient restoration. The revocation case
+    // below performs a real session-overlay revocation before the next native
+    // attempt; changing only the actor label is not accepted as that barrier.
+    // They produce no authenticated receipt and cannot change backend status.
     let assertions: &'static [&'static str] = match case_kind {
       "deny-only-closed-or-absent" => {
         set_actor(root, "node_modules/denied-native/index.cjs");
@@ -1837,6 +1843,23 @@ mod native_capsec_tests {
           "ambient setup did not mutate the V8 flag"
         );
         set_actor(root, "node_modules/denied-native/index.cjs");
+        let revocation = deno_permissions::OdenDynamicPermissionDescriptor {
+          name: "sys",
+          path: None,
+          host: None,
+          variable: None,
+          kind: Some("hostname"),
+          command: None,
+          presence: deno_permissions::OdenDynamicPermissionFieldPresence {
+            kind: true,
+            ..Default::default()
+          },
+        };
+        assert_eq!(
+          deno_permissions::oden_capsec_revoke_dynamic_permission(&revocation),
+          Some(deno_permissions::PermissionState::Denied),
+          "fixture did not apply a real session revocation before the next effect"
+        );
         expect_set_flags_denied(&mut runtime, "--no-expose-gc");
         assert!(
           EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
@@ -1848,7 +1871,7 @@ mod native_capsec_tests {
           "ambient cleanup did not restore the V8 flag"
         );
         &[
-          "actor-transition-rechecked-before-next-effect",
+          "session-revocation-applied-and-actor-rechecked-before-next-effect",
           "no-v8-flag-mutation",
         ]
       }
@@ -1890,10 +1913,10 @@ mod native_capsec_tests {
         r#"["ambient-cleanup-restores-v8-flag","no-v8-flag-mutation"]"#
       }
       [
-        "actor-transition-rechecked-before-next-effect",
+        "session-revocation-applied-and-actor-rechecked-before-next-effect",
         "no-v8-flag-mutation",
       ] => {
-        r#"["actor-transition-rechecked-before-next-effect","no-v8-flag-mutation"]"#
+        r#"["session-revocation-applied-and-actor-rechecked-before-next-effect","no-v8-flag-mutation"]"#
       }
       _ => panic!("Rev2 V8 fixture assertion tuple drifted"),
     };
@@ -2040,7 +2063,7 @@ mod native_capsec_tests {
             &["ambient-cleanup-restores-v8-flag", "no-v8-flag-mutation"]
           }
           "staged-barrier:revocation" => &[
-            "actor-transition-rechecked-before-next-effect",
+            "session-revocation-applied-and-actor-rechecked-before-next-effect",
             "no-v8-flag-mutation",
           ],
           _ => panic!("unknown Rev2 V8 fixture case kind {case_kind}"),
