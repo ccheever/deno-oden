@@ -1288,6 +1288,20 @@ mod native_capsec_tests {
 
   const NATIVE_V8_GUARD_CHILD: &str = "ODEN_NATIVE_V8_GUARD_CHILD";
   const NATIVE_V8_GUARD_TEST: &str = "native_v8_ops_recheck_actor_before_work";
+  const REV2_V8_FIXTURE_CHILD: &str = "ODEN_REV2_V8_FIXTURE_CHILD";
+  const REV2_V8_FIXTURE_CASE_ENV: &str = "ODEN_REV2_V8_SET_FLAGS_CASE_KIND";
+  const REV2_V8_FIXTURE_TARGET_ENV: &str = "ODEN_REV2_V8_FIXTURE_TARGET";
+  const REV2_V8_FIXTURE_REPORT_PREFIX: &str =
+    "ODEN_REV2_V8_SET_FLAGS_FIXTURE_REPORT ";
+  const REV2_V8_FIXTURE_TEST: &str =
+    "ops::v8::native_capsec_tests::rev2_v8_set_flags_fixture_case";
+  const REV2_V8_FIXTURE_CASE_KINDS: &[&str] = &[
+    "deny-only-closed-or-absent",
+    "staged-barrier:authorization",
+    "staged-barrier:cancellation",
+    "staged-barrier:cleanup",
+    "staged-barrier:revocation",
+  ];
 
   struct NativeV8TestRoot(PathBuf);
 
@@ -1657,6 +1671,394 @@ mod native_capsec_tests {
         1,
         "root near-heap positive control did not install exactly one callback"
       );
+    }
+  }
+
+  fn expect_set_flags_denied(runtime: &mut JsRuntime, flags: &str) {
+    execute(
+      runtime,
+      "file:///rev2_v8_set_flags_denied.js",
+      format!(
+        r#"
+        {{
+          try {{
+            Deno.core.ops.op_v8_set_flags_from_string({flags:?});
+          }} catch (error) {{
+            const message = String(error);
+            const expected =
+              "principal set [denied-native] may not use deny-only runtime:inspect:v8:set-flags";
+            if (!message.includes(expected)) {{
+              throw new Error(`setFlagsFromString used the wrong actor or boundary: ${{message}}`);
+            }}
+            globalThis.rev2SetFlagsDenied = true;
+          }}
+          if (!globalThis.rev2SetFlagsDenied) {{
+            throw new Error("setFlagsFromString reached native flag mutation");
+          }}
+          delete globalThis.rev2SetFlagsDenied;
+        }}
+        "#
+      ),
+    );
+  }
+
+  fn set_flags_as_root(runtime: &mut JsRuntime, root: &Path, flags: &str) {
+    set_actor(root, "main.ts");
+    execute(
+      runtime,
+      "file:///rev2_v8_set_flags_root.js",
+      format!("Deno.core.ops.op_v8_set_flags_from_string({flags:?});"),
+    );
+  }
+
+  fn compiled_rev2_v8_fixture_target() -> Option<&'static str> {
+    if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+      Some("aarch64-apple-darwin")
+    } else if cfg!(all(
+      target_arch = "x86_64",
+      target_os = "linux",
+      target_env = "gnu"
+    )) {
+      Some("x86_64-unknown-linux-gnu")
+    } else {
+      None
+    }
+  }
+
+  #[test]
+  fn rev2_v8_fixture_compiled_target_mapping_is_closed() {
+    if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+      assert_eq!(
+        compiled_rev2_v8_fixture_target(),
+        Some("aarch64-apple-darwin")
+      );
+    } else if cfg!(all(
+      target_arch = "x86_64",
+      target_os = "linux",
+      target_env = "gnu"
+    )) {
+      assert_eq!(
+        compiled_rev2_v8_fixture_target(),
+        Some("x86_64-unknown-linux-gnu")
+      );
+    } else {
+      assert_eq!(compiled_rev2_v8_fixture_target(), None);
+    }
+  }
+
+  fn run_rev2_v8_set_flags_fixture_case(
+    root: &Path,
+    case_kind: &str,
+    target: &str,
+  ) -> &'static [&'static str] {
+    assert_eq!(
+      compiled_rev2_v8_fixture_target(),
+      Some(target),
+      "fixture target label does not match an exact supported compiled target"
+    );
+    EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _tokio_guard = tokio_runtime.enter();
+    let mut runtime = JsRuntime::new(RuntimeOptions {
+      extensions: vec![native_v8_guard_test_ext::init()],
+      ..Default::default()
+    });
+
+    // @ref LLP 0019#pre-promotion-conformance-candidate-execution [tests] --
+    // These five development cases exercise one exact deny-only edge. They
+    // produce no authenticated receipt and cannot change backend status.
+    let assertions: &'static [&'static str] = match case_kind {
+      "deny-only-closed-or-absent" => {
+        set_actor(root, "node_modules/denied-native/index.cjs");
+        expect_set_flags_denied(&mut runtime, "--expose-gc");
+        assert!(
+          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "denied package mutated the V8 expose-gc flag"
+        );
+        &["constrained-package-denied", "no-v8-flag-mutation"]
+      }
+      "staged-barrier:authorization" => {
+        set_actor(root, "node_modules/denied-native/index.cjs");
+        expect_set_flags_denied(&mut runtime, "--expose-gc");
+        assert!(
+          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "native flag mutation preceded the authorization guard"
+        );
+        &["guard-precedes-v8-flag-mutation", "no-v8-flag-mutation"]
+      }
+      "staged-barrier:cancellation" => {
+        set_actor(root, "node_modules/denied-native/index.cjs");
+        expect_set_flags_denied(&mut runtime, "--expose-gc");
+        assert!(
+          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "denied attempt left provisional V8 flag state"
+        );
+        set_flags_as_root(&mut runtime, root, "--expose-gc");
+        assert!(
+          EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "ambient root could not use the control after package denial"
+        );
+        set_flags_as_root(&mut runtime, root, "--no-expose-gc");
+        assert!(
+          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "ambient root could not restore the V8 flag"
+        );
+        &[
+          "denied-attempt-leaves-no-provisional-state",
+          "ambient-control-remains-usable",
+        ]
+      }
+      "staged-barrier:cleanup" => {
+        set_flags_as_root(&mut runtime, root, "--expose-gc");
+        assert!(
+          EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "ambient setup did not mutate the V8 flag"
+        );
+        set_flags_as_root(&mut runtime, root, "--no-expose-gc");
+        assert!(
+          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "ambient cleanup did not restore the V8 flag"
+        );
+        set_actor(root, "node_modules/denied-native/index.cjs");
+        expect_set_flags_denied(&mut runtime, "--expose-gc");
+        assert!(
+          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "post-cleanup denied attempt mutated the V8 flag"
+        );
+        &["ambient-cleanup-restores-v8-flag", "no-v8-flag-mutation"]
+      }
+      "staged-barrier:revocation" => {
+        set_flags_as_root(&mut runtime, root, "--expose-gc");
+        assert!(
+          EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "ambient setup did not mutate the V8 flag"
+        );
+        set_actor(root, "node_modules/denied-native/index.cjs");
+        expect_set_flags_denied(&mut runtime, "--no-expose-gc");
+        assert!(
+          EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "actor transition was not rechecked before the next V8 effect"
+        );
+        set_flags_as_root(&mut runtime, root, "--no-expose-gc");
+        assert!(
+          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "ambient cleanup did not restore the V8 flag"
+        );
+        &[
+          "actor-transition-rechecked-before-next-effect",
+          "no-v8-flag-mutation",
+        ]
+      }
+      _ => panic!("unknown Rev2 V8 fixture case kind {case_kind}"),
+    };
+    EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
+    assertions
+  }
+
+  fn write_rev2_v8_fixture_report(
+    case_kind: &str,
+    target: &str,
+    assertions: &[&str],
+  ) {
+    let line =
+      rev2_v8_fixture_report_line(case_kind, target, assertions) + "\n";
+    std::io::stderr().write_all(line.as_bytes()).unwrap();
+  }
+
+  fn rev2_v8_fixture_report_line(
+    case_kind: &str,
+    target: &str,
+    assertions: &[&str],
+  ) -> String {
+    let assertions_json = match assertions {
+      ["constrained-package-denied", "no-v8-flag-mutation"] => {
+        r#"["constrained-package-denied","no-v8-flag-mutation"]"#
+      }
+      ["guard-precedes-v8-flag-mutation", "no-v8-flag-mutation"] => {
+        r#"["guard-precedes-v8-flag-mutation","no-v8-flag-mutation"]"#
+      }
+      [
+        "denied-attempt-leaves-no-provisional-state",
+        "ambient-control-remains-usable",
+      ] => {
+        r#"["denied-attempt-leaves-no-provisional-state","ambient-control-remains-usable"]"#
+      }
+      ["ambient-cleanup-restores-v8-flag", "no-v8-flag-mutation"] => {
+        r#"["ambient-cleanup-restores-v8-flag","no-v8-flag-mutation"]"#
+      }
+      [
+        "actor-transition-rechecked-before-next-effect",
+        "no-v8-flag-mutation",
+      ] => {
+        r#"["actor-transition-rechecked-before-next-effect","no-v8-flag-mutation"]"#
+      }
+      _ => panic!("Rev2 V8 fixture assertion tuple drifted"),
+    };
+    format!(
+      r#"{REV2_V8_FIXTURE_REPORT_PREFIX}{{"schema":"oden/capsec-native-v8-set-flags-fixture-report/2","caseKind":"{case_kind}","target":"{target}","assertions":{assertions_json},"executed":true,"nativeReleaseExecution":false,"authority":"development-fixture-execution-only"}}"#
+    )
+  }
+
+  fn validate_rev2_v8_fixture_report_channels(
+    stdout: &str,
+    stderr: &str,
+    expected_line: &str,
+  ) -> Result<(), &'static str> {
+    if stdout.contains(REV2_V8_FIXTURE_REPORT_PREFIX) {
+      return Err("native fixture report appeared on stdout");
+    }
+    if stderr.matches(REV2_V8_FIXTURE_REPORT_PREFIX).count() != 1 {
+      return Err("native fixture stderr did not contain exactly one marker");
+    }
+    if stderr.lines().filter(|line| *line == expected_line).count() != 1 {
+      return Err("native fixture stderr lacked one exact full report line");
+    }
+    Ok(())
+  }
+
+  fn bounded_debug_output(text: &str) -> String {
+    const MAX_CHARS: usize = 4096;
+    let bounded = text.chars().take(MAX_CHARS).collect::<String>();
+    let suffix = if text.chars().count() > MAX_CHARS {
+      " [truncated]"
+    } else {
+      ""
+    };
+    format!("{bounded:?}{suffix}")
+  }
+
+  #[test]
+  fn rev2_v8_fixture_report_channel_is_unambiguous() {
+    let expected = rev2_v8_fixture_report_line(
+      "deny-only-closed-or-absent",
+      "aarch64-apple-darwin",
+      &["constrained-package-denied", "no-v8-flag-mutation"],
+    );
+    assert_eq!(
+      validate_rev2_v8_fixture_report_channels(
+        "running 1 test\n",
+        &format!("{expected}\n"),
+        &expected,
+      ),
+      Ok(())
+    );
+    assert!(
+      validate_rev2_v8_fixture_report_channels(
+        &format!("test fixture ... {expected}\n"),
+        "",
+        &expected,
+      )
+      .is_err()
+    );
+    assert!(
+      validate_rev2_v8_fixture_report_channels(
+        "",
+        &format!("{expected} trailing\n"),
+        &expected,
+      )
+      .is_err()
+    );
+    assert!(
+      validate_rev2_v8_fixture_report_channels(
+        "",
+        &format!("{expected}\n{expected}\n"),
+        &expected,
+      )
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn rev2_v8_set_flags_fixture_case() {
+    let case_kind = std::env::var(REV2_V8_FIXTURE_CASE_ENV).ok();
+    let target = std::env::var(REV2_V8_FIXTURE_TARGET_ENV).ok();
+    if std::env::var_os(REV2_V8_FIXTURE_CHILD).is_some() {
+      let case_kind =
+        case_kind.expect("Rev2 V8 fixture child case kind is required");
+      let target = target.expect("Rev2 V8 fixture child target is required");
+      let root = PathBuf::from(std::env::var_os("ODEN_CAPSEC_ROOT").unwrap());
+      let assertions =
+        run_rev2_v8_set_flags_fixture_case(&root, &case_kind, &target);
+      write_rev2_v8_fixture_report(&case_kind, &target, assertions);
+      return;
+    }
+
+    let requested = match (case_kind, target) {
+      (Some(case_kind), Some(target)) => vec![(case_kind, target)],
+      (None, None) => {
+        let Some(target) = compiled_rev2_v8_fixture_target() else {
+          return;
+        };
+        REV2_V8_FIXTURE_CASE_KINDS
+          .iter()
+          .map(|case_kind| (case_kind.to_string(), target.to_string()))
+          .collect()
+      }
+      _ => {
+        panic!("Rev2 V8 fixture case and target labels must appear together")
+      }
+    };
+    for (case_kind, target) in requested {
+      let root = NativeV8TestRoot::new("enforce");
+      let mut command = Command::new(std::env::current_exe().unwrap());
+      clear_native_v8_capsec_env(&mut command);
+      command
+        .arg(REV2_V8_FIXTURE_TEST)
+        .args(["--exact", "--nocapture", "--test-threads=1"])
+        .env(REV2_V8_FIXTURE_CHILD, "1")
+        .env(REV2_V8_FIXTURE_CASE_ENV, &case_kind)
+        .env(REV2_V8_FIXTURE_TARGET_ENV, &target)
+        .env("ODEN_CAPSEC_ROOT", &root.0)
+        .env("ODEN_CAPSEC_POLICY", root.0.join("policy.json"));
+      let output = run_native_v8_child(command, &root.0);
+      assert!(
+        output.status.success(),
+        "Rev2 V8 fixture child failed for {target}/{case_kind}\nstdout={}\nstderr={}",
+        bounded_debug_output(&String::from_utf8_lossy(&output.stdout)),
+        bounded_debug_output(&String::from_utf8_lossy(&output.stderr)),
+      );
+      let stdout = String::from_utf8(output.stdout).unwrap();
+      let stderr = String::from_utf8(output.stderr).unwrap();
+      let expected_line = rev2_v8_fixture_report_line(
+        &case_kind,
+        &target,
+        match case_kind.as_str() {
+          "deny-only-closed-or-absent" => {
+            &["constrained-package-denied", "no-v8-flag-mutation"]
+          }
+          "staged-barrier:authorization" => {
+            &["guard-precedes-v8-flag-mutation", "no-v8-flag-mutation"]
+          }
+          "staged-barrier:cancellation" => &[
+            "denied-attempt-leaves-no-provisional-state",
+            "ambient-control-remains-usable",
+          ],
+          "staged-barrier:cleanup" => {
+            &["ambient-cleanup-restores-v8-flag", "no-v8-flag-mutation"]
+          }
+          "staged-barrier:revocation" => &[
+            "actor-transition-rechecked-before-next-effect",
+            "no-v8-flag-mutation",
+          ],
+          _ => panic!("unknown Rev2 V8 fixture case kind {case_kind}"),
+        },
+      );
+      if let Err(reason) = validate_rev2_v8_fixture_report_channels(
+        &stdout,
+        &stderr,
+        &expected_line,
+      ) {
+        panic!(
+          "Rev2 V8 fixture child report refused for {target}/{case_kind}: {reason}\nstdout={}\nstderr={}",
+          bounded_debug_output(&stdout),
+          bounded_debug_output(&stderr),
+        );
+      }
+      std::io::stdout().write_all(stdout.as_bytes()).unwrap();
+      std::io::stderr().write_all(stderr.as_bytes()).unwrap();
     }
   }
 
