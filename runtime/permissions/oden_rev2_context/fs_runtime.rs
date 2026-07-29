@@ -1914,6 +1914,48 @@ pub struct OdenRev2LstatCandidateArtifacts {
   _resource_inventory_digest: String,
 }
 
+impl OdenRev2LstatCandidateArtifacts {
+  /// Consumes the opaque D2 result through the broad one-shot bridge needed by
+  /// the later candidate-response assembler, lending every retained field as
+  /// an immutable borrow to one callback. The callback can deliberately derive
+  /// owned copies; consumption only prevents reuse of this artifact container.
+  ///
+  /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+  /// [constrained-by] -- These expected-free bytes remain candidate-local
+  /// consistency inputs. Consuming them does not make them evidence or grant
+  /// response, admission, policy, or release authority.
+  #[doc(hidden)]
+  #[allow(clippy::too_many_arguments)]
+  pub fn consume_for_candidate_response<R>(
+    self,
+    consume: impl FnOnce(
+      &[u8],
+      &str,
+      &[u8],
+      &str,
+      &[u8],
+      &str,
+      &[u8],
+      &str,
+      &[u8],
+      &str,
+    ) -> R,
+  ) -> R {
+    consume(
+      &self._observation_bytes,
+      &self._observation_digest,
+      &self._delivery_bytes,
+      &self._delivery_digest,
+      &self._trace_bytes,
+      &self._trace_digest,
+      &self._sandbox_bytes,
+      &self._sandbox_digest,
+      &self._resource_inventory_bytes,
+      &self._resource_inventory_digest,
+    )
+  }
+}
+
 /// Resolve and authorize one no-follow metadata observation, returning only
 /// retained metadata or an authorized final-entry `ENOENT`.
 pub fn oden_capsec_rev2_lstat_sync<'context>(

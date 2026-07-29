@@ -34,10 +34,10 @@ pub fn maybe_run_oden_capsec_filesystem_candidate(
 
   // No row can currently reach this point. The dormant FD3 role protocol
   // below has production-uncalled preflight, construction, descriptor-slot
-  // preparation, and exact D1-to-D2 execution-join boundaries, but no
-  // response-artifact assembler or production caller. All three generated
-  // process admission tables therefore remain empty until the complete
-  // parent/supervisor/candidate capture and oracle barriers exist.
+  // preparation, exact D1-to-D2 execution join, and one-shot candidate
+  // response assembly boundaries, but no production caller. All three
+  // generated process admission tables therefore remain empty until the
+  // complete parent/supervisor/candidate capture and oracle barriers exist.
   Some(REFUSAL_EXIT_CODE)
 }
 
@@ -118,10 +118,39 @@ mod fd3 {
     "oden/capsec-filesystem-candidate-request-frame/2";
   const CANDIDATE_RESPONSE_SCHEMA: &str =
     "oden/capsec-filesystem-candidate-response-frame/2";
+  const CANDIDATE_ARENA_SCHEMA: &str =
+    "oden/capsec-filesystem-candidate-arena/2";
+  const ENGINE_TRACE_SCHEMA: &str = "oden/capsec-filesystem-engine-trace/2";
+  const SANDBOX_REALIZATION_SCHEMA: &str =
+    "oden/capsec-filesystem-sandbox-realization/2";
+  const SANDBOX_INVENTORY_SCHEMA: &str =
+    "oden/capsec-filesystem-sandbox-inventory/2";
+  const PUBLIC_OP_WITNESS_SCHEMA: &str =
+    "oden/capsec-filesystem-public-op-witness/2";
+  const PRIVATE_EXECUTION_TRACE_SCHEMA: &str =
+    "oden/capsec-filesystem-private-execution-candidate-trace/1";
   const CANDIDATE_REQUEST_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-candidate-request-frame:2";
+  const CANDIDATE_ARENA_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-candidate-arena:2";
+  const ENGINE_TRACE_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-engine-trace:2";
+  const SANDBOX_REALIZATION_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-sandbox-realization:2";
+  const SANDBOX_INVENTORY_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-sandbox-inventory:2";
+  const PUBLIC_OP_WITNESS_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-public-op-witness:2";
+  const PRIVATE_EXECUTION_TRACE_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-private-execution-candidate-trace:1";
+  const PRIVATE_PUBLIC_OP_WITNESS_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-private-public-op-witness:1";
   const OBSERVED_RESULT_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-observed-result:2";
+  const LSTAT_METADATA_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-lstat-metadata:2";
+  const NORMALIZED_SLOTS_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-normalized-slots:2";
   const DELIVERY_FRAME_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-delivery-frame:2";
   const RESOURCE_INVENTORY_DIGEST_DOMAIN: &str =
@@ -140,6 +169,7 @@ mod fd3 {
   const ARENA_CAPACITY_BYTES: i64 = 8 * 1024 * 1024;
   const REQUIRED_CAPTURED_UMASK: u64 = 0o077;
   const EXPECTED_DESCRIPTOR_COUNT: usize = 2;
+  const LSTAT_ARENA_TRANSFER_INDEX: usize = 1;
   const LSTAT_ROOT_BINDING_ID: &str = "root:project";
   const LSTAT_ROOT_FIXTURE_IDENTITY: &str = "fixture:project-root";
   const LSTAT_SOURCE_OBJECT_ID: &str = "source";
@@ -263,6 +293,23 @@ mod fd3 {
     "identities",
     "preRequestFdInventory",
     "platformState",
+  ];
+
+  const LSTAT_TRACE_PHASES: &[&str] = &[
+    "harness-admitted",
+    "public-op-entered",
+    "actors-captured",
+    "namespace-gate-acquired",
+    "discovery-complete",
+    "authorization-complete",
+    "sources-revalidated",
+    "target-revalidated",
+    "core-commit-recorded",
+    "operation-completed",
+    "delivery-serialized",
+    "provisional-resources-released",
+    "namespace-gate-released",
+    "harness-exited",
   ];
 
   // @ref LLP 0019#pre-promotion-conformance-candidate-execution
@@ -523,6 +570,20 @@ mod fd3 {
         )),
       }
     }
+
+    fn exact_execution_projection(
+      &self,
+    ) -> io::Result<&FilesystemExecutionProjection> {
+      match &self.generated_seal {
+        CandidateGeneratedSeal::Exact(generated) => {
+          Ok(generated.execution_projection())
+        }
+        #[cfg(test)]
+        CandidateGeneratedSeal::Fixture => Err(invalid_data(
+          "candidate response requires an exact generated admission",
+        )),
+      }
+    }
   }
 
   fn validate_generated_lstat_topology(
@@ -724,6 +785,8 @@ mod fd3 {
     CpuValidationComplete,
     ArenaReadAttempt,
     ArenaReadComplete,
+    ArenaWriteAttempt,
+    ArenaWriteComplete,
     ExecutionStart,
     ExecutionComplete,
   }
@@ -921,17 +984,19 @@ mod fd3 {
 
   /// A consumed D1 request joined to exactly one completed D2 public-op
   /// execution. The original FD 3 endpoint and original arena remain owned
-  /// here for a later output checkpoint; the project-root descriptor has
-  /// already been consumed and dropped by D2. This type exposes no arena
-  /// write, artifact serialization, response, send, oracle, evidence, policy,
-  /// admission, or authority method.
+  /// here for one later output checkpoint; the project-root descriptor has
+  /// already been consumed and dropped by D2. Its sole method consumes the
+  /// whole state to assemble and emit one authority-free response. It exposes
+  /// no arena handle, reusable artifact, oracle, evidence, policy, admission,
+  /// or authority value.
   ///
   /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
   /// [constrained-by] — This is only a production-uncalled equality and
   /// ownership join between two dormant candidate checkpoints.
   /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
-  /// [constrained-by] — The endpoint and arena remain unconsumed; D3 emits no
-  /// packet and writes no arena byte.
+  /// [constrained-by] — D3 itself emitted no packet and wrote no arena byte;
+  /// these resources remain retained for the distinct one-shot response
+  /// checkpoint.
   pub(crate) struct CandidateExecutedLstatRequest {
     _endpoint: FramedStreamEndpoint,
     _identity: CandidateLstatProtocolIdentity,
@@ -944,7 +1009,42 @@ mod fd3 {
     _descriptor_slots_digest: String,
     _captured_umask: u64,
     _session_deadline: CandidateSessionDeadline,
+    _pre_operation_pgid: String,
+    _post_operation_pgid: String,
     _artifacts: deno_permissions::OdenRev2LstatCandidateArtifacts,
+  }
+
+  struct CandidateDerivedLstatArtifacts {
+    normalized_observed_result: Value,
+    observed_result_digest: String,
+    delivery_frame: Value,
+    delivery_frame_digest: String,
+    resource_inventory: Value,
+    resource_inventory_digest: String,
+    engine_trace_bytes: Vec<u8>,
+    engine_trace_digest: String,
+  }
+
+  struct CandidateDerivedSandbox {
+    realization: Value,
+    realization_digest: String,
+    final_inventory_digest: String,
+  }
+
+  #[derive(Clone, Debug, Eq, PartialEq)]
+  struct CandidateRetainedArenaSnapshot {
+    descriptor: CandidateDescriptorSnapshot,
+    descriptor_flags: libc::c_int,
+    status_flags: libc::c_int,
+  }
+
+  #[derive(Clone, Debug, Eq, PartialEq)]
+  struct CandidateRetainedEndpointSnapshot {
+    platform_identity: String,
+    descriptor_flags: libc::c_int,
+    status_flags: libc::c_int,
+    #[cfg(target_os = "macos")]
+    no_sigpipe: libc::c_int,
   }
 
   impl CandidatePreparedLstatRequest {
@@ -1032,6 +1132,7 @@ mod fd3 {
           "candidate execution arena duplicate is not exact",
         ));
       }
+      let pre_operation_pgid = require_current_candidate_process(&ready_facts)?;
 
       let capsule = deno_permissions::oden_capsec_rev2_prepare_lstat_candidate(
         &identity.fixture_artifact_digest,
@@ -1049,6 +1150,8 @@ mod fd3 {
         .map_err(|_| {
           invalid_data("candidate D2 public-op execution refused")
         })?;
+      let post_operation_pgid =
+        require_current_candidate_process(&ready_facts)?;
       after_execution(&arena)?;
       session_deadline.check(
         effective_deadline,
@@ -1089,8 +1192,244 @@ mod fd3 {
         _descriptor_slots_digest: descriptor_slots_digest,
         _captured_umask: captured_umask,
         _session_deadline: session_deadline,
+        _pre_operation_pgid: pre_operation_pgid,
+        _post_operation_pgid: post_operation_pgid,
         _artifacts: artifacts,
       })
+    }
+  }
+
+  impl CandidateExecutedLstatRequest {
+    /// Consume one exact D3 result, write and reconcile its frozen engine
+    /// trace in the retained arena, emit one canonical response on FD 3, then
+    /// irreversibly half-close the candidate write direction. There is no
+    /// production caller while `CANDIDATE_CASES` remains empty.
+    ///
+    /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
+    /// [implements] — The candidate's second and final frame follows the
+    /// accepted request and exact arena write, carries no right, and is
+    /// followed by write shutdown.
+    /// @ref LLP 0019#pre-promotion-conformance-candidate-execution
+    /// [constrained-by] — The frozen artifacts and containment fields remain
+    /// unauthenticated candidate claims until later supervisor/parent joins.
+    #[allow(dead_code)]
+    pub(crate) fn send_lstat_response(
+      self,
+      requested_deadline: Instant,
+    ) -> io::Result<()> {
+      self.send_lstat_response_with_hooks(
+        requested_deadline,
+        |_| Ok(()),
+        |_| Ok(()),
+      )
+    }
+
+    fn send_lstat_response_with_hooks<W, S>(
+      self,
+      requested_deadline: Instant,
+      after_write: W,
+      before_send: S,
+    ) -> io::Result<()>
+    where
+      W: FnOnce(&File) -> io::Result<()>,
+      S: FnOnce(&File) -> io::Result<()>,
+    {
+      let CandidateExecutedLstatRequest {
+        _endpoint: endpoint,
+        _identity: identity,
+        _ready_raw_bytes: ready_raw_bytes,
+        _ready_facts: ready_facts,
+        _binding: binding,
+        _request_metadata: request_metadata,
+        _arena: arena,
+        _descriptor_slots_raw_bytes: descriptor_slots_raw_bytes,
+        _descriptor_slots_digest: descriptor_slots_digest,
+        _captured_umask: captured_umask,
+        _session_deadline: session_deadline,
+        _pre_operation_pgid: pre_operation_pgid,
+        _post_operation_pgid: post_operation_pgid,
+        _artifacts: artifacts,
+      } = self;
+      let deadline = session_deadline.effective(
+        requested_deadline,
+        CandidateDeadlineCheckpoint::TransitionStart,
+      )?;
+      validate_executed_response_relation(
+        &identity,
+        &ready_raw_bytes,
+        &ready_facts,
+        &binding,
+        &request_metadata,
+        &descriptor_slots_raw_bytes,
+        &descriptor_slots_digest,
+        captured_umask,
+        &pre_operation_pgid,
+        &post_operation_pgid,
+      )?;
+      let endpoint_snapshot =
+        CandidateRetainedEndpointSnapshot::capture(&endpoint, &ready_facts)?;
+      let arena_snapshot = CandidateRetainedArenaSnapshot::capture(
+        arena.as_fd(),
+        &descriptor_slots_raw_bytes,
+        &session_deadline,
+        deadline,
+      )?;
+      let derived = artifacts.consume_for_candidate_response(
+        |observation_bytes,
+         observation_digest,
+         delivery_bytes,
+         delivery_digest,
+         private_trace_bytes,
+         private_trace_digest,
+         final_inventory_bytes,
+         final_inventory_digest,
+         resource_inventory_bytes,
+         resource_inventory_digest| {
+          derive_candidate_lstat_artifacts(
+            &identity,
+            &binding,
+            &descriptor_slots_raw_bytes,
+            observation_bytes,
+            observation_digest,
+            delivery_bytes,
+            delivery_digest,
+            private_trace_bytes,
+            private_trace_digest,
+            final_inventory_bytes,
+            final_inventory_digest,
+            resource_inventory_bytes,
+            resource_inventory_digest,
+          )
+        },
+      )?;
+      if derived.engine_trace_bytes.is_empty()
+        || derived.engine_trace_bytes.len() > ARENA_CAPACITY_BYTES as usize
+      {
+        return Err(invalid_data(
+          "candidate engine trace exceeds the fixed arena payload bound",
+        ));
+      }
+      let written_arena_snapshot = write_candidate_arena_payload(
+        arena.as_fd(),
+        &arena_snapshot,
+        &derived.engine_trace_bytes,
+        &session_deadline,
+        deadline,
+      )?;
+      after_write(&arena)?;
+      reconcile_candidate_arena_payload(
+        arena.as_fd(),
+        &written_arena_snapshot,
+        &derived.engine_trace_bytes,
+        &session_deadline,
+        deadline,
+      )?;
+
+      let arena_value = candidate_arena_value(
+        &identity,
+        &binding,
+        &arena_snapshot.descriptor,
+        &derived.engine_trace_bytes,
+        &derived.engine_trace_digest,
+      )?;
+      validate_candidate_arena(
+        &arena_value,
+        &identity,
+        &binding,
+        &arena_snapshot.descriptor,
+        &descriptor_slots_digest,
+        &derived.engine_trace_bytes,
+        &derived.engine_trace_digest,
+      )?;
+      let candidate_arena_digest = deno_permissions::rev2::hjcs_digest(
+        CANDIDATE_ARENA_DIGEST_DOMAIN,
+        &arena_value,
+      )
+      .map_err(|_| invalid_data("candidate arena artifact is not canonical"))?;
+      before_send(&arena)?;
+      let pre_exit_pgid = require_current_candidate_process(&ready_facts)?;
+      let response_value = candidate_lstat_response_value(
+        &identity,
+        &ready_facts,
+        &binding,
+        captured_umask,
+        &pre_operation_pgid,
+        &post_operation_pgid,
+        &pre_exit_pgid,
+        &derived,
+        &candidate_arena_digest,
+      );
+      let response_bytes =
+        deno_permissions::rev2::canonical_json(&response_value)
+          .map(String::into_bytes)
+          .map_err(|_| invalid_data("candidate response is not canonical"))?;
+      if response_bytes.is_empty()
+        || response_bytes.len() > MAX_CONTROL_PACKET_BYTES
+      {
+        return Err(invalid_data(
+          "candidate response exceeds its exact packet bound",
+        ));
+      }
+      let reparsed_response = parse_canonical_jcs(&response_bytes)?;
+      validate_response(&reparsed_response, &identity, &ready_facts, &binding)?;
+      let response_object = exact_object(
+        &reparsed_response,
+        RESPONSE_FIELDS,
+        "candidate response",
+      )?;
+      require_text_eq(
+        response_object,
+        "candidateArenaDigest",
+        &candidate_arena_digest,
+      )?;
+      require_text_eq(
+        response_object,
+        "engineTraceDigest",
+        &derived.engine_trace_digest,
+      )?;
+
+      // This is the last candidate-owned point-in-time arena check before
+      // dropping its retained right. A supervisor-held alias can still mutate
+      // the arena later, so these unauthenticated bytes remain subject to the
+      // later parent content/tree join.
+      reconcile_candidate_arena_payload(
+        arena.as_fd(),
+        &written_arena_snapshot,
+        &derived.engine_trace_bytes,
+        &session_deadline,
+        deadline,
+      )?;
+      drop(arena);
+      if CandidateRetainedEndpointSnapshot::capture(&endpoint, &ready_facts)?
+        != endpoint_snapshot
+        || require_current_candidate_process(&ready_facts)? != pre_exit_pgid
+      {
+        return Err(invalid_data(
+          "candidate process or FD3 endpoint changed before response emission",
+        ));
+      }
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)?;
+      endpoint.send_packet_with_descriptors_bounded(
+        &response_bytes,
+        &[],
+        FrameByteLimit::CONTROL,
+        deadline,
+      )?;
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::TransportComplete)?;
+      if CandidateRetainedEndpointSnapshot::capture(&endpoint, &ready_facts)?
+        != endpoint_snapshot
+      {
+        return Err(invalid_data(
+          "candidate FD3 endpoint changed while sending its response",
+        ));
+      }
+      endpoint.shutdown_write(deadline)?;
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::TransportComplete)?;
+      drop(endpoint);
+      Ok(())
     }
   }
 
@@ -1140,6 +1479,221 @@ mod fd3 {
       ));
     }
     Ok(())
+  }
+
+  fn validate_executed_response_relation(
+    identity: &CandidateLstatProtocolIdentity,
+    ready_raw_bytes: &[u8],
+    ready_facts: &CandidateReadyFacts,
+    binding: &CandidateCaseBinding,
+    request_metadata: &Arc<CandidateLstatRequestMetadata>,
+    descriptor_slots_raw_bytes: &[u8],
+    descriptor_slots_digest: &str,
+    captured_umask: u64,
+    pre_operation_pgid: &str,
+    post_operation_pgid: &str,
+  ) -> io::Result<()> {
+    validate_prepared_execution_relation(
+      identity,
+      binding,
+      request_metadata,
+      descriptor_slots_raw_bytes,
+      descriptor_slots_digest,
+    )?;
+    let ready_value = parse_canonical_jcs(ready_raw_bytes)?;
+    if validate_ready(&ready_value, identity)? != *ready_facts
+      || captured_umask != REQUIRED_CAPTURED_UMASK
+      || pre_operation_pgid != ready_facts.candidate_pgid
+      || post_operation_pgid != ready_facts.candidate_pgid
+      || require_current_candidate_process(ready_facts)?
+        != ready_facts.candidate_pgid
+    {
+      return Err(invalid_data(
+        "candidate executed request changed before response assembly",
+      ));
+    }
+    Ok(())
+  }
+
+  fn descriptor_flags(descriptor: BorrowedFd<'_>) -> io::Result<libc::c_int> {
+    loop {
+      // SAFETY: F_GETFD reads only flags from the supplied live descriptor.
+      let flags = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) };
+      if flags >= 0 {
+        return Ok(flags);
+      }
+      let error = io::Error::last_os_error();
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(error);
+      }
+    }
+  }
+
+  impl CandidateRetainedEndpointSnapshot {
+    fn capture(
+      endpoint: &FramedStreamEndpoint,
+      ready: &CandidateReadyFacts,
+    ) -> io::Result<Self> {
+      let platform_identity = inspect_candidate_control_fd(endpoint.as_fd())?;
+      let expected_identity = ready
+        .pre_request_fd_inventory
+        .as_array()
+        .and_then(|inventory| inventory.get(3))
+        .and_then(Value::as_object)
+        .and_then(|entry| entry.get("platformIdentity"))
+        .and_then(Value::as_object)
+        .and_then(|identity| identity.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+          invalid_data("candidate ready FD3 identity is not exact")
+        })?;
+      let descriptor_flags = descriptor_flags(endpoint.as_fd())?;
+      let status_flags = descriptor_status_flags(endpoint.as_fd())?;
+      #[cfg(target_os = "macos")]
+      let no_sigpipe = socket_option_int(endpoint.as_fd(), libc::SO_NOSIGPIPE)?;
+      if platform_identity != expected_identity
+        || descriptor_flags & libc::FD_CLOEXEC == 0
+        || status_flags & libc::O_NONBLOCK == 0
+        || status_flags & libc::O_APPEND != 0
+        || status_flags & libc::O_ACCMODE != libc::O_RDWR
+        || {
+          #[cfg(target_os = "macos")]
+          {
+            no_sigpipe != 1
+          }
+          #[cfg(not(target_os = "macos"))]
+          {
+            false
+          }
+        }
+      {
+        return Err(invalid_data(
+          "candidate retained FD3 endpoint is not exact",
+        ));
+      }
+      Ok(Self {
+        platform_identity,
+        descriptor_flags,
+        status_flags,
+        #[cfg(target_os = "macos")]
+        no_sigpipe,
+      })
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  fn socket_option_int(
+    descriptor: BorrowedFd<'_>,
+    option: libc::c_int,
+  ) -> io::Result<libc::c_int> {
+    let mut value: libc::c_int = 0;
+    let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
+    // SAFETY: value and length are valid output storage for this integer
+    // SOL_SOCKET option on the retained live socket.
+    let result = unsafe {
+      libc::getsockopt(
+        descriptor.as_raw_fd(),
+        libc::SOL_SOCKET,
+        option,
+        std::ptr::from_mut(&mut value).cast(),
+        &mut length,
+      )
+    };
+    if result != 0 {
+      return Err(io::Error::last_os_error());
+    }
+    if length as usize != std::mem::size_of_val(&value) {
+      return Err(invalid_data(
+        "candidate FD3 socket option length is not exact",
+      ));
+    }
+    Ok(value)
+  }
+
+  impl CandidateRetainedArenaSnapshot {
+    fn capture(
+      arena: BorrowedFd<'_>,
+      descriptor_slots_raw_bytes: &[u8],
+      session_deadline: &CandidateSessionDeadline,
+      deadline: Instant,
+    ) -> io::Result<Self> {
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)?;
+      let descriptor = CandidateDescriptorSnapshot::capture(arena)?;
+      let fd_flags = descriptor_flags(arena)?;
+      let status_flags = descriptor_status_flags(arena)?;
+      if descriptor.mode & libc::S_IFMT as u32 != libc::S_IFREG as u32
+        || descriptor.links != 1
+        || descriptor.size != ARENA_CAPACITY_BYTES
+        || fd_flags & libc::FD_CLOEXEC == 0
+        || status_flags & libc::O_ACCMODE != libc::O_RDWR
+        || status_flags & libc::O_APPEND != 0
+      {
+        return Err(invalid_data(
+          "candidate retained arena right is not exact",
+        ));
+      }
+      let slots = parse_canonical_jcs(descriptor_slots_raw_bytes)?;
+      let slots = slots
+        .get("slots")
+        .and_then(Value::as_array)
+        .filter(|slots| slots.len() == EXPECTED_DESCRIPTOR_COUNT)
+        .ok_or_else(|| {
+          invalid_data("candidate descriptor slots are not exact")
+        })?;
+      let slot = exact_object(
+        &slots[LSTAT_ARENA_TRANSFER_INDEX],
+        &[
+          "transferIndex",
+          "role",
+          "platformIdentity",
+          "objectKind",
+          "mode",
+          "uid",
+          "gid",
+          "capacityBytes",
+          "zeroFilledAtTransfer",
+        ],
+        "candidate arena descriptor slot",
+      )?;
+      if required_value(slot, "transferIndex")?.as_u64()
+        != Some(LSTAT_ARENA_TRANSFER_INDEX as u64)
+        || required_value(slot, "role")?.as_str() != Some("arena")
+        || required_value(slot, "platformIdentity")?
+          != &descriptor.platform_identity()
+        || required_value(slot, "objectKind")?.as_str() != Some("regular-file")
+        || required_value(slot, "mode")?.as_u64()
+          != Some(descriptor.mode as u64)
+        || required_value(slot, "uid")?.as_str()
+          != Some(descriptor.uid.to_string().as_str())
+        || required_value(slot, "gid")?.as_str()
+          != Some(descriptor.gid.to_string().as_str())
+        || required_value(slot, "capacityBytes")?.as_i64()
+          != Some(ARENA_CAPACITY_BYTES)
+        || required_value(slot, "zeroFilledAtTransfer")?.as_bool() != Some(true)
+      {
+        return Err(invalid_data(
+          "candidate retained arena diverges from its descriptor slot",
+        ));
+      }
+      require_zero_filled_arena(arena, session_deadline, deadline)?;
+      let result = Self {
+        descriptor,
+        descriptor_flags: fd_flags,
+        status_flags,
+      };
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)?;
+      if CandidateDescriptorSnapshot::capture(arena)? != result.descriptor
+        || descriptor_flags(arena)? != result.descriptor_flags
+        || descriptor_status_flags(arena)? != result.status_flags
+      {
+        return Err(invalid_data(
+          "candidate retained arena changed while captured",
+        ));
+      }
+      Ok(result)
+    }
   }
 
   impl CandidateLstatRequest {
@@ -1780,6 +2334,25 @@ mod fd3 {
     })
   }
 
+  fn require_current_candidate_process(
+    ready: &CandidateReadyFacts,
+  ) -> io::Result<String> {
+    // SAFETY: these identity syscalls take no pointers and cannot fail.
+    let pid = unsafe { libc::getpid() };
+    // SAFETY: getpgrp takes no arguments and cannot fail.
+    let pgid = unsafe { libc::getpgrp() };
+    if pid <= 0
+      || pgid <= 0
+      || ready.candidate_pid != pid.to_string()
+      || ready.candidate_pgid != pgid.to_string()
+    {
+      return Err(invalid_data(
+        "candidate process identity changed after ready preflight",
+      ));
+    }
+    Ok(pgid.to_string())
+  }
+
   #[cfg(target_os = "macos")]
   fn collect_current_ready_observed_facts()
   -> Result<CandidateReadyObservedFacts, CandidateReadyPreflightRefusal> {
@@ -2377,6 +2950,15 @@ mod fd3 {
       deno_core::serde_json::from_value(value.clone()).map_err(|_| {
         invalid_data("candidate normalized observation schema is invalid")
       })?;
+    let exact_observation = deno_core::serde_json::to_value(&observation)
+      .map_err(|_| {
+        invalid_data("candidate normalized observation schema is invalid")
+      })?;
+    if exact_observation != *value {
+      return Err(invalid_data(
+        "candidate normalized observation has an omitted or aliased field",
+      ));
+    }
     if observation.case_id != identity.case.case_id()
       || observation.edge_id != LSTAT_EDGE_ID
       || observation.requirement_id != LSTAT_REQUIREMENT_ID
@@ -2560,6 +3142,1373 @@ mod fd3 {
     Ok(())
   }
 
+  fn require_hjcs_artifact_digest(
+    domain: &str,
+    value: &Value,
+    claimed: &str,
+    label: &'static str,
+  ) -> io::Result<String> {
+    let digest = deno_permissions::rev2::hjcs_digest(domain, value)
+      .map_err(|_| invalid_data(label))?;
+    if digest != claimed {
+      return Err(invalid_data(label));
+    }
+    Ok(digest)
+  }
+
+  fn require_raw_artifact_digest(
+    domain: &str,
+    bytes: &[u8],
+    claimed: &str,
+    label: &'static str,
+  ) -> io::Result<String> {
+    let digest = raw_frame_digest(domain, bytes);
+    if digest != claimed {
+      return Err(invalid_data(label));
+    }
+    Ok(digest)
+  }
+
+  fn descriptor_slot_platform_identity(
+    descriptor_slots_raw_bytes: &[u8],
+    transfer_index: usize,
+    role: &'static str,
+  ) -> io::Result<Value> {
+    let artifact = parse_canonical_jcs(descriptor_slots_raw_bytes)?;
+    let slots = artifact
+      .get("slots")
+      .and_then(Value::as_array)
+      .filter(|slots| slots.len() == EXPECTED_DESCRIPTOR_COUNT)
+      .ok_or_else(|| {
+        invalid_data("candidate descriptor-slot artifact is not exact")
+      })?;
+    let slot = slots
+      .get(transfer_index)
+      .and_then(Value::as_object)
+      .ok_or_else(|| {
+        invalid_data("candidate descriptor-slot artifact is not exact")
+      })?;
+    if slot.get("transferIndex").and_then(Value::as_u64)
+      != Some(transfer_index as u64)
+      || slot.get("role").and_then(Value::as_str) != Some(role)
+    {
+      return Err(invalid_data(
+        "candidate descriptor-slot artifact has an inexact role",
+      ));
+    }
+    let identity = slot.get("platformIdentity").cloned().ok_or_else(|| {
+      invalid_data("candidate descriptor-slot platform identity is absent")
+    })?;
+    let identity_object = exact_object(
+      &identity,
+      &["kind", "value"],
+      "candidate descriptor-slot platform identity",
+    )?;
+    require_text_eq(identity_object, "kind", "platform-object")?;
+    if !is_platform_identity(
+      required_value(identity_object, "value")?
+        .as_str()
+        .unwrap_or_default(),
+    ) {
+      return Err(invalid_data(
+        "candidate descriptor-slot platform identity is not exact",
+      ));
+    }
+    Ok(identity)
+  }
+
+  fn validate_metadata_projection(
+    value: &Value,
+  ) -> io::Result<&Map<String, Value>> {
+    let metadata = exact_object(
+      value,
+      &[
+        "mode",
+        "size",
+        "linkCount",
+        "device",
+        "inode",
+        "uid",
+        "gid",
+        "rdev",
+        "blockSize",
+        "blocks",
+        "accessedTimeNs",
+        "modifiedTimeNs",
+        "changedTimeNs",
+        "birthTimeNs",
+      ],
+      "candidate lstat metadata projection",
+    )?;
+    let mode = required_value(metadata, "mode")?
+      .as_u64()
+      .filter(|mode| *mode <= u16::MAX as u64)
+      .ok_or_else(|| {
+        invalid_data("candidate lstat metadata mode is invalid")
+      })?;
+    if mode & libc::S_IFMT as u64 != libc::S_IFREG as u64 {
+      return Err(invalid_data(
+        "candidate lstat metadata is not a regular file",
+      ));
+    }
+    for field in [
+      "size",
+      "linkCount",
+      "device",
+      "inode",
+      "uid",
+      "gid",
+      "rdev",
+      "blockSize",
+      "blocks",
+    ] {
+      let value = required_value(metadata, field)?;
+      if !value.is_null()
+        && value
+          .as_str()
+          .filter(|value| is_canonical_unsigned_decimal(value))
+          .is_none()
+      {
+        return Err(invalid_data(
+          "candidate lstat metadata unsigned field is invalid",
+        ));
+      }
+    }
+    for field in [
+      "accessedTimeNs",
+      "modifiedTimeNs",
+      "changedTimeNs",
+      "birthTimeNs",
+    ] {
+      let value = required_value(metadata, field)?;
+      if !value.is_null()
+        && value
+          .as_str()
+          .filter(|value| is_canonical_signed_decimal(value))
+          .is_none()
+      {
+        return Err(invalid_data(
+          "candidate lstat metadata time field is invalid",
+        ));
+      }
+    }
+    if required_value(metadata, "size")?.as_str() != Some("0")
+      || required_value(metadata, "linkCount")?.as_str() != Some("1")
+    {
+      return Err(invalid_data("candidate lstat metadata shape is not exact"));
+    }
+    Ok(metadata)
+  }
+
+  fn is_canonical_unsigned_decimal(value: &str) -> bool {
+    value == "0"
+      || (value.len() <= 40
+        && value.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        && value.as_bytes()[0] != b'0'
+        && value.as_bytes().iter().all(u8::is_ascii_digit))
+  }
+
+  fn is_canonical_signed_decimal(value: &str) -> bool {
+    value == "0"
+      || value.strip_prefix('-').is_some_and(|magnitude| {
+        magnitude != "0" && is_canonical_unsigned_decimal(magnitude)
+      })
+      || is_canonical_unsigned_decimal(value)
+  }
+
+  fn require_platform_metadata_identity(
+    identity: &Value,
+    metadata: &Map<String, Value>,
+  ) -> io::Result<()> {
+    let identity = exact_object(
+      identity,
+      &["kind", "value"],
+      "candidate observed object identity",
+    )?;
+    require_text_eq(identity, "kind", "platform-object")?;
+    let device = required_value(metadata, "device")?
+      .as_str()
+      .and_then(|value| value.parse::<u64>().ok())
+      .ok_or_else(|| {
+        invalid_data("candidate lstat metadata device is not exact")
+      })?;
+    let inode = required_value(metadata, "inode")?
+      .as_str()
+      .and_then(|value| value.parse::<u64>().ok())
+      .ok_or_else(|| {
+        invalid_data("candidate lstat metadata inode is not exact")
+      })?;
+    require_text_eq(
+      identity,
+      "value",
+      &format!("unix-dev-ino:{device:016x}{inode:016x}"),
+    )
+  }
+
+  fn validate_missing_object_state(value: &Value) -> io::Result<()> {
+    let state = exact_object(
+      value,
+      &[
+        "kind",
+        "identity",
+        "metadata",
+        "contentDigest",
+        "aliasTargetObjectId",
+        "linkTargetObjectId",
+      ],
+      "candidate missing object state",
+    )?;
+    if required_value(state, "kind")?.as_str() != Some("missing")
+      || [
+        "identity",
+        "metadata",
+        "contentDigest",
+        "aliasTargetObjectId",
+        "linkTargetObjectId",
+      ]
+      .iter()
+      .any(|field| !state[*field].is_null())
+    {
+      return Err(invalid_data("candidate missing object state is not exact"));
+    }
+    Ok(())
+  }
+
+  fn derive_candidate_sandbox(
+    identity: &CandidateLstatProtocolIdentity,
+    binding: &CandidateCaseBinding,
+    descriptor_slots_raw_bytes: &[u8],
+    observation: &Value,
+    final_inventory: &Value,
+    claimed_final_inventory_digest: &str,
+  ) -> io::Result<CandidateDerivedSandbox> {
+    let projection = identity.exact_execution_projection()?;
+    let inventory = exact_object(
+      final_inventory,
+      &[
+        "schema",
+        "phase",
+        "logicalRoots",
+        "objects",
+        "unexpectedEntries",
+      ],
+      "candidate final sandbox inventory",
+    )?;
+    require_text_eq(inventory, "schema", SANDBOX_INVENTORY_SCHEMA)?;
+    require_text_eq(inventory, "phase", "final")?;
+    let unexpected_entries = required_value(inventory, "unexpectedEntries")?
+      .as_array()
+      .filter(|entries| entries.is_empty())
+      .ok_or_else(|| {
+        invalid_data("candidate final inventory has unexpected entries")
+      })?;
+    let roots = required_value(inventory, "logicalRoots")?
+      .as_array()
+      .filter(|roots| roots.len() == 1)
+      .ok_or_else(|| {
+        invalid_data("candidate final inventory logical roots are not exact")
+      })?;
+    let root = exact_object(
+      &roots[0],
+      &["root", "bindingId", "fixtureIdentity", "platformIdentity"],
+      "candidate final inventory logical root",
+    )?;
+    let generated_root = &projection.setup.logical_roots[0];
+    let generated_root_identity =
+      deno_core::serde_json::to_value(&generated_root.object_identity)
+        .map_err(|_| {
+          invalid_data("candidate generated root identity is not serializable")
+        })?;
+    let root_platform_identity = descriptor_slot_platform_identity(
+      descriptor_slots_raw_bytes,
+      0,
+      "logical-root",
+    )?;
+    if required_value(root, "root")?.as_str() != Some("$PROJECT")
+      || required_value(root, "bindingId")?
+        != &Value::String(LSTAT_ROOT_BINDING_ID.to_string())
+      || required_value(root, "fixtureIdentity")? != &generated_root_identity
+      || required_value(root, "platformIdentity")? != &root_platform_identity
+    {
+      return Err(invalid_data(
+        "candidate final inventory logical root diverges from D1",
+      ));
+    }
+
+    let objects = required_value(inventory, "objects")?
+      .as_array()
+      .filter(|objects| objects.len() == projection.setup.objects.len())
+      .ok_or_else(|| {
+        invalid_data("candidate final inventory object count is not exact")
+      })?;
+    let mut realized_objects = Vec::with_capacity(objects.len());
+    for (index, (object, generated)) in objects
+      .iter()
+      .zip(projection.setup.objects.iter())
+      .enumerate()
+    {
+      let object = exact_object(
+        object,
+        &["objectId", "root", "path", "fixtureIdentity", "state"],
+        "candidate final inventory object",
+      )?;
+      let generated_root = deno_core::serde_json::to_value(&generated.root)
+        .map_err(|_| {
+          invalid_data("candidate generated object root is not serializable")
+        })?;
+      let generated_path = deno_core::serde_json::to_value(&generated.path)
+        .map_err(|_| {
+          invalid_data("candidate generated object path is not serializable")
+        })?;
+      let generated_identity = deno_core::serde_json::to_value(
+        &generated.object_identity,
+      )
+      .map_err(|_| {
+        invalid_data("candidate generated object identity is not serializable")
+      })?;
+      if required_value(object, "objectId")?
+        != &Value::String(generated.object_id.clone())
+        || required_value(object, "root")? != &generated_root
+        || required_value(object, "path")? != &generated_path
+        || required_value(object, "fixtureIdentity")? != &generated_identity
+      {
+        return Err(invalid_data(
+          "candidate final inventory object diverges from its fixture",
+        ));
+      }
+      let state = required_value(object, "state")?;
+      if index == 1 {
+        validate_missing_object_state(state)?;
+      } else {
+        match identity.case {
+          CandidateLstatCase::FinalMissing => {
+            validate_missing_object_state(state)?;
+          }
+          CandidateLstatCase::Existing => {
+            let state = exact_object(
+              state,
+              &[
+                "kind",
+                "identity",
+                "metadata",
+                "contentDigest",
+                "aliasTargetObjectId",
+                "linkTargetObjectId",
+              ],
+              "candidate existing object state",
+            )?;
+            require_text_eq(state, "kind", "regular-file")?;
+            require_text_eq(state, "contentDigest", EMPTY_CONTENT_DIGEST)?;
+            if !required_value(state, "aliasTargetObjectId")?.is_null()
+              || !required_value(state, "linkTargetObjectId")?.is_null()
+            {
+              return Err(invalid_data(
+                "candidate existing object state contains an alias",
+              ));
+            }
+            let metadata =
+              validate_metadata_projection(required_value(state, "metadata")?)?;
+            require_platform_metadata_identity(
+              required_value(state, "identity")?,
+              metadata,
+            )?;
+            let observed_metadata_digest = deno_permissions::rev2::hjcs_digest(
+              LSTAT_METADATA_DIGEST_DOMAIN,
+              required_value(state, "metadata")?,
+            )
+            .map_err(|_| {
+              invalid_data(
+                "candidate lstat metadata digest could not be derived",
+              )
+            })?;
+            if observation
+              .get("result")
+              .and_then(Value::as_object)
+              .and_then(|result| result.get("digest"))
+              .and_then(Value::as_str)
+              != Some(observed_metadata_digest.as_str())
+            {
+              return Err(invalid_data(
+                "candidate lstat result is not bound to final metadata",
+              ));
+            }
+          }
+        }
+      }
+      realized_objects.push(json!({
+        "objectId": object["objectId"],
+        "root": object["root"],
+        "path": object["path"],
+        "fixtureIdentity": object["fixtureIdentity"],
+        "initialState": state,
+        "finalState": state,
+      }));
+    }
+
+    let occurrence = observation
+      .get("slots")
+      .and_then(Value::as_array)
+      .and_then(|slots| slots.first())
+      .and_then(|slot| slot.get("occurrence"))
+      .and_then(Value::as_object)
+      .ok_or_else(|| invalid_data("candidate lstat occurrence is not exact"))?;
+    if occurrence.get("parentIdentity") != Some(&root_platform_identity) {
+      return Err(invalid_data(
+        "candidate lstat parent identity diverges from its transferred root",
+      ));
+    }
+    let final_object_state = occurrence
+      .get("finalObjectState")
+      .and_then(Value::as_object)
+      .ok_or_else(|| {
+        invalid_data("candidate lstat final object state is not exact")
+      })?;
+    match identity.case {
+      CandidateLstatCase::Existing => {
+        if final_object_state.get("kind").and_then(Value::as_str)
+          != Some("existing")
+          || final_object_state.get("identity")
+            != objects[0]
+              .get("state")
+              .and_then(|state| state.get("identity"))
+        {
+          return Err(invalid_data(
+            "candidate lstat occurrence diverges from final inventory",
+          ));
+        }
+      }
+      CandidateLstatCase::FinalMissing => {
+        if final_object_state.len() != 1
+          || final_object_state.get("kind").and_then(Value::as_str)
+            != Some("missing")
+          || observation
+            .get("result")
+            .and_then(|result| result.get("digest"))
+            .is_none_or(|digest| !digest.is_null())
+        {
+          return Err(invalid_data(
+            "candidate missing lstat occurrence is not exact",
+          ));
+        }
+      }
+    }
+
+    let final_inventory_digest = require_hjcs_artifact_digest(
+      SANDBOX_INVENTORY_DIGEST_DOMAIN,
+      final_inventory,
+      claimed_final_inventory_digest,
+      "candidate final inventory digest is inexact",
+    )?;
+    let mut initial_inventory = final_inventory.clone();
+    initial_inventory["phase"] = Value::String("initial".to_string());
+    let initial_inventory_digest = deno_permissions::rev2::hjcs_digest(
+      SANDBOX_INVENTORY_DIGEST_DOMAIN,
+      &initial_inventory,
+    )
+    .map_err(|_| {
+      invalid_data("candidate initial inventory digest could not be derived")
+    })?;
+    let realization = json!({
+      "schema": SANDBOX_REALIZATION_SCHEMA,
+      "profile": CAPSEC_PROFILE,
+      "runNonce": binding.run_nonce,
+      "target": identity.target,
+      "featureSet": identity.feature_set,
+      "fixtureArtifactDigest": identity.fixture_artifact_digest,
+      "executionIdentityDigest": binding.execution_identity_digest,
+      "caseId": identity.case.case_id(),
+      "edgeId": LSTAT_EDGE_ID,
+      "requirementId": LSTAT_REQUIREMENT_ID,
+      "caseKind": identity.case.case_kind(),
+      "logicalRoots": roots,
+      "objects": realized_objects,
+      "initialInventoryDigest": initial_inventory_digest,
+      "finalInventoryDigest": final_inventory_digest,
+      "initialUnexpectedEntries": unexpected_entries,
+      "finalUnexpectedEntries": unexpected_entries,
+    });
+    exact_object(
+      &realization,
+      &[
+        "schema",
+        "profile",
+        "runNonce",
+        "target",
+        "featureSet",
+        "fixtureArtifactDigest",
+        "executionIdentityDigest",
+        "caseId",
+        "edgeId",
+        "requirementId",
+        "caseKind",
+        "logicalRoots",
+        "objects",
+        "initialInventoryDigest",
+        "finalInventoryDigest",
+        "initialUnexpectedEntries",
+        "finalUnexpectedEntries",
+      ],
+      "candidate sandbox realization",
+    )?;
+    let realization_digest = deno_permissions::rev2::hjcs_digest(
+      SANDBOX_REALIZATION_DIGEST_DOMAIN,
+      &realization,
+    )
+    .map_err(|_| {
+      invalid_data("candidate sandbox realization digest could not be derived")
+    })?;
+    Ok(CandidateDerivedSandbox {
+      realization,
+      realization_digest,
+      final_inventory_digest,
+    })
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn derive_candidate_lstat_artifacts(
+    identity: &CandidateLstatProtocolIdentity,
+    binding: &CandidateCaseBinding,
+    descriptor_slots_raw_bytes: &[u8],
+    observation_bytes: &[u8],
+    observation_digest: &str,
+    delivery_bytes: &[u8],
+    delivery_digest: &str,
+    private_trace_bytes: &[u8],
+    private_trace_digest: &str,
+    final_inventory_bytes: &[u8],
+    final_inventory_digest: &str,
+    resource_inventory_bytes: &[u8],
+    resource_inventory_digest: &str,
+  ) -> io::Result<CandidateDerivedLstatArtifacts> {
+    let observation = parse_canonical_jcs(observation_bytes)?;
+    validate_normalized_observation(&observation, identity)?;
+    let observed_result_digest = require_hjcs_artifact_digest(
+      OBSERVED_RESULT_DIGEST_DOMAIN,
+      &observation,
+      observation_digest,
+      "candidate observed-result digest is inexact",
+    )?;
+    if delivery_bytes != observation_bytes
+      || parse_canonical_jcs(delivery_bytes)? != observation
+    {
+      return Err(invalid_data(
+        "candidate delivery bytes differ from the observed result",
+      ));
+    }
+    let delivery_frame_digest = require_raw_artifact_digest(
+      DELIVERY_FRAME_DIGEST_DOMAIN,
+      delivery_bytes,
+      delivery_digest,
+      "candidate delivery-frame digest is inexact",
+    )?;
+    let delivery_frame = json!({
+      "encoding": "base64url",
+      "bytes": URL_SAFE_NO_PAD.encode(delivery_bytes),
+    });
+    validate_delivery(
+      &delivery_frame,
+      &Value::String(delivery_frame_digest.clone()),
+      &observation,
+    )?;
+
+    let resource_inventory = parse_canonical_jcs(resource_inventory_bytes)?;
+    validate_resource_inventory(&resource_inventory)?;
+    let resource_inventory_digest = require_hjcs_artifact_digest(
+      RESOURCE_INVENTORY_DIGEST_DOMAIN,
+      &resource_inventory,
+      resource_inventory_digest,
+      "candidate resource-inventory digest is inexact",
+    )?;
+    let final_inventory = parse_canonical_jcs(final_inventory_bytes)?;
+    let sandbox = derive_candidate_sandbox(
+      identity,
+      binding,
+      descriptor_slots_raw_bytes,
+      &observation,
+      &final_inventory,
+      final_inventory_digest,
+    )?;
+    // Keep the complete realization alive through trace construction so its
+    // HJCS is derived from the exact validated object, then consume it here.
+    let sandbox_realization_digest = require_hjcs_artifact_digest(
+      SANDBOX_REALIZATION_DIGEST_DOMAIN,
+      &sandbox.realization,
+      &sandbox.realization_digest,
+      "candidate sandbox-realization digest is inexact",
+    )?;
+
+    let projection = identity.exact_execution_projection()?;
+    let expected_actors =
+      deno_core::serde_json::to_value(&projection.execution.actors).map_err(
+        |_| invalid_data("candidate generated actors are not serializable"),
+      )?;
+    let expected_lifecycle =
+      deno_core::serde_json::to_value(&projection.execution.resource_lifecycle)
+        .map_err(|_| {
+          invalid_data(
+            "candidate generated resource lifecycle is not serializable",
+          )
+        })?;
+    let expected_phases =
+      deno_core::serde_json::to_value(&projection.execution.trace_phases)
+        .map_err(|_| {
+          invalid_data("candidate generated trace phases are not serializable")
+        })?;
+    if expected_phases != json!(LSTAT_TRACE_PHASES) {
+      return Err(invalid_data(
+        "candidate generated lstat trace plan is not frozen",
+      ));
+    }
+    let normalized_slots_digest = deno_permissions::rev2::hjcs_digest(
+      NORMALIZED_SLOTS_DIGEST_DOMAIN,
+      observation
+        .get("slots")
+        .ok_or_else(|| invalid_data("candidate observed slots are absent"))?,
+    )
+    .map_err(|_| {
+      invalid_data("candidate normalized-slots digest could not be derived")
+    })?;
+
+    let private_trace = parse_canonical_jcs(private_trace_bytes)?;
+    require_hjcs_artifact_digest(
+      PRIVATE_EXECUTION_TRACE_DIGEST_DOMAIN,
+      &private_trace,
+      private_trace_digest,
+      "candidate private execution-trace digest is inexact",
+    )?;
+    let private = exact_object(
+      &private_trace,
+      &[
+        "schema",
+        "target",
+        "featureSet",
+        "fixtureArtifactDigest",
+        "caseId",
+        "edgeId",
+        "requirementId",
+        "caseKind",
+        "executionProjectionDigest",
+        "publicOpEntryWitness",
+        "actors",
+        "normalizedSlotsDigest",
+        "events",
+        "resourceLifecycle",
+        "decision",
+        "nativeResult",
+        "delivery",
+        "cleanup",
+        "observedResultDigest",
+        "postOperationInventoryDigest",
+        "deliveryFrameDigest",
+        "resourceInventoryDigest",
+        "faultObservation",
+      ],
+      "candidate private execution trace",
+    )?;
+    for (field, expected) in [
+      ("schema", PRIVATE_EXECUTION_TRACE_SCHEMA),
+      ("target", identity.target.as_str()),
+      ("featureSet", identity.feature_set.as_str()),
+      (
+        "fixtureArtifactDigest",
+        identity.fixture_artifact_digest.as_str(),
+      ),
+      ("caseId", identity.case.case_id()),
+      ("edgeId", LSTAT_EDGE_ID),
+      ("requirementId", LSTAT_REQUIREMENT_ID),
+      ("caseKind", identity.case.case_kind()),
+      (
+        "executionProjectionDigest",
+        identity.execution_projection_digest.as_str(),
+      ),
+      ("normalizedSlotsDigest", normalized_slots_digest.as_str()),
+      ("decision", "allow"),
+      ("delivery", "delivered"),
+      ("cleanup", "complete"),
+      ("observedResultDigest", observed_result_digest.as_str()),
+      (
+        "postOperationInventoryDigest",
+        sandbox.final_inventory_digest.as_str(),
+      ),
+      ("deliveryFrameDigest", delivery_frame_digest.as_str()),
+      (
+        "resourceInventoryDigest",
+        resource_inventory_digest.as_str(),
+      ),
+    ] {
+      require_text_eq(private, field, expected)?;
+    }
+    if required_value(private, "actors")? != &expected_actors
+      || required_value(private, "resourceLifecycle")? != &expected_lifecycle
+      || required_value(private, "nativeResult")?
+        != observation.get("result").ok_or_else(|| {
+          invalid_data("candidate observed native result is absent")
+        })?
+      || !required_value(private, "faultObservation")?.is_null()
+    {
+      return Err(invalid_data(
+        "candidate private execution trace diverges from its D2 result",
+      ));
+    }
+
+    let private_witness = exact_object(
+      required_value(private, "publicOpEntryWitness")?,
+      &[
+        "sourcePath",
+        "symbol",
+        "adapterId",
+        "executionProjectionDigest",
+        "normalizedSlotsDigest",
+      ],
+      "candidate private public-op witness",
+    )?;
+    for (field, expected) in [
+      ("sourcePath", "ext/fs/ops.rs"),
+      ("symbol", "op_fs_lstat_sync_impl"),
+      ("adapterId", "oden.capsec.filesystem-checked-op-adapter/1"),
+      (
+        "executionProjectionDigest",
+        identity.execution_projection_digest.as_str(),
+      ),
+      ("normalizedSlotsDigest", normalized_slots_digest.as_str()),
+    ] {
+      require_text_eq(private_witness, field, expected)?;
+    }
+    let private_witness_digest = deno_permissions::rev2::hjcs_digest(
+      PRIVATE_PUBLIC_OP_WITNESS_DIGEST_DOMAIN,
+      required_value(private, "publicOpEntryWitness")?,
+    )
+    .map_err(|_| {
+      invalid_data("candidate private public-op witness is not canonical")
+    })?;
+
+    let entry_witness_digest = deno_permissions::rev2::hjcs_digest(
+      PUBLIC_OP_WITNESS_DIGEST_DOMAIN,
+      &json!({
+        "schema": PUBLIC_OP_WITNESS_SCHEMA,
+        "executionIdentityDigest": binding.execution_identity_digest,
+        "caseId": identity.case.case_id(),
+        "edgeId": LSTAT_EDGE_ID,
+        "normalizedRequestDigest": identity.execution_projection_digest,
+      }),
+    )
+    .map_err(|_| {
+      invalid_data("candidate public-op witness digest could not be derived")
+    })?;
+    let private_events = required_value(private, "events")?
+      .as_array()
+      .filter(|events| events.len() == LSTAT_TRACE_PHASES.len())
+      .ok_or_else(|| {
+        invalid_data("candidate private trace event count is not exact")
+      })?;
+    let mut engine_events = Vec::with_capacity(private_events.len());
+    for (sequence, (event, phase)) in private_events
+      .iter()
+      .zip(LSTAT_TRACE_PHASES.iter())
+      .enumerate()
+    {
+      let event = exact_object(
+        event,
+        &[
+          "sequence",
+          "phase",
+          "disposition",
+          "actorIds",
+          "detailDigest",
+        ],
+        "candidate private trace event",
+      )?;
+      if required_value(event, "sequence")?.as_u64() != Some(sequence as u64) {
+        return Err(invalid_data(
+          "candidate private trace event sequence is not exact",
+        ));
+      }
+      require_text_eq(event, "phase", phase)?;
+      require_text_eq(event, "disposition", "ok")?;
+      let expected_actor_ids = if *phase == "actors-captured" {
+        json!(["actor:list"])
+      } else {
+        json!([])
+      };
+      let expected_private_detail = match *phase {
+        "public-op-entered" => Value::String(private_witness_digest.clone()),
+        "delivery-serialized" => Value::String(delivery_frame_digest.clone()),
+        "provisional-resources-released" => {
+          Value::String(resource_inventory_digest.clone())
+        }
+        _ => Value::Null,
+      };
+      if required_value(event, "actorIds")? != &expected_actor_ids
+        || required_value(event, "detailDigest")? != &expected_private_detail
+      {
+        return Err(invalid_data(
+          "candidate private trace event relation is not exact",
+        ));
+      }
+      let engine_detail = if *phase == "public-op-entered" {
+        Value::String(entry_witness_digest.clone())
+      } else {
+        expected_private_detail
+      };
+      engine_events.push(json!({
+        "sequence": sequence,
+        "phase": phase,
+        "disposition": "ok",
+        "actorIds": expected_actor_ids,
+        "detailDigest": engine_detail,
+      }));
+    }
+
+    let engine_trace = json!({
+      "schema": ENGINE_TRACE_SCHEMA,
+      "profile": CAPSEC_PROFILE,
+      "runNonce": binding.run_nonce,
+      "target": identity.target,
+      "featureSet": identity.feature_set,
+      "engineDigest": binding.engine_digest,
+      "forkCommit": identity.fork_commit,
+      "fixtureArtifactDigest": identity.fixture_artifact_digest,
+      "executionIdentityDigest": binding.execution_identity_digest,
+      "caseId": identity.case.case_id(),
+      "edgeId": LSTAT_EDGE_ID,
+      "requirementId": LSTAT_REQUIREMENT_ID,
+      "caseKind": identity.case.case_kind(),
+      "publicOpEntryWitness": {
+        "sourcePath": "ext/fs/ops.rs",
+        "symbol": "op_fs_lstat_sync",
+        "adapterId": "oden.capsec.filesystem-checked-op-adapter/1",
+        "entryWitnessDigest": entry_witness_digest,
+      },
+      "actors": expected_actors,
+      "normalizedRequestDigest": identity.execution_projection_digest,
+      "normalizedSlotsDigest": normalized_slots_digest,
+      "events": engine_events,
+      "decision": "allow",
+      "nativeResult": observation["result"],
+      "delivery": "delivered",
+      "cleanup": "complete",
+      "observedResultDigest": observed_result_digest,
+      "sandboxRealizationDigest": sandbox_realization_digest,
+      "postOperationInventoryDigest": sandbox.final_inventory_digest,
+      "deliveryFrameDigest": delivery_frame_digest,
+      "resourceInventory": resource_inventory,
+      "faultObservation": null,
+    });
+    exact_object(
+      &engine_trace,
+      &[
+        "schema",
+        "profile",
+        "runNonce",
+        "target",
+        "featureSet",
+        "engineDigest",
+        "forkCommit",
+        "fixtureArtifactDigest",
+        "executionIdentityDigest",
+        "caseId",
+        "edgeId",
+        "requirementId",
+        "caseKind",
+        "publicOpEntryWitness",
+        "actors",
+        "normalizedRequestDigest",
+        "normalizedSlotsDigest",
+        "events",
+        "decision",
+        "nativeResult",
+        "delivery",
+        "cleanup",
+        "observedResultDigest",
+        "sandboxRealizationDigest",
+        "postOperationInventoryDigest",
+        "deliveryFrameDigest",
+        "resourceInventory",
+        "faultObservation",
+      ],
+      "candidate frozen engine trace",
+    )?;
+    let engine_trace_bytes =
+      deno_permissions::rev2::canonical_json(&engine_trace)
+        .map(String::into_bytes)
+        .map_err(|_| {
+          invalid_data("candidate frozen engine trace is not canonical")
+        })?;
+    if parse_canonical_jcs(&engine_trace_bytes)? != engine_trace {
+      return Err(invalid_data(
+        "candidate frozen engine trace did not round-trip exactly",
+      ));
+    }
+    let engine_trace_digest = deno_permissions::rev2::hjcs_digest(
+      ENGINE_TRACE_DIGEST_DOMAIN,
+      &engine_trace,
+    )
+    .map_err(|_| {
+      invalid_data("candidate frozen engine-trace digest could not be derived")
+    })?;
+    if raw_frame_digest(ENGINE_TRACE_DIGEST_DOMAIN, &engine_trace_bytes)
+      != engine_trace_digest
+    {
+      return Err(invalid_data(
+        "candidate engine trace canonical byte digest is inconsistent",
+      ));
+    }
+    Ok(CandidateDerivedLstatArtifacts {
+      normalized_observed_result: observation,
+      observed_result_digest,
+      delivery_frame,
+      delivery_frame_digest,
+      resource_inventory,
+      resource_inventory_digest,
+      engine_trace_bytes,
+      engine_trace_digest,
+    })
+  }
+
+  fn sha256_digest(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256-{}", URL_SAFE_NO_PAD.encode(hasher.finalize()))
+  }
+
+  fn zero_sha256_digest(length: usize) -> String {
+    let mut hasher = Sha256::new();
+    let zeros = [0_u8; 64 * 1024];
+    let mut remaining = length;
+    while remaining != 0 {
+      let chunk = remaining.min(zeros.len());
+      hasher.update(&zeros[..chunk]);
+      remaining -= chunk;
+    }
+    format!("sha256-{}", URL_SAFE_NO_PAD.encode(hasher.finalize()))
+  }
+
+  fn same_arena_identity(
+    left: &CandidateDescriptorSnapshot,
+    right: &CandidateDescriptorSnapshot,
+  ) -> bool {
+    left.device == right.device
+      && left.inode == right.inode
+      && left.mode == right.mode
+      && left.links == right.links
+      && left.uid == right.uid
+      && left.gid == right.gid
+      && left.size == right.size
+      && {
+        #[cfg(target_os = "macos")]
+        {
+          left.generation == right.generation
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+          true
+        }
+      }
+  }
+
+  fn write_candidate_arena_payload(
+    arena: BorrowedFd<'_>,
+    expected: &CandidateRetainedArenaSnapshot,
+    payload: &[u8],
+    session_deadline: &CandidateSessionDeadline,
+    deadline: Instant,
+  ) -> io::Result<CandidateRetainedArenaSnapshot> {
+    if payload.is_empty() || payload.len() > ARENA_CAPACITY_BYTES as usize {
+      return Err(invalid_data("candidate arena payload length is not exact"));
+    }
+    if CandidateDescriptorSnapshot::capture(arena)? != expected.descriptor
+      || descriptor_flags(arena)? != expected.descriptor_flags
+      || descriptor_status_flags(arena)? != expected.status_flags
+    {
+      return Err(invalid_data(
+        "candidate arena changed before its one-shot write",
+      ));
+    }
+    let mut offset = 0_usize;
+    while offset < payload.len() {
+      let chunk = (payload.len() - offset).min(64 * 1024);
+      let written = loop {
+        session_deadline
+          .check(deadline, CandidateDeadlineCheckpoint::ArenaWriteAttempt)?;
+        // SAFETY: the payload slice is readable for `chunk` bytes, the
+        // retained descriptor has exact O_RDWR regular-file access, and the
+        // checked offset remains inside the fixed arena.
+        let result = unsafe {
+          libc::pwrite(
+            arena.as_raw_fd(),
+            payload[offset..].as_ptr().cast(),
+            chunk,
+            offset as libc::off_t,
+          )
+        };
+        let write_error = if result < 0 {
+          Some(io::Error::last_os_error())
+        } else {
+          None
+        };
+        session_deadline
+          .check(deadline, CandidateDeadlineCheckpoint::ArenaWriteComplete)?;
+        if result >= 0 {
+          break result as usize;
+        }
+        let error = write_error.ok_or_else(|| {
+          invalid_data("candidate arena write failed without an OS error")
+        })?;
+        if error.kind() != io::ErrorKind::Interrupted {
+          return Err(error);
+        }
+      };
+      if written == 0 || written > chunk {
+        return Err(invalid_data(
+          "candidate arena payload write did not make exact progress",
+        ));
+      }
+      offset += written;
+    }
+    let descriptor = CandidateDescriptorSnapshot::capture(arena)?;
+    let descriptor_flags = descriptor_flags(arena)?;
+    let status_flags = descriptor_status_flags(arena)?;
+    if !same_arena_identity(&descriptor, &expected.descriptor)
+      || descriptor_flags != expected.descriptor_flags
+      || status_flags != expected.status_flags
+    {
+      return Err(invalid_data(
+        "candidate arena identity changed during its one-shot write",
+      ));
+    }
+    Ok(CandidateRetainedArenaSnapshot {
+      descriptor,
+      descriptor_flags,
+      status_flags,
+    })
+  }
+
+  fn reconcile_candidate_arena_payload(
+    arena: BorrowedFd<'_>,
+    expected: &CandidateRetainedArenaSnapshot,
+    payload: &[u8],
+    session_deadline: &CandidateSessionDeadline,
+    deadline: Instant,
+  ) -> io::Result<()> {
+    if CandidateDescriptorSnapshot::capture(arena)? != expected.descriptor
+      || descriptor_flags(arena)? != expected.descriptor_flags
+      || descriptor_status_flags(arena)? != expected.status_flags
+    {
+      return Err(invalid_data(
+        "candidate arena changed before reconciliation",
+      ));
+    }
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut offset = 0_usize;
+    while offset < ARENA_CAPACITY_BYTES as usize {
+      let requested =
+        (ARENA_CAPACITY_BYTES as usize - offset).min(buffer.len());
+      let read = loop {
+        session_deadline
+          .check(deadline, CandidateDeadlineCheckpoint::ArenaReadAttempt)?;
+        // SAFETY: buffer is writable for `requested` bytes, the descriptor is
+        // live, and the checked offset remains in the fixed arena.
+        let result = unsafe {
+          libc::pread(
+            arena.as_raw_fd(),
+            buffer.as_mut_ptr().cast(),
+            requested,
+            offset as libc::off_t,
+          )
+        };
+        let read_error = if result < 0 {
+          Some(io::Error::last_os_error())
+        } else {
+          None
+        };
+        session_deadline
+          .check(deadline, CandidateDeadlineCheckpoint::ArenaReadComplete)?;
+        if result >= 0 {
+          break result as usize;
+        }
+        let error = read_error.ok_or_else(|| {
+          invalid_data("candidate arena read failed without an OS error")
+        })?;
+        if error.kind() != io::ErrorKind::Interrupted {
+          return Err(error);
+        }
+      };
+      if read == 0 {
+        return Err(invalid_data(
+          "candidate arena ended before reconciliation completed",
+        ));
+      }
+      let expected_payload_end = payload.len().min(offset + read);
+      if offset < expected_payload_end
+        && buffer[..expected_payload_end - offset]
+          != payload[offset..expected_payload_end]
+      {
+        return Err(invalid_data(
+          "candidate arena payload changed after its write",
+        ));
+      }
+      let tail_start = payload.len().saturating_sub(offset).min(read);
+      if buffer[tail_start..read].iter().any(|byte| *byte != 0) {
+        return Err(invalid_data(
+          "candidate arena unused tail is not exact zero-fill",
+        ));
+      }
+      offset += read;
+    }
+    let mut beyond = 0_u8;
+    let beyond_read = loop {
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::ArenaReadAttempt)?;
+      // SAFETY: `beyond` is a writable byte and the exact capacity offset is
+      // representable. A byte here violates the fixed-length contract.
+      let result = unsafe {
+        libc::pread(
+          arena.as_raw_fd(),
+          std::ptr::from_mut(&mut beyond).cast(),
+          1,
+          ARENA_CAPACITY_BYTES,
+        )
+      };
+      let read_error = if result < 0 {
+        Some(io::Error::last_os_error())
+      } else {
+        None
+      };
+      session_deadline
+        .check(deadline, CandidateDeadlineCheckpoint::ArenaReadComplete)?;
+      if result >= 0 {
+        break result;
+      }
+      let error = read_error.ok_or_else(|| {
+        invalid_data("candidate arena EOF read failed without an OS error")
+      })?;
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(error);
+      }
+    };
+    if beyond_read != 0
+      || CandidateDescriptorSnapshot::capture(arena)? != expected.descriptor
+      || descriptor_flags(arena)? != expected.descriptor_flags
+      || descriptor_status_flags(arena)? != expected.status_flags
+    {
+      return Err(invalid_data("candidate arena changed while reconciled"));
+    }
+    Ok(())
+  }
+
+  fn candidate_arena_value(
+    identity: &CandidateLstatProtocolIdentity,
+    binding: &CandidateCaseBinding,
+    arena: &CandidateDescriptorSnapshot,
+    engine_trace_bytes: &[u8],
+    engine_trace_digest: &str,
+  ) -> io::Result<Value> {
+    let payload_length = engine_trace_bytes.len();
+    let unused_length = ARENA_CAPACITY_BYTES as usize - payload_length;
+    Ok(json!({
+      "schema": CANDIDATE_ARENA_SCHEMA,
+      "profile": CAPSEC_PROFILE,
+      "runNonce": binding.run_nonce,
+      "target": identity.target,
+      "featureSet": identity.feature_set,
+      "parentStandaloneDigest": binding.parent_standalone_digest,
+      "engineDigest": binding.engine_digest,
+      "forkCommit": identity.fork_commit,
+      "fixtureArtifactDigest": identity.fixture_artifact_digest,
+      "executionIdentityDigest": binding.execution_identity_digest,
+      "sourceClosureDigest": binding.source_closure_digest,
+      "caseId": identity.case.case_id(),
+      "edgeId": LSTAT_EDGE_ID,
+      "requirementId": LSTAT_REQUIREMENT_ID,
+      "caseKind": identity.case.case_kind(),
+      "descriptorSlotsDigest": binding.descriptor_slots_digest,
+      "arenaTransferIndex": LSTAT_ARENA_TRANSFER_INDEX,
+      "arenaPlatformIdentity": arena.platform_identity(),
+      "capacityBytes": ARENA_CAPACITY_BYTES,
+      "payload": {
+        "offset": 0,
+        "length": payload_length,
+        "byteDigest": sha256_digest(engine_trace_bytes),
+        "engineTraceDigest": engine_trace_digest,
+      },
+      "unusedTail": {
+        "offset": payload_length,
+        "length": unused_length,
+        "byteDigest": zero_sha256_digest(unused_length),
+        "allZero": true,
+      },
+    }))
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn validate_candidate_arena(
+    value: &Value,
+    identity: &CandidateLstatProtocolIdentity,
+    binding: &CandidateCaseBinding,
+    arena: &CandidateDescriptorSnapshot,
+    descriptor_slots_digest: &str,
+    engine_trace_bytes: &[u8],
+    engine_trace_digest: &str,
+  ) -> io::Result<()> {
+    let object = exact_object(
+      value,
+      &[
+        "schema",
+        "profile",
+        "runNonce",
+        "target",
+        "featureSet",
+        "parentStandaloneDigest",
+        "engineDigest",
+        "forkCommit",
+        "fixtureArtifactDigest",
+        "executionIdentityDigest",
+        "sourceClosureDigest",
+        "caseId",
+        "edgeId",
+        "requirementId",
+        "caseKind",
+        "descriptorSlotsDigest",
+        "arenaTransferIndex",
+        "arenaPlatformIdentity",
+        "capacityBytes",
+        "payload",
+        "unusedTail",
+      ],
+      "candidate arena artifact",
+    )?;
+    require_text_eq(object, "schema", CANDIDATE_ARENA_SCHEMA)?;
+    validate_common_static_binding(object, identity)?;
+    for (field, expected) in [
+      ("runNonce", binding.run_nonce.as_str()),
+      (
+        "parentStandaloneDigest",
+        binding.parent_standalone_digest.as_str(),
+      ),
+      ("engineDigest", binding.engine_digest.as_str()),
+      (
+        "executionIdentityDigest",
+        binding.execution_identity_digest.as_str(),
+      ),
+      (
+        "sourceClosureDigest",
+        binding.source_closure_digest.as_str(),
+      ),
+      ("descriptorSlotsDigest", descriptor_slots_digest),
+    ] {
+      require_text_eq(object, field, expected)?;
+    }
+    if required_value(object, "arenaTransferIndex")?.as_u64()
+      != Some(LSTAT_ARENA_TRANSFER_INDEX as u64)
+      || required_value(object, "arenaPlatformIdentity")?
+        != &arena.platform_identity()
+      || required_value(object, "capacityBytes")?.as_i64()
+        != Some(ARENA_CAPACITY_BYTES)
+    {
+      return Err(invalid_data(
+        "candidate arena binding or identity is not exact",
+      ));
+    }
+    let payload = exact_object(
+      required_value(object, "payload")?,
+      &["offset", "length", "byteDigest", "engineTraceDigest"],
+      "candidate arena payload",
+    )?;
+    if required_value(payload, "offset")?.as_u64() != Some(0)
+      || required_value(payload, "length")?.as_u64()
+        != Some(engine_trace_bytes.len() as u64)
+      || required_value(payload, "byteDigest")?.as_str()
+        != Some(sha256_digest(engine_trace_bytes).as_str())
+      || required_value(payload, "engineTraceDigest")?.as_str()
+        != Some(engine_trace_digest)
+    {
+      return Err(invalid_data(
+        "candidate arena payload relation is not exact",
+      ));
+    }
+    let tail_length = ARENA_CAPACITY_BYTES as usize - engine_trace_bytes.len();
+    let tail = exact_object(
+      required_value(object, "unusedTail")?,
+      &["offset", "length", "byteDigest", "allZero"],
+      "candidate arena unused tail",
+    )?;
+    if required_value(tail, "offset")?.as_u64()
+      != Some(engine_trace_bytes.len() as u64)
+      || required_value(tail, "length")?.as_u64() != Some(tail_length as u64)
+      || required_value(tail, "byteDigest")?.as_str()
+        != Some(zero_sha256_digest(tail_length).as_str())
+      || required_value(tail, "allZero")?.as_bool() != Some(true)
+    {
+      return Err(invalid_data(
+        "candidate arena unused-tail relation is not exact",
+      ));
+    }
+    Ok(())
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn candidate_lstat_response_value(
+    identity: &CandidateLstatProtocolIdentity,
+    ready: &CandidateReadyFacts,
+    binding: &CandidateCaseBinding,
+    captured_umask: u64,
+    pre_operation_pgid: &str,
+    post_operation_pgid: &str,
+    pre_exit_pgid: &str,
+    derived: &CandidateDerivedLstatArtifacts,
+    candidate_arena_digest: &str,
+  ) -> Value {
+    json!({
+      "schema": CANDIDATE_RESPONSE_SCHEMA,
+      "profile": CAPSEC_PROFILE,
+      "runNonce": binding.run_nonce,
+      "target": identity.target,
+      "featureSet": identity.feature_set,
+      "parentStandaloneDigest": binding.parent_standalone_digest,
+      "engineDigest": binding.engine_digest,
+      "forkCommit": identity.fork_commit,
+      "fixtureArtifactDigest": identity.fixture_artifact_digest,
+      "executionIdentityDigest": binding.execution_identity_digest,
+      "sourceClosureDigest": binding.source_closure_digest,
+      "caseId": identity.case.case_id(),
+      "edgeId": LSTAT_EDGE_ID,
+      "requirementId": LSTAT_REQUIREMENT_ID,
+      "caseKind": identity.case.case_kind(),
+      "candidateRequestFrameDigest": binding.request_frame_digest,
+      "acceptedDescriptorSlotsDigest": binding.descriptor_slots_digest,
+      "capturedUmask": captured_umask,
+      "normalizedObservedResult": derived.normalized_observed_result,
+      "observedResultDigest": derived.observed_result_digest,
+      "candidateArenaDigest": candidate_arena_digest,
+      "engineTraceDigest": derived.engine_trace_digest,
+      "deliveryFrame": derived.delivery_frame,
+      "deliveryFrameDigest": derived.delivery_frame_digest,
+      "resourceInventory": derived.resource_inventory,
+      "resourceInventoryDigest": derived.resource_inventory_digest,
+      "faultObservation": null,
+      "faultObservationDigest": null,
+      "noDescendantClaims": {
+        "noDescendantProfile": ready.no_descendant_profile,
+        "sourceClosureDigest": binding.source_closure_digest,
+        "candidatePid": ready.candidate_pid,
+        "candidatePgid": ready.candidate_pgid,
+        "candidateStartIdentity": ready.candidate_start_identity,
+        "expectedPgid": ready.candidate_pgid,
+        "pgidCheckpoints": {
+          "entry": ready.candidate_pgid,
+          "preOperation": pre_operation_pgid,
+          "postOperation": post_operation_pgid,
+          "preExit": pre_exit_pgid,
+        },
+        "processLimitReadback": ready.process_limit_readback,
+        "identities": ready.identities,
+        "preRequestFdInventory": ready.pre_request_fd_inventory,
+        "platformState": ready.platform_state,
+      },
+      "rootDescriptorsDroppedClaim": true,
+    })
+  }
+
   fn validate_request_descriptors(
     descriptors: &[OwnedFd; EXPECTED_DESCRIPTOR_COUNT],
     session_deadline: &CandidateSessionDeadline,
@@ -2663,12 +4612,19 @@ mod fd3 {
             offset,
           )
         };
+        let read_error = if result < 0 {
+          Some(io::Error::last_os_error())
+        } else {
+          None
+        };
         session_deadline
           .check(deadline, CandidateDeadlineCheckpoint::ArenaReadComplete)?;
         if result >= 0 {
           break result as usize;
         }
-        let error = io::Error::last_os_error();
+        let error = read_error.ok_or_else(|| {
+          invalid_data("candidate arena zero-fill read has no OS error")
+        })?;
         if error.kind() != io::ErrorKind::Interrupted {
           return Err(error);
         }
@@ -2704,12 +4660,19 @@ mod fd3 {
           ARENA_CAPACITY_BYTES,
         )
       };
+      let read_error = if result < 0 {
+        Some(io::Error::last_os_error())
+      } else {
+        None
+      };
       session_deadline
         .check(deadline, CandidateDeadlineCheckpoint::ArenaReadComplete)?;
       if result >= 0 {
         break result;
       }
-      let error = io::Error::last_os_error();
+      let error = read_error.ok_or_else(|| {
+        invalid_data("candidate arena zero-fill EOF read has no OS error")
+      })?;
       if error.kind() != io::ErrorKind::Interrupted {
         return Err(error);
       }
@@ -2718,12 +4681,10 @@ mod fd3 {
       .check(deadline, CandidateDeadlineCheckpoint::CpuValidationStart)?;
     let tail_result = if tail_read == 0 {
       Ok(())
-    } else if tail_read > 0 {
+    } else {
       Err(invalid_data(
         "candidate arena contained bytes beyond its fixed capacity",
       ))
-    } else {
-      Err(io::Error::last_os_error())
     };
     session_deadline
       .check(deadline, CandidateDeadlineCheckpoint::CpuValidationComplete)?;
@@ -3897,8 +5858,11 @@ mod fd3 {
         _ => unreachable!("test identity constructor closes the target"),
       };
       CandidateReadyObservedFacts {
-        candidate_pid: "77".to_string(),
-        candidate_pgid: "88".to_string(),
+        // SAFETY: these process identity syscalls take no pointers and cannot
+        // fail for the live test process.
+        candidate_pid: unsafe { libc::getpid() }.to_string(),
+        // SAFETY: getpgrp likewise has no failure return.
+        candidate_pgid: unsafe { libc::getpgrp() }.to_string(),
         candidate_start_identity: "start:test".to_string(),
         identities: json!({
           "realUid": "501",
@@ -4259,6 +6223,48 @@ mod fd3 {
         )
         .unwrap();
       (prepared, supervisor, files)
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      not(debug_assertions),
+      panic = "abort"
+    ))]
+    fn executed_response_request(
+      case: CandidateLstatCase,
+    ) -> (
+      CandidateExecutedLstatRequest,
+      FramedStreamEndpoint,
+      RequestFiles,
+    ) {
+      let (prepared, supervisor, files) = prepared_execution_request(case);
+      let executed = prepared
+        .execute_lstat_candidate(execution_session_deadline())
+        .unwrap();
+      (executed, supervisor, files)
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      not(debug_assertions),
+      panic = "abort"
+    ))]
+    fn read_candidate_engine_trace(files: &RequestFiles) -> Vec<u8> {
+      let arena = std::fs::read(files._temp.path().join("arena")).unwrap();
+      assert_eq!(arena.len(), ARENA_CAPACITY_BYTES as usize);
+      let payload_end = arena
+        .iter()
+        .position(|byte| *byte == 0)
+        .expect("canonical JSON payload must leave an unused arena tail");
+      assert!(payload_end > 0);
+      assert!(arena[payload_end..].iter().all(|byte| *byte == 0));
+      arena[..payload_end].to_vec()
     }
 
     fn assert_no_candidate_response(endpoint: &FramedStreamEndpoint) {
@@ -4989,6 +6995,14 @@ mod fd3 {
         CandidateLstatCase::FinalMissing,
       ] {
         assert!(
+          CandidateLstatProtocolIdentity::from_current_binary(
+            FIXTURE_DIGEST,
+            case.case_id(),
+          )
+          .is_err(),
+          "the production current-binary constructor must refuse the unwind test binary"
+        );
+        assert!(
           oden_capsec_rev2_join_lstat_candidate_binary_identity(
             &build_identity,
             FIXTURE_DIGEST,
@@ -5195,6 +7209,347 @@ mod fd3 {
         .unwrap();
       assert_eq!(error.kind(), io::ErrorKind::TimedOut);
       supervisor.require_eof(deadline()).unwrap();
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      not(debug_assertions),
+      panic = "abort"
+    ))]
+    #[test]
+    fn candidate_lstat_response_emits_exact_arena_trace_frame_and_eof() {
+      for case in [
+        CandidateLstatCase::Existing,
+        CandidateLstatCase::FinalMissing,
+      ] {
+        let (executed, supervisor, files) = executed_response_request(case);
+        let ready = executed._ready_facts.clone();
+        let binding = executed._binding.clone();
+        executed
+          .send_lstat_response(execution_session_deadline())
+          .unwrap();
+
+        let captured = supervisor
+          .receive_one_canonical_jcs_frame(
+            FrameByteLimit::CONTROL,
+            0,
+            execution_session_deadline(),
+          )
+          .unwrap();
+        let identity = native_execution_identity(case);
+        validate_response(&captured.value, &identity, &ready, &binding)
+          .unwrap();
+        supervisor
+          .require_eof(execution_session_deadline())
+          .unwrap();
+
+        let trace_bytes = read_candidate_engine_trace(&files);
+        let trace = parse_canonical_jcs(&trace_bytes).unwrap();
+        let trace_object = exact_object(
+          &trace,
+          &[
+            "schema",
+            "profile",
+            "runNonce",
+            "target",
+            "featureSet",
+            "engineDigest",
+            "forkCommit",
+            "fixtureArtifactDigest",
+            "executionIdentityDigest",
+            "caseId",
+            "edgeId",
+            "requirementId",
+            "caseKind",
+            "publicOpEntryWitness",
+            "actors",
+            "normalizedRequestDigest",
+            "normalizedSlotsDigest",
+            "events",
+            "decision",
+            "nativeResult",
+            "delivery",
+            "cleanup",
+            "observedResultDigest",
+            "sandboxRealizationDigest",
+            "postOperationInventoryDigest",
+            "deliveryFrameDigest",
+            "resourceInventory",
+            "faultObservation",
+          ],
+          "test engine trace",
+        )
+        .unwrap();
+        require_text_eq(trace_object, "schema", ENGINE_TRACE_SCHEMA).unwrap();
+        assert_eq!(
+          trace_object["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["phase"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+          LSTAT_TRACE_PHASES
+        );
+        let engine_trace_digest = deno_permissions::rev2::hjcs_digest(
+          ENGINE_TRACE_DIGEST_DOMAIN,
+          &trace,
+        )
+        .unwrap();
+        assert_eq!(
+          captured.value["engineTraceDigest"].as_str(),
+          Some(engine_trace_digest.as_str())
+        );
+        assert_eq!(
+          raw_frame_digest(ENGINE_TRACE_DIGEST_DOMAIN, &trace_bytes),
+          engine_trace_digest
+        );
+
+        let arena_descriptor =
+          CandidateDescriptorSnapshot::capture(files.arena.as_fd()).unwrap();
+        let arena = candidate_arena_value(
+          &identity,
+          &binding,
+          &arena_descriptor,
+          &trace_bytes,
+          &engine_trace_digest,
+        )
+        .unwrap();
+        validate_candidate_arena(
+          &arena,
+          &identity,
+          &binding,
+          &arena_descriptor,
+          &binding.descriptor_slots_digest,
+          &trace_bytes,
+          &engine_trace_digest,
+        )
+        .unwrap();
+        let arena_digest = deno_permissions::rev2::hjcs_digest(
+          CANDIDATE_ARENA_DIGEST_DOMAIN,
+          &arena,
+        )
+        .unwrap();
+        assert_eq!(
+          captured.value["candidateArenaDigest"].as_str(),
+          Some(arena_digest.as_str())
+        );
+      }
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      not(debug_assertions),
+      panic = "abort"
+    ))]
+    #[test]
+    fn candidate_lstat_response_refuses_arena_mutation_before_emission() {
+      let (executed, supervisor, _files) =
+        executed_response_request(CandidateLstatCase::Existing);
+      let error = executed
+        .send_lstat_response_with_hooks(
+          execution_session_deadline(),
+          |arena| {
+            let byte = [1_u8];
+            // SAFETY: the byte is readable and the test mutates the live
+            // retained arena at a checked in-bounds offset.
+            if unsafe {
+              libc::pwrite(
+                arena.as_raw_fd(),
+                byte.as_ptr().cast(),
+                byte.len(),
+                0,
+              )
+            } == 1
+            {
+              Ok(())
+            } else {
+              Err(io::Error::last_os_error())
+            }
+          },
+          |_| Ok(()),
+        )
+        .err()
+        .unwrap();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      supervisor
+        .require_eof(execution_session_deadline())
+        .unwrap();
+
+      let (executed, supervisor, _files) =
+        executed_response_request(CandidateLstatCase::FinalMissing);
+      let error = executed
+        .send_lstat_response_with_hooks(
+          execution_session_deadline(),
+          |_| Ok(()),
+          |arena| {
+            let byte = [1_u8];
+            // SAFETY: the byte is readable and the last fixed-capacity byte is
+            // a checked unused-tail offset for this bounded JSON trace.
+            if unsafe {
+              libc::pwrite(
+                arena.as_raw_fd(),
+                byte.as_ptr().cast(),
+                byte.len(),
+                ARENA_CAPACITY_BYTES - 1,
+              )
+            } == 1
+            {
+              Ok(())
+            } else {
+              Err(io::Error::last_os_error())
+            }
+          },
+        )
+        .err()
+        .unwrap();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      supervisor
+        .require_eof(execution_session_deadline())
+        .unwrap();
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      not(debug_assertions),
+      panic = "abort"
+    ))]
+    #[test]
+    fn candidate_lstat_response_refuses_retained_state_aliases_and_flags() {
+      let (executed, supervisor, _files) =
+        executed_response_request(CandidateLstatCase::Existing);
+      let metadata_alias = Arc::clone(&executed._request_metadata);
+      let error = executed
+        .send_lstat_response(execution_session_deadline())
+        .err()
+        .unwrap();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      drop(metadata_alias);
+      supervisor
+        .require_eof(execution_session_deadline())
+        .unwrap();
+
+      let (executed, supervisor, _files) =
+        executed_response_request(CandidateLstatCase::FinalMissing);
+      clear_cloexec_for_test(executed._arena.as_fd()).unwrap();
+      let error = executed
+        .send_lstat_response(execution_session_deadline())
+        .err()
+        .unwrap();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      supervisor
+        .require_eof(execution_session_deadline())
+        .unwrap();
+
+      let (executed, supervisor, _files) =
+        executed_response_request(CandidateLstatCase::FinalMissing);
+      clear_cloexec_for_test(executed._endpoint.as_fd()).unwrap();
+      let error = executed
+        .send_lstat_response(execution_session_deadline())
+        .err()
+        .unwrap();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+      supervisor
+        .require_eof(execution_session_deadline())
+        .unwrap();
+
+      #[cfg(target_os = "macos")]
+      {
+        let (executed, supervisor, _files) =
+          executed_response_request(CandidateLstatCase::Existing);
+        let disabled: libc::c_int = 0;
+        // SAFETY: disabled has the exact integer option representation and
+        // the endpoint is a live AF_UNIX stream socket.
+        assert_eq!(
+          unsafe {
+            libc::setsockopt(
+              executed._endpoint.as_fd().as_raw_fd(),
+              libc::SOL_SOCKET,
+              libc::SO_NOSIGPIPE,
+              std::ptr::from_ref(&disabled).cast(),
+              std::mem::size_of_val(&disabled) as libc::socklen_t,
+            )
+          },
+          0
+        );
+        let error = executed
+          .send_lstat_response(execution_session_deadline())
+          .err()
+          .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        supervisor
+          .require_eof(execution_session_deadline())
+          .unwrap();
+      }
+    }
+
+    #[cfg(all(
+      any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")
+      ),
+      not(debug_assertions),
+      panic = "abort"
+    ))]
+    #[test]
+    fn candidate_lstat_response_deadline_is_immutable_and_consuming() {
+      let (mut executed, supervisor, _files) =
+        executed_response_request(CandidateLstatCase::FinalMissing);
+      let absolute_deadline = Instant::now() + Duration::from_secs(30);
+      let clock = Arc::new(TestClock::new(absolute_deadline));
+      executed._session_deadline =
+        CandidateSessionDeadline::with_clock(absolute_deadline, clock.clone());
+      let error = executed
+        .send_lstat_response_with_hooks(
+          absolute_deadline + Duration::from_secs(30),
+          |_| {
+            clock.expire_now();
+            Ok(())
+          },
+          |_| Ok(()),
+        )
+        .err()
+        .unwrap();
+      assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+      supervisor
+        .require_eof(execution_session_deadline())
+        .unwrap();
+    }
+
+    #[test]
+    fn candidate_lstat_response_refuses_required_observation_key_deletion() {
+      assert!(is_canonical_signed_decimal("0"));
+      assert!(is_canonical_signed_decimal("-1"));
+      assert!(!is_canonical_signed_decimal("-0"));
+      let identity = identity(CandidateLstatCase::FinalMissing);
+      let ready_value = ready(&identity);
+      let ready_facts = validate_ready(&ready_value, &identity).unwrap();
+      let request = request(&identity);
+      let request_bytes = canonical_bytes(&request);
+      let binding = validate_request(
+        &request,
+        &identity,
+        raw_frame_digest(CANDIDATE_REQUEST_DIGEST_DOMAIN, &request_bytes),
+      )
+      .unwrap();
+      let mut response =
+        response(&identity, &ready_value, &request, &request_bytes);
+      response["normalizedObservedResult"]["result"]
+        .as_object_mut()
+        .unwrap()
+        .remove("digest");
+      let error =
+        validate_response(&response, &identity, &ready_facts, &binding)
+          .unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[cfg(target_os = "macos")]
