@@ -32,6 +32,8 @@ static EXPOSE_GC_FROM_SET_FLAGS: AtomicBool = AtomicBool::new(false);
 // These mutation canaries are absent from production artifacts. They count
 // actual native work only in deno_node's cfg(test) unit-test build.
 #[cfg(test)]
+static TAKE_HEAP_SNAPSHOT_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
 static TAKE_HEAP_SNAPSHOT_CHUNK_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -43,9 +45,15 @@ static NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT: AtomicUsize =
   AtomicUsize::new(0);
 #[cfg(test)]
+static GC_PROFILER_NEW_WORK_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
 static GC_PROFILER_START_WORK_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static GC_PROFILER_CALLBACK_INSTALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GC_PROFILER_STOP_WORK_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GC_PROFILER_ACTIVE_STATE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[op2(fast)]
 pub fn op_v8_cached_data_version_tag() -> u32 {
@@ -158,6 +166,8 @@ pub fn op_v8_take_heap_snapshot(
     "v8:heap-snapshot",
     "node:v8.getHeapSnapshot/writeHeapSnapshot",
   )?;
+  #[cfg(test)]
+  TAKE_HEAP_SNAPSHOT_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
   let mut buf = Vec::new();
   scope.take_heap_snapshot(|chunk| {
     #[cfg(test)]
@@ -1113,6 +1123,8 @@ pub fn op_v8_gc_profiler_new()
     "v8:gc-profiler",
     "node:v8.GCProfiler",
   )?;
+  #[cfg(test)]
+  GC_PROFILER_NEW_WORK_COUNT.fetch_add(1, Ordering::SeqCst);
   Ok(GcProfilerHandle {
     id: std::cell::Cell::new(None),
   })
@@ -1151,6 +1163,8 @@ pub fn op_v8_gc_profiler_start(
     id
   };
   handle.id.set(Some(id));
+  #[cfg(test)]
+  GC_PROFILER_ACTIVE_STATE_COUNT.fetch_add(1, Ordering::SeqCst);
   Ok(())
 }
 
@@ -1165,6 +1179,8 @@ pub fn op_v8_gc_profiler_stop<'s>(
     "v8:gc-profiler-stop",
     "node:v8.GCProfiler.stop",
   )?;
+  #[cfg(test)]
+  GC_PROFILER_STOP_WORK_COUNT.fetch_add(1, Ordering::SeqCst);
   let Some(id) = handle.id.take() else {
     return Ok(v8::null(scope).into());
   };
@@ -1178,6 +1194,8 @@ pub fn op_v8_gc_profiler_stop<'s>(
   let Some(state) = state else {
     return Ok(v8::null(scope).into());
   };
+  #[cfg(test)]
+  GC_PROFILER_ACTIVE_STATE_COUNT.fetch_sub(1, Ordering::SeqCst);
   Ok(build_report(scope, &state.statistics).into())
 }
 
@@ -1289,18 +1307,84 @@ mod native_capsec_tests {
   const NATIVE_V8_GUARD_CHILD: &str = "ODEN_NATIVE_V8_GUARD_CHILD";
   const NATIVE_V8_GUARD_TEST: &str = "native_v8_ops_recheck_actor_before_work";
   const REV2_V8_FIXTURE_CHILD: &str = "ODEN_REV2_V8_FIXTURE_CHILD";
-  const REV2_V8_FIXTURE_CASE_ENV: &str = "ODEN_REV2_V8_SET_FLAGS_CASE_KIND";
+  const REV2_V8_FIXTURE_OPERATION_ENV: &str = "ODEN_REV2_V8_FIXTURE_OPERATION";
+  const REV2_V8_FIXTURE_CASE_ENV: &str = "ODEN_REV2_V8_FIXTURE_CASE_KIND";
   const REV2_V8_FIXTURE_TARGET_ENV: &str = "ODEN_REV2_V8_FIXTURE_TARGET";
+  const REV2_V8_FIXTURE_MODE_ENV: &str = "ODEN_REV2_V8_FIXTURE_MODE";
   const REV2_V8_FIXTURE_REPORT_PREFIX: &str =
-    "ODEN_REV2_V8_SET_FLAGS_FIXTURE_REPORT ";
+    "ODEN_REV2_V8_INSPECTION_FIXTURE_REPORT ";
   const REV2_V8_FIXTURE_TEST: &str =
-    "ops::v8::native_capsec_tests::rev2_v8_set_flags_fixture_case";
+    "ops::v8::native_capsec_tests::rev2_v8_inspection_fixture_case";
+  const REV2_V8_FIXTURE_MODES: &[&str] = &["permissive", "audit", "enforce"];
   const REV2_V8_FIXTURE_CASE_KINDS: &[&str] = &[
     "deny-only-closed-or-absent",
     "staged-barrier:authorization",
     "staged-barrier:cancellation",
     "staged-barrier:cleanup",
-    "staged-barrier:revocation",
+  ];
+
+  struct Rev2V8FixtureOperation {
+    operation_id: &'static str,
+    edge_id: &'static str,
+    requirement_id: &'static str,
+    denied_target: &'static str,
+    authorization_assertion: &'static str,
+    denied_no_work_assertion: &'static str,
+    cleanup_assertion: &'static str,
+    post_cleanup_no_work_assertion: &'static str,
+  }
+
+  const REV2_V8_FIXTURE_OPERATIONS: &[Rev2V8FixtureOperation] = &[
+    Rev2V8FixtureOperation {
+      operation_id: "set-flags-from-string",
+      edge_id: "diagnostic-route:ext/node/ops/v8.rs#op_v8_set_flags_from_string",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/ops/v8.rs#op_v8_set_flags_from_string:complete",
+      denied_target: "v8:set-flags",
+      authorization_assertion: "guard-precedes-v8-flag-mutation",
+      denied_no_work_assertion: "denied-attempt-adds-no-v8-flag-mutation",
+      cleanup_assertion: "ambient-cleanup-restores-v8-flag",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-v8-flag-mutation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "gc-profiler-new",
+      edge_id: "diagnostic-route:ext/node/ops/v8.rs#op_v8_gc_profiler_new",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/ops/v8.rs#op_v8_gc_profiler_new:complete",
+      denied_target: "v8:gc-profiler",
+      authorization_assertion: "guard-precedes-gc-profiler-handle-allocation",
+      denied_no_work_assertion: "denied-attempt-adds-no-gc-profiler-handle-allocation",
+      cleanup_assertion: "explicit-root-stop-removes-active-profiler",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-gc-profiler-handle-allocation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "gc-profiler-start",
+      edge_id: "diagnostic-route:ext/node/ops/v8.rs#op_v8_gc_profiler_start",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/ops/v8.rs#op_v8_gc_profiler_start:complete",
+      denied_target: "v8:gc-profiler-start",
+      authorization_assertion: "guard-precedes-gc-profiler-start-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-gc-profiler-start-work",
+      cleanup_assertion: "explicit-root-stop-removes-active-profiler",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-gc-profiler-start-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "gc-profiler-stop",
+      edge_id: "diagnostic-route:ext/node/ops/v8.rs#op_v8_gc_profiler_stop",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/ops/v8.rs#op_v8_gc_profiler_stop:complete",
+      denied_target: "v8:gc-profiler-stop",
+      authorization_assertion: "guard-precedes-gc-profiler-stop-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-gc-profiler-stop-work",
+      cleanup_assertion: "explicit-root-stop-removes-active-profiler",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-gc-profiler-stop-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "take-heap-snapshot",
+      edge_id: "diagnostic-route:ext/node/ops/v8.rs#op_v8_take_heap_snapshot",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/ops/v8.rs#op_v8_take_heap_snapshot:complete",
+      denied_target: "v8:heap-snapshot",
+      authorization_assertion: "guard-precedes-heap-snapshot-native-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-heap-snapshot-native-work",
+      cleanup_assertion: "ambient-synchronous-snapshot-call-returns",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-heap-snapshot-native-work",
+    },
   ];
 
   struct NativeV8TestRoot(PathBuf);
@@ -1376,7 +1460,11 @@ mod native_capsec_tests {
 
   fn clear_native_v8_capsec_env(command: &mut Command) {
     for (key, _) in std::env::vars_os() {
-      if key.to_string_lossy().starts_with("ODEN_CAPSEC_") {
+      let key_text = key.to_string_lossy();
+      if key_text.starts_with("ODEN_CAPSEC_")
+        || key_text.starts_with("ODEN_REV2_V8_")
+        || key_text.starts_with("ODEN_NATIVE_V8_GUARD_")
+      {
         command.env_remove(key);
       }
     }
@@ -1415,13 +1503,17 @@ mod native_capsec_tests {
 
   fn run_native_v8_guard_contract(root: &Path, mode: &str) {
     EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
+    TAKE_HEAP_SNAPSHOT_CALL_COUNT.store(0, Ordering::SeqCst);
     TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
     QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
     NEAR_HEAP_LIMIT_CURRENT_DIR_COUNT.store(0, Ordering::SeqCst);
     NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT.store(0, Ordering::SeqCst);
     NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT.store(0, Ordering::SeqCst);
+    GC_PROFILER_NEW_WORK_COUNT.store(0, Ordering::SeqCst);
     GC_PROFILER_START_WORK_COUNT.store(0, Ordering::SeqCst);
     GC_PROFILER_CALLBACK_INSTALL_COUNT.store(0, Ordering::SeqCst);
+    GC_PROFILER_STOP_WORK_COUNT.store(0, Ordering::SeqCst);
+    GC_PROFILER_ACTIVE_STATE_COUNT.store(0, Ordering::SeqCst);
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -1493,6 +1585,11 @@ mod native_capsec_tests {
       "denied native flag mutation reached shared V8 state in {mode}"
     );
     assert_eq!(
+      TAKE_HEAP_SNAPSHOT_CALL_COUNT.load(Ordering::SeqCst),
+      0,
+      "denied heap snapshot reached the native snapshot call in {mode}"
+    );
+    assert_eq!(
       TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.load(Ordering::SeqCst),
       0,
       "denied heap snapshot reached native snapshot work in {mode}"
@@ -1518,6 +1615,11 @@ mod native_capsec_tests {
       "denied near-heap operation installed its callback in {mode}"
     );
     assert_eq!(
+      GC_PROFILER_NEW_WORK_COUNT.load(Ordering::SeqCst),
+      1,
+      "denied GC profiler new added native allocation work in {mode}"
+    );
+    assert_eq!(
       GC_PROFILER_START_WORK_COUNT.load(Ordering::SeqCst),
       0,
       "denied fresh-runtime GC profiler start reached registry work in {mode}"
@@ -1527,7 +1629,6 @@ mod native_capsec_tests {
       0,
       "denied fresh-runtime GC profiler start registered callbacks in {mode}"
     );
-
     // The denied near-heap attempt above ran with write permission denied, so
     // its exact capsec error plus zero current_dir/check_write counters proves
     // the native deny-only gate precedes cwd lookup, the substrate permission
@@ -1582,6 +1683,7 @@ mod native_capsec_tests {
       .to_string(),
     );
 
+    let stop_work_before = GC_PROFILER_STOP_WORK_COUNT.load(Ordering::SeqCst);
     set_actor(root, "node_modules/denied-native/index.cjs");
     execute(
       &mut runtime,
@@ -1606,6 +1708,11 @@ mod native_capsec_tests {
       }
       "#
       .to_string(),
+    );
+    assert_eq!(
+      GC_PROFILER_STOP_WORK_COUNT.load(Ordering::SeqCst),
+      stop_work_before,
+      "denied GC profiler stop reached native work in {mode}"
     );
 
     set_actor(root, "main.ts");
@@ -1649,6 +1756,10 @@ mod native_capsec_tests {
         "root positive control failed to restore the shared V8 flag"
       );
       assert!(
+        TAKE_HEAP_SNAPSHOT_CALL_COUNT.load(Ordering::SeqCst) > 0,
+        "root heap snapshot positive control did not enter native snapshot work"
+      );
+      assert!(
         TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.load(Ordering::SeqCst) > 0,
         "root heap snapshot positive control did no native snapshot work"
       );
@@ -1672,42 +1783,10 @@ mod native_capsec_tests {
         "root near-heap positive control did not install exactly one callback"
       );
     }
-  }
-
-  fn expect_set_flags_denied(runtime: &mut JsRuntime, flags: &str) {
-    execute(
-      runtime,
-      "file:///rev2_v8_set_flags_denied.js",
-      format!(
-        r#"
-        {{
-          try {{
-            Deno.core.ops.op_v8_set_flags_from_string({flags:?});
-          }} catch (error) {{
-            const message = String(error);
-            const expected =
-              "principal set [denied-native] may not use deny-only runtime:inspect:v8:set-flags";
-            if (!message.includes(expected)) {{
-              throw new Error(`setFlagsFromString used the wrong actor or boundary: ${{message}}`);
-            }}
-            globalThis.rev2SetFlagsDenied = true;
-          }}
-          if (!globalThis.rev2SetFlagsDenied) {{
-            throw new Error("setFlagsFromString reached native flag mutation");
-          }}
-          delete globalThis.rev2SetFlagsDenied;
-        }}
-        "#
-      ),
-    );
-  }
-
-  fn set_flags_as_root(runtime: &mut JsRuntime, root: &Path, flags: &str) {
-    set_actor(root, "main.ts");
-    execute(
-      runtime,
-      "file:///rev2_v8_set_flags_root.js",
-      format!("Deno.core.ops.op_v8_set_flags_from_string({flags:?});"),
+    assert_eq!(
+      GC_PROFILER_ACTIVE_STATE_COUNT.load(Ordering::SeqCst),
+      0,
+      "root GC profiler cleanup left an active state in {mode}"
     );
   }
 
@@ -1723,6 +1802,420 @@ mod native_capsec_tests {
     } else {
       None
     }
+  }
+
+  fn rev2_v8_fixture_operation(
+    operation_id: &str,
+  ) -> &'static Rev2V8FixtureOperation {
+    let matches = REV2_V8_FIXTURE_OPERATIONS
+      .iter()
+      .filter(|operation| operation.operation_id == operation_id)
+      .collect::<Vec<_>>();
+    assert_eq!(
+      matches.len(),
+      1,
+      "unknown or duplicate Rev2 V8 fixture operation {operation_id}"
+    );
+    matches[0]
+  }
+
+  fn rev2_v8_fixture_assertions(
+    operation: &Rev2V8FixtureOperation,
+    case_kind: &str,
+  ) -> [&'static str; 2] {
+    match case_kind {
+      "deny-only-closed-or-absent" => [
+        "constrained-package-denied",
+        operation.denied_no_work_assertion,
+      ],
+      "staged-barrier:authorization" => [
+        operation.authorization_assertion,
+        operation.denied_no_work_assertion,
+      ],
+      "staged-barrier:cancellation" => [
+        "denied-attempt-leaves-no-provisional-state",
+        "ambient-control-remains-usable",
+      ],
+      "staged-barrier:cleanup" => [
+        operation.cleanup_assertion,
+        operation.post_cleanup_no_work_assertion,
+      ],
+      _ => panic!("unknown Rev2 V8 fixture case kind {case_kind}"),
+    }
+  }
+
+  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+  struct Rev2V8FixtureCanaries {
+    expose_gc: bool,
+    heap_snapshot_calls: usize,
+    heap_snapshot_chunks: usize,
+    gc_profiler_new_work: usize,
+    gc_profiler_start_work: usize,
+    gc_profiler_callback_installs: usize,
+    gc_profiler_stop_work: usize,
+    gc_profiler_active_states: usize,
+  }
+
+  fn reset_rev2_v8_fixture_canaries() {
+    EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
+    TAKE_HEAP_SNAPSHOT_CALL_COUNT.store(0, Ordering::SeqCst);
+    TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
+    GC_PROFILER_NEW_WORK_COUNT.store(0, Ordering::SeqCst);
+    GC_PROFILER_START_WORK_COUNT.store(0, Ordering::SeqCst);
+    GC_PROFILER_CALLBACK_INSTALL_COUNT.store(0, Ordering::SeqCst);
+    GC_PROFILER_STOP_WORK_COUNT.store(0, Ordering::SeqCst);
+    GC_PROFILER_ACTIVE_STATE_COUNT.store(0, Ordering::SeqCst);
+  }
+
+  fn rev2_v8_fixture_canaries() -> Rev2V8FixtureCanaries {
+    Rev2V8FixtureCanaries {
+      expose_gc: EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+      heap_snapshot_calls: TAKE_HEAP_SNAPSHOT_CALL_COUNT.load(Ordering::SeqCst),
+      heap_snapshot_chunks: TAKE_HEAP_SNAPSHOT_CHUNK_COUNT
+        .load(Ordering::SeqCst),
+      gc_profiler_new_work: GC_PROFILER_NEW_WORK_COUNT.load(Ordering::SeqCst),
+      gc_profiler_start_work: GC_PROFILER_START_WORK_COUNT
+        .load(Ordering::SeqCst),
+      gc_profiler_callback_installs: GC_PROFILER_CALLBACK_INSTALL_COUNT
+        .load(Ordering::SeqCst),
+      gc_profiler_stop_work: GC_PROFILER_STOP_WORK_COUNT.load(Ordering::SeqCst),
+      gc_profiler_active_states: GC_PROFILER_ACTIVE_STATE_COUNT
+        .load(Ordering::SeqCst),
+    }
+  }
+
+  fn prepare_rev2_v8_fixture_handles(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation_id: &str,
+  ) {
+    set_actor(root, "main.ts");
+    match operation_id {
+      "gc-profiler-start" => execute(
+        runtime,
+        "file:///rev2_v8_fixture_prepare_start.js",
+        r#"
+        {
+          const ops = Deno.core.ops;
+          globalThis.rev2UnstartedHandle = ops.op_v8_gc_profiler_new();
+          globalThis.rev2StartedHandle = ops.op_v8_gc_profiler_new();
+          ops.op_v8_gc_profiler_start(rev2StartedHandle);
+        }
+        "#
+        .to_string(),
+      ),
+      "gc-profiler-stop" => execute(
+        runtime,
+        "file:///rev2_v8_fixture_prepare_stop.js",
+        r#"
+        {
+          const ops = Deno.core.ops;
+          globalThis.rev2LiveStopHandle = ops.op_v8_gc_profiler_new();
+          ops.op_v8_gc_profiler_start(rev2LiveStopHandle);
+          globalThis.rev2UnstartedStopHandle =
+            ops.op_v8_gc_profiler_new();
+          globalThis.rev2StoppedStopHandle =
+            ops.op_v8_gc_profiler_new();
+          ops.op_v8_gc_profiler_start(rev2StoppedStopHandle);
+          const stopped = ops.op_v8_gc_profiler_stop(
+            rev2StoppedStopHandle,
+          );
+          if (stopped === null) {
+            throw new Error("root could not prepare an already-stopped handle");
+          }
+        }
+        "#
+        .to_string(),
+      ),
+      _ => {}
+    }
+  }
+
+  fn deny_rev2_v8_fixture_operation(
+    runtime: &mut JsRuntime,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let body = match operation.operation_id {
+      "set-flags-from-string" => {
+        r#"expectDenied("op_v8_set_flags_from_string", () =>
+          ops.op_v8_set_flags_from_string("--expose-gc"));"#
+      }
+      "gc-profiler-new" => {
+        r#"expectDenied("op_v8_gc_profiler_new", () =>
+          ops.op_v8_gc_profiler_new());"#
+      }
+      "gc-profiler-start" => {
+        r#"
+        expectDenied("op_v8_gc_profiler_start/unstarted", () =>
+          ops.op_v8_gc_profiler_start(rev2UnstartedHandle));
+        expectDenied("op_v8_gc_profiler_start/already-started", () =>
+          ops.op_v8_gc_profiler_start(rev2StartedHandle));
+        "#
+      }
+      "gc-profiler-stop" => {
+        r#"
+        expectDenied("op_v8_gc_profiler_stop/live", () =>
+          ops.op_v8_gc_profiler_stop(rev2LiveStopHandle));
+        expectDenied("op_v8_gc_profiler_stop/unstarted", () =>
+          ops.op_v8_gc_profiler_stop(rev2UnstartedStopHandle));
+        expectDenied("op_v8_gc_profiler_stop/already-stopped", () =>
+          ops.op_v8_gc_profiler_stop(rev2StoppedStopHandle));
+        "#
+      }
+      "take-heap-snapshot" => {
+        r#"expectDenied("op_v8_take_heap_snapshot", () =>
+          ops.op_v8_take_heap_snapshot());"#
+      }
+      _ => panic!(
+        "unknown Rev2 V8 fixture operation {}",
+        operation.operation_id
+      ),
+    };
+    execute(
+      runtime,
+      "file:///rev2_v8_fixture_denied.js",
+      format!(
+        r#"
+        {{
+          const ops = Deno.core.ops;
+          function expectDenied(name, action) {{
+            try {{
+              action();
+            }} catch (error) {{
+              const message = String(error);
+              const expected =
+                "principal set [denied-native] may not use deny-only runtime:inspect:{}";
+              if (!message.includes(expected)) {{
+                throw new Error(
+                  `${{name}} used the wrong actor or boundary: ${{message}}`,
+                );
+              }}
+              return;
+            }}
+            throw new Error(`${{name}} reached native work`);
+          }}
+          {body}
+        }}
+        "#,
+        operation.denied_target,
+      ),
+    );
+  }
+
+  fn cleanup_rev2_v8_fixture_handles(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation_id: &str,
+    start_unstarted: bool,
+  ) {
+    set_actor(root, "main.ts");
+    match operation_id {
+      "gc-profiler-start" => execute(
+        runtime,
+        "file:///rev2_v8_fixture_cleanup_start.js",
+        format!(
+          r#"
+          {{
+            const ops = Deno.core.ops;
+            if ({start_unstarted}) {{
+              ops.op_v8_gc_profiler_start(rev2UnstartedHandle);
+              if (
+                ops.op_v8_gc_profiler_stop(rev2UnstartedHandle) === null
+              ) {{
+                throw new Error(
+                  "root could not start and stop the denied unstarted handle",
+                );
+              }}
+            }} else if (
+              ops.op_v8_gc_profiler_stop(rev2UnstartedHandle) !== null
+            ) {{
+              throw new Error("denied start mutated the unstarted handle");
+            }}
+            if (ops.op_v8_gc_profiler_stop(rev2StartedHandle) === null) {{
+              throw new Error("denied idempotent start consumed the live handle");
+            }}
+            delete globalThis.rev2UnstartedHandle;
+            delete globalThis.rev2StartedHandle;
+          }}
+          "#
+        ),
+      ),
+      "gc-profiler-stop" => execute(
+        runtime,
+        "file:///rev2_v8_fixture_cleanup_stop.js",
+        r#"
+        {
+          const ops = Deno.core.ops;
+          if (ops.op_v8_gc_profiler_stop(rev2LiveStopHandle) === null) {
+            throw new Error("denied stop consumed the live handle");
+          }
+          if (
+            ops.op_v8_gc_profiler_stop(rev2UnstartedStopHandle) !== null
+          ) {
+            throw new Error("denied stop mutated the unstarted handle");
+          }
+          if (ops.op_v8_gc_profiler_stop(rev2StoppedStopHandle) !== null) {
+            throw new Error("denied stop mutated the stopped handle");
+          }
+          delete globalThis.rev2LiveStopHandle;
+          delete globalThis.rev2UnstartedStopHandle;
+          delete globalThis.rev2StoppedStopHandle;
+        }
+        "#
+        .to_string(),
+      ),
+      _ => {}
+    }
+  }
+
+  fn run_rev2_v8_fixture_positive_control(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation_id: &str,
+  ) {
+    set_actor(root, "main.ts");
+    match operation_id {
+      "set-flags-from-string" => {
+        execute(
+          runtime,
+          "file:///rev2_v8_fixture_positive_set_flags.js",
+          r#"
+          Deno.core.ops.op_v8_set_flags_from_string("--expose-gc");
+          Deno.core.ops.op_v8_set_flags_from_string("--no-expose-gc");
+          "#
+          .to_string(),
+        );
+        assert!(
+          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+          "root did not restore the V8 expose-gc flag"
+        );
+      }
+      "gc-profiler-new" | "gc-profiler-start" | "gc-profiler-stop" => {
+        execute(
+          runtime,
+          "file:///rev2_v8_fixture_positive_profiler.js",
+          r#"
+          {
+            const ops = Deno.core.ops;
+            const handle = ops.op_v8_gc_profiler_new();
+            ops.op_v8_gc_profiler_start(handle);
+            if (ops.op_v8_gc_profiler_stop(handle) === null) {
+              throw new Error("root profiler lifecycle returned null");
+            }
+          }
+          "#
+          .to_string(),
+        );
+        assert_eq!(
+          GC_PROFILER_ACTIVE_STATE_COUNT.load(Ordering::SeqCst),
+          0,
+          "explicit root stop left an active profiler state"
+        );
+      }
+      "take-heap-snapshot" => execute(
+        runtime,
+        "file:///rev2_v8_fixture_positive_snapshot.js",
+        r#"
+        {
+          let snapshot = Deno.core.ops.op_v8_take_heap_snapshot();
+          if (snapshot.byteLength === 0) {
+            throw new Error("root heap snapshot was empty");
+          }
+          snapshot = null;
+        }
+        "#
+        .to_string(),
+      ),
+      _ => panic!("unknown Rev2 V8 fixture operation {operation_id}"),
+    }
+  }
+
+  fn assert_rev2_v8_fixture_terminal_clean(operation_id: &str, mode: &str) {
+    assert!(
+      !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+      "{operation_id}/{mode} left the V8 expose-gc flag enabled"
+    );
+    assert_eq!(
+      GC_PROFILER_ACTIVE_STATE_COUNT.load(Ordering::SeqCst),
+      0,
+      "{operation_id}/{mode} left an active GC profiler state"
+    );
+  }
+
+  fn run_rev2_v8_inspection_fixture_mode(
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    case_kind: &str,
+    target: &str,
+    mode: &str,
+  ) -> [&'static str; 2] {
+    assert_eq!(
+      compiled_rev2_v8_fixture_target(),
+      Some(target),
+      "fixture target label does not match an exact supported compiled target"
+    );
+    assert!(
+      REV2_V8_FIXTURE_MODES.contains(&mode),
+      "fixture mode is not exact"
+    );
+    reset_rev2_v8_fixture_canaries();
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _tokio_guard = tokio_runtime.enter();
+    let mut runtime = JsRuntime::new(RuntimeOptions {
+      extensions: vec![native_v8_guard_test_ext::init()],
+      ..Default::default()
+    });
+
+    // @ref LLP 0019#pre-promotion-conformance-candidate-execution [tests] --
+    // These development-only cases bind one exact operation/case/target row
+    // and exercise all three armed modes in distinct subprocesses. Test-only
+    // canaries sit immediately after each native guard; start and stop also
+    // exercise live and null/idempotent handle fast paths. Results remain
+    // unauthenticated and cannot change backend status.
+    if case_kind == "staged-barrier:cleanup" {
+      run_rev2_v8_fixture_positive_control(
+        &mut runtime,
+        root,
+        operation.operation_id,
+      );
+      assert_rev2_v8_fixture_terminal_clean(operation.operation_id, mode);
+    }
+
+    prepare_rev2_v8_fixture_handles(&mut runtime, root, operation.operation_id);
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    let before = rev2_v8_fixture_canaries();
+    deny_rev2_v8_fixture_operation(&mut runtime, operation);
+    let after = rev2_v8_fixture_canaries();
+    assert_eq!(
+      after, before,
+      "{} native work changed across denied {case_kind}/{mode}",
+      operation.operation_id
+    );
+
+    let start_unstarted = case_kind == "staged-barrier:cancellation";
+    cleanup_rev2_v8_fixture_handles(
+      &mut runtime,
+      root,
+      operation.operation_id,
+      start_unstarted,
+    );
+    if case_kind == "staged-barrier:cancellation"
+      && !matches!(
+        operation.operation_id,
+        "gc-profiler-start" | "gc-profiler-stop"
+      )
+    {
+      run_rev2_v8_fixture_positive_control(
+        &mut runtime,
+        root,
+        operation.operation_id,
+      );
+    }
+    assert_rev2_v8_fixture_terminal_clean(operation.operation_id, mode);
+    rev2_v8_fixture_assertions(operation, case_kind)
   }
 
   #[test]
@@ -1746,182 +2239,38 @@ mod native_capsec_tests {
     }
   }
 
-  fn run_rev2_v8_set_flags_fixture_case(
-    root: &Path,
-    case_kind: &str,
-    target: &str,
-  ) -> &'static [&'static str] {
-    assert_eq!(
-      compiled_rev2_v8_fixture_target(),
-      Some(target),
-      "fixture target label does not match an exact supported compiled target"
-    );
-    EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
-    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .unwrap();
-    let _tokio_guard = tokio_runtime.enter();
-    let mut runtime = JsRuntime::new(RuntimeOptions {
-      extensions: vec![native_v8_guard_test_ext::init()],
-      ..Default::default()
-    });
-
-    // @ref LLP 0019#pre-promotion-conformance-candidate-execution [tests] --
-    // These five development cases exercise one exact, synchronous,
-    // single-effect deny-only edge. It has no provisional resource or
-    // delivery phase: cancellation is therefore the proof that refusal
-    // precedes the only mutation and leaves root continuity intact, while
-    // cleanup is the non-authorizing ambient restoration. The revocation case
-    // below performs a real session-overlay revocation before the next native
-    // attempt; changing only the actor label is not accepted as that barrier.
-    // They produce no authenticated receipt and cannot change backend status.
-    let assertions: &'static [&'static str] = match case_kind {
-      "deny-only-closed-or-absent" => {
-        set_actor(root, "node_modules/denied-native/index.cjs");
-        expect_set_flags_denied(&mut runtime, "--expose-gc");
-        assert!(
-          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "denied package mutated the V8 expose-gc flag"
-        );
-        &["constrained-package-denied", "no-v8-flag-mutation"]
-      }
-      "staged-barrier:authorization" => {
-        set_actor(root, "node_modules/denied-native/index.cjs");
-        expect_set_flags_denied(&mut runtime, "--expose-gc");
-        assert!(
-          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "native flag mutation preceded the authorization guard"
-        );
-        &["guard-precedes-v8-flag-mutation", "no-v8-flag-mutation"]
-      }
-      "staged-barrier:cancellation" => {
-        set_actor(root, "node_modules/denied-native/index.cjs");
-        expect_set_flags_denied(&mut runtime, "--expose-gc");
-        assert!(
-          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "denied attempt left provisional V8 flag state"
-        );
-        set_flags_as_root(&mut runtime, root, "--expose-gc");
-        assert!(
-          EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "ambient root could not use the control after package denial"
-        );
-        set_flags_as_root(&mut runtime, root, "--no-expose-gc");
-        assert!(
-          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "ambient root could not restore the V8 flag"
-        );
-        &[
-          "denied-attempt-leaves-no-provisional-state",
-          "ambient-control-remains-usable",
-        ]
-      }
-      "staged-barrier:cleanup" => {
-        set_flags_as_root(&mut runtime, root, "--expose-gc");
-        assert!(
-          EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "ambient setup did not mutate the V8 flag"
-        );
-        set_flags_as_root(&mut runtime, root, "--no-expose-gc");
-        assert!(
-          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "ambient cleanup did not restore the V8 flag"
-        );
-        set_actor(root, "node_modules/denied-native/index.cjs");
-        expect_set_flags_denied(&mut runtime, "--expose-gc");
-        assert!(
-          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "post-cleanup denied attempt mutated the V8 flag"
-        );
-        &["ambient-cleanup-restores-v8-flag", "no-v8-flag-mutation"]
-      }
-      "staged-barrier:revocation" => {
-        set_flags_as_root(&mut runtime, root, "--expose-gc");
-        assert!(
-          EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "ambient setup did not mutate the V8 flag"
-        );
-        set_actor(root, "node_modules/denied-native/index.cjs");
-        let revocation = deno_permissions::OdenDynamicPermissionDescriptor {
-          name: "sys",
-          path: None,
-          host: None,
-          variable: None,
-          kind: Some("hostname"),
-          command: None,
-          presence: deno_permissions::OdenDynamicPermissionFieldPresence {
-            kind: true,
-            ..Default::default()
-          },
-        };
-        assert_eq!(
-          deno_permissions::oden_capsec_revoke_dynamic_permission(&revocation),
-          Some(deno_permissions::PermissionState::Denied),
-          "fixture did not apply a real session revocation before the next effect"
-        );
-        expect_set_flags_denied(&mut runtime, "--no-expose-gc");
-        assert!(
-          EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "actor transition was not rechecked before the next V8 effect"
-        );
-        set_flags_as_root(&mut runtime, root, "--no-expose-gc");
-        assert!(
-          !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
-          "ambient cleanup did not restore the V8 flag"
-        );
-        &[
-          "session-revocation-applied-and-actor-rechecked-before-next-effect",
-          "no-v8-flag-mutation",
-        ]
-      }
-      _ => panic!("unknown Rev2 V8 fixture case kind {case_kind}"),
-    };
-    EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
-    assertions
-  }
-
   fn write_rev2_v8_fixture_report(
+    operation: &Rev2V8FixtureOperation,
     case_kind: &str,
     target: &str,
     assertions: &[&str],
   ) {
     let line =
-      rev2_v8_fixture_report_line(case_kind, target, assertions) + "\n";
+      rev2_v8_fixture_report_line(operation, case_kind, target, assertions)
+        + "\n";
     std::io::stderr().write_all(line.as_bytes()).unwrap();
   }
 
   fn rev2_v8_fixture_report_line(
+    operation: &Rev2V8FixtureOperation,
     case_kind: &str,
     target: &str,
     assertions: &[&str],
   ) -> String {
-    let assertions_json = match assertions {
-      ["constrained-package-denied", "no-v8-flag-mutation"] => {
-        r#"["constrained-package-denied","no-v8-flag-mutation"]"#
-      }
-      ["guard-precedes-v8-flag-mutation", "no-v8-flag-mutation"] => {
-        r#"["guard-precedes-v8-flag-mutation","no-v8-flag-mutation"]"#
-      }
-      [
-        "denied-attempt-leaves-no-provisional-state",
-        "ambient-control-remains-usable",
-      ] => {
-        r#"["denied-attempt-leaves-no-provisional-state","ambient-control-remains-usable"]"#
-      }
-      ["ambient-cleanup-restores-v8-flag", "no-v8-flag-mutation"] => {
-        r#"["ambient-cleanup-restores-v8-flag","no-v8-flag-mutation"]"#
-      }
-      [
-        "session-revocation-applied-and-actor-rechecked-before-next-effect",
-        "no-v8-flag-mutation",
-      ] => {
-        r#"["session-revocation-applied-and-actor-rechecked-before-next-effect","no-v8-flag-mutation"]"#
-      }
-      _ => panic!("Rev2 V8 fixture assertion tuple drifted"),
-    };
+    assert_eq!(assertions, rev2_v8_fixture_assertions(operation, case_kind));
+    let case_id = format!("native-v8:{}:{case_kind}", operation.operation_id);
+    let case_id_json = deno_core::serde_json::to_string(&case_id).unwrap();
+    let operation_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    let edge_json =
+      deno_core::serde_json::to_string(operation.edge_id).unwrap();
+    let requirement_json =
+      deno_core::serde_json::to_string(operation.requirement_id).unwrap();
+    let case_kind_json = deno_core::serde_json::to_string(case_kind).unwrap();
+    let target_json = deno_core::serde_json::to_string(target).unwrap();
+    let assertions_json = deno_core::serde_json::to_string(assertions).unwrap();
     format!(
-      r#"{REV2_V8_FIXTURE_REPORT_PREFIX}{{"schema":"oden/capsec-native-v8-set-flags-fixture-report/2","caseKind":"{case_kind}","target":"{target}","assertions":{assertions_json},"executed":true,"nativeReleaseExecution":false,"authority":"development-fixture-execution-only"}}"#
+      r#"{REV2_V8_FIXTURE_REPORT_PREFIX}{{"schema":"oden/capsec-native-v8-inspection-fixture-report/2","caseId":{case_id_json},"operationId":{operation_json},"edgeId":{edge_json},"requirementId":{requirement_json},"caseKind":{case_kind_json},"target":{target_json},"modes":["permissive","audit","enforce"],"assertions":{assertions_json},"executed":true,"nativeReleaseExecution":false,"authority":"development-fixture-execution-only"}}"#
     )
   }
 
@@ -1955,10 +2304,14 @@ mod native_capsec_tests {
 
   #[test]
   fn rev2_v8_fixture_report_channel_is_unambiguous() {
+    let operation = rev2_v8_fixture_operation("set-flags-from-string");
+    let assertions =
+      rev2_v8_fixture_assertions(operation, "deny-only-closed-or-absent");
     let expected = rev2_v8_fixture_report_line(
+      operation,
       "deny-only-closed-or-absent",
       "aarch64-apple-darwin",
-      &["constrained-package-denied", "no-v8-flag-mutation"],
+      &assertions,
     );
     assert_eq!(
       validate_rev2_v8_fixture_report_channels(
@@ -1995,93 +2348,92 @@ mod native_capsec_tests {
   }
 
   #[test]
-  fn rev2_v8_set_flags_fixture_case() {
+  fn rev2_v8_inspection_fixture_case() {
+    let operation_id = std::env::var(REV2_V8_FIXTURE_OPERATION_ENV).ok();
     let case_kind = std::env::var(REV2_V8_FIXTURE_CASE_ENV).ok();
     let target = std::env::var(REV2_V8_FIXTURE_TARGET_ENV).ok();
     if std::env::var_os(REV2_V8_FIXTURE_CHILD).is_some() {
+      let operation_id =
+        operation_id.expect("Rev2 V8 fixture child operation is required");
       let case_kind =
         case_kind.expect("Rev2 V8 fixture child case kind is required");
       let target = target.expect("Rev2 V8 fixture child target is required");
+      let mode = std::env::var(REV2_V8_FIXTURE_MODE_ENV)
+        .expect("Rev2 V8 fixture child mode is required");
       let root = PathBuf::from(std::env::var_os("ODEN_CAPSEC_ROOT").unwrap());
-      let assertions =
-        run_rev2_v8_set_flags_fixture_case(&root, &case_kind, &target);
-      write_rev2_v8_fixture_report(&case_kind, &target, assertions);
+      let operation = rev2_v8_fixture_operation(&operation_id);
+      let assertions = run_rev2_v8_inspection_fixture_mode(
+        &root, operation, &case_kind, &target, &mode,
+      );
+      assert_eq!(
+        assertions,
+        rev2_v8_fixture_assertions(operation, &case_kind)
+      );
       return;
     }
 
-    let requested = match (case_kind, target) {
-      (Some(case_kind), Some(target)) => vec![(case_kind, target)],
-      (None, None) => {
+    let requested = match (operation_id, case_kind, target) {
+      (Some(operation_id), Some(case_kind), Some(target)) => {
+        vec![(operation_id, case_kind, target)]
+      }
+      (None, None, None) => {
         let Some(target) = compiled_rev2_v8_fixture_target() else {
           return;
         };
-        REV2_V8_FIXTURE_CASE_KINDS
+        REV2_V8_FIXTURE_OPERATIONS
           .iter()
-          .map(|case_kind| (case_kind.to_string(), target.to_string()))
+          .flat_map(|operation| {
+            REV2_V8_FIXTURE_CASE_KINDS.iter().map(|case_kind| {
+              (
+                operation.operation_id.to_string(),
+                case_kind.to_string(),
+                target.to_string(),
+              )
+            })
+          })
           .collect()
       }
       _ => {
-        panic!("Rev2 V8 fixture case and target labels must appear together")
+        panic!(
+          "Rev2 V8 fixture operation, case, and target labels must appear together"
+        )
       }
     };
-    for (case_kind, target) in requested {
-      let root = NativeV8TestRoot::new("enforce");
-      let mut command = Command::new(std::env::current_exe().unwrap());
-      clear_native_v8_capsec_env(&mut command);
-      command
-        .arg(REV2_V8_FIXTURE_TEST)
-        .args(["--exact", "--nocapture", "--test-threads=1"])
-        .env(REV2_V8_FIXTURE_CHILD, "1")
-        .env(REV2_V8_FIXTURE_CASE_ENV, &case_kind)
-        .env(REV2_V8_FIXTURE_TARGET_ENV, &target)
-        .env("ODEN_CAPSEC_ROOT", &root.0)
-        .env("ODEN_CAPSEC_POLICY", root.0.join("policy.json"));
-      let output = run_native_v8_child(command, &root.0);
-      assert!(
-        output.status.success(),
-        "Rev2 V8 fixture child failed for {target}/{case_kind}\nstdout={}\nstderr={}",
-        bounded_debug_output(&String::from_utf8_lossy(&output.stdout)),
-        bounded_debug_output(&String::from_utf8_lossy(&output.stderr)),
-      );
-      let stdout = String::from_utf8(output.stdout).unwrap();
-      let stderr = String::from_utf8(output.stderr).unwrap();
-      let expected_line = rev2_v8_fixture_report_line(
-        &case_kind,
-        &target,
-        match case_kind.as_str() {
-          "deny-only-closed-or-absent" => {
-            &["constrained-package-denied", "no-v8-flag-mutation"]
-          }
-          "staged-barrier:authorization" => {
-            &["guard-precedes-v8-flag-mutation", "no-v8-flag-mutation"]
-          }
-          "staged-barrier:cancellation" => &[
-            "denied-attempt-leaves-no-provisional-state",
-            "ambient-control-remains-usable",
-          ],
-          "staged-barrier:cleanup" => {
-            &["ambient-cleanup-restores-v8-flag", "no-v8-flag-mutation"]
-          }
-          "staged-barrier:revocation" => &[
-            "session-revocation-applied-and-actor-rechecked-before-next-effect",
-            "no-v8-flag-mutation",
-          ],
-          _ => panic!("unknown Rev2 V8 fixture case kind {case_kind}"),
-        },
-      );
-      if let Err(reason) = validate_rev2_v8_fixture_report_channels(
-        &stdout,
-        &stderr,
-        &expected_line,
-      ) {
-        panic!(
-          "Rev2 V8 fixture child report refused for {target}/{case_kind}: {reason}\nstdout={}\nstderr={}",
-          bounded_debug_output(&stdout),
-          bounded_debug_output(&stderr),
+    for (operation_id, case_kind, target) in requested {
+      let operation = rev2_v8_fixture_operation(&operation_id);
+      for mode in REV2_V8_FIXTURE_MODES {
+        let root = NativeV8TestRoot::new(mode);
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        clear_native_v8_capsec_env(&mut command);
+        command
+          .arg(REV2_V8_FIXTURE_TEST)
+          .args(["--exact", "--nocapture", "--test-threads=1"])
+          .env(REV2_V8_FIXTURE_CHILD, "1")
+          .env(REV2_V8_FIXTURE_OPERATION_ENV, &operation_id)
+          .env(REV2_V8_FIXTURE_CASE_ENV, &case_kind)
+          .env(REV2_V8_FIXTURE_TARGET_ENV, &target)
+          .env(REV2_V8_FIXTURE_MODE_ENV, mode)
+          .env("ODEN_CAPSEC_ROOT", &root.0)
+          .env("ODEN_CAPSEC_POLICY", root.0.join("policy.json"));
+        let output = run_native_v8_child(command, &root.0);
+        assert!(
+          output.status.success(),
+          "Rev2 V8 fixture child failed for {target}/{operation_id}/{case_kind}/{mode}\nstdout={}\nstderr={}",
+          bounded_debug_output(&String::from_utf8_lossy(&output.stdout)),
+          bounded_debug_output(&String::from_utf8_lossy(&output.stderr)),
         );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+          !stdout.contains(REV2_V8_FIXTURE_REPORT_PREFIX)
+            && !stderr.contains(REV2_V8_FIXTURE_REPORT_PREFIX),
+          "mode child emitted a parent-owned fixture report"
+        );
+        std::io::stdout().write_all(stdout.as_bytes()).unwrap();
+        std::io::stderr().write_all(stderr.as_bytes()).unwrap();
       }
-      std::io::stdout().write_all(stdout.as_bytes()).unwrap();
-      std::io::stderr().write_all(stderr.as_bytes()).unwrap();
+      let assertions = rev2_v8_fixture_assertions(operation, &case_kind);
+      write_rev2_v8_fixture_report(operation, &case_kind, &target, &assertions);
     }
   }
 
