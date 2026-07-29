@@ -106,6 +106,8 @@ mod topology {
     "oden/capsec-filesystem-candidate-request-frame/2";
   const CANDIDATE_RESPONSE_SCHEMA: &str =
     "oden/capsec-filesystem-candidate-response-frame/2";
+  const CANDIDATE_ARENA_SCHEMA: &str =
+    "oden/capsec-filesystem-candidate-arena/2";
   const CANDIDATE_TERMINAL_SCHEMA: &str =
     "oden/capsec-filesystem-candidate-terminal/2";
   const DESCRIPTOR_SLOTS_SCHEMA: &str =
@@ -122,8 +124,12 @@ mod topology {
     "oden:capsec:filesystem-candidate-request-frame:2";
   const CANDIDATE_RESPONSE_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-candidate-response-frame:2";
+  const CANDIDATE_ARENA_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-candidate-arena:2";
   const CANDIDATE_TERMINAL_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-candidate-terminal-frame:2";
+  const ENGINE_TRACE_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-engine-trace:2";
   const OBSERVED_RESULT_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-observed-result:2";
   const DELIVERY_FRAME_DIGEST_DOMAIN: &str =
@@ -145,6 +151,7 @@ mod topology {
   const LSTAT_SOURCE_NAME: &str = "input.txt";
   const LSTAT_DESTINATION_OBJECT_ID: &str = "destination";
   const LSTAT_DESTINATION_NAME: &str = "output.txt";
+  const LSTAT_ARENA_TRANSFER_INDEX: usize = 1;
   const EMPTY_CONTENT_DIGEST: &str =
     "sha256-47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
   const CANDIDATE_RESERVED_FLAG: &str =
@@ -287,6 +294,30 @@ mod topology {
     "exitStatus",
     "reaped",
     "supervisorGroupLeaderStillOwned",
+  ];
+
+  const CANDIDATE_ARENA_FIELDS: &[&str] = &[
+    "schema",
+    "profile",
+    "runNonce",
+    "target",
+    "featureSet",
+    "parentStandaloneDigest",
+    "engineDigest",
+    "forkCommit",
+    "fixtureArtifactDigest",
+    "executionIdentityDigest",
+    "sourceClosureDigest",
+    "caseId",
+    "edgeId",
+    "requirementId",
+    "caseKind",
+    "descriptorSlotsDigest",
+    "arenaTransferIndex",
+    "arenaPlatformIdentity",
+    "capacityBytes",
+    "payload",
+    "unusedTail",
   ];
 
   const NO_DESCENDANT_CLAIM_FIELDS: &[&str] = &[
@@ -683,6 +714,10 @@ mod topology {
     TransportComplete,
     ValidationComplete,
     ArenaRead,
+    ArenaReadAttempt,
+    ArenaReadComplete,
+    ArenaFirstPassComplete,
+    ArenaSecondPassComplete,
   }
 
   trait SupervisorClock: Send + Sync {
@@ -925,9 +960,10 @@ mod topology {
   }
 
   /// Opaque, non-cloneable cutoff after the supervisor has captured the exact
-  /// parent terminal, immediate FD4 EOF, and closed FD4. It intentionally
-  /// exposes no method: arena reconciliation, sandbox cleanup, report
-  /// generation, oracle comparison, and evidence remain separate transitions.
+  /// parent terminal, immediate FD4 EOF, and closed FD4. Its sole consuming
+  /// method performs candidate-arena byte reconciliation; root scanning,
+  /// cleanup, report generation, oracle comparison, and evidence remain
+  /// separate transitions.
   ///
   /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
   /// [constrained-by] — A syntactically and relationally closed parent terminal
@@ -953,6 +989,50 @@ mod topology {
     _candidate_terminal: SupervisorCandidateTerminalFacts,
     _parent_terminal_eof_observed: bool,
     _fd4_closed: bool,
+  }
+
+  struct SupervisorCandidateArenaFacts {
+    value: Value,
+    digest: String,
+    payload_bytes: Vec<u8>,
+    payload_value: Value,
+    payload_byte_digest: String,
+    engine_trace_digest: String,
+    unused_tail_byte_digest: String,
+  }
+
+  /// Opaque, non-cloneable cutoff after two exact bounded reads of the retained
+  /// arena agree with each other and with the response-bound arena and trace
+  /// digests. It intentionally exposes no method: engine-trace semantics,
+  /// final root scanning, cleanup, reporting, oracle comparison, and evidence
+  /// remain separate transitions.
+  ///
+  /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
+  /// [constrained-by] — Reconstructing candidate-authored arena bytes is a
+  /// candidate-only consistency observation. It is not immutable-state proof,
+  /// execution evidence, admission, or release authority.
+  pub(crate) struct SupervisorAwaitingEngineTraceValidation {
+    _resources: SupervisorLstatResources,
+    _identity: SupervisorGeneratedLstatIdentity,
+    _binding: SupervisorCaseBinding,
+    _entry: SupervisorEntryFacts,
+    _deadline: SupervisorDeadline,
+    _supervisor_request_raw_bytes: Vec<u8>,
+    _supervisor_request_frame_digest: String,
+    _spawn_request_raw_bytes: Vec<u8>,
+    _spawn_request_frame_digest: String,
+    _spawn_result: SupervisorSpawnResultFacts,
+    _candidate_request_raw_bytes: Vec<u8>,
+    _candidate_request_frame_digest: String,
+    _descriptor_slots_raw_bytes: Vec<u8>,
+    _descriptor_slots_digest: String,
+    _candidate_response: SupervisorCandidateResponseFacts,
+    _candidate_response_eof_observed: bool,
+    _candidate_peer_closed: bool,
+    _candidate_terminal: SupervisorCandidateTerminalFacts,
+    _parent_terminal_eof_observed: bool,
+    _fd4_closed: bool,
+    _candidate_arena: SupervisorCandidateArenaFacts,
   }
 
   impl SupervisorAwaitingCandidateOutcome {
@@ -1101,6 +1181,72 @@ mod topology {
     }
   }
 
+  impl SupervisorAwaitingArenaReconciliation {
+    pub(crate) fn reconcile_candidate_arena(
+      self,
+    ) -> io::Result<SupervisorAwaitingEngineTraceValidation> {
+      self
+        ._deadline
+        .check(SupervisorDeadlineCheckpoint::TransitionStart)?;
+      let candidate_arena = reconcile_supervisor_candidate_arena(
+        &self._resources,
+        &self._identity,
+        &self._binding,
+        &self._descriptor_slots_digest,
+        &self._candidate_response,
+        &self._deadline,
+      )?;
+      self
+        ._deadline
+        .check(SupervisorDeadlineCheckpoint::ValidationComplete)?;
+      let SupervisorAwaitingArenaReconciliation {
+        _resources,
+        _identity,
+        _binding,
+        _entry,
+        _deadline,
+        _supervisor_request_raw_bytes,
+        _supervisor_request_frame_digest,
+        _spawn_request_raw_bytes,
+        _spawn_request_frame_digest,
+        _spawn_result,
+        _candidate_request_raw_bytes,
+        _candidate_request_frame_digest,
+        _descriptor_slots_raw_bytes,
+        _descriptor_slots_digest,
+        _candidate_response,
+        _candidate_response_eof_observed,
+        _candidate_peer_closed,
+        _candidate_terminal,
+        _parent_terminal_eof_observed,
+        _fd4_closed,
+      } = self;
+      Ok(SupervisorAwaitingEngineTraceValidation {
+        _resources,
+        _identity,
+        _binding,
+        _entry,
+        _deadline,
+        _supervisor_request_raw_bytes,
+        _supervisor_request_frame_digest,
+        _spawn_request_raw_bytes,
+        _spawn_request_frame_digest,
+        _spawn_result,
+        _candidate_request_raw_bytes,
+        _candidate_request_frame_digest,
+        _descriptor_slots_raw_bytes,
+        _descriptor_slots_digest,
+        _candidate_response,
+        _candidate_response_eof_observed,
+        _candidate_peer_closed,
+        _candidate_terminal,
+        _parent_terminal_eof_observed,
+        _fd4_closed,
+        _candidate_arena: candidate_arena,
+      })
+    }
+  }
+
   #[derive(Clone, Debug, Eq, PartialEq)]
   struct SupervisorDescriptorSnapshot {
     device: u64,
@@ -1151,6 +1297,8 @@ mod topology {
     source_created: bool,
     before_root: SupervisorDescriptorSnapshot,
     before_arena: SupervisorDescriptorSnapshot,
+    before_arena_descriptor_flags: libc::c_int,
+    before_arena_status_flags: libc::c_int,
   }
 
   impl SupervisorLstatResources {
@@ -1171,6 +1319,8 @@ mod topology {
         source_created: false,
         before_root: zero_snapshot(),
         before_arena: zero_snapshot(),
+        before_arena_descriptor_flags: 0,
+        before_arena_status_flags: 0,
       };
       mkdirat_exact(resources.workspace.as_fd(), ROOT_NAME, 0o700)?;
       resources.root_created = true;
@@ -1233,6 +1383,10 @@ mod topology {
       deadline.check(SupervisorDeadlineCheckpoint::ValidationComplete)?;
       resources.before_root = before_root;
       resources.before_arena = before_arena;
+      resources.before_arena_descriptor_flags =
+        descriptor_flags(resources.arena_fd())?;
+      resources.before_arena_status_flags =
+        descriptor_status_flags(resources.arena_fd())?;
       Ok(resources)
     }
 
@@ -1260,7 +1414,13 @@ mod topology {
       deadline.check(SupervisorDeadlineCheckpoint::ValidationComplete)?;
       let root = SupervisorDescriptorSnapshot::capture(self.root_fd())?;
       let arena = SupervisorDescriptorSnapshot::capture(self.arena_fd())?;
-      if root != self.before_root || arena != self.before_arena {
+      if root != self.before_root
+        || arena != self.before_arena
+        || descriptor_flags(self.arena_fd())?
+          != self.before_arena_descriptor_flags
+        || descriptor_status_flags(self.arena_fd())?
+          != self.before_arena_status_flags
+      {
         return Err(invalid_data(
           "supervisor lstat resources changed during transfer",
         ));
@@ -1737,6 +1897,280 @@ mod topology {
       ));
     }
     Ok(())
+  }
+
+  fn require_exact_retained_arena(
+    resources: &SupervisorLstatResources,
+  ) -> io::Result<()> {
+    let arena = SupervisorDescriptorSnapshot::capture(resources.arena_fd())?;
+    if arena != resources.before_arena
+      || arena.mode != (libc::S_IFREG as u32 | 0o600)
+      || arena.links != 1
+      || arena.size != ARENA_CAPACITY_BYTES
+      || (arena.device == resources.before_root.device
+        && arena.inode == resources.before_root.inode)
+      || descriptor_flags(resources.arena_fd())?
+        != resources.before_arena_descriptor_flags
+      || descriptor_status_flags(resources.arena_fd())?
+        != resources.before_arena_status_flags
+      || resources.before_arena_descriptor_flags & libc::FD_CLOEXEC == 0
+      || resources.before_arena_status_flags & libc::O_ACCMODE != libc::O_RDWR
+      || resources.before_arena_status_flags & libc::O_APPEND != 0
+    {
+      return Err(invalid_data(
+        "supervisor retained arena descriptor is not exact",
+      ));
+    }
+    Ok(())
+  }
+
+  fn pread_supervisor_arena(
+    arena: BorrowedFd<'_>,
+    destination: &mut [u8],
+    offset: usize,
+    deadline: &SupervisorDeadline,
+  ) -> io::Result<usize> {
+    let offset = libc::off_t::try_from(offset)
+      .map_err(|_| invalid_data("supervisor arena offset overflowed"))?;
+    loop {
+      deadline.check(SupervisorDeadlineCheckpoint::ArenaReadAttempt)?;
+      // SAFETY: destination is writable for its exact length, arena is live,
+      // and pread leaves the shared open-file-description offset unchanged.
+      let read = unsafe {
+        libc::pread(
+          arena.as_raw_fd(),
+          destination.as_mut_ptr().cast(),
+          destination.len(),
+          offset,
+        )
+      };
+      let read_error = (read < 0).then(io::Error::last_os_error);
+      deadline.check(SupervisorDeadlineCheckpoint::ArenaReadComplete)?;
+      if let Some(error) = read_error {
+        if error.kind() == io::ErrorKind::Interrupted {
+          continue;
+        }
+        return Err(error);
+      }
+      let read = usize::try_from(read)
+        .map_err(|_| invalid_data("supervisor arena read overflowed"))?;
+      if read > destination.len() {
+        return Err(invalid_data(
+          "supervisor arena read exceeded its requested bound",
+        ));
+      }
+      return Ok(read);
+    }
+  }
+
+  fn require_supervisor_arena_eof(
+    arena: BorrowedFd<'_>,
+    deadline: &SupervisorDeadline,
+  ) -> io::Result<()> {
+    let mut extra = [0_u8; 1];
+    let capacity = usize::try_from(ARENA_CAPACITY_BYTES)
+      .map_err(|_| invalid_data("supervisor arena capacity overflowed"))?;
+    if pread_supervisor_arena(arena, &mut extra, capacity, deadline)? != 0 {
+      return Err(invalid_data(
+        "supervisor arena contains bytes beyond capacity",
+      ));
+    }
+    Ok(())
+  }
+
+  fn read_supervisor_arena_first_pass(
+    resources: &SupervisorLstatResources,
+    deadline: &SupervisorDeadline,
+  ) -> io::Result<Vec<u8>> {
+    require_exact_retained_arena(resources)?;
+    let capacity = usize::try_from(ARENA_CAPACITY_BYTES)
+      .map_err(|_| invalid_data("supervisor arena capacity overflowed"))?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut payload = Vec::new();
+    let mut tail_started = false;
+    let mut offset = 0_usize;
+    while offset < capacity {
+      let requested = (capacity - offset).min(buffer.len());
+      let read = pread_supervisor_arena(
+        resources.arena_fd(),
+        &mut buffer[..requested],
+        offset,
+        deadline,
+      )?;
+      if read == 0 {
+        return Err(invalid_data("supervisor arena ended before capacity"));
+      }
+      let bytes = &buffer[..read];
+      if tail_started {
+        if bytes.iter().any(|byte| *byte != 0) {
+          return Err(invalid_data(
+            "supervisor arena unused tail is not exactly zero",
+          ));
+        }
+      } else if let Some(tail_offset) = bytes.iter().position(|byte| *byte == 0)
+      {
+        payload.extend_from_slice(&bytes[..tail_offset]);
+        if bytes[tail_offset..].iter().any(|byte| *byte != 0) {
+          return Err(invalid_data(
+            "supervisor arena payload is not one exact prefix",
+          ));
+        }
+        tail_started = true;
+      } else {
+        payload.extend_from_slice(bytes);
+      }
+      offset = offset
+        .checked_add(read)
+        .ok_or_else(|| invalid_data("supervisor arena offset overflowed"))?;
+    }
+    require_supervisor_arena_eof(resources.arena_fd(), deadline)?;
+    require_exact_retained_arena(resources)?;
+    if payload.is_empty() {
+      return Err(invalid_data("supervisor arena payload is empty"));
+    }
+    Ok(payload)
+  }
+
+  fn read_supervisor_arena_second_pass(
+    resources: &SupervisorLstatResources,
+    expected_payload: &[u8],
+    deadline: &SupervisorDeadline,
+  ) -> io::Result<()> {
+    require_exact_retained_arena(resources)?;
+    let capacity = usize::try_from(ARENA_CAPACITY_BYTES)
+      .map_err(|_| invalid_data("supervisor arena capacity overflowed"))?;
+    if expected_payload.is_empty() || expected_payload.len() > capacity {
+      return Err(invalid_data(
+        "supervisor arena payload length is outside capacity",
+      ));
+    }
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut offset = 0_usize;
+    while offset < capacity {
+      let requested = (capacity - offset).min(buffer.len());
+      let read = pread_supervisor_arena(
+        resources.arena_fd(),
+        &mut buffer[..requested],
+        offset,
+        deadline,
+      )?;
+      if read == 0 {
+        return Err(invalid_data("supervisor arena ended before capacity"));
+      }
+      for (index, byte) in buffer[..read].iter().copied().enumerate() {
+        let absolute = offset
+          .checked_add(index)
+          .ok_or_else(|| invalid_data("supervisor arena offset overflowed"))?;
+        let expected = expected_payload.get(absolute).copied().unwrap_or(0);
+        if byte != expected {
+          return Err(invalid_data(
+            "supervisor arena changed between bounded reads",
+          ));
+        }
+      }
+      offset = offset
+        .checked_add(read)
+        .ok_or_else(|| invalid_data("supervisor arena offset overflowed"))?;
+    }
+    require_supervisor_arena_eof(resources.arena_fd(), deadline)?;
+    require_exact_retained_arena(resources)
+  }
+
+  fn reconcile_supervisor_candidate_arena(
+    resources: &SupervisorLstatResources,
+    identity: &SupervisorGeneratedLstatIdentity,
+    binding: &SupervisorCaseBinding,
+    descriptor_slots_digest: &str,
+    candidate_response: &SupervisorCandidateResponseFacts,
+    deadline: &SupervisorDeadline,
+  ) -> io::Result<SupervisorCandidateArenaFacts> {
+    let payload_bytes = read_supervisor_arena_first_pass(resources, deadline)?;
+    deadline.check(SupervisorDeadlineCheckpoint::ArenaFirstPassComplete)?;
+    read_supervisor_arena_second_pass(resources, &payload_bytes, deadline)?;
+    deadline.check(SupervisorDeadlineCheckpoint::ArenaSecondPassComplete)?;
+
+    // This establishes only syntactic byte identity. Trace phases, operation
+    // semantics, and oracle meaning belong to the unreachable next transition.
+    let payload_value = parse_canonical_jcs(&payload_bytes)?;
+    let payload_byte_digest = sha256_digest(&payload_bytes);
+    let engine_trace_digest =
+      raw_frame_digest(ENGINE_TRACE_DIGEST_DOMAIN, &payload_bytes);
+    if engine_trace_digest != candidate_response.engine_trace_digest {
+      return Err(invalid_data(
+        "supervisor arena trace digest does not join the response",
+      ));
+    }
+    let capacity = usize::try_from(ARENA_CAPACITY_BYTES)
+      .map_err(|_| invalid_data("supervisor arena capacity overflowed"))?;
+    let unused_tail_length =
+      capacity.checked_sub(payload_bytes.len()).ok_or_else(|| {
+        invalid_data("supervisor arena payload exceeds capacity")
+      })?;
+    let unused_tail_byte_digest = zero_sha256_digest(unused_tail_length);
+    let mut object = Map::new();
+    object.insert("schema".into(), json!(CANDIDATE_ARENA_SCHEMA));
+    binding.insert_common(&mut object, identity);
+    object.insert(
+      "descriptorSlotsDigest".into(),
+      json!(descriptor_slots_digest),
+    );
+    object.insert(
+      "arenaTransferIndex".into(),
+      json!(LSTAT_ARENA_TRANSFER_INDEX),
+    );
+    object.insert(
+      "arenaPlatformIdentity".into(),
+      resources.before_arena.platform_identity(),
+    );
+    object.insert("capacityBytes".into(), json!(capacity));
+    object.insert(
+      "payload".into(),
+      json!({
+        "offset": 0,
+        "length": payload_bytes.len(),
+        "byteDigest": payload_byte_digest,
+        "engineTraceDigest": engine_trace_digest,
+      }),
+    );
+    object.insert(
+      "unusedTail".into(),
+      json!({
+        "offset": payload_bytes.len(),
+        "length": unused_tail_length,
+        "byteDigest": unused_tail_byte_digest,
+        "allZero": true,
+      }),
+    );
+    let value = Value::Object(object);
+    let exact =
+      exact_object(&value, CANDIDATE_ARENA_FIELDS, "candidate arena")?;
+    binding.validate_common(exact, identity)?;
+    require_text_eq(exact, "schema", CANDIDATE_ARENA_SCHEMA)?;
+    require_text_eq(exact, "descriptorSlotsDigest", descriptor_slots_digest)?;
+    require_usize_eq(exact, "arenaTransferIndex", LSTAT_ARENA_TRANSFER_INDEX)?;
+    require_usize_eq(exact, "capacityBytes", capacity)?;
+    if required_value(exact, "arenaPlatformIdentity")?
+      != &resources.before_arena.platform_identity()
+    {
+      return Err(invalid_data(
+        "supervisor candidate arena identity is not exact",
+      ));
+    }
+    let digest = hjcs_digest(CANDIDATE_ARENA_DIGEST_DOMAIN, &value)?;
+    if digest != candidate_response.candidate_arena_digest {
+      return Err(invalid_data(
+        "supervisor candidate arena digest does not join the response",
+      ));
+    }
+    Ok(SupervisorCandidateArenaFacts {
+      value,
+      digest,
+      payload_bytes,
+      payload_value,
+      payload_byte_digest,
+      engine_trace_digest,
+      unused_tail_byte_digest,
+    })
   }
 
   /// One production-uncalled FD4 topology session. Every transition is
@@ -3086,6 +3520,24 @@ mod topology {
     format!("sha256-{}", URL_SAFE_NO_PAD.encode(hasher.finalize()))
   }
 
+  fn sha256_digest(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256-{}", URL_SAFE_NO_PAD.encode(hasher.finalize()))
+  }
+
+  fn zero_sha256_digest(length: usize) -> String {
+    let mut hasher = Sha256::new();
+    let zeros = [0_u8; 64 * 1024];
+    let mut remaining = length;
+    while remaining != 0 {
+      let take = remaining.min(zeros.len());
+      hasher.update(&zeros[..take]);
+      remaining -= take;
+    }
+    format!("sha256-{}", URL_SAFE_NO_PAD.encode(hasher.finalize()))
+  }
+
   fn descriptor_status_flags(
     descriptor: BorrowedFd<'_>,
   ) -> io::Result<libc::c_int> {
@@ -3296,6 +3748,8 @@ mod topology {
     use std::fs::File;
     use std::os::fd::RawFd;
     use std::path::Path;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
     use std::thread;
 
     use super::*;
@@ -3835,6 +4289,136 @@ mod topology {
       })
     }
 
+    fn pwrite_all_at(
+      descriptor: BorrowedFd<'_>,
+      bytes: &[u8],
+      offset: usize,
+    ) -> io::Result<()> {
+      let mut written = 0_usize;
+      while written < bytes.len() {
+        let absolute = offset
+          .checked_add(written)
+          .ok_or_else(|| invalid_data("test arena offset overflowed"))?;
+        let absolute = libc::off_t::try_from(absolute)
+          .map_err(|_| invalid_data("test arena offset overflowed"))?;
+        // SAFETY: the unwritten suffix is readable, the descriptor is live and
+        // writable, and pwrite leaves the shared file offset unchanged.
+        let result = unsafe {
+          libc::pwrite(
+            descriptor.as_raw_fd(),
+            bytes[written..].as_ptr().cast(),
+            bytes.len() - written,
+            absolute,
+          )
+        };
+        if result < 0 {
+          let error = io::Error::last_os_error();
+          if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+          }
+          return Err(error);
+        }
+        if result == 0 {
+          return Err(io::Error::from(io::ErrorKind::WriteZero));
+        }
+        written = written
+          .checked_add(result as usize)
+          .ok_or_else(|| invalid_data("test arena write overflowed"))?;
+      }
+      Ok(())
+    }
+
+    fn write_test_arena_payload(observation: &PeerObservation, payload: &[u8]) {
+      assert!(!payload.is_empty());
+      assert!(payload.len() <= ARENA_CAPACITY_BYTES as usize);
+      pwrite_all_at(observation.descriptors[1].as_fd(), payload, 0).unwrap();
+    }
+
+    fn test_sha256_digest(bytes: &[u8]) -> String {
+      let digest = Sha256::digest(bytes);
+      format!("sha256-{}", URL_SAFE_NO_PAD.encode(digest))
+    }
+
+    fn test_hbytes_digest(domain: &str, bytes: &[u8]) -> String {
+      let mut hasher = Sha256::new();
+      hasher.update(domain.as_bytes());
+      hasher.update([0]);
+      hasher.update(bytes);
+      format!("sha256-{}", URL_SAFE_NO_PAD.encode(hasher.finalize()))
+    }
+
+    fn test_zero_sha256_digest(length: usize) -> String {
+      let mut hasher = Sha256::new();
+      let zeros = [0_u8; 4096];
+      let mut remaining = length;
+      while remaining != 0 {
+        let take = remaining.min(zeros.len());
+        hasher.update(&zeros[..take]);
+        remaining -= take;
+      }
+      format!("sha256-{}", URL_SAFE_NO_PAD.encode(hasher.finalize()))
+    }
+
+    fn candidate_arena_value(
+      outcome: &SupervisorAwaitingCandidateOutcome,
+      payload: &[u8],
+    ) -> Value {
+      let capacity = ARENA_CAPACITY_BYTES as usize;
+      let mut object = Map::new();
+      object.insert("schema".into(), json!(CANDIDATE_ARENA_SCHEMA));
+      outcome
+        ._binding
+        .insert_common(&mut object, &outcome._identity);
+      object.insert(
+        "descriptorSlotsDigest".into(),
+        json!(outcome._descriptor_slots_digest),
+      );
+      object.insert(
+        "arenaTransferIndex".into(),
+        json!(LSTAT_ARENA_TRANSFER_INDEX),
+      );
+      object.insert(
+        "arenaPlatformIdentity".into(),
+        outcome._resources.before_arena.platform_identity(),
+      );
+      object.insert("capacityBytes".into(), json!(capacity));
+      object.insert(
+        "payload".into(),
+        json!({
+          "offset": 0,
+          "length": payload.len(),
+          "byteDigest": test_sha256_digest(payload),
+          "engineTraceDigest":
+            test_hbytes_digest(ENGINE_TRACE_DIGEST_DOMAIN, payload),
+        }),
+      );
+      object.insert(
+        "unusedTail".into(),
+        json!({
+          "offset": payload.len(),
+          "length": capacity - payload.len(),
+          "byteDigest": test_zero_sha256_digest(capacity - payload.len()),
+          "allZero": true,
+        }),
+      );
+      Value::Object(object)
+    }
+
+    fn response_bound_to_arena(
+      outcome: &SupervisorAwaitingCandidateOutcome,
+      observation: &PeerObservation,
+      payload: &[u8],
+    ) -> (Value, Value) {
+      write_test_arena_payload(observation, payload);
+      let arena = candidate_arena_value(outcome, payload);
+      let mut response = response_value(outcome, observation);
+      response["candidateArenaDigest"] =
+        json!(hjcs_digest(CANDIDATE_ARENA_DIGEST_DOMAIN, &arena).unwrap());
+      response["engineTraceDigest"] =
+        json!(test_hbytes_digest(ENGINE_TRACE_DIGEST_DOMAIN, payload));
+      (response, arena)
+    }
+
     fn send_response(
       endpoint: &FramedStreamEndpoint,
       response: &Value,
@@ -3882,6 +4466,56 @@ mod topology {
       PeerObservation,
     ) {
       run_awaiting_parent_terminal_for_target("aarch64-apple-darwin", case)
+    }
+
+    fn finish_parent_terminal(
+      outcome: SupervisorAwaitingCandidateOutcome,
+      observation: &PeerObservation,
+      response: &Value,
+    ) -> SupervisorAwaitingArenaReconciliation {
+      send_response_and_eof(&observation.candidate_endpoint, response);
+      let awaiting = outcome.capture_candidate_response().unwrap();
+      let terminal = terminal_value(&awaiting);
+      send_terminal_and_eof(&observation.parent_control, &terminal);
+      awaiting.capture_parent_terminal().unwrap()
+    }
+
+    fn run_awaiting_arena_for_target(
+      target: &str,
+      case: SupervisorLstatCase,
+      payload: &[u8],
+    ) -> (
+      SupervisorAwaitingArenaReconciliation,
+      tempfile::TempDir,
+      PeerObservation,
+      Value,
+    ) {
+      let (outcome, temp, observation) = run_positive_for_target(target, case);
+      let (response, arena) =
+        response_bound_to_arena(&outcome, &observation, payload);
+      let awaiting = finish_parent_terminal(outcome, &observation, &response);
+      (awaiting, temp, observation, arena)
+    }
+
+    fn run_awaiting_arena(
+      case: SupervisorLstatCase,
+      payload: &[u8],
+    ) -> (
+      SupervisorAwaitingArenaReconciliation,
+      tempfile::TempDir,
+      PeerObservation,
+      Value,
+    ) {
+      run_awaiting_arena_for_target("aarch64-apple-darwin", case, payload)
+    }
+
+    fn arena_reconciliation_error_kind(
+      awaiting: SupervisorAwaitingArenaReconciliation,
+    ) -> io::ErrorKind {
+      match awaiting.reconcile_candidate_arena() {
+        Ok(_) => panic!("inexact candidate arena was accepted"),
+        Err(error) => error.kind(),
+      }
     }
 
     fn terminal_value(awaiting: &SupervisorAwaitingParentTerminal) -> Value {
@@ -4200,6 +4834,285 @@ mod topology {
         )
         .unwrap();
       }
+    }
+
+    fn duplicate_cloexec(descriptor: BorrowedFd<'_>) -> OwnedFd {
+      let raw = loop {
+        // SAFETY: F_DUPFD_CLOEXEC duplicates one live descriptor.
+        let raw = unsafe {
+          libc::fcntl(descriptor.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0)
+        };
+        if raw >= 0 {
+          break raw;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+          panic!("failed to duplicate arena descriptor: {error}");
+        }
+      };
+      // SAFETY: successful F_DUPFD_CLOEXEC returned a new owned descriptor.
+      unsafe { OwnedFd::from_raw_fd(raw) }
+    }
+
+    struct FirstPassArenaMutationClock {
+      before: Instant,
+      arena: OwnedFd,
+      offset: usize,
+      replacement: u8,
+      fired: AtomicBool,
+    }
+
+    impl SupervisorClock for FirstPassArenaMutationClock {
+      fn now(&self, checkpoint: SupervisorDeadlineCheckpoint) -> Instant {
+        if checkpoint == SupervisorDeadlineCheckpoint::ArenaFirstPassComplete
+          && !self.fired.swap(true, Ordering::SeqCst)
+        {
+          pwrite_all_at(self.arena.as_fd(), &[self.replacement], self.offset)
+            .unwrap();
+        }
+        self.before
+      }
+    }
+
+    #[test]
+    fn supervisor_candidate_arena_reconciles_both_targets_and_cases() {
+      assert_eq!(CANDIDATE_ARENA_FIELDS.len(), 21);
+      assert!(super::super::SUPERVISED_CASES.is_empty());
+      for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
+        for case in [
+          SupervisorLstatCase::Existing,
+          SupervisorLstatCase::FinalMissing,
+        ] {
+          let payload = canonical_json_bytes(&json!({
+            "case": case.case_kind(),
+            "target": target,
+          }))
+          .unwrap();
+          let (awaiting, _temp, _observation, expected_arena) =
+            run_awaiting_arena_for_target(target, case, &payload);
+          let pre_trace = awaiting.reconcile_candidate_arena().unwrap();
+          assert_eq!(pre_trace._identity.target, target);
+          assert_eq!(pre_trace._identity.case, case);
+          assert_eq!(pre_trace._candidate_arena.value, expected_arena);
+          assert_eq!(
+            pre_trace._candidate_arena.digest,
+            hjcs_digest(
+              CANDIDATE_ARENA_DIGEST_DOMAIN,
+              &pre_trace._candidate_arena.value,
+            )
+            .unwrap(),
+          );
+          assert_eq!(pre_trace._candidate_arena.payload_bytes, payload);
+        }
+      }
+    }
+
+    #[test]
+    fn supervisor_candidate_arena_retains_exact_artifact_payload_and_pre_trace_state()
+     {
+      // Deliberately not a valid engine-trace object: this transition proves
+      // canonical byte retention but must stop before trace semantics.
+      let payload = br#"{}"#;
+      let (awaiting, temp, _observation, expected_arena) =
+        run_awaiting_arena(SupervisorLstatCase::Existing, payload);
+      let response_arena_digest =
+        awaiting._candidate_response.candidate_arena_digest.clone();
+      let response_trace_digest =
+        awaiting._candidate_response.engine_trace_digest.clone();
+      let pre_trace = awaiting.reconcile_candidate_arena().unwrap();
+      assert!(pre_trace._candidate_response_eof_observed);
+      assert!(pre_trace._candidate_peer_closed);
+      assert!(pre_trace._parent_terminal_eof_observed);
+      assert!(pre_trace._fd4_closed);
+      assert_eq!(pre_trace._candidate_arena.value, expected_arena);
+      assert_eq!(pre_trace._candidate_arena.payload_bytes, payload);
+      assert_eq!(pre_trace._candidate_arena.payload_value, json!({}));
+      assert_eq!(
+        pre_trace._candidate_arena.payload_byte_digest,
+        test_sha256_digest(payload),
+      );
+      assert_eq!(
+        pre_trace._candidate_arena.engine_trace_digest,
+        response_trace_digest,
+      );
+      assert_eq!(
+        pre_trace._candidate_arena.unused_tail_byte_digest,
+        test_zero_sha256_digest(ARENA_CAPACITY_BYTES as usize - payload.len()),
+      );
+      assert_eq!(pre_trace._candidate_arena.digest, response_arena_digest);
+      assert!(temp.path().join(ROOT_NAME).exists());
+      assert!(temp.path().join(ARENA_NAME).exists());
+      drop(pre_trace);
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
+    }
+
+    #[test]
+    fn supervisor_candidate_arena_refuses_response_digest_aliases_and_inexact_layout()
+     {
+      for field in ["candidateArenaDigest", "engineTraceDigest"] {
+        let (outcome, temp, observation) =
+          run_positive(SupervisorLstatCase::Existing);
+        let (mut response, _arena) =
+          response_bound_to_arena(&outcome, &observation, br#"{}"#);
+        response[field] = aliased_digest(&response[field]);
+        let awaiting = finish_parent_terminal(outcome, &observation, &response);
+        assert_eq!(
+          arena_reconciliation_error_kind(awaiting),
+          io::ErrorKind::InvalidData,
+        );
+        assert!(!temp.path().join(ROOT_NAME).exists());
+        assert!(!temp.path().join(ARENA_NAME).exists());
+      }
+
+      let (outcome, temp, observation) =
+        run_positive(SupervisorLstatCase::FinalMissing);
+      let (response, _arena) =
+        response_bound_to_arena(&outcome, &observation, br#"{}"#);
+      let awaiting = finish_parent_terminal(outcome, &observation, &response);
+      ftruncate_exact(observation.descriptors[1].as_fd(), 0).unwrap();
+      ftruncate_exact(observation.descriptors[1].as_fd(), ARENA_CAPACITY_BYTES)
+        .unwrap();
+      assert_eq!(
+        arena_reconciliation_error_kind(awaiting),
+        io::ErrorKind::InvalidData,
+      );
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
+
+      let payload = br#"{}"#;
+      let (awaiting, temp, observation, _arena) =
+        run_awaiting_arena(SupervisorLstatCase::Existing, payload);
+      pwrite_all_at(
+        observation.descriptors[1].as_fd(),
+        &[1],
+        payload.len() + 1,
+      )
+      .unwrap();
+      assert_eq!(
+        arena_reconciliation_error_kind(awaiting),
+        io::ErrorKind::InvalidData,
+      );
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
+    }
+
+    #[test]
+    fn supervisor_candidate_arena_refuses_descriptor_and_content_mutation_before_read()
+     {
+      let (awaiting, temp, observation, _arena) =
+        run_awaiting_arena(SupervisorLstatCase::Existing, br#"{}"#);
+      let flags =
+        descriptor_status_flags(observation.descriptors[1].as_fd()).unwrap();
+      // SAFETY: F_SETFL changes only mutable status flags on this live arena
+      // open-file description, shared with the retained supervisor descriptor.
+      assert_eq!(
+        unsafe {
+          libc::fcntl(
+            observation.descriptors[1].as_raw_fd(),
+            libc::F_SETFL,
+            flags | libc::O_APPEND,
+          )
+        },
+        0,
+      );
+      assert_eq!(
+        arena_reconciliation_error_kind(awaiting),
+        io::ErrorKind::InvalidData,
+      );
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
+
+      let (awaiting, temp, observation, _arena) =
+        run_awaiting_arena(SupervisorLstatCase::Existing, br#"{}"#);
+      ftruncate_exact(
+        observation.descriptors[1].as_fd(),
+        ARENA_CAPACITY_BYTES - 1,
+      )
+      .unwrap();
+      assert_eq!(
+        arena_reconciliation_error_kind(awaiting),
+        io::ErrorKind::InvalidData,
+      );
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
+
+      let (awaiting, temp, observation, _arena) =
+        run_awaiting_arena(SupervisorLstatCase::FinalMissing, br#"{}"#);
+      pwrite_all_at(observation.descriptors[1].as_fd(), b"[", 0).unwrap();
+      assert_eq!(
+        arena_reconciliation_error_kind(awaiting),
+        io::ErrorKind::InvalidData,
+      );
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
+    }
+
+    #[test]
+    fn supervisor_candidate_arena_refuses_mutation_between_bounded_reads() {
+      let payload = br#"{"x":1}"#;
+      let (mut awaiting, temp, observation, _arena) =
+        run_awaiting_arena(SupervisorLstatCase::Existing, payload);
+      let clock = Arc::new(FirstPassArenaMutationClock {
+        before: awaiting
+          ._deadline
+          .work_instant
+          .checked_sub(Duration::from_millis(1))
+          .unwrap(),
+        arena: duplicate_cloexec(observation.descriptors[1].as_fd()),
+        offset: 5,
+        replacement: b'2',
+        fired: AtomicBool::new(false),
+      });
+      awaiting._deadline.replace_clock(clock.clone());
+      assert_eq!(
+        arena_reconciliation_error_kind(awaiting),
+        io::ErrorKind::InvalidData,
+      );
+      assert!(clock.fired.load(Ordering::SeqCst));
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
+    }
+
+    #[test]
+    fn supervisor_candidate_arena_deadline_and_drop_are_terminal_without_trace_or_cleanup_claim()
+     {
+      for checkpoint in [
+        SupervisorDeadlineCheckpoint::ArenaReadAttempt,
+        SupervisorDeadlineCheckpoint::ArenaReadComplete,
+        SupervisorDeadlineCheckpoint::ArenaFirstPassComplete,
+        SupervisorDeadlineCheckpoint::ArenaSecondPassComplete,
+        SupervisorDeadlineCheckpoint::ValidationComplete,
+      ] {
+        let (mut awaiting, temp, _observation, _arena) =
+          run_awaiting_arena(SupervisorLstatCase::FinalMissing, br#"{}"#);
+        let expiry = awaiting._deadline.work_instant;
+        let before = expiry.checked_sub(Duration::from_millis(1)).unwrap();
+        awaiting
+          ._deadline
+          .replace_clock(Arc::new(CheckpointExpiredClock {
+            before,
+            expiry,
+            checkpoint,
+          }));
+        assert_eq!(
+          arena_reconciliation_error_kind(awaiting),
+          io::ErrorKind::TimedOut,
+        );
+        assert!(!temp.path().join(ROOT_NAME).exists());
+        assert!(!temp.path().join(ARENA_NAME).exists());
+      }
+
+      let (awaiting, temp, _observation, _arena) =
+        run_awaiting_arena(SupervisorLstatCase::Existing, br#"{}"#);
+      let pre_trace = awaiting.reconcile_candidate_arena().unwrap();
+      assert!(super::super::SUPERVISED_CASES.is_empty());
+      assert_eq!(pre_trace._candidate_arena.payload_value, json!({}));
+      assert!(temp.path().join(ROOT_NAME).exists());
+      assert!(temp.path().join(ARENA_NAME).exists());
+      drop(pre_trace);
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
     }
 
     #[test]
