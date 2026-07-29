@@ -8,9 +8,9 @@ use crate::oden_capsec_filesystem_protocol::parse_reserved_request;
 const RESERVED_FLAG: &str = "--_oden-capsec-filesystem-supervise-v2";
 const RESERVED_PREFIX: &str = "--_oden-capsec-filesystem-supervise";
 
-// The supervisor table stays empty until a later checkpoint can capture the
-// exact parent terminal, reconcile exact candidate reap/lifetime facts, and
-// validate final cleanup without exposing candidate claims as authority.
+// The supervisor table stays empty until later checkpoints can reconcile the
+// candidate arena, validate final cleanup, and emit the parent-bound report
+// without exposing candidate or parent claims as authority.
 const SUPERVISED_CASES: &[(&str, &str)] = &[];
 
 // @ref LLP 0019#pre-promotion-conformance-candidate-execution [implements] —
@@ -106,6 +106,8 @@ mod topology {
     "oden/capsec-filesystem-candidate-request-frame/2";
   const CANDIDATE_RESPONSE_SCHEMA: &str =
     "oden/capsec-filesystem-candidate-response-frame/2";
+  const CANDIDATE_TERMINAL_SCHEMA: &str =
+    "oden/capsec-filesystem-candidate-terminal/2";
   const DESCRIPTOR_SLOTS_SCHEMA: &str =
     "oden/capsec-filesystem-descriptor-slots/2";
   const SUPERVISOR_REQUEST_DIGEST_DOMAIN: &str =
@@ -120,6 +122,8 @@ mod topology {
     "oden:capsec:filesystem-candidate-request-frame:2";
   const CANDIDATE_RESPONSE_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-candidate-response-frame:2";
+  const CANDIDATE_TERMINAL_DIGEST_DOMAIN: &str =
+    "oden:capsec:filesystem-candidate-terminal-frame:2";
   const OBSERVED_RESULT_DIGEST_DOMAIN: &str =
     "oden:capsec:filesystem-observed-result:2";
   const DELIVERY_FRAME_DIGEST_DOMAIN: &str =
@@ -257,6 +261,32 @@ mod topology {
     "faultObservationDigest",
     "noDescendantClaims",
     "rootDescriptorsDroppedClaim",
+  ];
+
+  const CANDIDATE_TERMINAL_FIELDS: &[&str] = &[
+    "schema",
+    "profile",
+    "runNonce",
+    "target",
+    "featureSet",
+    "parentStandaloneDigest",
+    "engineDigest",
+    "forkCommit",
+    "fixtureArtifactDigest",
+    "executionIdentityDigest",
+    "sourceClosureDigest",
+    "caseId",
+    "edgeId",
+    "requirementId",
+    "caseKind",
+    "candidateSpawnResultFrameDigest",
+    "candidatePid",
+    "candidatePgid",
+    "candidateStartIdentity",
+    "terminalObservationMonotonicNs",
+    "exitStatus",
+    "reaped",
+    "supervisorGroupLeaderStillOwned",
   ];
 
   const NO_DESCENDANT_CLAIM_FIELDS: &[&str] = &[
@@ -858,9 +888,9 @@ mod topology {
   }
 
   /// Opaque, non-cloneable cutoff after the supervisor has captured exactly
-  /// one candidate response and immediate FD3 EOF. It intentionally exposes no
-  /// method: every retained response field is still an unauthenticated
-  /// candidate claim, and FD4 terminal capture requires separate review.
+  /// one candidate response and immediate FD3 EOF. Its only transition
+  /// captures the exact parent terminal and immediate FD4 EOF; every retained
+  /// response field remains an unauthenticated candidate claim.
   ///
   /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
   /// [constrained-by] — Candidate response framing and internal consistency do
@@ -885,6 +915,44 @@ mod topology {
     _candidate_response: SupervisorCandidateResponseFacts,
     _candidate_response_eof_observed: bool,
     _candidate_peer_closed: bool,
+  }
+
+  struct SupervisorCandidateTerminalFacts {
+    raw_bytes: Vec<u8>,
+    value: Value,
+    frame_digest: String,
+    terminal_observation_monotonic_ns: String,
+  }
+
+  /// Opaque, non-cloneable cutoff after the supervisor has captured the exact
+  /// parent terminal, immediate FD4 EOF, and closed FD4. It intentionally
+  /// exposes no method: arena reconciliation, sandbox cleanup, report
+  /// generation, oracle comparison, and evidence remain separate transitions.
+  ///
+  /// @ref LLP 0019#parentsupervisor-transport-and-single-process-lifetime-cell
+  /// [constrained-by] — A syntactically and relationally closed parent terminal
+  /// is still not arena reconciliation, cleanup proof, evidence, or authority.
+  pub(crate) struct SupervisorAwaitingArenaReconciliation {
+    _resources: SupervisorLstatResources,
+    _identity: SupervisorGeneratedLstatIdentity,
+    _binding: SupervisorCaseBinding,
+    _entry: SupervisorEntryFacts,
+    _deadline: SupervisorDeadline,
+    _supervisor_request_raw_bytes: Vec<u8>,
+    _supervisor_request_frame_digest: String,
+    _spawn_request_raw_bytes: Vec<u8>,
+    _spawn_request_frame_digest: String,
+    _spawn_result: SupervisorSpawnResultFacts,
+    _candidate_request_raw_bytes: Vec<u8>,
+    _candidate_request_frame_digest: String,
+    _descriptor_slots_raw_bytes: Vec<u8>,
+    _descriptor_slots_digest: String,
+    _candidate_response: SupervisorCandidateResponseFacts,
+    _candidate_response_eof_observed: bool,
+    _candidate_peer_closed: bool,
+    _candidate_terminal: SupervisorCandidateTerminalFacts,
+    _parent_terminal_eof_observed: bool,
+    _fd4_closed: bool,
   }
 
   impl SupervisorAwaitingCandidateOutcome {
@@ -955,6 +1023,80 @@ mod topology {
         _candidate_response: candidate_response,
         _candidate_response_eof_observed: true,
         _candidate_peer_closed: true,
+      })
+    }
+  }
+
+  impl SupervisorAwaitingParentTerminal {
+    pub(crate) fn capture_parent_terminal(
+      self,
+    ) -> io::Result<SupervisorAwaitingArenaReconciliation> {
+      self
+        ._deadline
+        .check(SupervisorDeadlineCheckpoint::TransitionStart)?;
+      let packet = self._fd4.receive_one_canonical_jcs_frame(
+        FrameByteLimit::CONTROL,
+        0,
+        self._deadline.work_instant,
+      )?;
+      self._fd4.require_eof(self._deadline.work_instant)?;
+      self
+        ._deadline
+        .check(SupervisorDeadlineCheckpoint::TransportComplete)?;
+      let SupervisorAwaitingParentTerminal {
+        _fd4,
+        _resources,
+        _identity,
+        _binding,
+        _entry,
+        _deadline,
+        _supervisor_request_raw_bytes,
+        _supervisor_request_frame_digest,
+        _spawn_request_raw_bytes,
+        _spawn_request_frame_digest,
+        _spawn_result,
+        _candidate_request_raw_bytes,
+        _candidate_request_frame_digest,
+        _descriptor_slots_raw_bytes,
+        _descriptor_slots_digest,
+        _candidate_response,
+        _candidate_response_eof_observed,
+        _candidate_peer_closed,
+      } = self;
+      // The parent has shut down its sole write direction and EOF proved that
+      // no second terminal frame or late right exists. Close FD4 before
+      // interpreting any parent-controlled terminal field.
+      drop(_fd4);
+      let candidate_terminal = validate_candidate_terminal(
+        &packet.raw_bytes,
+        &packet.value,
+        &_identity,
+        &_binding,
+        &_spawn_result,
+        &_deadline,
+      )?;
+      _deadline.check(SupervisorDeadlineCheckpoint::ValidationComplete)?;
+      Ok(SupervisorAwaitingArenaReconciliation {
+        _resources,
+        _identity,
+        _binding,
+        _entry,
+        _deadline,
+        _supervisor_request_raw_bytes,
+        _supervisor_request_frame_digest,
+        _spawn_request_raw_bytes,
+        _spawn_request_frame_digest,
+        _spawn_result,
+        _candidate_request_raw_bytes,
+        _candidate_request_frame_digest,
+        _descriptor_slots_raw_bytes,
+        _descriptor_slots_digest,
+        _candidate_response,
+        _candidate_response_eof_observed,
+        _candidate_peer_closed,
+        _candidate_terminal: candidate_terminal,
+        _parent_terminal_eof_observed: true,
+        _fd4_closed: true,
       })
     }
   }
@@ -1962,6 +2104,65 @@ mod topology {
     session.send_candidate_spawn_request()?;
     session.receive_candidate_spawn_result()?;
     session.materialize_and_send_lstat_request()
+  }
+
+  fn validate_candidate_terminal(
+    raw_bytes: &[u8],
+    value: &Value,
+    identity: &SupervisorGeneratedLstatIdentity,
+    binding: &SupervisorCaseBinding,
+    spawn_result: &SupervisorSpawnResultFacts,
+    deadline: &SupervisorDeadline,
+  ) -> io::Result<SupervisorCandidateTerminalFacts> {
+    let object =
+      exact_object(value, CANDIDATE_TERMINAL_FIELDS, "candidate terminal")?;
+    require_text_eq(object, "schema", CANDIDATE_TERMINAL_SCHEMA)?;
+    binding.validate_common(object, identity)?;
+    require_text_eq(
+      object,
+      "candidateSpawnResultFrameDigest",
+      &spawn_result.frame_digest,
+    )?;
+    require_text_eq(object, "candidatePid", &spawn_result.candidate_pid)?;
+    require_text_eq(object, "candidatePgid", &spawn_result.candidate_pgid)?;
+    require_text_eq(
+      object,
+      "candidateStartIdentity",
+      &spawn_result.candidate_start_identity,
+    )?;
+    let terminal_observation_monotonic_ns =
+      require_positive_decimal(object, "terminalObservationMonotonicNs")?;
+    let terminal_ns = terminal_observation_monotonic_ns
+      .parse::<u64>()
+      .map_err(|_| {
+        invalid_data("candidate terminal monotonic observation overflowed")
+      })?;
+    if terminal_ns < deadline.receipt_ns
+      || terminal_ns > deadline.effective_work_ns
+    {
+      return Err(invalid_data(
+        "candidate terminal observation is outside the frozen work interval",
+      ));
+    }
+    require_u64_eq(object, "exitStatus", 0)?;
+    if object.get("reaped") != Some(&Value::Bool(true)) {
+      return Err(invalid_data("candidate terminal is not exactly reaped"));
+    }
+    if object.get("supervisorGroupLeaderStillOwned") != Some(&Value::Bool(true))
+    {
+      return Err(invalid_data(
+        "candidate terminal does not retain supervisor group ownership",
+      ));
+    }
+    Ok(SupervisorCandidateTerminalFacts {
+      raw_bytes: raw_bytes.to_vec(),
+      value: value.clone(),
+      frame_digest: raw_frame_digest(
+        CANDIDATE_TERMINAL_DIGEST_DOMAIN,
+        raw_bytes,
+      ),
+      terminal_observation_monotonic_ns,
+    })
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -3115,6 +3316,7 @@ mod topology {
       candidate_request: Value,
       descriptors: Vec<OwnedFd>,
       candidate_endpoint: FramedStreamEndpoint,
+      parent_control: FramedStreamEndpoint,
     }
 
     fn identity(case: SupervisorLstatCase) -> SupervisorGeneratedLstatIdentity {
@@ -3450,6 +3652,7 @@ mod topology {
           candidate_request: request.value,
           descriptors: request.descriptors,
           candidate_endpoint: candidate_child,
+          parent_control: fd4_parent,
         }
       })
     }
@@ -3656,6 +3859,80 @@ mod topology {
       raw_bytes
     }
 
+    fn run_awaiting_parent_terminal_for_target(
+      target: &str,
+      case: SupervisorLstatCase,
+    ) -> (
+      SupervisorAwaitingParentTerminal,
+      tempfile::TempDir,
+      PeerObservation,
+    ) {
+      let (outcome, temp, observation) = run_positive_for_target(target, case);
+      let response = response_value(&outcome, &observation);
+      send_response_and_eof(&observation.candidate_endpoint, &response);
+      let awaiting = outcome.capture_candidate_response().unwrap();
+      (awaiting, temp, observation)
+    }
+
+    fn run_awaiting_parent_terminal(
+      case: SupervisorLstatCase,
+    ) -> (
+      SupervisorAwaitingParentTerminal,
+      tempfile::TempDir,
+      PeerObservation,
+    ) {
+      run_awaiting_parent_terminal_for_target("aarch64-apple-darwin", case)
+    }
+
+    fn terminal_value(awaiting: &SupervisorAwaitingParentTerminal) -> Value {
+      let terminal_ns = MonotonicNs::now().unwrap().0;
+      assert!(terminal_ns >= awaiting._deadline.receipt_ns);
+      assert!(terminal_ns <= awaiting._deadline.effective_work_ns);
+      let mut object = Map::new();
+      object.insert("schema".into(), json!(CANDIDATE_TERMINAL_SCHEMA));
+      awaiting
+        ._binding
+        .insert_common(&mut object, &awaiting._identity);
+      object.insert(
+        "candidateSpawnResultFrameDigest".into(),
+        json!(awaiting._spawn_result.frame_digest),
+      );
+      object.insert(
+        "candidatePid".into(),
+        json!(awaiting._spawn_result.candidate_pid),
+      );
+      object.insert(
+        "candidatePgid".into(),
+        json!(awaiting._spawn_result.candidate_pgid),
+      );
+      object.insert(
+        "candidateStartIdentity".into(),
+        json!(awaiting._spawn_result.candidate_start_identity),
+      );
+      object.insert(
+        "terminalObservationMonotonicNs".into(),
+        json!(terminal_ns.to_string()),
+      );
+      object.insert("exitStatus".into(), json!(0));
+      object.insert("reaped".into(), json!(true));
+      object.insert("supervisorGroupLeaderStillOwned".into(), json!(true));
+      Value::Object(object)
+    }
+
+    fn send_terminal_and_eof(
+      endpoint: &FramedStreamEndpoint,
+      terminal: &Value,
+    ) -> Vec<u8> {
+      send_response_and_eof(endpoint, terminal)
+    }
+
+    fn assert_raw_fd_closed(raw_fd: RawFd) {
+      // SAFETY: F_GETFD only probes whether the captured descriptor number is
+      // still installed; it cannot mutate or adopt it.
+      assert_eq!(unsafe { libc::fcntl(raw_fd, libc::F_GETFD) }, -1);
+      assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF),);
+    }
+
     #[derive(Clone, Copy)]
     enum ResponseMutation {
       Schema,
@@ -3788,6 +4065,99 @@ mod topology {
       }
     }
 
+    #[derive(Clone, Copy)]
+    enum TerminalMutation {
+      Schema,
+      ExtraField,
+      Binding,
+      SpawnDigest,
+      CandidatePid,
+      CandidatePgid,
+      CandidateStartIdentity,
+      MissingExitStatus,
+      TimestampSyntax,
+      TimestampBeforeReceipt,
+      TimestampAfterWork,
+      ExitStatus,
+      Reaped,
+      SupervisorOwned,
+    }
+
+    fn mutate_terminal(
+      terminal: &mut Value,
+      awaiting: &SupervisorAwaitingParentTerminal,
+      mutation: TerminalMutation,
+    ) {
+      match mutation {
+        TerminalMutation::Schema => {
+          terminal["schema"] =
+            json!("oden/capsec-filesystem-candidate-terminal/1");
+        }
+        TerminalMutation::ExtraField => {
+          terminal["extra"] = json!(true);
+        }
+        TerminalMutation::Binding => {
+          terminal["runNonce"] = json!("run:alias");
+        }
+        TerminalMutation::SpawnDigest => {
+          terminal["candidateSpawnResultFrameDigest"] =
+            aliased_digest(&terminal["candidateSpawnResultFrameDigest"]);
+        }
+        TerminalMutation::CandidatePid => {
+          terminal["candidatePid"] = json!("103");
+        }
+        TerminalMutation::CandidatePgid => {
+          terminal["candidatePgid"] = json!("101");
+        }
+        TerminalMutation::CandidateStartIdentity => {
+          terminal["candidateStartIdentity"] = json!("candidate-start:alias");
+        }
+        TerminalMutation::MissingExitStatus => {
+          terminal.as_object_mut().unwrap().remove("exitStatus");
+        }
+        TerminalMutation::TimestampSyntax => {
+          terminal["terminalObservationMonotonicNs"] = json!("01");
+        }
+        TerminalMutation::TimestampBeforeReceipt => {
+          terminal["terminalObservationMonotonicNs"] =
+            json!(awaiting._deadline.receipt_ns.saturating_sub(1).to_string());
+        }
+        TerminalMutation::TimestampAfterWork => {
+          terminal["terminalObservationMonotonicNs"] = json!(
+            awaiting
+              ._deadline
+              .effective_work_ns
+              .checked_add(1)
+              .unwrap()
+              .to_string()
+          );
+        }
+        TerminalMutation::ExitStatus => {
+          terminal["exitStatus"] = json!(1);
+        }
+        TerminalMutation::Reaped => {
+          terminal["reaped"] = json!(false);
+        }
+        TerminalMutation::SupervisorOwned => {
+          terminal["supervisorGroupLeaderStillOwned"] = json!(false);
+        }
+      }
+    }
+
+    fn refusal_for_terminal_mutation(
+      mutation: TerminalMutation,
+    ) -> io::ErrorKind {
+      let (awaiting, _temp, observation) =
+        run_awaiting_parent_terminal(SupervisorLstatCase::Existing);
+      let mut terminal = terminal_value(&awaiting);
+      mutate_terminal(&mut terminal, &awaiting, mutation);
+      send_terminal_and_eof(&observation.parent_control, &terminal);
+      match awaiting.capture_parent_terminal() {
+        Ok(_) => panic!("mutated candidate terminal was accepted"),
+        Err(error) => error.kind(),
+      }
+    }
+
     fn assert_ordered_lstat_rights(
       observation: &PeerObservation,
       case: SupervisorLstatCase,
@@ -3830,6 +4200,213 @@ mod topology {
         )
         .unwrap();
       }
+    }
+
+    #[test]
+    fn supervisor_candidate_terminal_accepts_both_targets_after_response_eof_and_closes_fd4()
+     {
+      assert_eq!(CANDIDATE_TERMINAL_FIELDS.len(), 23);
+      for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
+        for case in [
+          SupervisorLstatCase::Existing,
+          SupervisorLstatCase::FinalMissing,
+        ] {
+          let (awaiting, _temp, observation) =
+            run_awaiting_parent_terminal_for_target(target, case);
+          let terminal = terminal_value(&awaiting);
+          let fd4_raw = awaiting._fd4.as_fd().as_raw_fd();
+          send_terminal_and_eof(&observation.parent_control, &terminal);
+          let reconciliation = awaiting.capture_parent_terminal().unwrap();
+          assert!(reconciliation._candidate_response_eof_observed);
+          assert!(reconciliation._candidate_peer_closed);
+          assert!(reconciliation._parent_terminal_eof_observed);
+          assert!(reconciliation._fd4_closed);
+          assert_eq!(reconciliation._identity.target, target);
+          assert_eq!(reconciliation._identity.case, case);
+          assert_raw_fd_closed(fd4_raw);
+        }
+      }
+    }
+
+    #[test]
+    fn supervisor_candidate_terminal_retains_exact_raw_digest_and_pre_cleanup_state()
+     {
+      let (awaiting, temp, observation) =
+        run_awaiting_parent_terminal(SupervisorLstatCase::Existing);
+      let response_raw = awaiting._candidate_response.raw_bytes.clone();
+      let terminal = terminal_value(&awaiting);
+      let terminal_ns = terminal["terminalObservationMonotonicNs"]
+        .as_str()
+        .unwrap()
+        .to_string();
+      let raw = send_terminal_and_eof(&observation.parent_control, &terminal);
+      let reconciliation = awaiting.capture_parent_terminal().unwrap();
+      assert_eq!(reconciliation._candidate_terminal.raw_bytes, raw);
+      assert_eq!(reconciliation._candidate_terminal.value, terminal);
+      assert_eq!(
+        reconciliation._candidate_terminal.frame_digest,
+        raw_frame_digest(CANDIDATE_TERMINAL_DIGEST_DOMAIN, &raw),
+      );
+      assert_eq!(
+        reconciliation
+          ._candidate_terminal
+          .terminal_observation_monotonic_ns,
+        terminal_ns,
+      );
+      assert_eq!(reconciliation._candidate_response.raw_bytes, response_raw,);
+      assert!(temp.path().join(ROOT_NAME).exists());
+      assert!(temp.path().join(ARENA_NAME).exists());
+      drop(reconciliation);
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
+    }
+
+    #[test]
+    fn supervisor_candidate_terminal_refuses_binding_spawn_digest_and_candidate_identity_aliases()
+     {
+      for mutation in [
+        TerminalMutation::Schema,
+        TerminalMutation::ExtraField,
+        TerminalMutation::Binding,
+        TerminalMutation::SpawnDigest,
+        TerminalMutation::CandidatePid,
+        TerminalMutation::CandidatePgid,
+        TerminalMutation::CandidateStartIdentity,
+        TerminalMutation::MissingExitStatus,
+      ] {
+        assert_eq!(
+          refusal_for_terminal_mutation(mutation),
+          io::ErrorKind::InvalidData,
+        );
+      }
+    }
+
+    #[test]
+    fn supervisor_candidate_terminal_refuses_terminal_fact_and_monotonic_aliases()
+     {
+      for mutation in [
+        TerminalMutation::TimestampSyntax,
+        TerminalMutation::TimestampBeforeReceipt,
+        TerminalMutation::TimestampAfterWork,
+        TerminalMutation::ExitStatus,
+        TerminalMutation::Reaped,
+        TerminalMutation::SupervisorOwned,
+      ] {
+        assert_eq!(
+          refusal_for_terminal_mutation(mutation),
+          io::ErrorKind::InvalidData,
+        );
+      }
+
+      let (awaiting, _temp, observation) =
+        run_awaiting_parent_terminal(SupervisorLstatCase::FinalMissing);
+      let mut terminal = terminal_value(&awaiting);
+      terminal["terminalObservationMonotonicNs"] =
+        json!(awaiting._deadline.effective_work_ns.to_string());
+      send_terminal_and_eof(&observation.parent_control, &terminal);
+      let reconciliation = awaiting.capture_parent_terminal().unwrap();
+      assert_eq!(
+        reconciliation
+          ._candidate_terminal
+          .terminal_observation_monotonic_ns,
+        reconciliation._deadline.effective_work_text(),
+      );
+    }
+
+    #[test]
+    fn supervisor_candidate_terminal_refuses_rights_trailing_bytes_and_missing_eof()
+     {
+      let (awaiting, _temp, observation) =
+        run_awaiting_parent_terminal(SupervisorLstatCase::Existing);
+      let terminal = terminal_value(&awaiting);
+      let (read_end, _write_end) = pipe_pair().unwrap();
+      send_response(
+        &observation.parent_control,
+        &terminal,
+        &[read_end.as_fd()],
+      );
+      observation
+        .parent_control
+        .shutdown_write(Instant::now() + Duration::from_secs(3))
+        .unwrap();
+      assert_eq!(
+        match awaiting.capture_parent_terminal() {
+          Ok(_) => panic!("candidate terminal with a right was accepted"),
+          Err(error) => error.kind(),
+        },
+        io::ErrorKind::InvalidData,
+      );
+
+      let (awaiting, _temp, observation) =
+        run_awaiting_parent_terminal(SupervisorLstatCase::FinalMissing);
+      let terminal = terminal_value(&awaiting);
+      send_response(&observation.parent_control, &terminal, &[]);
+      send_response(
+        &observation.parent_control,
+        &json!({"trailing": true}),
+        &[],
+      );
+      observation
+        .parent_control
+        .shutdown_write(Instant::now() + Duration::from_secs(3))
+        .unwrap();
+      assert_eq!(
+        match awaiting.capture_parent_terminal() {
+          Ok(_) => {
+            panic!("candidate terminal with trailing frame bytes was accepted")
+          }
+          Err(error) => error.kind(),
+        },
+        io::ErrorKind::InvalidData,
+      );
+
+      let (mut awaiting, _temp, observation) =
+        run_awaiting_parent_terminal(SupervisorLstatCase::Existing);
+      let terminal = terminal_value(&awaiting);
+      send_response(&observation.parent_control, &terminal, &[]);
+      let missing_eof_deadline = Instant::now() + Duration::from_millis(50);
+      awaiting._deadline.work_instant = missing_eof_deadline;
+      awaiting._deadline.replace_clock(Arc::new(ExpiredClock {
+        now: missing_eof_deadline
+          .checked_sub(Duration::from_millis(1))
+          .unwrap(),
+      }));
+      assert_eq!(
+        match awaiting.capture_parent_terminal() {
+          Ok(_) => panic!("candidate terminal without FD4 EOF was accepted"),
+          Err(error) => error.kind(),
+        },
+        io::ErrorKind::TimedOut,
+      );
+    }
+
+    #[test]
+    fn supervisor_candidate_terminal_deadline_and_drop_are_terminal_without_cleanup_claim()
+     {
+      let (mut awaiting, temp, observation) =
+        run_awaiting_parent_terminal(SupervisorLstatCase::FinalMissing);
+      let terminal = terminal_value(&awaiting);
+      let fd4_raw = awaiting._fd4.as_fd().as_raw_fd();
+      let expiry = awaiting._deadline.work_instant;
+      let before = expiry.checked_sub(Duration::from_millis(1)).unwrap();
+      awaiting
+        ._deadline
+        .replace_clock(Arc::new(CheckpointExpiredClock {
+          before,
+          expiry,
+          checkpoint: SupervisorDeadlineCheckpoint::ValidationComplete,
+        }));
+      send_terminal_and_eof(&observation.parent_control, &terminal);
+      assert_eq!(
+        match awaiting.capture_parent_terminal() {
+          Ok(_) => panic!("post-validation deadline expiry was accepted"),
+          Err(error) => error.kind(),
+        },
+        io::ErrorKind::TimedOut,
+      );
+      assert_raw_fd_closed(fd4_raw);
+      assert!(!temp.path().join(ROOT_NAME).exists());
+      assert!(!temp.path().join(ARENA_NAME).exists());
     }
 
     #[test]
@@ -4326,6 +4903,22 @@ mod topology {
     impl SupervisorClock for ExpiredClock {
       fn now(&self, _checkpoint: SupervisorDeadlineCheckpoint) -> Instant {
         self.now
+      }
+    }
+
+    struct CheckpointExpiredClock {
+      before: Instant,
+      expiry: Instant,
+      checkpoint: SupervisorDeadlineCheckpoint,
+    }
+
+    impl SupervisorClock for CheckpointExpiredClock {
+      fn now(&self, checkpoint: SupervisorDeadlineCheckpoint) -> Instant {
+        if checkpoint == self.checkpoint {
+          self.expiry
+        } else {
+          self.before
+        }
       }
     }
 
