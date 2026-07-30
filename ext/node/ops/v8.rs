@@ -4693,13 +4693,15 @@ mod native_capsec_tests {
       // @ref LLP 0019#runtime-and-memory-inspection [tests] -- Execute the
       // actual ext:deno_node/diagnostics_channel.js public facade. The
       // shared test guard records its exact deny-only runtime:inspect tuple;
-      // closure-private state is observed only through prototypes, callback
-      // delivery, store execution, and exact root teardown. Internal
-      // channel facades remain unreachable. These rows deliberately use
-      // primitive exact string names: they establish guard precedence over
-      // authority-bearing state/work after required target derivation, not
-      // malformed-name or user-coercion behavior. Results remain
-      // development-only, unauthenticated candidate evidence.
+      // closure-private state is observed only through public behavior and
+      // exact root teardown. Internal channel facades remain unreachable.
+      // These rows deliberately use primitive exact string names: they
+      // establish guard precedence over authority-bearing state/work after
+      // required target derivation, not malformed-name or user-coercion
+      // behavior.
+      // @ref LLP 0019#pre-promotion-conformance-candidate-execution
+      // [constrained-by] -- Results remain development-only candidate output,
+      // not a receipt, evidence artifact, external report, or promotion input.
       run_rev2_public_diagnostics_fixture_mode(
         root, operation, case_kind, mode,
       );
