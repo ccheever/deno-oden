@@ -54,11 +54,13 @@ enum FixtureBranch {
 }
 
 impl FixtureBranch {
-  fn from_case_kind(case_kind: &str) -> Self {
+  fn from_case(operation: &str, case_kind: &str) -> Self {
     if matches!(
       case_kind,
       "staged-barrier:cancellation" | "staged-barrier:cleanup"
-    ) {
+    ) || (matches!(operation, "query" | "request")
+      && case_kind == "staged-barrier:revocation")
+    {
       Self::Read
     } else if case_kind.starts_with("alternative-branch:effect-10-run:") {
       Self::Run
@@ -96,6 +98,7 @@ impl FixtureBranch {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FixtureAuthorityPlan {
+  CeilingOnly,
   CrossAction,
   Floor,
   FloorAndPrincipalDenial,
@@ -106,8 +109,13 @@ enum FixtureAuthorityPlan {
   WrongPrincipal,
 }
 
-fn authority_plan(case_kind: &str) -> FixtureAuthorityPlan {
-  if case_kind.ends_with(":denied") || case_kind == "authorable-negative" {
+fn authority_plan(operation: &str, case_kind: &str) -> FixtureAuthorityPlan {
+  if matches!(operation, "query" | "request")
+    && case_kind == "staged-barrier:revocation"
+  {
+    FixtureAuthorityPlan::CeilingOnly
+  } else if case_kind.ends_with(":denied") || case_kind == "authorable-negative"
+  {
     FixtureAuthorityPlan::FloorAndPrincipalDenial
   } else if matches!(
     case_kind,
@@ -415,9 +423,21 @@ impl OdenRev2PermissionFixtureContext {
     self.fixture_call.is_claimed()
   }
 
-  pub fn exact_selected_ceiling_and_root_binding_counts(
+  pub fn exact_selected_floor_ceiling_and_root_binding_counts(
     &self,
-  ) -> (usize, usize) {
+  ) -> (usize, usize, usize) {
+    let floor_count = self
+      .authority
+      .static_policy()
+      .principals()
+      .iter()
+      .filter(|principal| principal.principal() == &self.overlay_owner)
+      .flat_map(|principal| principal.floor())
+      .filter(|row| {
+        row.source_id() == "floor:fixture:selected"
+          && row.selector() == &self.selected_policy_positive
+      })
+      .count();
     let ceiling_count = self
       .authority
       .static_policy()
@@ -437,7 +457,7 @@ impl OdenRev2PermissionFixtureContext {
       .iter()
       .filter(|binding| binding.source_id() == "ceiling:fixture:selected")
       .count();
-    (ceiling_count, root_binding_count)
+    (floor_count, ceiling_count, root_binding_count)
   }
 }
 
@@ -493,7 +513,9 @@ pub fn oden_capsec_rev2_permission_fixture_context(
   {
     return Err("fixture operation or mode is not closed".to_string());
   }
-  let branch = FixtureBranch::from_case_kind(case_kind);
+  let effect_bound_revocation = matches!(operation, "query" | "request")
+    && case_kind == "staged-barrier:revocation";
+  let branch = FixtureBranch::from_case(operation, case_kind);
   if operation == "request"
     && matches!(branch, FixtureBranch::Run | FixtureBranch::Ffi)
   {
@@ -501,13 +523,6 @@ pub fn oden_capsec_rev2_permission_fixture_context(
       "static-only request branch is not a supported case".to_string(),
     );
   }
-  if matches!(
-    (operation, case_kind),
-    ("query" | "request", "staged-barrier:revocation")
-  ) {
-    return Err("unsupported staged permission fixture case".to_string());
-  }
-
   std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
   use std::os::unix::fs::PermissionsExt;
   std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
@@ -519,7 +534,7 @@ pub fn oden_capsec_rev2_permission_fixture_context(
   std::fs::write(root.join("libfixture.bin"), b"fixture library image")
     .map_err(|error| error.to_string())?;
   let root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
-  let plan = authority_plan(case_kind);
+  let plan = authority_plan(operation, case_kind);
   let overlay_owner = match plan {
     FixtureAuthorityPlan::NoUser => {
       principal(PrincipalKind::NoUser, "no-user:dynamic-permission-fixture")
@@ -611,6 +626,7 @@ pub fn oden_capsec_rev2_permission_fixture_context(
   });
 
   let (floor, denials) = match plan {
+    FixtureAuthorityPlan::CeilingOnly => (Vec::new(), Vec::new()),
     FixtureAuthorityPlan::CrossAction => (vec![env_floor], Vec::new()),
     FixtureAuthorityPlan::Quarantine => (Vec::new(), Vec::new()),
     FixtureAuthorityPlan::FloorAndPrincipalDenial => {
@@ -658,7 +674,9 @@ pub fn oden_capsec_rev2_permission_fixture_context(
   let mut root_source_ids = Vec::new();
   if !matches!(
     plan,
-    FixtureAuthorityPlan::CrossAction | FixtureAuthorityPlan::Quarantine
+    FixtureAuthorityPlan::CeilingOnly
+      | FixtureAuthorityPlan::CrossAction
+      | FixtureAuthorityPlan::Quarantine
   ) {
     root_source_ids.push("floor:fixture:selected");
   }
@@ -668,7 +686,7 @@ pub fn oden_capsec_rev2_permission_fixture_context(
   if plan == FixtureAuthorityPlan::FloorAndProcessDenial {
     root_source_ids.push("process-deny:fixture:selected");
   }
-  if revoke_cancellation {
+  if revoke_cancellation || effect_bound_revocation {
     root_source_ids.push("ceiling:fixture:selected");
   }
   let mut root_bindings =

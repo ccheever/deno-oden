@@ -516,7 +516,7 @@ mod native_capsec_tests {
   const REPORT_PREFIX: &str = "ODEN_REV2_DYNAMIC_PERMISSION_FIXTURE_REPORT ";
   const MODES: [&str; 3] = ["permissive", "audit", "enforce"];
 
-  const QUERY_CASES: [&str; 23] = [
+  const QUERY_CASES: [&str; 24] = [
     "alternative-branch:effect-10-run:run:authorized",
     "alternative-branch:effect-10-run:run:denied",
     "alternative-branch:effect-11-sys:read:authorized",
@@ -540,8 +540,9 @@ mod native_capsec_tests {
     "staged-barrier:authorization",
     "staged-barrier:cancellation",
     "staged-barrier:cleanup",
+    "staged-barrier:revocation",
   ];
-  const REQUEST_CASES: [&str; 19] = [
+  const REQUEST_CASES: [&str; 20] = [
     "alternative-branch:effect-11-sys:read:authorized",
     "alternative-branch:effect-11-sys:read:denied",
     "alternative-branch:effect-4-fs:read:authorized",
@@ -561,6 +562,7 @@ mod native_capsec_tests {
     "staged-barrier:authorization",
     "staged-barrier:cancellation",
     "staged-barrier:cleanup",
+    "staged-barrier:revocation",
   ];
   const REVOKE_CASES: [&str; 24] = [
     "alternative-branch:effect-10-run:run:authorized",
@@ -722,6 +724,11 @@ mod native_capsec_tests {
     )
   }
 
+  fn is_effect_bound_revocation(operation: &str, case_kind: &str) -> bool {
+    matches!(operation, "query" | "request")
+      && case_kind == "staged-barrier:revocation"
+  }
+
   fn has_mode_fallback(case_kind: &str) -> bool {
     matches!(
       case_kind,
@@ -750,6 +757,10 @@ mod native_capsec_tests {
       && operation == "request"
     {
       "denied"
+    } else if is_effect_bound_revocation(operation, case_kind)
+      && operation == "request"
+    {
+      "denied"
     } else if case_kind == "alternative-no-unselected-branch-commit"
       || case_kind == "staged-barrier:revocation"
     {
@@ -773,6 +784,11 @@ mod native_capsec_tests {
       "malformed-resource-refusal" => "present-null-required-sys-kind",
       "alternative-no-unselected-branch-commit" => {
         "exact-selected-and-unrelated-session-revocations-plus-ceiling"
+      }
+      "staged-barrier:revocation"
+        if is_effect_bound_revocation(operation, case_kind) =>
+      {
+        "zero-static-floor-plus-one-exact-ceiling-root-path-fact-session-positive"
       }
       "staged-barrier:revocation" => "one-exact-session-positive-plus-ceiling",
       "staged-barrier:cancellation" if operation == "revoke" => {
@@ -860,6 +876,11 @@ mod native_capsec_tests {
         "staged-barrier:cleanup" => {
           "normal-cleanup-releases-retained-fs-descriptor-ownership-before-v8-delivery"
         }
+        "staged-barrier:revocation"
+          if is_effect_bound_revocation(operation, case_kind) =>
+        {
+          "effect-bound-revocation-stales-batch-and-replays-from-initial"
+        }
         "staged-barrier:revocation" => {
           "revoke-publication-rechecks-proposed-negative-before-result"
         }
@@ -904,10 +925,13 @@ mod native_capsec_tests {
       "actors-validated".to_string(),
       "host-effect-retained".to_string(),
     ]);
-    let lifecycle = matches!(
-      case_kind,
-      "staged-barrier:cancellation" | "staged-barrier:cleanup"
-    );
+    let effect_bound_revocation =
+      is_effect_bound_revocation(operation, case_kind);
+    let lifecycle = effect_bound_revocation
+      || matches!(
+        case_kind,
+        "staged-barrier:cancellation" | "staged-barrier:cleanup"
+      );
     if lifecycle {
       trace.push(format!(
         "host-descriptors-retained:{}",
@@ -943,6 +967,40 @@ mod native_capsec_tests {
         "host-effect-released".to_string(),
         "cleanup-completed".to_string(),
         "op-returned:refused".to_string(),
+      ]);
+      return trace;
+    }
+    if effect_bound_revocation {
+      if operation == "request" {
+        trace.extend([
+          "phase-entered:already-granted-check".to_string(),
+          "phase-completed:already-granted-check".to_string(),
+        ]);
+      }
+      trace.extend([
+        "authority-revocation-published".to_string(),
+        "phase-entered:result-production".to_string(),
+        "stale-authority-view-observed".to_string(),
+        "stale-authority-batch-discarded".to_string(),
+        "fresh-authority-batch-replay-captured".to_string(),
+        "phase-entered:initial-query-or-request".to_string(),
+        "phase-completed:initial-query-or-request".to_string(),
+      ]);
+      if operation == "request" {
+        trace.extend([
+          "phase-entered:already-granted-check".to_string(),
+          "phase-completed:already-granted-check".to_string(),
+        ]);
+      }
+      trace.extend([
+        "phase-entered:result-production".to_string(),
+        "phase-completed:result-production".to_string(),
+        format!(
+          "host-descriptors-released:{}",
+          lifecycle_descriptor_count(operation, case_kind)
+        ),
+        "host-effect-released".to_string(),
+        format!("op-returned:{state}"),
       ]);
       return trace;
     }
@@ -1086,9 +1144,15 @@ mod native_capsec_tests {
       .unwrap();
     if operation == "revoke" && case_kind == "staged-barrier:cancellation" {
       assert_eq!(
-        fixture.exact_selected_ceiling_and_root_binding_counts(),
-        (1, 1),
+        fixture.exact_selected_floor_ceiling_and_root_binding_counts(),
+        (1, 1, 1),
         "revoke lifecycle baseline lacks its exact authenticated path ceiling"
+      );
+    } else if is_effect_bound_revocation(operation, case_kind) {
+      assert_eq!(
+        fixture.exact_selected_floor_ceiling_and_root_binding_counts(),
+        (0, 1, 1),
+        "effect-bound revocation baseline must have zero static floor and one exact authenticated path ceiling"
       );
     }
     if case_kind == "alternative-no-unselected-branch-commit" {
@@ -1128,10 +1192,11 @@ mod native_capsec_tests {
       active_retained_descriptors, 0,
       "retained descriptor ownership leaked"
     );
-    let lifecycle = matches!(
-      case_kind,
-      "staged-barrier:cancellation" | "staged-barrier:cleanup"
-    );
+    let lifecycle = is_effect_bound_revocation(operation, case_kind)
+      || matches!(
+        case_kind,
+        "staged-barrier:cancellation" | "staged-barrier:cleanup"
+      );
     assert_eq!(
       retained_descriptor_count,
       if lifecycle {
@@ -1215,21 +1280,21 @@ mod native_capsec_tests {
     let revoke_mutation = operation == "revoke"
       && !is_refused(case_kind)
       && case_kind != "alternative-no-unselected-branch-commit";
+    let revocation_mutation =
+      revoke_mutation || is_effect_bound_revocation(operation, case_kind);
     let expected_generation = GenerationDelta {
-      negative: i64::from(revoke_mutation),
+      negative: i64::from(revocation_mutation),
       policy: 0,
-      revocation: i64::from(revoke_mutation),
-      session: i64::from(revoke_mutation),
+      revocation: i64::from(revocation_mutation),
+      session: i64::from(revocation_mutation),
     };
     let expected_rows = RowDelta {
-      session_positive: if operation == "revoke"
-        && case_kind == "staged-barrier:revocation"
-      {
+      session_positive: if case_kind == "staged-barrier:revocation" {
         -1
       } else {
         0
       },
-      session_revocation: if revoke_mutation {
+      session_revocation: if revocation_mutation {
         if case_kind == "authorable-wrong-principal-denial" {
           2
         } else {
@@ -1327,26 +1392,26 @@ mod native_capsec_tests {
         exact_set(&after.session_revocation_row_ids),
         "selected or unrelated revocation identity changed"
       );
-    } else if revoke_mutation {
+    } else if revocation_mutation {
       let expected_selected_revocations =
         usize::try_from(expected_rows.session_revocation).unwrap();
       assert!(before.selected_session_revocation_row_ids.is_empty());
       assert_eq!(
         after.selected_session_revocation_row_ids.len(),
         expected_selected_revocations,
-        "revoke did not publish every and only exact selected principal selector"
+        "revocation did not publish every and only exact selected principal selector"
       );
       assert_eq!(
         after.selected_session_revocation_row_ids,
         after.expected_selected_session_revocation_row_ids,
-        "revoke row IDs are not derived from the exact runtime selector, owner, actors, and snapshot"
+        "revocation row IDs are not derived from the exact runtime selector, owner, actors, and snapshot"
       );
       assert!(before.unrelated_session_revocation_row_ids.is_empty());
       assert!(after.unrelated_session_revocation_row_ids.is_empty());
       assert_eq!(
         after.session_revocation_row_ids,
         after.selected_session_revocation_row_ids,
-        "revoke published a non-selected revocation"
+        "revocation published a non-selected row"
       );
       if case_kind == "staged-barrier:revocation" {
         assert_eq!(before.selected_session_positive_row_ids.len(), 1);
@@ -1365,7 +1430,7 @@ mod native_capsec_tests {
         assert!(before.selected_session_positive_row_ids.is_empty());
         assert!(after.selected_session_positive_row_ids.is_empty());
       }
-    } else if !revoke_mutation {
+    } else if !revocation_mutation {
       assert_eq!(
         exact_set(&before.session_positive_row_ids),
         exact_set(&after.session_positive_row_ids)

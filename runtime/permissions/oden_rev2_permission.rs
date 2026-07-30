@@ -289,6 +289,26 @@ impl From<OdenRev2PermissionOperation> for PermissionOperation {
 enum PermissionFixtureLifecyclePlan {
   Cancellation,
   Cleanup,
+  Revocation,
+}
+
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+fn permission_fixture_lifecycle_plan(
+  operation: OdenRev2PermissionOperation,
+  case_kind: &str,
+) -> Option<PermissionFixtureLifecyclePlan> {
+  match case_kind {
+    "staged-barrier:cancellation" => {
+      Some(PermissionFixtureLifecyclePlan::Cancellation)
+    }
+    "staged-barrier:cleanup" => Some(PermissionFixtureLifecyclePlan::Cleanup),
+    "staged-barrier:revocation"
+      if operation != OdenRev2PermissionOperation::Revoke =>
+    {
+      Some(PermissionFixtureLifecyclePlan::Revocation)
+    }
+    _ => None,
+  }
 }
 
 /// One opaque, one-shot call binding for the debug-only registered-op fixture.
@@ -314,13 +334,8 @@ impl OdenRev2PermissionFixtureCall {
     operation: OdenRev2PermissionOperation,
     case_kind: &str,
   ) -> Self {
-    let lifecycle_plan = match case_kind {
-      "staged-barrier:cancellation" => {
-        Some(PermissionFixtureLifecyclePlan::Cancellation)
-      }
-      "staged-barrier:cleanup" => Some(PermissionFixtureLifecyclePlan::Cleanup),
-      _ => None,
-    };
+    let lifecycle_plan =
+      permission_fixture_lifecycle_plan(operation, case_kind);
     let mode = authority.mode();
     Self {
       authority,
@@ -338,13 +353,8 @@ impl OdenRev2PermissionFixtureCall {
     operation: OdenRev2PermissionOperation,
   ) -> Result<Option<PermissionFixtureLifecyclePlan>, OdenRev2PermissionError>
   {
-    let expected_plan = match self.case_kind.as_str() {
-      "staged-barrier:cancellation" => {
-        Some(PermissionFixtureLifecyclePlan::Cancellation)
-      }
-      "staged-barrier:cleanup" => Some(PermissionFixtureLifecyclePlan::Cleanup),
-      _ => None,
-    };
+    let expected_plan =
+      permission_fixture_lifecycle_plan(operation, &self.case_kind);
     if !std::ptr::eq(self.authority.as_ref(), context)
       || self.operation != operation
       || self.mode != context.mode()
@@ -545,6 +555,62 @@ fn evaluate_phase<'batch>(
   result
 }
 
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+// @ref LLP 0019#typed-permission-batches [tests] -- The fixture publishes one
+// real session revocation, requires the old generation-bound batch to refuse,
+// and replays only from a fresh host-captured sequence.
+fn publish_permission_fixture_revocation(
+  context: &OdenRev2RuntimeAuthorityContext,
+  view: &RuntimeAuthorityReadView,
+  actors: &VerifiedPermissionActorSet,
+  overlay_owner: &crate::rev2::PrincipalRef,
+  effect: &NormalizedPermissionEffect,
+  path_binding: Option<&PathBindingInput>,
+) -> Result<(), OdenRev2PermissionError> {
+  let [principal] = actors.constrained_principals() else {
+    return Err(OdenRev2PermissionError::Protocol(
+      "OD-CAP-REV2-FIXTURE-REVOCATION-ACTOR".to_string(),
+    ));
+  };
+  if principal != overlay_owner {
+    return Err(OdenRev2PermissionError::Protocol(
+      "OD-CAP-REV2-FIXTURE-REVOCATION-OWNER".to_string(),
+    ));
+  }
+  let path_fact = path_binding
+    .map(|binding| {
+      AuthorityPathFact::capture_verified(
+        binding,
+        effect.selector(),
+        &effect.canonical_effect().occurrence,
+      )
+    })
+    .transpose()
+    .map_err(|error| OdenRev2PermissionError::Context(error.to_string()))?;
+  let mut revocation_selector = effect.selector().clone();
+  revocation_selector.principal = Some(principal.clone());
+  revocation_selector.projection_id =
+    effect.canonical_effect().projection_id.clone();
+  let mut transaction = context
+    .authority_state()
+    .begin_transaction_from(view)
+    .map_err(|error| OdenRev2PermissionError::Context(error.to_string()))?;
+  transaction
+    .upsert_session_revocation(
+      overlay_owner,
+      principal,
+      &revocation_selector,
+      path_fact.as_ref(),
+    )
+    .map_err(|error| OdenRev2PermissionError::Context(error.to_string()))?;
+  context
+    .authority_state()
+    .commit_if(transaction, |_| Ok(()))
+    .map_err(|error| OdenRev2PermissionError::Context(error.to_string()))?;
+  permission_fixture_trace("authority-revocation-published");
+  Ok(())
+}
+
 fn permission_effect_result(
   core: &Rev2Core,
   policy: &DecisionPolicyInput,
@@ -743,23 +809,106 @@ fn evaluate_singleton_permission(
     selector,
     canonical_effect,
   )?;
+  let capture_batch =
+    |view: &RuntimeAuthorityReadView,
+     path_binding: Option<&PathBindingInput>| {
+      let sequence = context
+        .next_permission_batch_sequence()
+        .map_err(OdenRev2PermissionError::Context)?;
+      NormalizedPermissionBatch::capture_host_with_path_bindings(
+        context.authority_state(),
+        view,
+        sequence,
+        operation,
+        &generated,
+        &actors,
+        std::slice::from_ref(&effect),
+        &[path_binding],
+      )
+      .map_err(OdenRev2PermissionError::from)
+    };
+  #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+  let stale_batch_sequence = if fixture_lifecycle_plan
+    == Some(PermissionFixtureLifecyclePlan::Revocation)
+  {
+    let stale_view = context
+      .authority_state()
+      .read_view()
+      .map_err(|error| OdenRev2PermissionError::Context(error.to_string()))?;
+    let stale_batch =
+      capture_batch(&stale_view, host_effect.session_path_binding.as_ref())?;
+    let stale_batch_sequence = stale_batch.batch_sequence();
+    let stale_initial = evaluate_phase(
+      context,
+      &stale_batch,
+      &stale_view,
+      &overlay_owner,
+      &host_effect.path_bindings,
+      PermissionNegativeReentryPhase::InitialQueryOrRequest,
+      PermissionEvaluationView::Current,
+    )?;
+    if operation == PermissionOperation::Request {
+      let stale_already_granted = evaluate_phase(
+        context,
+        &stale_batch,
+        &stale_view,
+        &overlay_owner,
+        &host_effect.path_bindings,
+        PermissionNegativeReentryPhase::AlreadyGrantedCheck,
+        PermissionEvaluationView::Current,
+      )?;
+      drop(stale_already_granted);
+    }
+    drop(stale_initial);
+    publish_permission_fixture_revocation(
+      context,
+      &stale_view,
+      &actors,
+      &overlay_owner,
+      &effect,
+      host_effect.session_path_binding.as_ref(),
+    )?;
+    match evaluate_phase(
+      context,
+      &stale_batch,
+      &stale_view,
+      &overlay_owner,
+      &host_effect.path_bindings,
+      PermissionNegativeReentryPhase::ResultProduction,
+      PermissionEvaluationView::Current,
+    ) {
+      Err(OdenRev2PermissionError::Protocol(message))
+        if message
+          == PermissionProtocolError::StaleAuthorityView.to_string() =>
+      {
+        permission_fixture_trace("stale-authority-view-observed");
+      }
+      Err(error) => return Err(error),
+      Ok(_) => {
+        return Err(OdenRev2PermissionError::Protocol(
+          "OD-CAP-REV2-FIXTURE-OLD-BATCH-ACCEPTED".to_string(),
+        ));
+      }
+    }
+    permission_fixture_trace("stale-authority-batch-discarded");
+    Some(stale_batch_sequence)
+  } else {
+    None
+  };
   let view = context
     .authority_state()
     .read_view()
     .map_err(|error| OdenRev2PermissionError::Context(error.to_string()))?;
-  let sequence = context
-    .next_permission_batch_sequence()
-    .map_err(OdenRev2PermissionError::Context)?;
-  let batch = NormalizedPermissionBatch::capture_host_with_path_bindings(
-    context.authority_state(),
-    &view,
-    sequence,
-    operation,
-    &generated,
-    &actors,
-    std::slice::from_ref(&effect),
-    &[host_effect.session_path_binding.as_ref()],
-  )?;
+  let batch = capture_batch(&view, host_effect.session_path_binding.as_ref())?;
+  #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+  if let Some(stale_batch_sequence) = stale_batch_sequence {
+    if stale_batch_sequence.checked_add(1) != Some(batch.batch_sequence()) {
+      return Err(OdenRev2PermissionError::Protocol(
+        "OD-CAP-REV2-FIXTURE-BATCH-SEQUENCE".to_string(),
+      ));
+    }
+    permission_fixture_trace("fresh-authority-batch-replay-captured");
+  }
 
   let initial = evaluate_phase(
     context,
