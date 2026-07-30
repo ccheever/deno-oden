@@ -2029,6 +2029,9 @@ impl OdenRev2ArmedContext {
       discovery,
       interaction,
     });
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    crate::oden_rev2_protected_stream_fixture::
+      oden_capsec_rev2_protected_stream_fixture_record_event("stage-bound");
     Ok(())
   }
 
@@ -2037,6 +2040,11 @@ impl OdenRev2ArmedContext {
     target: &str,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    crate::oden_rev2_protected_stream_fixture::
+      oden_capsec_rev2_protected_stream_fixture_record_event(
+        "native-stage-consume-entered",
+      );
     let Some(bound) = self.protected_inspector_stream_stage.as_ref() else {
       return Err(self.fail_closed_permission(
         OdenRev2HostError::NativeStageMismatch,
@@ -2051,6 +2059,11 @@ impl OdenRev2ArmedContext {
         api_name,
       ));
     }
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    crate::oden_rev2_protected_stream_fixture::
+      oden_capsec_rev2_protected_stream_fixture_record_event(
+        "native-stage-exact-match",
+      );
     if !self
       .actor
       .as_ref()
@@ -2062,6 +2075,11 @@ impl OdenRev2ArmedContext {
         api_name,
       ));
     }
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    crate::oden_rev2_protected_stream_fixture::
+      oden_capsec_rev2_protected_stream_fixture_record_event(
+        "live-principals-matched",
+      );
     let mut bound = self
       .protected_inspector_stream_stage
       .take()
@@ -2072,6 +2090,11 @@ impl OdenRev2ArmedContext {
         return Err(self.fail_closed_permission(error, target, api_name));
       }
     };
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    crate::oden_rev2_protected_stream_fixture::
+      oden_capsec_rev2_protected_stream_fixture_record_event(
+        "authorization-policy-projected",
+      );
     let Some(actor) = self.actor.as_mut() else {
       return Err(self.fail_closed_permission(
         OdenRev2HostError::MissingNativeActor,
@@ -2079,6 +2102,11 @@ impl OdenRev2ArmedContext {
         api_name,
       ));
     };
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    crate::oden_rev2_protected_stream_fixture::
+      oden_capsec_rev2_protected_stream_fixture_record_event(
+        "authorization-barrier-entered",
+      );
     let authorization = if bound.discovery {
       actor.authorize_discovery(
         &bound.request,
@@ -2094,7 +2122,14 @@ impl OdenRev2ArmedContext {
     }
     .map_err(|error| rev2_permission_error(error, target, api_name));
     let authorization = match authorization {
-      Ok(authorization) => authorization,
+      Ok(authorization) => {
+        #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+        crate::oden_rev2_protected_stream_fixture::
+          oden_capsec_rev2_protected_stream_fixture_record_event(
+            "authorization-returned",
+          );
+        authorization
+      }
       Err(error) => {
         self.cancel_actor();
         return Err(error);
@@ -2107,6 +2142,16 @@ impl OdenRev2ArmedContext {
           return Err(self.fail_closed_permission(error, target, api_name));
         }
       };
+      #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+      crate::oden_rev2_protected_stream_fixture::
+        oden_capsec_rev2_protected_stream_fixture_record_event(
+          "commit-policy-projected",
+        );
+      #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+      crate::oden_rev2_protected_stream_fixture::
+        oden_capsec_rev2_protected_stream_fixture_record_event(
+          "commit-barrier-entered",
+        );
       let commit = match self
         .actor
         .as_mut()
@@ -2120,6 +2165,11 @@ impl OdenRev2ArmedContext {
       };
       match commit {
         OdenRev2HostCommit::Committed { launch_payload, .. } => {
+          #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+          crate::oden_rev2_protected_stream_fixture::
+            oden_capsec_rev2_protected_stream_fixture_record_event(
+              "native-stage-committed",
+            );
           if let Some(payload) = launch_payload {
             if self.committed_launch_payload.is_some() {
               return Err(self.fail_closed_permission(
@@ -2190,6 +2240,11 @@ impl OdenRev2ArmedContext {
   pub fn cancel(
     &mut self,
   ) -> Result<OperationReleaseEvidence, OdenRev2HostError> {
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    crate::oden_rev2_protected_stream_fixture::
+      oden_capsec_rev2_protected_stream_fixture_record_event(
+        "actor-cancel-entered",
+      );
     self.protected_inspector_stream_stage = None;
     self.committed_launch_payload = None;
     self
@@ -2205,6 +2260,11 @@ impl OdenRev2ArmedContext {
   pub fn cleanup_non_authorizing(
     &mut self,
   ) -> Result<OperationReleaseEvidence, OdenRev2HostError> {
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    crate::oden_rev2_protected_stream_fixture::
+      oden_capsec_rev2_protected_stream_fixture_record_event(
+        "non-authorizing-cleanup-entered",
+      );
     self.protected_inspector_stream_stage = None;
     self
       .actor
@@ -2214,6 +2274,11 @@ impl OdenRev2ArmedContext {
   }
 
   pub fn complete(mut self) -> Result<Vec<String>, OdenRev2HostError> {
+    #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+    crate::oden_rev2_protected_stream_fixture::
+      oden_capsec_rev2_protected_stream_fixture_record_event(
+        "actor-complete-entered",
+      );
     self.protected_inspector_stream_stage = None;
     self
       .actor

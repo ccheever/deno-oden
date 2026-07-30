@@ -55,6 +55,8 @@ mod oden_rev2_permission;
 #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
 mod oden_rev2_permission_fixture;
 mod oden_rev2_policy;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+mod oden_rev2_protected_stream_fixture;
 mod oden_rev2_protocol;
 mod oden_rev2_runtime;
 mod oden_rev2_session;
@@ -134,6 +136,33 @@ pub use oden_rev2_permission_fixture::oden_capsec_rev2_permission_fixture_take_t
 pub use oden_rev2_policy::OdenRev2CompiledBuildIdentity;
 pub use oden_rev2_policy::OdenRev2LoadState;
 pub use oden_rev2_policy::OdenRev2LoadedPolicyContext;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_protected_stream_fixture::OdenRev2ProtectedStreamFixture;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_protected_stream_fixture::OdenRev2ProtectedStreamObservation;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_protected_stream_fixture::oden_capsec_rev2_protected_stream_fixture_case_kinds;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_protected_stream_fixture::oden_capsec_rev2_protected_stream_fixture_compiled_feature_set;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_protected_stream_fixture::oden_capsec_rev2_protected_stream_fixture_compiled_target;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_protected_stream_fixture::oden_capsec_rev2_protected_stream_fixture_compiled_vocab_digest;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_protected_stream_fixture::oden_capsec_rev2_protected_stream_fixture_record_event;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_protected_stream_fixture::oden_capsec_rev2_protected_stream_fixture_reset_trace;
+#[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+#[doc(hidden)]
+pub use oden_rev2_protected_stream_fixture::oden_capsec_rev2_protected_stream_fixture_take_trace;
 pub use oden_rev2_runtime::OdenRev2ArmedContext;
 pub use oden_rev2_runtime::OdenRev2CommittedLaunchEntry;
 pub use oden_rev2_runtime::OdenRev2CommittedLaunchPayload;

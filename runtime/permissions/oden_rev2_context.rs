@@ -675,6 +675,20 @@ impl OdenRev2RuntimeAuthorityContext {
     Self::install_with(&RuntimeAuthorityInstaller::new(), loaded)
   }
 
+  // @ref LLP 0019#pre-promotion-conformance-candidate-execution
+  // [constrained-by] -- A fresh local installer cannot claim or replace the
+  // process-wide C04 installation.
+  #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+  pub(crate) fn install_protected_stream_fixture_candidate(
+    loaded: OdenRev2LoadedPolicyContext,
+  ) -> Result<Self, String> {
+    let installer = RuntimeAuthorityInstaller::new();
+    installer.claim()?;
+    let parts =
+      loaded.into_protected_stream_fixture_candidate_runtime_parts()?;
+    Self::install_parts(parts, None)
+  }
+
   #[cfg(test)]
   pub(crate) fn install_candidate_for_test(
     loaded: OdenRev2LoadedPolicyContext,

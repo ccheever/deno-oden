@@ -396,6 +396,67 @@ impl OdenRev2LoadedPolicyContext {
     self.into_parts()
   }
 
+  // @ref LLP 0019#pre-promotion-conformance-candidate-execution
+  // [constrained-by] -- This feature-only projection accepts only unauthoritative
+  // Candidate state and the sealed protected-stream fixture's exact route rows.
+  #[cfg(all(feature = "capsec_fixture_test", debug_assertions, unix))]
+  pub(crate) fn into_protected_stream_fixture_candidate_runtime_parts(
+    self,
+  ) -> Result<OdenRev2LoadedPolicyParts, String> {
+    let empty = |field| {
+      self
+        .snapshot
+        .get(field)
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    };
+    let protected_stream_routes = self
+      .snapshot
+      .get("routeBindings")
+      .and_then(Value::as_array)
+      .is_some_and(|rows| {
+        rows.len() <= 2
+          && rows.iter().all(|row| {
+            let Some(row) = row.as_object() else {
+              return false;
+            };
+            let Some(source_id) = row.get("sourceId").and_then(Value::as_str)
+            else {
+              return false;
+            };
+            let expected_route_id =
+              format!("route:protected-stream-fixture:{source_id}");
+            matches!(
+              source_id,
+              "floor:protected-stream-fixture:exact"
+                | "denial:protected-stream-fixture:exact"
+            ) && row.get("routeKind").and_then(Value::as_str) == Some("direct")
+              && row.get("routeId").and_then(Value::as_str)
+                == Some(expected_route_id.as_str())
+          })
+      });
+    if self.state != OdenRev2LoadState::VerifiedUnarmed
+      || self.execution_role != "candidate"
+      || self.conformant
+      || self.advertised
+      || self.conformance_report_digest.is_some()
+      || self.installed_executables.is_installed()
+      || !self.retained_objects.is_empty()
+      || !empty("rootBindings")
+      || !empty("denyCeiling")
+      || !empty("executableBindings")
+      || !empty("classifierBindings")
+      || !empty("protectedPredicateVersions")
+      || !empty("protectedReceiptBindings")
+      || !protected_stream_routes
+    {
+      return Err(
+        "OD-CAP-REV2-RUNTIME-CONTEXT-FIXTURE-CANDIDATE-BOUNDARY".to_string(),
+      );
+    }
+    self.into_parts()
+  }
+
   fn into_parts(self) -> Result<OdenRev2LoadedPolicyParts, String> {
     let snapshot = Arc::try_unwrap(self.snapshot)
       .map_err(|_| "OD-CAP-REV2-RUNTIME-CONTEXT-SNAPSHOT-SHARED".to_string())?;
@@ -2521,6 +2582,55 @@ pub(crate) mod fixture_support {
     verify_snapshot(&authenticated, hermetic_target()).unwrap()
   }
 
+  pub(crate) fn unarmed_candidate_snapshot(mode: &str) -> Value {
+    let embedded = embedded_target();
+    let mut snapshot = candidate_snapshot(mode);
+    snapshot["engineTarget"] = Value::String(embedded.target.to_string());
+    snapshot["engineFeatureSet"] =
+      Value::String(embedded.feature_set.to_string());
+    snapshot["executionRole"] = Value::String("candidate".to_string());
+    snapshot["conformanceReportDigest"] = Value::Null;
+    snapshot["runNonce"] =
+      Value::String("run:protected-stream-fixture-candidate".to_string());
+    snapshot["channelEpoch"] =
+      Value::String("channel:protected-stream-fixture-candidate".to_string());
+    refresh_digests(&mut snapshot);
+    snapshot
+  }
+
+  pub(crate) fn load_unarmed_candidate_snapshot(
+    snapshot: Value,
+    key: &[u8; 32],
+  ) -> Result<OdenRev2LoadedPolicyContext, String> {
+    let embedded = embedded_target();
+    let authenticated =
+      parse_authenticated_snapshot(&envelope(snapshot, key), key)?;
+    let loaded = verify_snapshot(
+      &authenticated,
+      TargetStatus {
+        target: embedded.target,
+        feature_set: embedded.feature_set,
+        profile_claim: embedded.profile_claim,
+        conformance_report_digest: None,
+        enforced: embedded.enforced,
+        closed: embedded.closed,
+        absent: embedded.absent,
+        unsupported: embedded.unsupported,
+        advertised: REV2_ADVERTISED_TARGETS.contains(&embedded.target),
+        hermetic: false,
+      },
+    )?;
+    if loaded.state != OdenRev2LoadState::VerifiedUnarmed
+      || loaded.execution_role != "candidate"
+      || loaded.conformant
+      || loaded.advertised
+      || loaded.conformance_report_digest.is_some()
+    {
+      return Err("OD-CAP-REV2-FIXTURE-CANDIDATE-ARMABLE".to_string());
+    }
+    Ok(loaded)
+  }
+
   #[cfg(unix)]
   pub(crate) fn file_digest(path: &std::path::Path) -> String {
     format!(
@@ -2545,6 +2655,10 @@ pub(crate) mod fixture_support {
 
   pub(crate) fn target() -> &'static str {
     embedded_target().target
+  }
+
+  pub(crate) fn feature_set() -> &'static str {
+    embedded_target().feature_set
   }
 }
 
