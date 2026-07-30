@@ -1656,7 +1656,7 @@ mod native_capsec_tests {
       .create_new(true)
       .open(&stderr_path)
       .unwrap();
-    command.stdout(stdout).stderr(stderr);
+    command.current_dir(root).stdout(stdout).stderr(stderr);
     let mut child = command.spawn().unwrap();
     let started = Instant::now();
     let timeout = Duration::from_secs(120);
@@ -2678,6 +2678,11 @@ mod native_capsec_tests {
     operation: &Rev2V8FixtureOperation,
   ) {
     set_actor(root, "main.ts");
+    assert_eq!(
+      std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+      root,
+      "public V8 ambient control escaped its owned fixture cwd"
+    );
     let before = rev2_v8_fixture_canaries();
     let positive_snapshot_path =
       root.join("positive-public-wrapper.heapsnapshot");
