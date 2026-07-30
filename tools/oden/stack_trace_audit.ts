@@ -104,7 +104,9 @@ for (const dir of SCAN_DIRS) {
     const fns = extractFns(src);
     const locals = new Map(fns.filter((f) => !f.isOp).map((f) => [f.name, f]));
     for (const fn of fns) {
-      if (!fn.isOp) continue;
+      // @ref LLP 0019#migration-from-revision-1 [implements] — Directly
+      // cfg(test) fixture ops do not enter the product attribution surface.
+      if (!fn.isOp || /#\[cfg\(test\)\]/.test(fn.attrs)) continue;
       opCount++;
       const hasAnnotation = /stack_trace/.test(fn.attrs);
       if (hasAnnotation) annotated++;
