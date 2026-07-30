@@ -2904,6 +2904,11 @@ mod native_capsec_tests {
             lastCallbackArgs: undefined,
             callbackThis: {{ __proto__: null, marker: "root-this" }},
           }};
+          if (typeof state.name !== "string") {{
+            throw new Error(
+              "diagnostics fixtures cover exact primitive string names only",
+            );
+          }}
           state.primarySubscriber = (data, name) => {{
             state.primarySubscriberCalls++;
             state.lastSubscriberData = data;
@@ -3304,7 +3309,7 @@ mod native_capsec_tests {
       }
       "diagnostics-channel-constructor" => {
         r#"
-        state.channel = new diagnostics.Channel(state.name);
+        state.channel = diagnostics.channel(state.name);
         assert(
           Object.getPrototypeOf(state.channel) ===
               diagnostics.Channel.prototype &&
@@ -3581,6 +3586,7 @@ mod native_capsec_tests {
         }
       }
       "diagnostics-channel-constructor" => {
+        push(target, channel);
         push(target, constructor);
         push(target, channel);
       }
@@ -4518,6 +4524,8 @@ mod native_capsec_tests {
       );
     }
 
+    let base_guard_start =
+      PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.load(Ordering::SeqCst);
     prepare_rev2_public_diagnostics_fixture_state(
       &mut runtime,
       root,
@@ -4552,6 +4560,33 @@ mod native_capsec_tests {
       &mut runtime,
       root,
       operation,
+    );
+    let base_guard_end =
+      PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.load(Ordering::SeqCst);
+    let mut expected_base_calls =
+      rev2_public_diagnostics_expected_positive_guard_calls(
+        operation,
+        operation.denied_target,
+      );
+    let prepare_call_count =
+      before.public_wrapper_guard_calls - base_guard_start;
+    expected_base_calls.insert(
+      prepare_call_count,
+      (
+        "runtime".to_string(),
+        "inspect".to_string(),
+        operation.denied_target.to_string(),
+        rev2_public_wrapper_guard_api_name(operation).to_string(),
+      ),
+    );
+    let observed_base_calls = {
+      let calls = PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap();
+      calls[base_guard_start..base_guard_end].to_vec()
+    };
+    assert_eq!(
+      observed_base_calls, expected_base_calls,
+      "{} used an inexact prepare/deny/same-target-cleanup guard sequence in {case_kind}/{mode}",
+      operation.operation_id
     );
     if case_kind == "staged-barrier:cancellation" {
       run_rev2_public_diagnostics_positive_control(
@@ -4660,7 +4695,10 @@ mod native_capsec_tests {
       // shared test guard records its exact deny-only runtime:inspect tuple;
       // closure-private state is observed only through prototypes, callback
       // delivery, store execution, and exact root teardown. Internal
-      // channel facades remain unreachable and results remain
+      // channel facades remain unreachable. These rows deliberately use
+      // primitive exact string names: they establish guard precedence over
+      // authority-bearing state/work after required target derivation, not
+      // malformed-name or user-coercion behavior. Results remain
       // development-only, unauthenticated candidate evidence.
       run_rev2_public_diagnostics_fixture_mode(
         root, operation, case_kind, mode,
