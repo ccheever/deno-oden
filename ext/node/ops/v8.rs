@@ -1577,6 +1577,166 @@ mod native_capsec_tests {
       cleanup_assertion: "fixture-runtime-drop-releases-heap-snapshot-state",
       post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-write-heap-snapshot-native-work",
     },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-active-channel-bind-store",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.bindStore",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.bindStore:complete",
+      denied_target: "rev2-diagnostics:active-bind-store",
+      authorization_assertion: "guard-precedes-diagnostics-active-bind-store-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-active-bind-store-state",
+      cleanup_assertion: "explicit-root-unsubscribe-restores-inactive-diagnostics-channel",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-active-bind-store-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-active-channel-has-subscribers",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.hasSubscribers",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.hasSubscribers:complete",
+      denied_target: "rev2-diagnostics:active-has-subscribers",
+      authorization_assertion: "guard-precedes-diagnostics-active-has-subscribers-observation",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-active-has-subscribers-observation",
+      cleanup_assertion: "explicit-root-unsubscribe-restores-inactive-diagnostics-channel",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-active-has-subscribers-observation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-active-channel-publish",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.publish",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.publish:complete",
+      denied_target: "rev2-diagnostics:active-publish",
+      authorization_assertion: "guard-precedes-diagnostics-active-publish-delivery",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-active-publish-delivery",
+      cleanup_assertion: "explicit-root-unsubscribe-restores-inactive-diagnostics-channel",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-active-publish-delivery",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-active-channel-run-stores",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.runStores",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.runStores:complete",
+      denied_target: "rev2-diagnostics:active-run-stores",
+      authorization_assertion: "guard-precedes-diagnostics-active-run-stores-execution",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-active-run-stores-execution",
+      cleanup_assertion: "explicit-root-unbind-restores-inactive-diagnostics-channel",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-active-run-stores-execution",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-active-channel-subscribe",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.subscribe",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.subscribe:complete",
+      denied_target: "rev2-diagnostics:active-subscribe",
+      authorization_assertion: "guard-precedes-diagnostics-active-subscribe-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-active-subscribe-state",
+      cleanup_assertion: "explicit-root-unsubscribe-restores-inactive-diagnostics-channel",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-active-subscribe-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-active-channel-unbind-store",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.unbindStore",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.unbindStore:complete",
+      denied_target: "rev2-diagnostics:active-unbind-store",
+      authorization_assertion: "guard-precedes-diagnostics-active-unbind-store-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-active-unbind-store-state",
+      cleanup_assertion: "explicit-root-unbind-restores-inactive-diagnostics-channel",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-active-unbind-store-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-active-channel-unsubscribe",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.unsubscribe",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#ActiveChannel.unsubscribe:complete",
+      denied_target: "rev2-diagnostics:active-unsubscribe",
+      authorization_assertion: "guard-precedes-diagnostics-active-unsubscribe-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-active-unsubscribe-state",
+      cleanup_assertion: "explicit-root-unsubscribe-restores-inactive-diagnostics-channel",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-active-unsubscribe-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-channel-bind-store",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.bindStore",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.bindStore:complete",
+      denied_target: "rev2-diagnostics:inactive-bind-store",
+      authorization_assertion: "guard-precedes-diagnostics-inactive-bind-store-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-inactive-bind-store-state",
+      cleanup_assertion: "explicit-root-unbind-restores-inactive-diagnostics-channel",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-inactive-bind-store-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-channel-constructor",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.constructor",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.constructor:complete",
+      denied_target: "rev2-diagnostics:channel-constructor",
+      authorization_assertion: "guard-precedes-diagnostics-channel-constructor-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-channel-constructor-state",
+      cleanup_assertion: "fixture-runtime-drop-releases-diagnostics-channel-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-channel-constructor-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-channel-has-subscribers",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.hasSubscribers",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.hasSubscribers:complete",
+      denied_target: "rev2-diagnostics:inactive-has-subscribers",
+      authorization_assertion: "guard-precedes-diagnostics-inactive-has-subscribers-observation",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-inactive-has-subscribers-observation",
+      cleanup_assertion: "ambient-diagnostics-control-remains-usable",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-inactive-has-subscribers-observation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-channel-publish",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.publish",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.publish:complete",
+      denied_target: "rev2-diagnostics:inactive-publish",
+      authorization_assertion: "guard-precedes-diagnostics-inactive-publish-delivery",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-inactive-publish-delivery",
+      cleanup_assertion: "ambient-diagnostics-control-remains-usable",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-inactive-publish-delivery",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-channel-run-stores",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.runStores",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.runStores:complete",
+      denied_target: "rev2-diagnostics:inactive-run-stores",
+      authorization_assertion: "guard-precedes-diagnostics-inactive-run-stores-execution",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-inactive-run-stores-execution",
+      cleanup_assertion: "ambient-diagnostics-control-remains-usable",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-inactive-run-stores-execution",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-channel-subscribe",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.subscribe",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#Channel.subscribe:complete",
+      denied_target: "rev2-diagnostics:inactive-subscribe",
+      authorization_assertion: "guard-precedes-diagnostics-inactive-subscribe-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-inactive-subscribe-state",
+      cleanup_assertion: "explicit-root-unsubscribe-restores-inactive-diagnostics-channel",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-inactive-subscribe-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-channel",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#channel",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#channel:complete",
+      denied_target: "rev2-diagnostics:channel",
+      authorization_assertion: "guard-precedes-diagnostics-channel-lookup-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-channel-lookup-state",
+      cleanup_assertion: "fixture-runtime-drop-releases-diagnostics-channel-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-channel-lookup-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-has-subscribers",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#hasSubscribers",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#hasSubscribers:complete",
+      denied_target: "rev2-diagnostics:has-subscribers",
+      authorization_assertion: "guard-precedes-diagnostics-has-subscribers-observation",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-has-subscribers-observation",
+      cleanup_assertion: "explicit-root-unsubscribe-restores-inactive-diagnostics-channel",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-has-subscribers-observation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "diagnostics-tracing-channel",
+      edge_id: "diagnostic-route:ext/node/polyfills/diagnostics_channel.js#tracingChannel",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/diagnostics_channel.js#tracingChannel:complete",
+      denied_target: "rev2-diagnostics:tracing-channel",
+      authorization_assertion: "guard-precedes-diagnostics-tracing-channel-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-tracing-channel-state",
+      cleanup_assertion: "fixture-runtime-drop-releases-diagnostics-channel-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-tracing-channel-state",
+    },
   ];
 
   struct NativeV8TestRoot(PathBuf, Option<tempfile::TempDir>);
@@ -2295,6 +2455,207 @@ mod native_capsec_tests {
     );
   }
 
+  fn load_public_diagnostics_wrapper(runtime: &mut JsRuntime, root: &Path) {
+    set_actor(root, "main.ts");
+    execute(
+      runtime,
+      "file:///rev2_public_diagnostics_fixture_load.js",
+      r#"
+      {
+        const diagnostics = Deno.core.loadExtScript(
+          "ext:deno_node/diagnostics_channel.js",
+        );
+        globalThis.rev2Diagnostics = Object.freeze({
+          __proto__: null,
+          channel: diagnostics.channel,
+          hasSubscribers: diagnostics.hasSubscribers,
+          subscribe: diagnostics.subscribe,
+          tracingChannel: diagnostics.tracingChannel,
+          unsubscribe: diagnostics.unsubscribe,
+          Channel: diagnostics.Channel,
+        });
+      }
+      if (
+        typeof rev2Diagnostics.channel !== "function" ||
+        typeof rev2Diagnostics.hasSubscribers !== "function" ||
+        typeof rev2Diagnostics.tracingChannel !== "function" ||
+        typeof rev2Diagnostics.Channel !== "function" ||
+        Object.getPrototypeOf(rev2Diagnostics) !== null ||
+        !Object.isFrozen(rev2Diagnostics) ||
+        "channelInternal" in rev2Diagnostics ||
+        "tracingChannelInternal" in rev2Diagnostics
+      ) {
+        throw new Error(
+          "the exact public node:diagnostics_channel facade did not load",
+        );
+      }
+      "#
+      .to_string(),
+    );
+  }
+
+  fn assert_public_diagnostics_guard_precedes_wrapper_work(
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let source = include_str!("../polyfills/diagnostics_channel.js");
+    let active_scope = &source[source.find("class ActiveChannel {").unwrap()
+      ..source.find("class Channel {").unwrap()];
+    let channel_scope = &source[source.find("class Channel {").unwrap()
+      ..source.find("const channels = new WeakRefMap();").unwrap()];
+    let channel_impl_scope =
+      &source[source.find("function channelImpl(").unwrap()
+        ..source.find("function channel(name)").unwrap()];
+    let has_subscribers_scope =
+      &source[source.find("function hasSubscribers(name)").unwrap()
+        ..source.find("const traceEvents =").unwrap()];
+    let tracing_scope = &source[source
+      .find("function tracingChannel(nameOrChannels)")
+      .unwrap()
+      ..source
+        .find("function tracingChannelInternal(name)")
+        .unwrap()];
+    let (scope, operation_anchor, first_work) = match operation.operation_id {
+      "diagnostics-active-channel-bind-store" => (
+        active_scope,
+        "  bindStore(store, transform) {",
+        "    const replacing = state.stores.has(store);",
+      ),
+      "diagnostics-active-channel-has-subscribers" => {
+        (active_scope, "  get hasSubscribers() {", "    return true;")
+      }
+      "diagnostics-active-channel-publish" => (
+        active_scope,
+        "  publish(data) {",
+        "    publishChannel(this, data);",
+      ),
+      "diagnostics-active-channel-run-stores" => (
+        active_scope,
+        "  runStores(data, fn, thisArg, ...args) {",
+        "    return runChannelStores(this, data, fn, thisArg, args);",
+      ),
+      "diagnostics-active-channel-subscribe" => (
+        active_scope,
+        "  subscribe(subscription) {",
+        "    validateFunction(subscription, \"subscription\");",
+      ),
+      "diagnostics-active-channel-unbind-store" => (
+        active_scope,
+        "  unbindStore(store) {",
+        "    if (!state.stores.has(store)) {",
+      ),
+      "diagnostics-active-channel-unsubscribe" => (
+        active_scope,
+        "  unsubscribe(subscription) {",
+        "    const index = ArrayPrototypeIndexOf(",
+      ),
+      "diagnostics-channel-bind-store" => (
+        channel_scope,
+        "  bindStore(store, transform) {",
+        "    markActive(this);",
+      ),
+      "diagnostics-channel-constructor" => (
+        channel_scope,
+        "  constructor(name, trustedToken) {",
+        "    this._subscribers = undefined;",
+      ),
+      "diagnostics-channel-has-subscribers" => (
+        channel_scope,
+        "  get hasSubscribers() {",
+        "    return false;",
+      ),
+      "diagnostics-channel-publish" => (channel_scope, "  publish() {", "  }"),
+      "diagnostics-channel-run-stores" => (
+        channel_scope,
+        "  runStores(_data, fn, thisArg, ...args) {",
+        "    return ReflectApply(fn, thisArg, args);",
+      ),
+      "diagnostics-channel-subscribe" => (
+        channel_scope,
+        "  subscribe(subscription) {",
+        "    validateFunction(subscription, \"subscription\");",
+      ),
+      "diagnostics-channel" => (
+        channel_impl_scope,
+        "function channelImpl(name, trustedInternal) {",
+        "  const ch = channels.get(name);",
+      ),
+      "diagnostics-has-subscribers" => (
+        has_subscribers_scope,
+        "function hasSubscribers(name) {",
+        "  const ch = channels.get(name);",
+      ),
+      "diagnostics-tracing-channel" => (
+        tracing_scope,
+        "function tracingChannel(nameOrChannels) {",
+        "  return new TracingChannel(nameOrChannels);",
+      ),
+      _ => panic!(
+        "unknown public diagnostics fixture operation {}",
+        operation.operation_id
+      ),
+    };
+    assert_eq!(
+      scope.matches(operation_anchor).count(),
+      1,
+      "{} diagnostics source anchor is not unique",
+      operation.operation_id
+    );
+    let operation_source = &scope[scope.find(operation_anchor).unwrap()..];
+    let guard_api =
+      format!("\"{}\"", rev2_public_wrapper_guard_api_name(operation));
+    let guard_index = operation_source.find(&guard_api).unwrap_or_else(|| {
+      panic!(
+        "{} no longer names its exact diagnostics guard API",
+        operation.operation_id
+      )
+    });
+    let work_index = operation_source.find(first_work).unwrap_or_else(|| {
+      panic!(
+        "{} no longer contains its exact first post-guard work",
+        operation.operation_id
+      )
+    });
+    assert!(
+      guard_index < work_index,
+      "{} no longer guards before its first wrapper work",
+      operation.operation_id
+    );
+    assert!(
+      source.contains(
+        r#"function guardChannel(channel, api) {
+  const state = channelStates.get(channel);
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    String(state.name),
+    api,
+  );
+}"#
+      ),
+      "diagnostics guard helper no longer uses the exact runtime:inspect tuple"
+    );
+    if operation.operation_id == "diagnostics-channel" {
+      assert!(
+        source.contains(
+          r#"function channel(name) {
+  return channelImpl(name, false);
+}"#
+        ),
+        "public diagnostics channel no longer delegates exactly to the guarded helper"
+      );
+    }
+    if operation.operation_id == "diagnostics-channel-publish" {
+      assert!(
+        channel_scope.contains(
+          r#"  publish() {
+    guardChannel(this, "node:diagnostics_channel.publish");
+  }"#
+        ),
+        "inactive diagnostics publish no longer consists solely of its guard"
+      );
+    }
+  }
+
   fn assert_public_v8_guard_precedes_wrapper_mutation(
     operation: &Rev2V8FixtureOperation,
   ) {
@@ -2447,7 +2808,44 @@ mod native_capsec_tests {
     );
   }
 
-  fn assert_exact_public_v8_guard_call(
+  fn rev2_public_wrapper_guard_api_name(
+    operation: &Rev2V8FixtureOperation,
+  ) -> &'static str {
+    match operation.operation_id {
+      "diagnostics-active-channel-bind-store"
+      | "diagnostics-channel-bind-store" => {
+        "node:diagnostics_channel.bindStore"
+      }
+      "diagnostics-active-channel-has-subscribers"
+      | "diagnostics-channel-has-subscribers"
+      | "diagnostics-has-subscribers" => {
+        "node:diagnostics_channel.hasSubscribers"
+      }
+      "diagnostics-active-channel-publish" | "diagnostics-channel-publish" => {
+        "node:diagnostics_channel.publish"
+      }
+      "diagnostics-active-channel-run-stores"
+      | "diagnostics-channel-run-stores" => {
+        "node:diagnostics_channel.runStores"
+      }
+      "diagnostics-active-channel-subscribe"
+      | "diagnostics-channel-subscribe" => "node:diagnostics_channel.subscribe",
+      "diagnostics-active-channel-unbind-store" => {
+        "node:diagnostics_channel.unbindStore"
+      }
+      "diagnostics-active-channel-unsubscribe" => {
+        "node:diagnostics_channel.unsubscribe"
+      }
+      "diagnostics-channel-constructor" => "node:diagnostics_channel.Channel",
+      "diagnostics-channel" => "node:diagnostics_channel.channel",
+      "diagnostics-tracing-channel" => {
+        "node:diagnostics_channel.tracingChannel"
+      }
+      _ => operation.denied_target,
+    }
+  }
+
+  fn assert_exact_public_wrapper_guard_call(
     operation: &Rev2V8FixtureOperation,
     call_index: usize,
   ) {
@@ -2461,10 +2859,840 @@ mod native_capsec_tests {
         "runtime".to_string(),
         "inspect".to_string(),
         operation.denied_target.to_string(),
-        operation.denied_target.to_string(),
+        rev2_public_wrapper_guard_api_name(operation).to_string(),
       ),
       "{} used an inexact public guard tuple",
       operation.operation_id
+    );
+  }
+
+  fn prepare_rev2_public_diagnostics_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    target: &str,
+  ) {
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    let target_json = deno_core::serde_json::to_string(target).unwrap();
+    execute(
+      runtime,
+      "file:///rev2_public_diagnostics_fixture_prepare.js",
+      format!(
+        r#"
+        {{
+          const operationId = {operation_id_json};
+          const diagnostics = rev2Diagnostics;
+          const state = {{
+            __proto__: null,
+            name: {target_json},
+            channel: undefined,
+            initialPrototype: undefined,
+            primarySubscriberCalls: 0,
+            deniedSubscriberCalls: 0,
+            primaryTransformCalls: 0,
+            deniedTransformCalls: 0,
+            primaryStoreRuns: 0,
+            deniedStoreRuns: 0,
+            primaryCallbackCalls: 0,
+            deniedCallbackCalls: 0,
+            lastSubscriberData: undefined,
+            lastSubscriberName: undefined,
+            lastStoreContext: undefined,
+            lastCallbackThis: undefined,
+            lastCallbackArgs: undefined,
+            callbackThis: {{ __proto__: null, marker: "root-this" }},
+          }};
+          state.primarySubscriber = (data, name) => {{
+            state.primarySubscriberCalls++;
+            state.lastSubscriberData = data;
+            state.lastSubscriberName = name;
+          }};
+          state.deniedSubscriber = () => {{
+            state.deniedSubscriberCalls++;
+          }};
+          state.primaryTransform = (data) => {{
+            state.primaryTransformCalls++;
+            return `context:${{data}}`;
+          }};
+          state.deniedTransform = (data) => {{
+            state.deniedTransformCalls++;
+            return `denied-context:${{data}}`;
+          }};
+          state.primaryStore = {{
+            __proto__: null,
+            run(context, next) {{
+              state.primaryStoreRuns++;
+              state.lastStoreContext = context;
+              return next();
+            }},
+          }};
+          state.deniedStore = {{
+            __proto__: null,
+            run(_context, next) {{
+              state.deniedStoreRuns++;
+              return next();
+            }},
+          }};
+          state.primaryCallback = function (...args) {{
+            state.primaryCallbackCalls++;
+            state.lastCallbackThis = this;
+            state.lastCallbackArgs = args;
+            return "root-result";
+          }};
+          state.deniedCallback = () => {{
+            state.deniedCallbackCalls++;
+            return "denied-result";
+          }};
+          globalThis.rev2DiagnosticsState = state;
+
+          switch (operationId) {{
+            case "diagnostics-active-channel-bind-store":
+            case "diagnostics-active-channel-has-subscribers":
+            case "diagnostics-active-channel-publish":
+            case "diagnostics-active-channel-unsubscribe":
+              state.channel = diagnostics.channel(state.name);
+              state.channel.subscribe(state.primarySubscriber);
+              break;
+            case "diagnostics-active-channel-run-stores":
+            case "diagnostics-active-channel-subscribe":
+            case "diagnostics-active-channel-unbind-store":
+              state.channel = diagnostics.channel(state.name);
+              state.channel.bindStore(
+                state.primaryStore,
+                state.primaryTransform,
+              );
+              break;
+            case "diagnostics-channel-bind-store":
+            case "diagnostics-channel-has-subscribers":
+            case "diagnostics-channel-publish":
+            case "diagnostics-channel-run-stores":
+            case "diagnostics-channel-subscribe":
+              state.channel = diagnostics.channel(state.name);
+              if (
+                Object.getPrototypeOf(state.channel) !==
+                  diagnostics.Channel.prototype
+              ) {{
+                throw new Error("root did not prepare an inactive channel");
+              }}
+              break;
+            case "diagnostics-has-subscribers":
+              state.channel = diagnostics.channel(state.name);
+              state.channel.subscribe(state.primarySubscriber);
+              break;
+            case "diagnostics-channel-constructor":
+            case "diagnostics-channel":
+            case "diagnostics-tracing-channel":
+              break;
+            default:
+              throw new Error(
+                `unknown diagnostics fixture operation ${{operationId}}`,
+              );
+          }}
+          if (state.channel !== undefined) {{
+            state.initialPrototype = Object.getPrototypeOf(state.channel);
+          }}
+        }}
+        "#
+      ),
+    );
+  }
+
+  fn deny_rev2_public_diagnostics_fixture_operation(
+    runtime: &mut JsRuntime,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let body = match operation.operation_id {
+      "diagnostics-active-channel-bind-store"
+      | "diagnostics-channel-bind-store" => {
+        "state.channel.bindStore(state.deniedStore, state.deniedTransform)"
+      }
+      "diagnostics-active-channel-has-subscribers"
+      | "diagnostics-channel-has-subscribers" => "state.channel.hasSubscribers",
+      "diagnostics-active-channel-publish" | "diagnostics-channel-publish" => {
+        r#"state.channel.publish("denied-data")"#
+      }
+      "diagnostics-active-channel-run-stores"
+      | "diagnostics-channel-run-stores" => {
+        r#"state.channel.runStores(
+        "denied-data",
+        state.deniedCallback,
+        state.callbackThis,
+        "denied-arg",
+      )"#
+      }
+      "diagnostics-active-channel-subscribe"
+      | "diagnostics-channel-subscribe" => {
+        "state.channel.subscribe(state.deniedSubscriber)"
+      }
+      "diagnostics-active-channel-unbind-store" => {
+        "state.channel.unbindStore(state.primaryStore)"
+      }
+      "diagnostics-active-channel-unsubscribe" => {
+        "state.channel.unsubscribe(state.primarySubscriber)"
+      }
+      "diagnostics-channel-constructor" => {
+        "new diagnostics.Channel(state.name)"
+      }
+      "diagnostics-channel" => "diagnostics.channel(state.name)",
+      "diagnostics-has-subscribers" => "diagnostics.hasSubscribers(state.name)",
+      "diagnostics-tracing-channel" => "diagnostics.tracingChannel(state.name)",
+      _ => panic!(
+        "unknown public diagnostics fixture operation {}",
+        operation.operation_id
+      ),
+    };
+    execute(
+      runtime,
+      "file:///rev2_public_diagnostics_fixture_denied.js",
+      format!(
+        r#"
+        {{
+          const diagnostics = rev2Diagnostics;
+          const state = rev2DiagnosticsState;
+          let denied = false;
+          try {{
+            state.deniedResult = {body};
+          }} catch (error) {{
+            const message = String(error);
+            const expected =
+              "principal set [denied-native] may not use deny-only runtime:inspect:{}";
+            if (!message.includes(expected)) {{
+              throw new Error(
+                `public diagnostics wrapper used the wrong actor or boundary: ${{message}}`,
+              );
+            }}
+            denied = true;
+          }}
+          if (!denied) {{
+            throw new Error(
+              "public diagnostics wrapper reached post-guard work",
+            );
+          }}
+          if (
+            state.deniedResult !== undefined ||
+            state.primarySubscriberCalls !== 0 ||
+            state.deniedSubscriberCalls !== 0 ||
+            state.primaryTransformCalls !== 0 ||
+            state.deniedTransformCalls !== 0 ||
+            state.primaryStoreRuns !== 0 ||
+            state.deniedStoreRuns !== 0 ||
+            state.primaryCallbackCalls !== 0 ||
+            state.deniedCallbackCalls !== 0
+          ) {{
+            throw new Error(
+              "denied diagnostics operation changed observable state",
+            );
+          }}
+          if (
+            state.channel !== undefined &&
+            Object.getPrototypeOf(state.channel) !== state.initialPrototype
+          ) {{
+            throw new Error(
+              "denied diagnostics operation changed the channel prototype",
+            );
+          }}
+        }}
+        "#,
+        operation.denied_target,
+      ),
+    );
+  }
+
+  fn cleanup_rev2_public_diagnostics_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "main.ts");
+    let body = match operation.operation_id {
+      "diagnostics-active-channel-bind-store" => {
+        r#"
+        let result = state.channel.runStores(
+          "root-bind-probe",
+          state.primaryCallback,
+          state.callbackThis,
+          "root-arg",
+        );
+        assert(result === "root-result", "root bind probe returned wrongly");
+        assert(
+          state.primaryStoreRuns === 0 &&
+            state.primaryTransformCalls === 0,
+          "denied active bind installed its store",
+        );
+        assert(
+          state.primarySubscriberCalls === 1,
+          "root bind probe did not publish through the seed subscriber",
+        );
+        state.channel.bindStore(
+          state.primaryStore,
+          state.primaryTransform,
+        );
+        result = state.channel.runStores(
+          "root-bound-probe",
+          state.primaryCallback,
+          state.callbackThis,
+          "root-bound-arg",
+        );
+        assert(
+          result === "root-result" &&
+            state.primaryStoreRuns === 1 &&
+            state.primaryTransformCalls === 1 &&
+            state.lastStoreContext === "context:root-bound-probe",
+          "root active bind did not install and execute its exact store",
+        );
+        assert(
+          state.channel.unbindStore(state.primaryStore) === true,
+          "root could not remove its active-bind store",
+        );
+        assert(
+          state.channel.unsubscribe(state.primarySubscriber) === true,
+          "root could not remove the seed subscriber",
+        );
+      "#
+      }
+      "diagnostics-active-channel-has-subscribers" => {
+        r#"
+        assert(
+          state.channel.hasSubscribers === true,
+          "denied active getter changed subscriber state",
+        );
+        assert(
+          state.channel.unsubscribe(state.primarySubscriber) === true,
+          "root could not remove the active getter seed subscriber",
+        );
+      "#
+      }
+      "diagnostics-active-channel-publish" => {
+        r#"
+        state.channel.publish("root-publish");
+        assert(
+          state.primarySubscriberCalls === 1 &&
+            state.lastSubscriberData === "root-publish" &&
+            state.lastSubscriberName === state.name,
+          "root publish did not deliver the exact payload and name once",
+        );
+        assert(
+          state.channel.unsubscribe(state.primarySubscriber) === true,
+          "root could not remove the publish seed subscriber",
+        );
+      "#
+      }
+      "diagnostics-active-channel-run-stores" => {
+        r#"
+        const result = state.channel.runStores(
+          "root-run",
+          state.primaryCallback,
+          state.callbackThis,
+          "root-arg",
+        );
+        assert(
+          result === "root-result" &&
+            state.primaryTransformCalls === 1 &&
+            state.primaryStoreRuns === 1 &&
+            state.lastStoreContext === "context:root-run" &&
+            state.primaryCallbackCalls === 1 &&
+            state.lastCallbackThis === state.callbackThis &&
+            state.lastCallbackArgs.length === 1 &&
+            state.lastCallbackArgs[0] === "root-arg",
+          "root runStores did not execute transform/store/callback exactly",
+        );
+        assert(
+          state.channel.unbindStore(state.primaryStore) === true,
+          "root could not remove the prepared store",
+        );
+      "#
+      }
+      "diagnostics-active-channel-subscribe" => {
+        r#"
+        state.channel.publish("root-before-subscribe");
+        assert(
+          state.primarySubscriberCalls === 0 &&
+            state.deniedSubscriberCalls === 0,
+          "denied active subscribe installed a handler",
+        );
+        state.channel.subscribe(state.primarySubscriber);
+        state.channel.publish("root-subscribe-probe");
+        assert(
+          state.primarySubscriberCalls === 1 &&
+            state.deniedSubscriberCalls === 0,
+          "denied active subscribe installed its handler",
+        );
+        assert(
+          state.channel.unsubscribe(state.primarySubscriber) === true,
+          "root could not remove its active-subscribe handler",
+        );
+        assert(
+          state.channel.unbindStore(state.primaryStore) === true,
+          "root could not remove the active-subscribe activation store",
+        );
+      "#
+      }
+      "diagnostics-active-channel-unbind-store" => {
+        r#"
+        const result = state.channel.runStores(
+          "root-unbind-probe",
+          state.primaryCallback,
+          state.callbackThis,
+          "root-arg",
+        );
+        assert(
+          result === "root-result" &&
+            state.primaryTransformCalls === 1 &&
+            state.primaryStoreRuns === 1 &&
+            state.primaryCallbackCalls === 1,
+          "denied active unbind removed the prepared store",
+        );
+        assert(
+          state.channel.unbindStore(state.primaryStore) === true,
+          "root could not remove the retained store",
+        );
+      "#
+      }
+      "diagnostics-active-channel-unsubscribe" => {
+        r#"
+        state.channel.publish("root-unsubscribe-probe");
+        assert(
+          state.primarySubscriberCalls === 1,
+          "denied active unsubscribe removed the seed handler",
+        );
+        assert(
+          state.channel.unsubscribe(state.primarySubscriber) === true,
+          "root could not remove the retained handler",
+        );
+      "#
+      }
+      "diagnostics-channel-bind-store" => {
+        r#"
+        let result = state.channel.runStores(
+          "root-before-bind",
+          state.primaryCallback,
+          state.callbackThis,
+          "first",
+        );
+        assert(
+          result === "root-result" &&
+            state.primaryCallbackCalls === 1 &&
+            state.primaryStoreRuns === 0 &&
+            state.primaryTransformCalls === 0,
+          "denied inactive bind installed a store",
+        );
+        state.channel.bindStore(
+          state.primaryStore,
+          state.primaryTransform,
+        );
+        result = state.channel.runStores(
+          "root-after-bind",
+          state.primaryCallback,
+          state.callbackThis,
+          "second",
+        );
+        assert(
+          result === "root-result" &&
+            state.primaryCallbackCalls === 2 &&
+            state.primaryStoreRuns === 1 &&
+            state.primaryTransformCalls === 1 &&
+            state.lastStoreContext === "context:root-after-bind",
+          "root inactive bind did not activate the exact store",
+        );
+        assert(
+          state.channel.unbindStore(state.primaryStore) === true,
+          "root could not remove its inactive-bind store",
+        );
+      "#
+      }
+      "diagnostics-channel-constructor" => {
+        r#"
+        state.channel = new diagnostics.Channel(state.name);
+        assert(
+          Object.getPrototypeOf(state.channel) ===
+              diagnostics.Channel.prototype &&
+            state.channel instanceof diagnostics.Channel &&
+            state.channel.name === state.name,
+          "root constructor produced the wrong inactive channel",
+        );
+        assert(
+          diagnostics.channel(state.name) === state.channel,
+          "root constructor did not register exact channel identity",
+        );
+      "#
+      }
+      "diagnostics-channel-has-subscribers" => {
+        r#"
+        assert(
+          state.channel.hasSubscribers === false,
+          "denied inactive getter changed subscriber state",
+        );
+      "#
+      }
+      "diagnostics-channel-publish" => {
+        r#"
+        assert(
+          state.channel.publish("root-inactive-publish") === undefined,
+          "inactive publish did not retain its exact no-op behavior",
+        );
+      "#
+      }
+      "diagnostics-channel-run-stores" => {
+        r#"
+        const result = state.channel.runStores(
+          "root-inactive-run",
+          state.primaryCallback,
+          state.callbackThis,
+          "first",
+          "second",
+        );
+        assert(
+          result === "root-result" &&
+            state.primaryCallbackCalls === 1 &&
+            state.lastCallbackThis === state.callbackThis &&
+            state.lastCallbackArgs.length === 2 &&
+            state.lastCallbackArgs[0] === "first" &&
+            state.lastCallbackArgs[1] === "second",
+          "inactive runStores did not preserve exact callback semantics",
+        );
+      "#
+      }
+      "diagnostics-channel-subscribe" => {
+        r#"
+        state.channel.subscribe(state.primarySubscriber);
+        assert(
+          Object.getPrototypeOf(state.channel) !==
+            diagnostics.Channel.prototype,
+          "root inactive subscribe did not activate the channel",
+        );
+        state.channel.publish("root-inactive-subscribe");
+        assert(
+          state.primarySubscriberCalls === 1 &&
+            state.deniedSubscriberCalls === 0,
+          "root inactive subscribe installed the wrong handlers",
+        );
+        assert(
+          state.channel.unsubscribe(state.primarySubscriber) === true,
+          "root could not remove its inactive-subscribe handler",
+        );
+      "#
+      }
+      "diagnostics-channel" => {
+        r#"
+        state.channel = diagnostics.channel(state.name);
+        assert(
+          state.channel instanceof diagnostics.Channel &&
+            state.channel.name === state.name &&
+            diagnostics.channel(state.name) === state.channel,
+          "root channel lookup did not preserve exact identity",
+        );
+      "#
+      }
+      "diagnostics-has-subscribers" => {
+        r#"
+        assert(
+          diagnostics.hasSubscribers(state.name) === true,
+          "denied top-level hasSubscribers changed active state",
+        );
+        assert(
+          state.channel.unsubscribe(state.primarySubscriber) === true,
+          "root could not remove the top-level getter seed handler",
+        );
+      "#
+      }
+      "diagnostics-tracing-channel" => {
+        r#"
+        const tracing = diagnostics.tracingChannel(state.name);
+        const events = [
+          "start",
+          "end",
+          "asyncStart",
+          "asyncEnd",
+          "error",
+        ];
+        const seen = new Set();
+        for (const event of events) {
+          const channel = tracing[event];
+          assert(
+            channel instanceof diagnostics.Channel &&
+              channel.name === `tracing:${state.name}:${event}` &&
+              !seen.has(channel),
+            `root tracing channel produced a wrong ${event} member`,
+          );
+          seen.add(channel);
+        }
+        assert(seen.size === 5, "root tracing channel did not create five members");
+      "#
+      }
+      _ => panic!(
+        "unknown public diagnostics fixture operation {}",
+        operation.operation_id
+      ),
+    };
+    execute(
+      runtime,
+      "file:///rev2_public_diagnostics_fixture_cleanup.js",
+      format!(
+        r#"
+        {{
+          const diagnostics = rev2Diagnostics;
+          const state = rev2DiagnosticsState;
+          function assert(value, message) {{
+            if (!value) throw new Error(message);
+          }}
+          {body}
+          assert(
+            state.deniedSubscriberCalls === 0 &&
+              state.deniedTransformCalls === 0 &&
+              state.deniedStoreRuns === 0 &&
+              state.deniedCallbackCalls === 0,
+            "denied diagnostics work appeared during cleanup",
+          );
+          if (state.channel !== undefined) {{
+            assert(
+              Object.getPrototypeOf(state.channel) ===
+                diagnostics.Channel.prototype,
+              "explicit diagnostics cleanup did not restore inactivity",
+            );
+          }}
+          state.channel = undefined;
+          state.primaryStore = undefined;
+          state.deniedStore = undefined;
+          state.primarySubscriber = undefined;
+          state.deniedSubscriber = undefined;
+          delete globalThis.rev2DiagnosticsState;
+        }}
+        "#
+      ),
+    );
+  }
+
+  fn rev2_public_diagnostics_expected_positive_guard_calls(
+    operation: &Rev2V8FixtureOperation,
+    target: &str,
+  ) -> Vec<(String, String, String, String)> {
+    let mut calls = Vec::new();
+    let mut push = |call_target: &str, api_name: &str| {
+      calls.push((
+        "runtime".to_string(),
+        "inspect".to_string(),
+        call_target.to_string(),
+        api_name.to_string(),
+      ));
+    };
+    let channel = "node:diagnostics_channel.channel";
+    let constructor = "node:diagnostics_channel.Channel";
+    let subscribe = "node:diagnostics_channel.subscribe";
+    let unsubscribe = "node:diagnostics_channel.unsubscribe";
+    let bind_store = "node:diagnostics_channel.bindStore";
+    let unbind_store = "node:diagnostics_channel.unbindStore";
+    let has_subscribers = "node:diagnostics_channel.hasSubscribers";
+    let publish = "node:diagnostics_channel.publish";
+    let run_stores = "node:diagnostics_channel.runStores";
+
+    match operation.operation_id {
+      "diagnostics-active-channel-bind-store" => {
+        for api in [
+          channel,
+          constructor,
+          subscribe,
+          subscribe,
+          run_stores,
+          bind_store,
+          run_stores,
+          unbind_store,
+          unsubscribe,
+        ] {
+          push(target, api);
+        }
+      }
+      "diagnostics-active-channel-has-subscribers" => {
+        for api in [
+          channel,
+          constructor,
+          subscribe,
+          subscribe,
+          has_subscribers,
+          unsubscribe,
+        ] {
+          push(target, api);
+        }
+      }
+      "diagnostics-active-channel-publish" => {
+        for api in [
+          channel,
+          constructor,
+          subscribe,
+          subscribe,
+          publish,
+          unsubscribe,
+        ] {
+          push(target, api);
+        }
+      }
+      "diagnostics-active-channel-run-stores"
+      | "diagnostics-active-channel-unbind-store" => {
+        for api in [
+          channel,
+          constructor,
+          bind_store,
+          bind_store,
+          run_stores,
+          unbind_store,
+        ] {
+          push(target, api);
+        }
+      }
+      "diagnostics-active-channel-subscribe" => {
+        for api in [
+          channel,
+          constructor,
+          bind_store,
+          bind_store,
+          publish,
+          subscribe,
+          publish,
+          unsubscribe,
+          unbind_store,
+        ] {
+          push(target, api);
+        }
+      }
+      "diagnostics-active-channel-unsubscribe" => {
+        for api in [
+          channel,
+          constructor,
+          subscribe,
+          subscribe,
+          publish,
+          unsubscribe,
+        ] {
+          push(target, api);
+        }
+      }
+      "diagnostics-channel-bind-store" => {
+        for api in [
+          channel,
+          constructor,
+          run_stores,
+          bind_store,
+          bind_store,
+          run_stores,
+          unbind_store,
+        ] {
+          push(target, api);
+        }
+      }
+      "diagnostics-channel-constructor" => {
+        push(target, constructor);
+        push(target, channel);
+      }
+      "diagnostics-channel-has-subscribers" => {
+        for api in [channel, constructor, has_subscribers] {
+          push(target, api);
+        }
+      }
+      "diagnostics-channel-publish" => {
+        for api in [channel, constructor, publish] {
+          push(target, api);
+        }
+      }
+      "diagnostics-channel-run-stores" => {
+        for api in [channel, constructor, run_stores] {
+          push(target, api);
+        }
+      }
+      "diagnostics-channel-subscribe" => {
+        for api in [
+          channel,
+          constructor,
+          subscribe,
+          subscribe,
+          publish,
+          unsubscribe,
+        ] {
+          push(target, api);
+        }
+      }
+      "diagnostics-channel" => {
+        for api in [channel, constructor, channel] {
+          push(target, api);
+        }
+      }
+      "diagnostics-has-subscribers" => {
+        for api in [
+          channel,
+          constructor,
+          subscribe,
+          subscribe,
+          has_subscribers,
+          has_subscribers,
+          unsubscribe,
+        ] {
+          push(target, api);
+        }
+      }
+      "diagnostics-tracing-channel" => {
+        push(target, "node:diagnostics_channel.tracingChannel");
+        for event in ["start", "end", "asyncStart", "asyncEnd", "error"] {
+          let member_target = format!("tracing:{target}:{event}");
+          push(&member_target, channel);
+          push(&member_target, constructor);
+        }
+      }
+      _ => panic!(
+        "unknown public diagnostics fixture operation {}",
+        operation.operation_id
+      ),
+    }
+    calls
+  }
+
+  fn run_rev2_public_diagnostics_positive_control(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    phase: &str,
+  ) {
+    let target = format!("{}:positive-{phase}", operation.denied_target);
+    let before = rev2_v8_fixture_canaries();
+    prepare_rev2_public_diagnostics_fixture_state(
+      runtime, root, operation, &target,
+    );
+    cleanup_rev2_public_diagnostics_fixture_state(runtime, root, operation);
+    let after = rev2_v8_fixture_canaries();
+    let expected =
+      rev2_public_diagnostics_expected_positive_guard_calls(operation, &target);
+    assert_eq!(
+      after.public_wrapper_guard_calls,
+      before.public_wrapper_guard_calls + expected.len(),
+      "{} ambient diagnostics control crossed an inexact number of guards",
+      operation.operation_id
+    );
+    let observed = {
+      let calls = PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap();
+      calls[before.public_wrapper_guard_calls..].to_vec()
+    };
+    assert_eq!(
+      observed, expected,
+      "{} ambient diagnostics control used an inexact guard sequence",
+      operation.operation_id
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before.public_wrapper_guard_calls,
+        ..after
+      },
+      before,
+      "{} ambient diagnostics control crossed unrelated native work",
+      operation.operation_id
+    );
+    execute(
+      runtime,
+      "file:///rev2_public_diagnostics_fixture_positive_clean.js",
+      r#"
+      if ("rev2DiagnosticsState" in globalThis) {
+        throw new Error("ambient diagnostics control retained fixture state");
+      }
+      "#
+      .to_string(),
     );
   }
 
@@ -2906,7 +4134,7 @@ mod native_capsec_tests {
         operation.operation_id,
         "public-gc-profiler-stop" | "public-gc-profiler-dispose"
       ));
-    assert_exact_public_v8_guard_call(operation, operation_guard_index);
+    assert_exact_public_wrapper_guard_call(operation, operation_guard_index);
     match operation.operation_id {
       "public-gc-profiler-start"
       | "public-gc-profiler-stop"
@@ -3265,6 +4493,84 @@ mod native_capsec_tests {
     );
   }
 
+  fn run_rev2_public_diagnostics_fixture_mode(
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    case_kind: &str,
+    mode: &str,
+  ) {
+    reset_rev2_v8_fixture_canaries();
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _tokio_guard = tokio_runtime.enter();
+    let mut runtime = new_public_v8_wrapper_runtime();
+    assert_public_diagnostics_guard_precedes_wrapper_work(operation);
+    load_public_diagnostics_wrapper(&mut runtime, root);
+
+    if case_kind == "staged-barrier:cleanup" {
+      run_rev2_public_diagnostics_positive_control(
+        &mut runtime,
+        root,
+        operation,
+        "before-cleanup-case",
+      );
+    }
+
+    prepare_rev2_public_diagnostics_fixture_state(
+      &mut runtime,
+      root,
+      operation,
+      operation.denied_target,
+    );
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    let before = rev2_v8_fixture_canaries();
+    deny_rev2_public_diagnostics_fixture_operation(&mut runtime, operation);
+    let after = rev2_v8_fixture_canaries();
+    assert_eq!(
+      after.public_wrapper_guard_calls,
+      before.public_wrapper_guard_calls + 1,
+      "{} did not cross exactly one diagnostics guard in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_exact_public_wrapper_guard_call(
+      operation,
+      before.public_wrapper_guard_calls,
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before.public_wrapper_guard_calls,
+        ..after
+      },
+      before,
+      "{} changed diagnostics state or unrelated native work before denial in {case_kind}/{mode}",
+      operation.operation_id
+    );
+
+    cleanup_rev2_public_diagnostics_fixture_state(
+      &mut runtime,
+      root,
+      operation,
+    );
+    if case_kind == "staged-barrier:cancellation" {
+      run_rev2_public_diagnostics_positive_control(
+        &mut runtime,
+        root,
+        operation,
+        "after-cancellation",
+      );
+    }
+    assert_rev2_v8_fixture_terminal_clean(operation.operation_id, mode);
+    drop(runtime);
+    assert_eq!(
+      GC_PROFILER_ACTIVE_STATE_COUNT.load(Ordering::SeqCst),
+      0,
+      "{} retained unrelated native profiler state after diagnostics runtime disposal in {mode}",
+      operation.operation_id
+    );
+  }
+
   fn run_rev2_public_v8_fixture_mode(
     root: &Path,
     operation: &Rev2V8FixtureOperation,
@@ -3300,7 +4606,7 @@ mod native_capsec_tests {
       "{} did not cross exactly one public guard in {case_kind}/{mode}",
       operation.operation_id
     );
-    assert_exact_public_v8_guard_call(
+    assert_exact_public_wrapper_guard_call(
       operation,
       before.public_wrapper_guard_calls,
     );
@@ -3348,6 +4654,19 @@ mod native_capsec_tests {
       REV2_V8_FIXTURE_MODES.contains(&mode),
       "fixture mode is not exact"
     );
+    if operation.operation_id.starts_with("diagnostics-") {
+      // @ref LLP 0019#runtime-and-memory-inspection [tests] -- Execute the
+      // actual ext:deno_node/diagnostics_channel.js public facade. The
+      // shared test guard records its exact deny-only runtime:inspect tuple;
+      // closure-private state is observed only through prototypes, callback
+      // delivery, store execution, and exact root teardown. Internal
+      // channel facades remain unreachable and results remain
+      // development-only, unauthenticated candidate evidence.
+      run_rev2_public_diagnostics_fixture_mode(
+        root, operation, case_kind, mode,
+      );
+      return rev2_v8_fixture_assertions(operation, case_kind);
+    }
     if operation.operation_id.starts_with("public-") {
       // @ref LLP 0019#runtime-and-memory-inspection [tests] -- Execute the
       // actual ext/node/polyfills/v8.ts public export. The test guard records
