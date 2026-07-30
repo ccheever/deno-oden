@@ -1728,6 +1728,7 @@ mod native_capsec_tests {
     Vec<(String, String, String, String)>,
   > = Mutex::new(Vec::new());
 
+  #[cfg(test)]
   #[op2(fast, stack_trace)]
   fn op_oden_guard_deny_only_surface(
     #[string] family: String,
