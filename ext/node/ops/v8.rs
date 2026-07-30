@@ -36,6 +36,14 @@ static TAKE_HEAP_SNAPSHOT_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static TAKE_HEAP_SNAPSHOT_CHUNK_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
+static SET_FLAGS_WORK_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GET_HEAP_CODE_STATISTICS_WORK_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GET_HEAP_STATISTICS_WORK_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GET_HEAP_SPACE_STATISTICS_WORK_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
 static QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static NEAR_HEAP_LIMIT_CURRENT_DIR_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -71,6 +79,8 @@ pub fn op_v8_set_flags_from_string(
     "v8:set-flags",
     "node:v8.setFlagsFromString",
   )?;
+  #[cfg(test)]
+  SET_FLAGS_WORK_COUNT.fetch_add(1, Ordering::SeqCst);
   for flag in flags.split_ascii_whitespace() {
     match flag {
       "--expose_gc" | "--expose-gc" => {
@@ -115,6 +125,8 @@ pub fn op_v8_get_heap_statistics(
   scope: &mut v8::PinScope<'_, '_>,
   #[buffer] buffer: &mut [f64],
 ) {
+  #[cfg(test)]
+  GET_HEAP_STATISTICS_WORK_COUNT.fetch_add(1, Ordering::SeqCst);
   let stats = scope.get_heap_statistics();
 
   buffer[0] = stats.total_heap_size() as f64;
@@ -137,6 +149,8 @@ pub fn op_v8_get_heap_statistics(
 #[op2(fast)]
 #[smi]
 pub fn op_v8_number_of_heap_spaces(scope: &mut v8::PinScope<'_, '_>) -> u32 {
+  #[cfg(test)]
+  GET_HEAP_SPACE_STATISTICS_WORK_COUNT.fetch_add(1, Ordering::SeqCst);
   scope.number_of_heap_spaces() as u32
 }
 
@@ -147,6 +161,8 @@ pub fn op_v8_update_heap_space_statistics(
   #[buffer] buffer: &mut [f64],
   #[smi] space_index: u32,
 ) -> Option<String> {
+  #[cfg(test)]
+  GET_HEAP_SPACE_STATISTICS_WORK_COUNT.fetch_add(1, Ordering::SeqCst);
   let stats = scope.get_heap_space_statistics(space_index as usize)?;
   buffer[0] = stats.space_size() as f64;
   buffer[1] = stats.space_used_size() as f64;
@@ -493,6 +509,8 @@ pub fn op_v8_get_heap_code_statistics(
   scope: &mut v8::PinScope<'_, '_>,
   #[buffer] buffer: &mut [f64],
 ) {
+  #[cfg(test)]
+  GET_HEAP_CODE_STATISTICS_WORK_COUNT.fetch_add(1, Ordering::SeqCst);
   if let Some(stats) = scope.get_heap_code_and_metadata_statistics() {
     buffer[0] = stats.code_and_metadata_size() as f64;
     buffer[1] = stats.bytecode_and_metadata_size() as f64;
@@ -1286,23 +1304,37 @@ fn build_report<'s>(
 
 #[cfg(test)]
 mod native_capsec_tests {
+  use std::fs::OpenOptions;
+  use std::io::Write as _;
   use std::path::Path;
   use std::path::PathBuf;
   use std::process::Command;
   use std::process::Output;
   use std::sync::Arc;
+  use std::sync::Mutex;
   use std::time::Duration;
   use std::time::Instant;
-  use std::time::SystemTime;
-  use std::time::UNIX_EPOCH;
 
   use deno_core::JsRuntime;
   use deno_core::RuntimeOptions;
   use deno_permissions::Permissions;
   use deno_permissions::PermissionsContainer;
   use deno_permissions::RuntimePermissionDescriptorParser;
+  use deno_resolver::npm::DenoInNpmPackageChecker;
+  use deno_resolver::npm::NpmResolver;
 
   use super::*;
+
+  deno_error::js_error_wrapper!(
+    deno_ast::ParseDiagnostic,
+    PublicV8FixtureParseDiagnostic,
+    "SyntaxError"
+  );
+  deno_error::js_error_wrapper!(
+    deno_ast::TranspileError,
+    PublicV8FixtureTranspileError,
+    "Error"
+  );
 
   const NATIVE_V8_GUARD_CHILD: &str = "ODEN_NATIVE_V8_GUARD_CHILD";
   const NATIVE_V8_GUARD_TEST: &str = "native_v8_ops_recheck_actor_before_work";
@@ -1385,31 +1417,217 @@ mod native_capsec_tests {
       cleanup_assertion: "ambient-synchronous-snapshot-call-returns",
       post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-heap-snapshot-native-work",
     },
+    Rev2V8FixtureOperation {
+      operation_id: "public-gc-profiler-dispose",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.GCProfiler.dispose",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.GCProfiler.dispose:complete",
+      denied_target: "node:v8.GCProfiler.dispose",
+      authorization_assertion: "guard-precedes-public-wrapper-gc-profiler-dispose-native-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-gc-profiler-dispose-native-work",
+      cleanup_assertion: "explicit-root-stop-removes-active-profiler",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-gc-profiler-dispose-native-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-gc-profiler-start",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.GCProfiler.start",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.GCProfiler.start:complete",
+      denied_target: "node:v8.GCProfiler.start",
+      authorization_assertion: "guard-precedes-public-wrapper-gc-profiler-start-native-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-gc-profiler-start-native-work",
+      cleanup_assertion: "explicit-root-stop-removes-active-profiler",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-gc-profiler-start-native-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-gc-profiler-stop",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.GCProfiler.stop",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.GCProfiler.stop:complete",
+      denied_target: "node:v8.GCProfiler.stop",
+      authorization_assertion: "guard-precedes-public-wrapper-gc-profiler-stop-native-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-gc-profiler-stop-native-work",
+      cleanup_assertion: "explicit-root-stop-removes-active-profiler",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-gc-profiler-stop-native-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-get-heap-code-statistics",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.getHeapCodeStatistics",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.getHeapCodeStatistics:complete",
+      denied_target: "node:v8.getHeapCodeStatistics",
+      authorization_assertion: "guard-precedes-public-wrapper-get-heap-code-statistics-native-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-get-heap-code-statistics-native-work",
+      cleanup_assertion: "ambient-synchronous-inspection-call-returns",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-get-heap-code-statistics-native-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-get-heap-snapshot",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.getHeapSnapshot",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.getHeapSnapshot:complete",
+      denied_target: "node:v8.getHeapSnapshot",
+      authorization_assertion: "guard-precedes-public-wrapper-get-heap-snapshot-native-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-get-heap-snapshot-native-work",
+      cleanup_assertion: "fixture-runtime-drop-releases-heap-snapshot-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-get-heap-snapshot-native-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-get-heap-space-statistics",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.getHeapSpaceStatistics",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.getHeapSpaceStatistics:complete",
+      denied_target: "node:v8.getHeapSpaceStatistics",
+      authorization_assertion: "guard-precedes-public-wrapper-get-heap-space-statistics-native-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-get-heap-space-statistics-native-work",
+      cleanup_assertion: "ambient-synchronous-inspection-call-returns",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-get-heap-space-statistics-native-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-get-heap-statistics",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.getHeapStatistics",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.getHeapStatistics:complete",
+      denied_target: "node:v8.getHeapStatistics",
+      authorization_assertion: "guard-precedes-public-wrapper-get-heap-statistics-native-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-get-heap-statistics-native-work",
+      cleanup_assertion: "ambient-synchronous-inspection-call-returns",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-get-heap-statistics-native-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-query-objects",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.queryObjects",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.queryObjects:complete",
+      denied_target: "node:v8.queryObjects",
+      authorization_assertion: "guard-precedes-public-wrapper-query-objects-native-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-query-objects-native-work",
+      cleanup_assertion: "ambient-query-objects-control-returns",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-query-objects-native-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-set-flags-from-string",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.setFlagsFromString",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.setFlagsFromString:complete",
+      denied_target: "node:v8.setFlagsFromString",
+      authorization_assertion: "guard-precedes-public-wrapper-v8-flag-mutation",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-v8-flag-mutation",
+      cleanup_assertion: "ambient-cleanup-restores-v8-flag",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-v8-flag-mutation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-set-heap-snapshot-near-heap-limit",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.setHeapSnapshotNearHeapLimit",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.setHeapSnapshotNearHeapLimit:complete",
+      denied_target: "node:v8.setHeapSnapshotNearHeapLimit",
+      authorization_assertion: "guard-precedes-public-wrapper-near-heap-limit-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-near-heap-limit-state",
+      cleanup_assertion: "fixture-runtime-drop-releases-near-heap-limit-wrapper-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-near-heap-limit-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-startup-snapshot-add-deserialize-callback",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.startupSnapshot.addDeserializeCallback",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.startupSnapshot.addDeserializeCallback:complete",
+      denied_target: "node:v8.startupSnapshot.addDeserializeCallback",
+      authorization_assertion: "guard-precedes-public-wrapper-startup-deserialize-callback-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-startup-deserialize-callback-state",
+      cleanup_assertion: "fixture-runtime-drop-releases-startup-snapshot-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-startup-deserialize-callback-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-startup-snapshot-add-serialize-callback",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.startupSnapshot.addSerializeCallback",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.startupSnapshot.addSerializeCallback:complete",
+      denied_target: "node:v8.startupSnapshot.addSerializeCallback",
+      authorization_assertion: "guard-precedes-public-wrapper-startup-serialize-callback-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-startup-serialize-callback-state",
+      cleanup_assertion: "fixture-runtime-drop-releases-startup-snapshot-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-startup-serialize-callback-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-startup-snapshot-set-deserialize-main-function",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.startupSnapshot.setDeserializeMainFunction",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.startupSnapshot.setDeserializeMainFunction:complete",
+      denied_target: "node:v8.startupSnapshot.setDeserializeMainFunction",
+      authorization_assertion: "guard-precedes-public-wrapper-startup-deserialize-main-state",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-startup-deserialize-main-state",
+      cleanup_assertion: "fixture-runtime-drop-releases-startup-snapshot-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-startup-deserialize-main-state",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-stop-coverage",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.stopCoverage",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.stopCoverage:complete",
+      denied_target: "node:v8.stopCoverage",
+      authorization_assertion: "guard-precedes-public-wrapper-stop-coverage-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-stop-coverage-work",
+      cleanup_assertion: "ambient-not-implemented-control-remains-reachable",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-stop-coverage-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-take-coverage",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.takeCoverage",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.takeCoverage:complete",
+      denied_target: "node:v8.takeCoverage",
+      authorization_assertion: "guard-precedes-public-wrapper-take-coverage-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-take-coverage-work",
+      cleanup_assertion: "ambient-not-implemented-control-remains-reachable",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-take-coverage-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "public-write-heap-snapshot",
+      edge_id: "diagnostic-route:ext/node/polyfills/v8.ts#node:v8.writeHeapSnapshot",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/v8.ts#node:v8.writeHeapSnapshot:complete",
+      denied_target: "node:v8.writeHeapSnapshot",
+      authorization_assertion: "guard-precedes-public-wrapper-write-heap-snapshot-native-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-public-wrapper-write-heap-snapshot-native-work",
+      cleanup_assertion: "fixture-runtime-drop-releases-heap-snapshot-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-public-wrapper-write-heap-snapshot-native-work",
+    },
   ];
 
-  struct NativeV8TestRoot(PathBuf);
+  struct NativeV8TestRoot(PathBuf, Option<tempfile::TempDir>);
 
   impl NativeV8TestRoot {
     fn new(mode: &str) -> Self {
-      let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-      let path = std::env::temp_dir()
-        .join(format!("oden-native-v8-{}-{nonce}", std::process::id()));
-      std::fs::create_dir_all(&path).unwrap();
-      std::fs::write(
-        path.join("policy.json"),
-        format!(r#"{{"mode":"{mode}","grants":{{}}}}"#),
-      )
-      .unwrap();
-      Self(path)
+      let dir = tempfile::Builder::new()
+        .prefix("oden-native-v8-")
+        .tempdir()
+        .unwrap();
+      let metadata = std::fs::symlink_metadata(dir.path()).unwrap();
+      assert!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "native V8 fixture root must be one newly created real directory"
+      );
+      let path = std::fs::canonicalize(dir.path()).unwrap();
+      let policy_path = path.join("policy.json");
+      let mut policy = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&policy_path)
+        .unwrap();
+      write!(policy, r#"{{"mode":"{mode}","grants":{{}}}}"#).unwrap();
+      policy.sync_all().unwrap();
+      let policy_metadata = std::fs::symlink_metadata(&policy_path).unwrap();
+      assert!(
+        policy_metadata.is_file() && !policy_metadata.file_type().is_symlink(),
+        "native V8 fixture policy must be one newly created real file"
+      );
+      Self(path, Some(dir))
     }
   }
 
   impl Drop for NativeV8TestRoot {
     fn drop(&mut self) {
-      let _ = std::fs::remove_dir_all(&self.0);
+      let Some(dir) = self.1.take() else {
+        return;
+      };
+      if let Err(error) = dir.close() {
+        if std::thread::panicking() {
+          eprintln!(
+            "native V8 fixture cleanup also failed for {}: {error}",
+            self.0.display()
+          );
+        } else {
+          panic!(
+            "native V8 fixture cleanup failed for {}: {error}",
+            self.0.display()
+          );
+        }
+      }
     }
   }
 
@@ -1428,9 +1646,17 @@ mod native_capsec_tests {
   fn run_native_v8_child(mut command: Command, root: &Path) -> Output {
     let stdout_path = root.join("native-v8-child.stdout");
     let stderr_path = root.join("native-v8-child.stderr");
-    command
-      .stdout(std::fs::File::create(&stdout_path).unwrap())
-      .stderr(std::fs::File::create(&stderr_path).unwrap());
+    let stdout = OpenOptions::new()
+      .write(true)
+      .create_new(true)
+      .open(&stdout_path)
+      .unwrap();
+    let stderr = OpenOptions::new()
+      .write(true)
+      .create_new(true)
+      .open(&stderr_path)
+      .unwrap();
+    command.stdout(stdout).stderr(stderr);
     let mut child = command.spawn().unwrap();
     let started = Instant::now();
     let timeout = Duration::from_secs(120);
@@ -1497,12 +1723,48 @@ mod native_capsec_tests {
     }
   );
 
+  static PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+  static PUBLIC_V8_WRAPPER_GUARD_CALLS: Mutex<
+    Vec<(String, String, String, String)>,
+  > = Mutex::new(Vec::new());
+
+  #[op2(fast, stack_trace)]
+  fn op_oden_guard_deny_only_surface(
+    #[string] family: String,
+    #[string] action: String,
+    #[string] target: String,
+    #[string] api_name: String,
+  ) -> Result<(), deno_permissions::PermissionCheckError> {
+    PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+    PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap().push((
+      family.clone(),
+      action.clone(),
+      target.clone(),
+      api_name.clone(),
+    ));
+    deno_permissions::oden_capsec_guard_deny_only_surface(
+      &family, &action, &target, &api_name,
+    )
+  }
+
+  deno_core::extension!(
+    public_v8_wrapper_guard_test_ext,
+    ops = [op_oden_guard_deny_only_surface],
+    state = |state| {
+      state.put::<PermissionsContainer>(native_test_permissions(false));
+    }
+  );
+
   fn execute(runtime: &mut JsRuntime, name: &'static str, source: String) {
     runtime.execute_script(name, source).unwrap();
   }
 
   fn run_native_v8_guard_contract(root: &Path, mode: &str) {
     EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
+    SET_FLAGS_WORK_COUNT.store(0, Ordering::SeqCst);
+    GET_HEAP_CODE_STATISTICS_WORK_COUNT.store(0, Ordering::SeqCst);
+    GET_HEAP_STATISTICS_WORK_COUNT.store(0, Ordering::SeqCst);
+    GET_HEAP_SPACE_STATISTICS_WORK_COUNT.store(0, Ordering::SeqCst);
     TAKE_HEAP_SNAPSHOT_CALL_COUNT.store(0, Ordering::SeqCst);
     TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
     QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
@@ -1583,6 +1845,11 @@ mod native_capsec_tests {
     assert!(
       !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
       "denied native flag mutation reached shared V8 state in {mode}"
+    );
+    assert_eq!(
+      SET_FLAGS_WORK_COUNT.load(Ordering::SeqCst),
+      0,
+      "denied native flag mutation reached V8 flag work in {mode}"
     );
     assert_eq!(
       TAKE_HEAP_SNAPSHOT_CALL_COUNT.load(Ordering::SeqCst),
@@ -1834,7 +2101,14 @@ mod native_capsec_tests {
       ],
       "staged-barrier:cancellation" => [
         "denied-attempt-leaves-no-provisional-state",
-        "ambient-control-remains-usable",
+        if matches!(
+          operation.operation_id,
+          "public-get-heap-snapshot" | "public-write-heap-snapshot"
+        ) {
+          "ambient-wrapper-native-work-remains-reachable"
+        } else {
+          "ambient-control-remains-usable"
+        },
       ],
       "staged-barrier:cleanup" => [
         operation.cleanup_assertion,
@@ -1846,9 +2120,18 @@ mod native_capsec_tests {
 
   #[derive(Clone, Copy, Debug, Eq, PartialEq)]
   struct Rev2V8FixtureCanaries {
+    public_wrapper_guard_calls: usize,
     expose_gc: bool,
+    set_flags_work: usize,
+    heap_code_statistics_work: usize,
+    heap_statistics_work: usize,
+    heap_space_statistics_work: usize,
     heap_snapshot_calls: usize,
     heap_snapshot_chunks: usize,
+    query_objects_snapshot_chunks: usize,
+    near_heap_limit_current_dir: usize,
+    near_heap_limit_check_write: usize,
+    near_heap_limit_callback_installs: usize,
     gc_profiler_new_work: usize,
     gc_profiler_start_work: usize,
     gc_profiler_callback_installs: usize,
@@ -1857,9 +2140,19 @@ mod native_capsec_tests {
   }
 
   fn reset_rev2_v8_fixture_canaries() {
+    PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.store(0, Ordering::SeqCst);
+    PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap().clear();
     EXPOSE_GC_FROM_SET_FLAGS.store(false, Ordering::SeqCst);
+    SET_FLAGS_WORK_COUNT.store(0, Ordering::SeqCst);
+    GET_HEAP_CODE_STATISTICS_WORK_COUNT.store(0, Ordering::SeqCst);
+    GET_HEAP_STATISTICS_WORK_COUNT.store(0, Ordering::SeqCst);
+    GET_HEAP_SPACE_STATISTICS_WORK_COUNT.store(0, Ordering::SeqCst);
     TAKE_HEAP_SNAPSHOT_CALL_COUNT.store(0, Ordering::SeqCst);
     TAKE_HEAP_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
+    QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT.store(0, Ordering::SeqCst);
+    NEAR_HEAP_LIMIT_CURRENT_DIR_COUNT.store(0, Ordering::SeqCst);
+    NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT.store(0, Ordering::SeqCst);
+    NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT.store(0, Ordering::SeqCst);
     GC_PROFILER_NEW_WORK_COUNT.store(0, Ordering::SeqCst);
     GC_PROFILER_START_WORK_COUNT.store(0, Ordering::SeqCst);
     GC_PROFILER_CALLBACK_INSTALL_COUNT.store(0, Ordering::SeqCst);
@@ -1869,9 +2162,26 @@ mod native_capsec_tests {
 
   fn rev2_v8_fixture_canaries() -> Rev2V8FixtureCanaries {
     Rev2V8FixtureCanaries {
+      public_wrapper_guard_calls: PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT
+        .load(Ordering::SeqCst),
       expose_gc: EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+      set_flags_work: SET_FLAGS_WORK_COUNT.load(Ordering::SeqCst),
+      heap_code_statistics_work: GET_HEAP_CODE_STATISTICS_WORK_COUNT
+        .load(Ordering::SeqCst),
+      heap_statistics_work: GET_HEAP_STATISTICS_WORK_COUNT
+        .load(Ordering::SeqCst),
+      heap_space_statistics_work: GET_HEAP_SPACE_STATISTICS_WORK_COUNT
+        .load(Ordering::SeqCst),
       heap_snapshot_calls: TAKE_HEAP_SNAPSHOT_CALL_COUNT.load(Ordering::SeqCst),
       heap_snapshot_chunks: TAKE_HEAP_SNAPSHOT_CHUNK_COUNT
+        .load(Ordering::SeqCst),
+      query_objects_snapshot_chunks: QUERY_OBJECTS_SNAPSHOT_CHUNK_COUNT
+        .load(Ordering::SeqCst),
+      near_heap_limit_current_dir: NEAR_HEAP_LIMIT_CURRENT_DIR_COUNT
+        .load(Ordering::SeqCst),
+      near_heap_limit_check_write: NEAR_HEAP_LIMIT_CHECK_WRITE_COUNT
+        .load(Ordering::SeqCst),
+      near_heap_limit_callback_installs: NEAR_HEAP_LIMIT_CALLBACK_INSTALL_COUNT
         .load(Ordering::SeqCst),
       gc_profiler_new_work: GC_PROFILER_NEW_WORK_COUNT.load(Ordering::SeqCst),
       gc_profiler_start_work: GC_PROFILER_START_WORK_COUNT
@@ -1882,6 +2192,813 @@ mod native_capsec_tests {
       gc_profiler_active_states: GC_PROFILER_ACTIVE_STATE_COUNT
         .load(Ordering::SeqCst),
     }
+  }
+
+  fn transpile_public_v8_fixture_source(
+    specifier: deno_core::ModuleName,
+    source: deno_core::ModuleCodeString,
+  ) -> Result<
+    (
+      deno_core::ModuleCodeString,
+      Option<deno_core::SourceMapData>,
+    ),
+    deno_error::JsErrorBox,
+  > {
+    if !specifier.ends_with(".ts") {
+      return Ok((source, None));
+    }
+    let specifier_url = deno_core::url::Url::parse(&specifier).unwrap();
+    let parsed = deno_ast::parse_module(deno_ast::ParseParams {
+      specifier: specifier_url,
+      text: source.into(),
+      media_type: deno_ast::MediaType::TypeScript,
+      capture_tokens: false,
+      scope_analysis: false,
+      maybe_syntax: None,
+    })
+    .map_err(|error| {
+      deno_error::JsErrorBox::from_err(PublicV8FixtureParseDiagnostic(error))
+    })?;
+    let output = parsed
+      .transpile(
+        &deno_ast::TranspileOptions {
+          imports_not_used_as_values: deno_ast::ImportsNotUsedAsValues::Remove,
+          ..Default::default()
+        },
+        &deno_ast::TranspileModuleOptions::default(),
+        &deno_ast::EmitOptions {
+          source_map: deno_ast::SourceMapOption::None,
+          ..Default::default()
+        },
+      )
+      .map_err(|error| {
+        deno_error::JsErrorBox::from_err(PublicV8FixtureTranspileError(error))
+      })?
+      .into_source();
+    Ok((output.text.into(), None))
+  }
+
+  fn new_public_v8_wrapper_runtime() -> JsRuntime {
+    let fs: deno_fs::FileSystemRc = Rc::new(deno_fs::RealFs);
+    let runtime = JsRuntime::new(RuntimeOptions {
+      extensions: vec![
+        deno_webidl::deno_webidl::init(),
+        deno_web::deno_web::init(
+          deno_web::BlobStore::default_arc(),
+          Default::default(),
+          Default::default(),
+          deno_web::InMemoryBroadcastChannel::default(),
+        ),
+        deno_io::deno_io::init(Some(Default::default())),
+        deno_fs::deno_fs::init(fs.clone()),
+        crate::deno_node::init::<
+          DenoInNpmPackageChecker,
+          NpmResolver<sys_traits::impls::RealSys>,
+          sys_traits::impls::RealSys,
+        >(None, fs),
+        public_v8_wrapper_guard_test_ext::init(),
+      ],
+      extension_transpiler: Some(Rc::new(transpile_public_v8_fixture_source)),
+      ..Default::default()
+    });
+    runtime
+      .op_state()
+      .borrow_mut()
+      .put::<PermissionsContainer>(native_test_permissions(true));
+    runtime
+  }
+
+  fn load_public_v8_wrapper(runtime: &mut JsRuntime, root: &Path) {
+    set_actor(root, "main.ts");
+    execute(
+      runtime,
+      "file:///rev2_public_v8_fixture_load.js",
+      r#"
+      {
+        const webUrl =
+          Deno.core.loadExtScript("ext:deno_web/00_url.js");
+        globalThis.URL = webUrl.URL;
+        globalThis.URLSearchParams = webUrl.URLSearchParams;
+      }
+      globalThis.rev2PublicV8 =
+        Deno.core.loadExtScript("ext:deno_node/v8.ts");
+      if (
+        typeof rev2PublicV8.getHeapStatistics !== "function" ||
+        typeof rev2PublicV8.GCProfiler !== "function" ||
+        typeof rev2PublicV8.startupSnapshot !== "object"
+      ) {
+        throw new Error("the actual public node:v8 wrapper did not load");
+      }
+      "#
+      .to_string(),
+    );
+  }
+
+  fn assert_public_v8_guard_precedes_wrapper_mutation(
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let source = include_str!("../polyfills/v8.ts");
+    let (scope, operation_anchor, exact_guard_prefix) =
+      match operation.operation_id {
+        "public-gc-profiler-dispose" => (
+          &source[source.find("class GCProfiler {").unwrap()
+            ..source
+              .find("// https://nodejs.org/api/v8.html#startup-snapshot-api")
+              .unwrap()],
+          "  [SymbolDispose]() {",
+          r#"  [SymbolDispose]() {
+    const state = gcProfilerStates.get(this);
+    const handle = state.handle;
+    if (handle === null) return undefined;
+    guardV8("GCProfiler.dispose");"#,
+        ),
+        "public-gc-profiler-start" => (
+          &source[source.find("class GCProfiler {").unwrap()
+            ..source
+              .find("// https://nodejs.org/api/v8.html#startup-snapshot-api")
+              .unwrap()],
+          "  start() {",
+          r#"  start() {
+    guardV8("GCProfiler.start");"#,
+        ),
+        "public-gc-profiler-stop" => (
+          &source[source.find("class GCProfiler {").unwrap()
+            ..source
+              .find("// https://nodejs.org/api/v8.html#startup-snapshot-api")
+              .unwrap()],
+          "  stop() {",
+          r#"  stop() {
+    const state = gcProfilerStates.get(this);
+    const handle = state.handle;
+    if (handle === null) return undefined;
+    guardV8("GCProfiler.stop");"#,
+        ),
+        "public-get-heap-code-statistics" => (
+          source,
+          "function getHeapCodeStatistics() {",
+          r#"function getHeapCodeStatistics() {
+  guardV8("getHeapCodeStatistics");"#,
+        ),
+        "public-get-heap-snapshot" => (
+          source,
+          "function getHeapSnapshot(",
+          r#"function getHeapSnapshot(options?: Record<string, unknown>) {
+  guardV8("getHeapSnapshot");"#,
+        ),
+        "public-get-heap-space-statistics" => (
+          source,
+          "function getHeapSpaceStatistics() {",
+          r#"function getHeapSpaceStatistics() {
+  guardV8("getHeapSpaceStatistics");"#,
+        ),
+        "public-get-heap-statistics" => (
+          source,
+          "function getHeapStatistics() {",
+          r#"function getHeapStatistics() {
+  guardV8("getHeapStatistics");"#,
+        ),
+        "public-query-objects" => (
+          source,
+          "function queryObjects(",
+          r#"function queryObjects(
+  ctor: { name?: string; prototype?: unknown },
+  options:
+    | { format?: "count" | "summary" }
+    | undefined = undefined,
+) {
+  guardV8("queryObjects");"#,
+        ),
+        "public-set-flags-from-string" => (
+          source,
+          "function setFlagsFromString(",
+          r#"function setFlagsFromString(flags: string) {
+  guardV8("setFlagsFromString");"#,
+        ),
+        "public-set-heap-snapshot-near-heap-limit" => (
+          source,
+          "function setHeapSnapshotNearHeapLimit(",
+          r#"function setHeapSnapshotNearHeapLimit(limit: number) {
+  guardV8("setHeapSnapshotNearHeapLimit");"#,
+        ),
+        "public-startup-snapshot-add-deserialize-callback" => (
+          source,
+          "function startupSnapshotAddDeserializeCallback(",
+          r#"function startupSnapshotAddDeserializeCallback(
+  fn: SnapshotCallback,
+  data?: unknown,
+) {
+  guardV8("startupSnapshot.addDeserializeCallback");"#,
+        ),
+        "public-startup-snapshot-add-serialize-callback" => (
+          source,
+          "function startupSnapshotAddSerializeCallback(",
+          r#"function startupSnapshotAddSerializeCallback(
+  fn: SnapshotCallback,
+  data?: unknown,
+) {
+  guardV8("startupSnapshot.addSerializeCallback");"#,
+        ),
+        "public-startup-snapshot-set-deserialize-main-function" => (
+          source,
+          "function startupSnapshotSetDeserializeMainFunction(",
+          r#"function startupSnapshotSetDeserializeMainFunction(
+  fn: SnapshotCallback,
+  data?: unknown,
+) {
+  guardV8("startupSnapshot.setDeserializeMainFunction");"#,
+        ),
+        "public-stop-coverage" => (
+          source,
+          "function stopCoverage() {",
+          r#"function stopCoverage() {
+  guardV8("stopCoverage");"#,
+        ),
+        "public-take-coverage" => (
+          source,
+          "function takeCoverage() {",
+          r#"function takeCoverage() {
+  guardV8("takeCoverage");"#,
+        ),
+        "public-write-heap-snapshot" => (
+          source,
+          "function writeHeapSnapshot(",
+          r#"function writeHeapSnapshot(
+  filename?: string,
+  options?: Record<string, unknown>,
+) {
+  guardV8("writeHeapSnapshot");"#,
+        ),
+        _ => panic!(
+          "unknown public Rev2 V8 fixture operation {}",
+          operation.operation_id
+        ),
+      };
+    assert_eq!(
+      scope.matches(operation_anchor).count(),
+      1,
+      "{} public wrapper source anchor is not unique",
+      operation.operation_id
+    );
+    assert!(
+      scope.contains(exact_guard_prefix),
+      "{} no longer has the exact guard-before-mutation source prefix",
+      operation.operation_id
+    );
+  }
+
+  fn assert_exact_public_v8_guard_call(
+    operation: &Rev2V8FixtureOperation,
+    call_index: usize,
+  ) {
+    let calls = PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap();
+    let call = calls
+      .get(call_index)
+      .unwrap_or_else(|| panic!("missing public guard call at {call_index}"));
+    assert_eq!(
+      call,
+      &(
+        "runtime".to_string(),
+        "inspect".to_string(),
+        operation.denied_target.to_string(),
+        operation.denied_target.to_string(),
+      ),
+      "{} used an inexact public guard tuple",
+      operation.operation_id
+    );
+  }
+
+  fn assert_native_v8_fixture_path_absent(path: &Path, context: &str) {
+    match std::fs::symlink_metadata(path) {
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+      Err(error) => {
+        panic!(
+          "{context}: could not establish absence for {}: {error}",
+          path.display()
+        )
+      }
+      Ok(metadata) => panic!(
+        "{context}: {} exists as {:?}",
+        path.display(),
+        metadata.file_type()
+      ),
+    }
+  }
+
+  fn prepare_rev2_public_v8_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation_id: &str,
+  ) {
+    set_actor(root, "main.ts");
+    match operation_id {
+      "public-gc-profiler-start" => execute(
+        runtime,
+        "file:///rev2_public_v8_prepare_start.js",
+        r#"
+        globalThis.rev2PublicProfiler = new rev2PublicV8.GCProfiler();
+        "#
+        .to_string(),
+      ),
+      "public-gc-profiler-stop" | "public-gc-profiler-dispose" => execute(
+        runtime,
+        "file:///rev2_public_v8_prepare_live.js",
+        r#"
+        globalThis.rev2PublicProfiler = new rev2PublicV8.GCProfiler();
+        rev2PublicProfiler.start();
+        "#
+        .to_string(),
+      ),
+      _ => {}
+    }
+  }
+
+  fn deny_rev2_public_v8_fixture_operation(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let snapshot_path = root.join("denied-public-wrapper.heapsnapshot");
+    assert_native_v8_fixture_path_absent(
+      &snapshot_path,
+      "before denied public V8 wrapper",
+    );
+    let snapshot_path_json =
+      deno_core::serde_json::to_string(&snapshot_path.to_string_lossy())
+        .unwrap();
+    let body = match operation.operation_id {
+      "public-gc-profiler-dispose" => {
+        r#"expectDenied(() => rev2PublicProfiler[Symbol.dispose]());"#
+          .to_string()
+      }
+      "public-gc-profiler-start" => {
+        r#"expectDenied(() => rev2PublicProfiler.start());"#.to_string()
+      }
+      "public-gc-profiler-stop" => {
+        r#"expectDenied(() => rev2PublicProfiler.stop());"#.to_string()
+      }
+      "public-get-heap-code-statistics" => {
+        r#"expectDenied(() => rev2PublicV8.getHeapCodeStatistics());"#
+          .to_string()
+      }
+      "public-get-heap-snapshot" => {
+        r#"expectDenied(() => rev2PublicV8.getHeapSnapshot());"#.to_string()
+      }
+      "public-get-heap-space-statistics" => {
+        r#"expectDenied(() => rev2PublicV8.getHeapSpaceStatistics());"#
+          .to_string()
+      }
+      "public-get-heap-statistics" => {
+        r#"expectDenied(() => rev2PublicV8.getHeapStatistics());"#.to_string()
+      }
+      "public-query-objects" => r#"
+        class Rev2PublicQueryCanary {}
+        expectDenied(() =>
+          rev2PublicV8.queryObjects(
+            Rev2PublicQueryCanary,
+            { format: "count" },
+          ));
+        "#
+      .to_string(),
+      "public-set-flags-from-string" => r#"expectDenied(() =>
+          rev2PublicV8.setFlagsFromString("--expose-gc"));"#
+        .to_string(),
+      "public-set-heap-snapshot-near-heap-limit" => r#"expectDenied(() =>
+          rev2PublicV8.setHeapSnapshotNearHeapLimit(0));"#
+        .to_string(),
+      "public-startup-snapshot-add-deserialize-callback" => r#"
+        expectDenied(() =>
+          rev2PublicV8.startupSnapshot.addDeserializeCallback(() => {
+            globalThis.rev2DeniedStartupCallbackRan = true;
+          }));
+        "#
+      .to_string(),
+      "public-startup-snapshot-add-serialize-callback" => r#"
+        expectDenied(() =>
+          rev2PublicV8.startupSnapshot.addSerializeCallback(() => {
+            globalThis.rev2DeniedStartupCallbackRan = true;
+          }));
+        "#
+      .to_string(),
+      "public-startup-snapshot-set-deserialize-main-function" => r#"
+        expectDenied(() =>
+          rev2PublicV8.startupSnapshot.setDeserializeMainFunction(() => {
+            globalThis.rev2DeniedStartupCallbackRan = true;
+          }));
+        "#
+      .to_string(),
+      "public-stop-coverage" => {
+        r#"expectDenied(() => rev2PublicV8.stopCoverage());"#.to_string()
+      }
+      "public-take-coverage" => {
+        r#"expectDenied(() => rev2PublicV8.takeCoverage());"#.to_string()
+      }
+      "public-write-heap-snapshot" => format!(
+        "expectDenied(() => rev2PublicV8.writeHeapSnapshot({snapshot_path_json}));"
+      ),
+      _ => panic!(
+        "unknown public Rev2 V8 fixture operation {}",
+        operation.operation_id
+      ),
+    };
+    execute(
+      runtime,
+      "file:///rev2_public_v8_fixture_denied.js",
+      format!(
+        r#"
+        {{
+          globalThis.rev2DeniedStartupCallbackRan = false;
+          function expectDenied(action) {{
+            try {{
+              action();
+            }} catch (error) {{
+              const message = String(error);
+              const expected =
+                "principal set [denied-native] may not use deny-only runtime:inspect:{}";
+              if (!message.includes(expected)) {{
+                throw new Error(
+                  `public wrapper used the wrong actor or boundary: ${{message}}`,
+                );
+              }}
+              return;
+            }}
+            throw new Error("public wrapper reached post-guard work");
+          }}
+          {body}
+          if (globalThis.rev2DeniedStartupCallbackRan) {{
+            throw new Error("denied public wrapper committed startup state");
+          }}
+        }}
+        "#,
+        operation.denied_target,
+      ),
+    );
+    assert_native_v8_fixture_path_absent(
+      &snapshot_path,
+      "after denied public V8 wrapper",
+    );
+  }
+
+  fn cleanup_rev2_public_v8_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation_id: &str,
+  ) {
+    set_actor(root, "main.ts");
+    match operation_id {
+      "public-gc-profiler-start" => execute(
+        runtime,
+        "file:///rev2_public_v8_cleanup_start.js",
+        r#"
+        rev2PublicProfiler.start();
+        if (rev2PublicProfiler.stop() === undefined) {
+          throw new Error("denied public start mutated profiler state");
+        }
+        delete globalThis.rev2PublicProfiler;
+        "#
+        .to_string(),
+      ),
+      "public-gc-profiler-stop" | "public-gc-profiler-dispose" => execute(
+        runtime,
+        "file:///rev2_public_v8_cleanup_live.js",
+        r#"
+        if (rev2PublicProfiler.stop() === undefined) {
+          throw new Error("denied public stop/dispose consumed profiler state");
+        }
+        delete globalThis.rev2PublicProfiler;
+        "#
+        .to_string(),
+      ),
+      _ => {}
+    }
+  }
+
+  fn run_rev2_public_v8_positive_control(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "main.ts");
+    let before = rev2_v8_fixture_canaries();
+    let positive_snapshot_path =
+      root.join("positive-public-wrapper.heapsnapshot");
+    assert_native_v8_fixture_path_absent(
+      &positive_snapshot_path,
+      "before ambient public V8 wrapper",
+    );
+    let positive_snapshot_path_json = deno_core::serde_json::to_string(
+      &positive_snapshot_path.to_string_lossy(),
+    )
+    .unwrap();
+    let source = match operation.operation_id {
+      "public-gc-profiler-start" => r#"
+        {
+          const profiler = new rev2PublicV8.GCProfiler();
+          profiler.start();
+          if (profiler.stop() === undefined) {
+            throw new Error("ambient public profiler start control failed");
+          }
+        }
+        "#
+      .to_string(),
+      "public-gc-profiler-stop" => r#"
+        {
+          const profiler = new rev2PublicV8.GCProfiler();
+          profiler.start();
+          if (profiler.stop() === undefined) {
+            throw new Error("ambient public profiler stop control failed");
+          }
+        }
+        "#
+      .to_string(),
+      "public-gc-profiler-dispose" => r#"
+        {
+          const profiler = new rev2PublicV8.GCProfiler();
+          profiler.start();
+          if (profiler[Symbol.dispose]() !== undefined) {
+            throw new Error("ambient public profiler dispose control failed");
+          }
+        }
+        "#
+      .to_string(),
+      "public-get-heap-code-statistics" => r#"
+        {
+          const stats = rev2PublicV8.getHeapCodeStatistics();
+          if (
+            typeof stats !== "object" ||
+            typeof stats.code_and_metadata_size !== "number"
+          ) {
+            throw new Error("ambient public heap-code control failed");
+          }
+        }
+        "#
+      .to_string(),
+      "public-get-heap-snapshot" => r#"
+        {
+          try {
+            const stream = rev2PublicV8.getHeapSnapshot();
+            if (typeof stream?.destroy !== "function") {
+              throw new Error("ambient public heap-snapshot control failed");
+            }
+            stream.destroy();
+          } catch (error) {
+            if (
+              !String(error).includes(
+                'Cannot resolve module "node:process"',
+              )
+            ) {
+              throw error;
+            }
+            // The unit runtime deliberately has no CLI module resolver. The
+            // native canary below must still prove that the actual wrapper
+            // crossed its guard and completed heap-snapshot work first.
+          }
+        }
+        "#
+      .to_string(),
+      "public-get-heap-space-statistics" => r#"
+        {
+          const stats = rev2PublicV8.getHeapSpaceStatistics();
+          if (
+            !Array.isArray(stats) ||
+            stats.length === 0 ||
+            typeof stats[0]?.space_size !== "number"
+          ) {
+            throw new Error("ambient public heap-space control failed");
+          }
+        }
+        "#
+      .to_string(),
+      "public-get-heap-statistics" => r#"
+        {
+          const stats = rev2PublicV8.getHeapStatistics();
+          if (
+            typeof stats !== "object" ||
+            typeof stats.total_heap_size !== "number"
+          ) {
+            throw new Error("ambient public heap-statistics control failed");
+          }
+        }
+        "#
+      .to_string(),
+      "public-query-objects" => r#"
+        {
+          class Rev2PublicPositiveQueryCanary {}
+          globalThis.rev2PublicPositiveQueryCanary =
+            new Rev2PublicPositiveQueryCanary();
+          const count = rev2PublicV8.queryObjects(
+            Rev2PublicPositiveQueryCanary,
+            { format: "count" },
+          );
+          if (!Number.isInteger(count) || count < 1) {
+            throw new Error("ambient public queryObjects control failed");
+          }
+          delete globalThis.rev2PublicPositiveQueryCanary;
+        }
+        "#
+      .to_string(),
+      "public-set-flags-from-string" => r#"
+        rev2PublicV8.setFlagsFromString("--expose-gc");
+        rev2PublicV8.setFlagsFromString("--no-expose-gc");
+        "#
+      .to_string(),
+      "public-set-heap-snapshot-near-heap-limit" => r#"
+        rev2PublicV8.setHeapSnapshotNearHeapLimit(1);
+        "#
+      .to_string(),
+      "public-startup-snapshot-set-deserialize-main-function" => r#"
+        globalThis.rev2PositiveStartupMainCalls = 0;
+        rev2PublicV8.startupSnapshot.setDeserializeMainFunction(() => {
+          globalThis.rev2PositiveStartupMainCalls++;
+        });
+        if (rev2PositiveStartupMainCalls !== 1) {
+          throw new Error("ambient startup main control did not run once");
+        }
+        "#
+      .to_string(),
+      "public-startup-snapshot-add-deserialize-callback" => r#"
+        rev2PublicV8.startupSnapshot.addDeserializeCallback(() => {});
+        "#
+      .to_string(),
+      "public-startup-snapshot-add-serialize-callback" => r#"
+        rev2PublicV8.startupSnapshot.addSerializeCallback(() => {});
+        "#
+      .to_string(),
+      "public-stop-coverage" => r#"
+        try {
+          rev2PublicV8.stopCoverage();
+        } catch (error) {
+          if (!String(error).includes("Not implemented")) throw error;
+          globalThis.rev2PositiveCoverageControl = true;
+        }
+        if (!globalThis.rev2PositiveCoverageControl) {
+          throw new Error("ambient stopCoverage did not reach its body");
+        }
+        "#
+      .to_string(),
+      "public-take-coverage" => r#"
+        try {
+          rev2PublicV8.takeCoverage();
+        } catch (error) {
+          if (!String(error).includes("Not implemented")) throw error;
+          globalThis.rev2PositiveCoverageControl = true;
+        }
+        if (!globalThis.rev2PositiveCoverageControl) {
+          throw new Error("ambient takeCoverage did not reach its body");
+        }
+        "#
+      .to_string(),
+      "public-write-heap-snapshot" => format!(
+        r#"
+        {{
+          try {{
+            const output =
+              rev2PublicV8.writeHeapSnapshot({positive_snapshot_path_json});
+            if (output !== {positive_snapshot_path_json}) {{
+              throw new Error("ambient public writeHeapSnapshot returned the wrong path");
+            }}
+          }} catch (error) {{
+            if (!String(error).includes("Cannot resolve module")) {{
+              throw error;
+            }}
+            // The unit runtime deliberately has no CLI module resolver. The
+            // native canary below must still prove that the actual wrapper
+            // completed heap-snapshot work before this downstream refusal.
+          }}
+        }}
+        "#
+      ),
+      _ => panic!(
+        "unknown public Rev2 V8 fixture operation {}",
+        operation.operation_id
+      ),
+    };
+    execute(
+      runtime,
+      "file:///rev2_public_v8_fixture_positive.js",
+      source,
+    );
+    let after = rev2_v8_fixture_canaries();
+    let expected_guard_calls = if matches!(
+      operation.operation_id,
+      "public-gc-profiler-start"
+        | "public-gc-profiler-stop"
+        | "public-gc-profiler-dispose"
+        | "public-set-flags-from-string"
+    ) {
+      2
+    } else {
+      1
+    };
+    assert_eq!(
+      after.public_wrapper_guard_calls,
+      before.public_wrapper_guard_calls + expected_guard_calls,
+      "{} ambient control crossed an inexact number of public guards",
+      operation.operation_id
+    );
+    let operation_guard_index = before.public_wrapper_guard_calls
+      + usize::from(matches!(
+        operation.operation_id,
+        "public-gc-profiler-stop" | "public-gc-profiler-dispose"
+      ));
+    assert_exact_public_v8_guard_call(operation, operation_guard_index);
+    match operation.operation_id {
+      "public-gc-profiler-start"
+      | "public-gc-profiler-stop"
+      | "public-gc-profiler-dispose" => {
+        assert!(
+          after.gc_profiler_new_work > before.gc_profiler_new_work
+            && after.gc_profiler_start_work > before.gc_profiler_start_work
+            && after.gc_profiler_stop_work > before.gc_profiler_stop_work,
+          "{} ambient control did not complete exact native profiler work",
+          operation.operation_id
+        );
+        assert_eq!(
+          after.gc_profiler_active_states, before.gc_profiler_active_states,
+          "{} ambient control retained native profiler state",
+          operation.operation_id
+        );
+      }
+      "public-get-heap-code-statistics" => assert!(
+        after.heap_code_statistics_work > before.heap_code_statistics_work,
+        "ambient getHeapCodeStatistics did no native work"
+      ),
+      "public-get-heap-snapshot" | "public-write-heap-snapshot" => assert!(
+        after.heap_snapshot_calls > before.heap_snapshot_calls
+          && after.heap_snapshot_chunks > before.heap_snapshot_chunks,
+        "{} ambient control did no native heap-snapshot work",
+        operation.operation_id
+      ),
+      "public-get-heap-space-statistics" => assert!(
+        after.heap_space_statistics_work > before.heap_space_statistics_work,
+        "ambient getHeapSpaceStatistics did no native work"
+      ),
+      "public-get-heap-statistics" => assert!(
+        after.heap_statistics_work > before.heap_statistics_work,
+        "ambient getHeapStatistics did no native work"
+      ),
+      "public-query-objects" => assert!(
+        after.query_objects_snapshot_chunks
+          > before.query_objects_snapshot_chunks,
+        "ambient queryObjects did no native snapshot work"
+      ),
+      "public-set-flags-from-string" => assert_eq!(
+        after.set_flags_work,
+        before.set_flags_work + 2,
+        "ambient setFlagsFromString did not perform two exact flag mutations"
+      ),
+      "public-set-heap-snapshot-near-heap-limit" => {
+        assert_eq!(
+          after.near_heap_limit_current_dir,
+          before.near_heap_limit_current_dir + 1,
+          "ambient near-heap wrapper did not reach cwd capture exactly once"
+        );
+        assert_eq!(
+          after.near_heap_limit_check_write,
+          before.near_heap_limit_check_write + 1,
+          "ambient near-heap wrapper did not reach write check exactly once"
+        );
+        assert_eq!(
+          after.near_heap_limit_callback_installs,
+          before.near_heap_limit_callback_installs + 1,
+          "ambient near-heap wrapper did not install exactly one callback"
+        );
+      }
+      "public-startup-snapshot-add-deserialize-callback"
+      | "public-startup-snapshot-add-serialize-callback"
+      | "public-startup-snapshot-set-deserialize-main-function"
+      | "public-stop-coverage"
+      | "public-take-coverage" => {}
+      _ => unreachable!(),
+    }
+    if operation.operation_id == "public-write-heap-snapshot" {
+      match std::fs::symlink_metadata(&positive_snapshot_path) {
+        Ok(metadata) => {
+          assert!(
+            metadata.is_file()
+              && !metadata.file_type().is_symlink()
+              && metadata.len() > 0,
+            "ambient writeHeapSnapshot did not create one real nonempty file"
+          );
+          std::fs::remove_file(&positive_snapshot_path).unwrap();
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+          // The minimal unit runtime may refuse its downstream node:fs module
+          // resolution after the wrapper has completed native snapshot work.
+        }
+        Err(error) => panic!(
+          "could not inspect ambient writeHeapSnapshot output {}: {error}",
+          positive_snapshot_path.display()
+        ),
+      }
+      assert_native_v8_fixture_path_absent(
+        &positive_snapshot_path,
+        "after ambient writeHeapSnapshot cleanup",
+      );
+    }
+    assert!(
+      !EXPOSE_GC_FROM_SET_FLAGS.load(Ordering::SeqCst),
+      "ambient public wrapper control left the V8 expose-gc flag enabled"
+    );
   }
 
   fn prepare_rev2_v8_fixture_handles(
@@ -2142,6 +3259,73 @@ mod native_capsec_tests {
     );
   }
 
+  fn run_rev2_public_v8_fixture_mode(
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    case_kind: &str,
+    mode: &str,
+  ) {
+    reset_rev2_v8_fixture_canaries();
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _tokio_guard = tokio_runtime.enter();
+    let mut runtime = new_public_v8_wrapper_runtime();
+    assert_public_v8_guard_precedes_wrapper_mutation(operation);
+    load_public_v8_wrapper(&mut runtime, root);
+
+    if case_kind == "staged-barrier:cleanup" {
+      run_rev2_public_v8_positive_control(&mut runtime, root, operation);
+      assert_rev2_v8_fixture_terminal_clean(operation.operation_id, mode);
+    }
+    prepare_rev2_public_v8_fixture_state(
+      &mut runtime,
+      root,
+      operation.operation_id,
+    );
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    let before = rev2_v8_fixture_canaries();
+    deny_rev2_public_v8_fixture_operation(&mut runtime, root, operation);
+    let after = rev2_v8_fixture_canaries();
+    assert_eq!(
+      after.public_wrapper_guard_calls,
+      before.public_wrapper_guard_calls + 1,
+      "{} did not cross exactly one public guard in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_exact_public_v8_guard_call(
+      operation,
+      before.public_wrapper_guard_calls,
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before.public_wrapper_guard_calls,
+        ..after
+      },
+      before,
+      "{} changed wrapper state or native work before denial in {case_kind}/{mode}",
+      operation.operation_id
+    );
+
+    cleanup_rev2_public_v8_fixture_state(
+      &mut runtime,
+      root,
+      operation.operation_id,
+    );
+    if case_kind == "staged-barrier:cancellation" {
+      run_rev2_public_v8_positive_control(&mut runtime, root, operation);
+    }
+    assert_rev2_v8_fixture_terminal_clean(operation.operation_id, mode);
+    drop(runtime);
+    assert_eq!(
+      GC_PROFILER_ACTIVE_STATE_COUNT.load(Ordering::SeqCst),
+      0,
+      "{} left native profiler state after runtime disposal in {mode}",
+      operation.operation_id
+    );
+  }
+
   fn run_rev2_v8_inspection_fixture_mode(
     root: &Path,
     operation: &Rev2V8FixtureOperation,
@@ -2158,6 +3342,15 @@ mod native_capsec_tests {
       REV2_V8_FIXTURE_MODES.contains(&mode),
       "fixture mode is not exact"
     );
+    if operation.operation_id.starts_with("public-") {
+      // @ref LLP 0019#runtime-and-memory-inspection [tests] -- Execute the
+      // actual ext/node/polyfills/v8.ts public export. The test guard records
+      // the exact wrapper target and delegates to the same deny-only
+      // permissions primitive as the production runtime op; test-only
+      // canaries prove no wrapper state or native work precedes denial.
+      run_rev2_public_v8_fixture_mode(root, operation, case_kind, mode);
+      return rev2_v8_fixture_assertions(operation, case_kind);
+    }
     reset_rev2_v8_fixture_canaries();
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
       .enable_all()
@@ -2171,10 +3364,10 @@ mod native_capsec_tests {
 
     // @ref LLP 0019#pre-promotion-conformance-candidate-execution [tests] --
     // These development-only cases bind one exact operation/case/target row
-    // and exercise all three armed modes in distinct subprocesses. Test-only
-    // canaries sit immediately after each native guard; start and stop also
-    // exercise live and null/idempotent handle fast paths. Results remain
-    // unauthenticated and cannot change backend status.
+    // and exercise all three armed modes in distinct subprocesses. The
+    // retained raw-native cases keep canaries immediately after each native
+    // guard; start and stop also exercise live and null/idempotent handle fast
+    // paths. Results remain unauthenticated and cannot change backend status.
     if case_kind == "staged-barrier:cleanup" {
       run_rev2_v8_fixture_positive_control(
         &mut runtime,

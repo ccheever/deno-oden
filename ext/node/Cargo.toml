@@ -70,6 +70,11 @@ nix = { workspace = true, features = ["user"] }
 [build-dependencies]
 cc = "1"
 
+[dev-dependencies]
+deno_web.workspace = true
+deno_webidl.workspace = true
+tempfile.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Networking_WinSock", "Win32_NetworkManagement_IpHelper", "Win32_System_Console", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 deno_subprocess_windows.workspace = true
