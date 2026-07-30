@@ -1624,7 +1624,7 @@ mod native_capsec_tests {
       denied_target: "rev2-diagnostics:active-subscribe",
       authorization_assertion: "guard-precedes-diagnostics-active-subscribe-state",
       denied_no_work_assertion: "denied-attempt-adds-no-diagnostics-active-subscribe-state",
-      cleanup_assertion: "explicit-root-unsubscribe-restores-inactive-diagnostics-channel",
+      cleanup_assertion: "explicit-root-unsubscribe-and-unbind-restores-inactive-diagnostics-channel",
       post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-active-subscribe-state",
     },
     Rev2V8FixtureOperation {
