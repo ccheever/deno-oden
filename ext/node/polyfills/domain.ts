@@ -8,7 +8,7 @@ const { core, primordials } = __bootstrap;
 const { ERR_UNHANDLED_ERROR } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
-const { AsyncHook, internalHookToken } = core.loadExtScript(
+const { createInternalHook } = core.loadExtScript(
   "ext:deno_node/internal/async_hooks.ts",
 );
 const {
@@ -38,7 +38,7 @@ let active = null;
 const pairing = new SafeMap();
 
 // Async hook to track domain associations across async operations
-const asyncHook = new AsyncHook({
+const asyncHook = createInternalHook({
   init(asyncId, _type, _triggerAsyncId, resource) {
     if (process.domain !== null && process.domain !== undefined) {
       // Record which domain this async operation belongs to
@@ -70,7 +70,7 @@ const asyncHook = new AsyncHook({
   destroy(asyncId) {
     pairing.delete(asyncId);
   },
-}, internalHookToken);
+});
 
 function create() {
   return new Domain();

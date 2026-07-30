@@ -456,7 +456,10 @@ function setupBuiltinModules() {
     events,
     fs,
     "internal/assert/myers_diff": internalAssertMyersDiff.default,
-    "internal/async_hooks": internalAsyncHooks,
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    // Privileged async-hook factories and raw resource observers remain
+    // ext-script-only. Node does not expose internal/async_hooks as a public
+    // builtin, so do not register its full internal return object here.
     "internal/console/constructor": internalConsole,
     "internal/crypto/certificate": internalCryptoCertificate,
     "internal/crypto/diffiehellman": internalCryptoDiffiehellman,

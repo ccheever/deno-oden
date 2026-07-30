@@ -1737,6 +1737,46 @@ mod native_capsec_tests {
       cleanup_assertion: "fixture-runtime-drop-releases-diagnostics-channel-state",
       post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-diagnostics-tracing-channel-state",
     },
+    Rev2V8FixtureOperation {
+      operation_id: "async-hooks-create-hook",
+      edge_id: "diagnostic-route:ext/node/polyfills/async_hooks.ts#createHook",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/async_hooks.ts#createHook:complete",
+      denied_target: "async-hooks",
+      authorization_assertion: "guard-precedes-async-hook-state-initialization-or-callback-read",
+      denied_no_work_assertion: "denied-attempt-adds-no-async-hook-state-initialization-or-callback-read",
+      cleanup_assertion: "explicit-root-resource-destroy-callback-and-hook-disable",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-async-hook-state-initialization-or-callback-read",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "async-hooks-execution-async-resource",
+      edge_id: "diagnostic-route:ext/node/polyfills/async_hooks.ts#executionAsyncResource",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/async_hooks.ts#executionAsyncResource:complete",
+      denied_target: "async-resource",
+      authorization_assertion: "guard-precedes-async-resource-observation",
+      denied_no_work_assertion: "denied-attempt-adds-no-async-resource-observation",
+      cleanup_assertion: "root-async-resource-before-function-after-destroy-order-and-hook-disable",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-async-resource-observation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "async-hook-disable",
+      edge_id: "diagnostic-route:ext/node/polyfills/internal/async_hooks.ts#AsyncHook.disable",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/internal/async_hooks.ts#AsyncHook.disable:complete",
+      denied_target: "async-hooks",
+      authorization_assertion: "guard-precedes-async-hook-array-removal",
+      denied_no_work_assertion: "denied-attempt-adds-no-async-hook-array-removal",
+      cleanup_assertion: "explicit-root-resource-destroy-callback-and-hook-disable",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-async-hook-array-removal",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "async-hook-enable",
+      edge_id: "diagnostic-route:ext/node/polyfills/internal/async_hooks.ts#AsyncHook.enable",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/internal/async_hooks.ts#AsyncHook.enable:complete",
+      denied_target: "async-hooks",
+      authorization_assertion: "guard-precedes-async-hook-array-insertion",
+      denied_no_work_assertion: "denied-attempt-adds-no-async-hook-array-insertion",
+      cleanup_assertion: "explicit-root-resource-destroy-callback-and-hook-disable",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-async-hook-array-insertion",
+    },
   ];
 
   struct NativeV8TestRoot(PathBuf, Option<tempfile::TempDir>);
@@ -2494,6 +2534,175 @@ mod native_capsec_tests {
     );
   }
 
+  fn load_public_async_hooks_wrapper(runtime: &mut JsRuntime, root: &Path) {
+    set_actor(root, "main.ts");
+    execute(
+      runtime,
+      "file:///rev2_public_async_hooks_fixture_load.js",
+      r#"
+      {
+        const asyncHooks = Deno.core.loadExtScript(
+          "ext:deno_node/async_hooks.ts",
+        );
+        globalThis.rev2AsyncHooks = Object.freeze({
+          __proto__: null,
+          AsyncResource: asyncHooks.AsyncResource,
+          createHook: asyncHooks.createHook,
+          executionAsyncResource: asyncHooks.executionAsyncResource,
+        });
+      }
+      if (
+        typeof rev2AsyncHooks.AsyncResource !== "function" ||
+        typeof rev2AsyncHooks.createHook !== "function" ||
+        typeof rev2AsyncHooks.executionAsyncResource !== "function" ||
+        Object.getPrototypeOf(rev2AsyncHooks) !== null ||
+        !Object.isFrozen(rev2AsyncHooks) ||
+        Object.keys(rev2AsyncHooks).length !== 3 ||
+        "AsyncHook" in rev2AsyncHooks ||
+        "createPublicHook" in rev2AsyncHooks ||
+        "createInternalHook" in rev2AsyncHooks ||
+        "internalHookToken" in rev2AsyncHooks ||
+        "emitBefore" in rev2AsyncHooks ||
+        "emitAfter" in rev2AsyncHooks
+      ) {
+        throw new Error(
+          "the exact public node:async_hooks facade did not load",
+        );
+      }
+      "#
+      .to_string(),
+    );
+  }
+
+  fn assert_public_async_hooks_guard_precedes_wrapper_work(
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let public_source = include_str!("../polyfills/async_hooks.ts");
+    let internal_source = include_str!("../polyfills/internal/async_hooks.ts");
+    let require_source = include_str!("../polyfills/01_require.js");
+    assert!(
+      !require_source.contains(r#""internal/async_hooks": internalAsyncHooks"#),
+      "the bare CJS internal/async_hooks builtin exposes privileged ext-script exports"
+    );
+    assert_eq!(
+      require_source
+        .matches(
+          "Privileged async-hook factories and raw resource observers remain"
+        )
+        .count(),
+      1,
+      "the CJS internal/async_hooks absence boundary is not exact"
+    );
+    let (scope, operation_anchor, exact_guard_prefix) =
+      match operation.operation_id {
+        "async-hooks-create-hook" => (
+          public_source,
+          "function createHook(callbacks:",
+          r#"function createHook(callbacks: {
+  init?: (
+    asyncId: number,
+    type: string,
+    triggerAsyncId: number,
+    resource: unknown,
+  ) => void;
+  before?: (asyncId: number) => void;
+  after?: (asyncId: number) => void;
+  destroy?: (asyncId: number) => void;
+  promiseResolve?: (asyncId: number) => void;
+}) {
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  // Async hook callbacks observe activity across every principal in the shared
+  // isolate, so the initial profile closes registration as runtime inspection.
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "async-hooks",
+    "node:async_hooks.createHook",
+  );
+  return createPublicHook(callbacks);"#,
+        ),
+        "async-hooks-execution-async-resource" => (
+          public_source,
+          "function executionAsyncResource() {",
+          r#"function executionAsyncResource() {
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "async-resource",
+    "node:async_hooks.executionAsyncResource",
+  );
+  return internalExecutionAsyncResource();"#,
+        ),
+        "async-hook-disable" => (
+          internal_source,
+          r#""node:async_hooks.AsyncHook.disable""#,
+          r#"  disable() {
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "async-hooks",
+      "node:async_hooks.AsyncHook.disable",
+    );
+    return disableHook(this);"#,
+        ),
+        "async-hook-enable" => (
+          internal_source,
+          r#""node:async_hooks.AsyncHook.enable""#,
+          r#"  enable() {
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "async-hooks",
+      "node:async_hooks.AsyncHook.enable",
+    );
+    return enableHook(this);"#,
+        ),
+        _ => panic!(
+          "unknown public async_hooks fixture operation {}",
+          operation.operation_id
+        ),
+      };
+    assert_eq!(
+      scope.matches(operation_anchor).count(),
+      1,
+      "{} async_hooks source anchor is not unique",
+      operation.operation_id
+    );
+    assert!(
+      scope.contains(exact_guard_prefix),
+      "{} no longer guards before its first observable work",
+      operation.operation_id
+    );
+    if operation.operation_id == "async-hooks-create-hook" {
+      let inherited_constructor_prefix = r#"class AsyncHook implements HookInstance {
+  constructor(callbacks: HookCallbacks, factoryToken?: object) {
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    if (factoryToken !== publicHookFactoryToken) {
+      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        "async-hooks",
+        "node:async_hooks.createHook",
+      );
+    }
+    initializeHook(this, callbacks);"#;
+      assert_eq!(
+        internal_source
+          .matches("class AsyncHook implements HookInstance {")
+          .count(),
+        1,
+        "public AsyncHook implementation anchor is not unique"
+      );
+      assert!(
+        internal_source.contains(inherited_constructor_prefix),
+        "recovered public AsyncHook constructor no longer guards before callback reads or hook-state initialization"
+      );
+    }
+  }
+
   fn assert_public_diagnostics_guard_precedes_wrapper_work(
     operation: &Rev2V8FixtureOperation,
   ) {
@@ -2841,6 +3050,12 @@ mod native_capsec_tests {
       "diagnostics-tracing-channel" => {
         "node:diagnostics_channel.tracingChannel"
       }
+      "async-hooks-create-hook" => "node:async_hooks.createHook",
+      "async-hooks-execution-async-resource" => {
+        "node:async_hooks.executionAsyncResource"
+      }
+      "async-hook-disable" => "node:async_hooks.AsyncHook.disable",
+      "async-hook-enable" => "node:async_hooks.AsyncHook.enable",
       _ => operation.denied_target,
     }
   }
@@ -2863,6 +3078,744 @@ mod native_capsec_tests {
       ),
       "{} used an inexact public guard tuple",
       operation.operation_id
+    );
+  }
+
+  fn prepare_rev2_public_async_hooks_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    execute(
+      runtime,
+      "file:///rev2_public_async_hooks_fixture_prepare.js",
+      format!(
+        r#"
+        {{
+          const operationId = {operation_id_json};
+          const asyncHooks = rev2AsyncHooks;
+          const state = {{
+            __proto__: null,
+            operationId,
+            hook: undefined,
+            resource: undefined,
+            resourceAsyncId: undefined,
+            postDisableResource: undefined,
+            postDisableResourceAsyncId: undefined,
+            deniedResult: undefined,
+            constructorDeniedResults: [undefined, undefined, undefined, undefined],
+            constructorCallbackGetterReads: [0, 0, 0, 0],
+            receiverCanaryResult: undefined,
+            receiverCanaryReads: 0,
+            deniedScopeEntries: 0,
+            deniedScopeCompletions: 0,
+            deniedScopeResult: undefined,
+            deniedScopeSequence: [],
+            beforeCalls: 0,
+            afterCalls: 0,
+            destroyCalls: 0,
+            destroyAsyncIds: [],
+            functionCalls: 0,
+            resourceObservations: 0,
+            sequence: [],
+          }};
+          state.plainCallbacks = {{
+            __proto__: null,
+            before() {{
+              state.beforeCalls++;
+              state.sequence.push("before");
+            }},
+            after() {{
+              state.afterCalls++;
+              state.sequence.push("after");
+            }},
+            destroy(asyncId) {{
+              state.destroyCalls++;
+              state.destroyAsyncIds.push(asyncId);
+              state.sequence.push("destroy");
+            }},
+          }};
+          function makeGetterCallbacks(index) {{
+            function descriptor(value) {{
+              return {{
+                __proto__: null,
+                enumerable: true,
+                get() {{
+                  state.constructorCallbackGetterReads[index]++;
+                  return value;
+                }},
+              }};
+            }}
+            return Object.create(null, {{
+              init: descriptor(undefined),
+              before: descriptor(state.plainCallbacks.before),
+              after: descriptor(state.plainCallbacks.after),
+              destroy: descriptor(state.plainCallbacks.destroy),
+              promiseResolve: descriptor(undefined),
+            }});
+          }}
+          state.constructorGetterCallbacks = [
+            makeGetterCallbacks(0),
+            makeGetterCallbacks(1),
+            makeGetterCallbacks(2),
+            makeGetterCallbacks(3),
+          ];
+          state.receiverCanary = new Proxy(Object.create(null), {{
+            get() {{
+              state.receiverCanaryReads++;
+              throw new Error("receiver state was read before the guard");
+            }},
+            getPrototypeOf() {{
+              state.receiverCanaryReads++;
+              throw new Error(
+                "receiver prototype was observed before the guard",
+              );
+            }},
+            has() {{
+              state.receiverCanaryReads++;
+              throw new Error("receiver state was queried before the guard");
+            }},
+          }});
+          globalThis.rev2AsyncHooksState = state;
+
+          switch (operationId) {{
+            case "async-hooks-create-hook":
+            case "async-hooks-execution-async-resource":
+            case "async-hook-enable":
+              state.hook = asyncHooks.createHook(state.plainCallbacks);
+              state.resource = new asyncHooks.AsyncResource(
+                `rev2:${{operationId}}`,
+              );
+              state.resourceAsyncId = state.resource.asyncId();
+              break;
+            case "async-hook-disable":
+              state.hook = asyncHooks.createHook(state.plainCallbacks);
+              state.hook.enable();
+              state.resource = new asyncHooks.AsyncResource(
+                `rev2:${{operationId}}`,
+              );
+              state.resourceAsyncId = state.resource.asyncId();
+              break;
+            default:
+              throw new Error(
+                `unknown async_hooks fixture operation ${{operationId}}`,
+              );
+          }}
+        }}
+        "#
+      ),
+    );
+  }
+
+  fn deny_rev2_public_async_hooks_fixture_operation(
+    runtime: &mut JsRuntime,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let denied_actions = match operation.operation_id {
+      "async-hooks-create-hook" => {
+        r#"
+          expectDenied(() => {
+            state.constructorDeniedResults[0] = asyncHooks.createHook(
+              state.constructorGetterCallbacks[0],
+            );
+          }, "public createHook");
+          const RecoveredAsyncHook = state.hook.constructor;
+          expectDenied(() => {
+            state.constructorDeniedResults[1] = new RecoveredAsyncHook(
+              state.constructorGetterCallbacks[1],
+            );
+          }, "inherited constructor");
+          const SubclassedAsyncHook = class extends RecoveredAsyncHook {};
+          expectDenied(() => {
+            state.constructorDeniedResults[2] = new SubclassedAsyncHook(
+              state.constructorGetterCallbacks[2],
+            );
+          }, "subclass constructor");
+          expectDenied(() => {
+            state.constructorDeniedResults[3] = Reflect.construct(
+              RecoveredAsyncHook,
+              [state.constructorGetterCallbacks[3]],
+            );
+          }, "Reflect.construct");
+        "#
+      }
+      "async-hooks-execution-async-resource" => {
+        r#"
+          state.deniedScopeResult = state.resource.runInAsyncScope(() => {
+            state.deniedScopeEntries++;
+            state.deniedScopeSequence.push("function");
+            expectDenied(() => {
+              state.deniedResult = asyncHooks.executionAsyncResource();
+            }, "active root AsyncResource observation");
+            state.deniedScopeCompletions++;
+            state.deniedScopeSequence.push("complete");
+            return "denied-scope-complete";
+          }, null);
+        "#
+      }
+      "async-hook-disable" => {
+        r#"
+          const disable = state.hook.disable;
+          expectDenied(() => {
+            state.deniedResult = Reflect.apply(disable, state.hook, []);
+          }, "valid public hook");
+          expectDenied(() => {
+            state.receiverCanaryResult = Reflect.apply(
+              disable,
+              state.receiverCanary,
+              [],
+            );
+          }, "receiver-state precedence canary");
+        "#
+      }
+      "async-hook-enable" => {
+        r#"
+          const enable = state.hook.enable;
+          expectDenied(() => {
+            state.deniedResult = Reflect.apply(enable, state.hook, []);
+          }, "valid public hook");
+          expectDenied(() => {
+            state.receiverCanaryResult = Reflect.apply(
+              enable,
+              state.receiverCanary,
+              [],
+            );
+          }, "receiver-state precedence canary");
+        "#
+      }
+      _ => panic!(
+        "unknown public async_hooks fixture operation {}",
+        operation.operation_id
+      ),
+    };
+    execute(
+      runtime,
+      "file:///rev2_public_async_hooks_fixture_denied.js",
+      format!(
+        r#"
+        {{
+          const asyncHooks = rev2AsyncHooks;
+          const state = rev2AsyncHooksState;
+          const before = {{
+            __proto__: null,
+            hook: state.hook,
+            resource: state.resource,
+            resourceAsyncId: state.resourceAsyncId,
+            postDisableResource: state.postDisableResource,
+            postDisableResourceAsyncId: state.postDisableResourceAsyncId,
+            constructorCallbackGetterReads: [
+              state.constructorCallbackGetterReads[0],
+              state.constructorCallbackGetterReads[1],
+              state.constructorCallbackGetterReads[2],
+              state.constructorCallbackGetterReads[3],
+            ],
+            receiverCanaryReads: state.receiverCanaryReads,
+            deniedScopeEntries: state.deniedScopeEntries,
+            deniedScopeCompletions: state.deniedScopeCompletions,
+            deniedScopeSequenceLength: state.deniedScopeSequence.length,
+            beforeCalls: state.beforeCalls,
+            afterCalls: state.afterCalls,
+            destroyCalls: state.destroyCalls,
+            destroyAsyncIdsLength: state.destroyAsyncIds.length,
+            functionCalls: state.functionCalls,
+            resourceObservations: state.resourceObservations,
+            sequenceLength: state.sequence.length,
+          }};
+          function expectDenied(action, route) {{
+            let denied = false;
+            try {{
+              action();
+            }} catch (error) {{
+              const message = String(error);
+              const expected =
+                "principal set [denied-native] may not use deny-only runtime:inspect:{}";
+              if (!message.includes(expected)) {{
+                throw new Error(
+                  `${{route}} used the wrong actor or boundary: ${{message}}`,
+                );
+              }}
+              denied = true;
+            }}
+            if (!denied) {{
+              throw new Error(
+                `${{route}} reached post-guard async_hooks work`,
+              );
+            }}
+          }}
+
+          {denied_actions}
+
+          const activeResourceAttempt =
+            state.operationId ===
+              "async-hooks-execution-async-resource";
+          if (
+            state.deniedResult !== undefined ||
+            state.constructorDeniedResults[0] !== undefined ||
+            state.constructorDeniedResults[1] !== undefined ||
+            state.constructorDeniedResults[2] !== undefined ||
+            state.constructorDeniedResults[3] !== undefined ||
+            state.receiverCanaryResult !== undefined ||
+            state.hook !== before.hook ||
+            state.resource !== before.resource ||
+            state.resourceAsyncId !== before.resourceAsyncId ||
+            state.postDisableResource !== before.postDisableResource ||
+            state.postDisableResourceAsyncId !==
+              before.postDisableResourceAsyncId ||
+            state.constructorCallbackGetterReads[0] !==
+              before.constructorCallbackGetterReads[0] ||
+            state.constructorCallbackGetterReads[1] !==
+              before.constructorCallbackGetterReads[1] ||
+            state.constructorCallbackGetterReads[2] !==
+              before.constructorCallbackGetterReads[2] ||
+            state.constructorCallbackGetterReads[3] !==
+              before.constructorCallbackGetterReads[3] ||
+            state.receiverCanaryReads !== before.receiverCanaryReads ||
+            state.beforeCalls !== before.beforeCalls ||
+            state.afterCalls !== before.afterCalls ||
+            state.destroyCalls !== before.destroyCalls ||
+            state.destroyAsyncIds.length !== before.destroyAsyncIdsLength ||
+            state.functionCalls !== before.functionCalls ||
+            state.resourceObservations !== before.resourceObservations ||
+            state.sequence.length !== before.sequenceLength ||
+            state.deniedScopeEntries !==
+              before.deniedScopeEntries + (activeResourceAttempt ? 1 : 0) ||
+            state.deniedScopeCompletions !==
+              before.deniedScopeCompletions +
+                (activeResourceAttempt ? 1 : 0) ||
+            state.deniedScopeSequence.length !==
+              before.deniedScopeSequenceLength +
+                (activeResourceAttempt ? 2 : 0) ||
+            (
+              activeResourceAttempt &&
+              (
+                state.deniedScopeResult !== "denied-scope-complete" ||
+                state.deniedScopeSequence[
+                    before.deniedScopeSequenceLength
+                  ] !== "function" ||
+                state.deniedScopeSequence[
+                    before.deniedScopeSequenceLength + 1
+                  ] !== "complete"
+              )
+            ) ||
+            (!activeResourceAttempt &&
+              state.deniedScopeResult !== undefined)
+          ) {{
+            throw new Error(
+              "denied async_hooks operation changed observable state",
+            );
+          }}
+        }}
+        "#,
+        operation.denied_target,
+        denied_actions = denied_actions,
+      ),
+    );
+  }
+
+  fn cleanup_rev2_public_async_hooks_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "main.ts");
+    let body = match operation.operation_id {
+      "async-hooks-create-hook" => {
+        r#"
+        assert(
+          state.constructorCallbackGetterReads[0] === 0 &&
+            state.constructorCallbackGetterReads[1] === 0 &&
+            state.constructorCallbackGetterReads[2] === 0 &&
+            state.constructorCallbackGetterReads[3] === 0 &&
+            state.constructorDeniedResults[0] === undefined &&
+            state.constructorDeniedResults[1] === undefined &&
+            state.constructorDeniedResults[2] === undefined &&
+            state.constructorDeniedResults[3] === undefined,
+          "denied createHook route read callbacks or returned a hook",
+        );
+        state.hook.enable();
+        resetObservations();
+        const result = state.resource.runInAsyncScope(() => {
+          state.functionCalls++;
+          state.sequence.push("function");
+          const observed = asyncHooks.executionAsyncResource();
+          if (observed !== state.resource) {
+            throw new Error("root createHook control observed wrong resource");
+          }
+          state.resourceObservations++;
+          return "root-result";
+        }, null);
+        assert(
+          result === "root-result",
+          "root createHook control returned wrongly",
+        );
+        assertExactActiveSequence();
+        assertExactDestroy();
+        state.hook.disable();
+        assertExplicitDisable();
+      "#
+      }
+      "async-hooks-execution-async-resource" => {
+        r#"
+        assert(
+          (
+            state.deniedScopeEntries === 0 &&
+            state.deniedScopeCompletions === 0 &&
+            state.deniedScopeResult === undefined &&
+            state.deniedScopeSequence.length === 0
+          ) ||
+            (
+              state.deniedScopeEntries === 1 &&
+              state.deniedScopeCompletions === 1 &&
+              state.deniedScopeResult === "denied-scope-complete" &&
+              state.deniedScopeSequence.length === 2 &&
+              state.deniedScopeSequence[0] === "function" &&
+              state.deniedScopeSequence[1] === "complete" &&
+              state.resourceObservations === 0
+            ),
+          "executionAsyncResource control retained an inexact denied root-resource scope",
+        );
+        state.hook.enable();
+        resetObservations();
+        const result = state.resource.runInAsyncScope(() => {
+          state.functionCalls++;
+          state.sequence.push("function");
+          const observed = asyncHooks.executionAsyncResource();
+          if (observed !== state.resource) {
+            throw new Error(
+              "root executionAsyncResource observed wrong resource",
+            );
+          }
+          state.resourceObservations++;
+          return "root-result";
+        }, null);
+        assert(
+          result === "root-result",
+          "root executionAsyncResource control returned wrongly",
+        );
+        assertExactActiveSequence();
+        assertExactDestroy();
+        state.hook.disable();
+        assertExplicitDisable();
+      "#
+      }
+      "async-hook-disable" => {
+        r#"
+        resetObservations();
+        const result = state.resource.runInAsyncScope(() => {
+          state.functionCalls++;
+          state.sequence.push("function");
+          return "root-result";
+        }, null);
+        assert(
+          result === "root-result",
+          "denied disable active-hook control returned wrongly",
+        );
+        assertExactActiveSequence();
+        assertExactDestroy();
+        state.hook.disable();
+        assertExplicitDisable();
+      "#
+      }
+      "async-hook-enable" => {
+        r#"
+        resetObservations();
+        const disabledResult = state.resource.runInAsyncScope(() => {
+          state.functionCalls++;
+          state.sequence.push("function");
+          return "disabled-result";
+        }, null);
+        assert(
+          disabledResult === "disabled-result" &&
+            state.beforeCalls === 0 &&
+            state.afterCalls === 0 &&
+            state.sequence.length === 1 &&
+            state.sequence[0] === "function",
+          "denied enable inserted the root-created hook",
+        );
+        state.hook.enable();
+        resetObservations();
+        const activeResult = state.resource.runInAsyncScope(() => {
+          state.functionCalls++;
+          state.sequence.push("function");
+          return "root-result";
+        }, null);
+        assert(
+          activeResult === "root-result",
+          "root enable control returned wrongly",
+        );
+        assertExactActiveSequence();
+        assertExactDestroy();
+        state.hook.disable();
+        assertExplicitDisable();
+      "#
+      }
+      _ => panic!(
+        "unknown public async_hooks fixture operation {}",
+        operation.operation_id
+      ),
+    };
+    execute(
+      runtime,
+      "file:///rev2_public_async_hooks_fixture_cleanup.js",
+      format!(
+        r#"
+        {{
+          const asyncHooks = rev2AsyncHooks;
+          const state = rev2AsyncHooksState;
+          function assert(value, message) {{
+            if (!value) throw new Error(message);
+          }}
+          function resetObservations() {{
+            state.beforeCalls = 0;
+            state.afterCalls = 0;
+            state.functionCalls = 0;
+            state.resourceObservations = 0;
+            state.sequence.length = 0;
+          }}
+          function assertExactActiveSequence() {{
+            assert(
+              state.beforeCalls === 1 &&
+                state.afterCalls === 1 &&
+                state.destroyCalls === 0 &&
+                state.destroyAsyncIds.length === 0 &&
+                state.functionCalls === 1 &&
+                state.sequence.length === 3 &&
+                state.sequence[0] === "before" &&
+                state.sequence[1] === "function" &&
+                state.sequence[2] === "after",
+              "root AsyncResource did not preserve before/function/after",
+            );
+          }}
+          function assertExactDestroy() {{
+            const destroyedResource = state.resource;
+            assert(
+              destroyedResource.emitDestroy() === destroyedResource,
+              "explicit AsyncResource teardown returned the wrong resource",
+            );
+            assert(
+              state.beforeCalls === 1 &&
+                state.afterCalls === 1 &&
+                state.destroyCalls === 1 &&
+                state.destroyAsyncIds.length === 1 &&
+                state.destroyAsyncIds[0] === state.resourceAsyncId &&
+                state.functionCalls === 1 &&
+                state.sequence.length === 4 &&
+                state.sequence[0] === "before" &&
+                state.sequence[1] === "function" &&
+                state.sequence[2] === "after" &&
+                state.sequence[3] === "destroy",
+              "active hook did not observe one exact synchronous destroy callback",
+            );
+          }}
+          function assertExplicitDisable() {{
+            state.postDisableResource = new asyncHooks.AsyncResource(
+              `rev2:${{state.operationId}}:post-disable`,
+            );
+            state.postDisableResourceAsyncId =
+              state.postDisableResource.asyncId();
+            assert(
+              state.postDisableResourceAsyncId !== state.resourceAsyncId,
+              "post-disable control reused the destroyed AsyncResource id",
+            );
+            resetObservations();
+            const result = state.postDisableResource.runInAsyncScope(() => {{
+              state.functionCalls++;
+              state.sequence.push("function");
+              return "disabled-result";
+            }}, null);
+            assert(
+              result === "disabled-result" &&
+                state.beforeCalls === 0 &&
+                state.afterCalls === 0 &&
+                state.destroyCalls === 1 &&
+                state.destroyAsyncIds.length === 1 &&
+                state.destroyAsyncIds[0] === state.resourceAsyncId &&
+                state.functionCalls === 1 &&
+                state.sequence.length === 1 &&
+                state.sequence[0] === "function",
+              "explicit root disable left the async hook active",
+            );
+            const postDisableResource = state.postDisableResource;
+            assert(
+              postDisableResource.emitDestroy() === postDisableResource &&
+                state.destroyCalls === 1 &&
+                state.destroyAsyncIds.length === 1 &&
+                state.destroyAsyncIds[0] === state.resourceAsyncId &&
+                state.sequence.length === 1 &&
+                state.sequence[0] === "function",
+              "post-disable resource teardown emitted a second destroy callback",
+            );
+            state.postDisableResource = undefined;
+            state.postDisableResourceAsyncId = undefined;
+          }}
+          {body}
+          assert(
+            state.deniedResult === undefined &&
+              state.receiverCanaryResult === undefined &&
+              state.receiverCanaryReads === 0 &&
+              state.destroyCalls === 1 &&
+              state.destroyAsyncIds.length === 1 &&
+              state.destroyAsyncIds[0] === state.resourceAsyncId &&
+              state.postDisableResource === undefined &&
+              state.postDisableResourceAsyncId === undefined,
+            "async_hooks cleanup left an inexact denial or destroy state",
+          );
+          state.hook = undefined;
+          state.resource = undefined;
+          state.resourceAsyncId = undefined;
+          state.postDisableResource = undefined;
+          state.postDisableResourceAsyncId = undefined;
+          state.plainCallbacks = undefined;
+          state.constructorGetterCallbacks = undefined;
+          state.receiverCanary = undefined;
+          delete globalThis.rev2AsyncHooksState;
+        }}
+        "#
+      ),
+    );
+  }
+
+  fn rev2_public_async_hooks_expected_positive_guard_calls(
+    operation: &Rev2V8FixtureOperation,
+  ) -> Vec<(String, String, String, String)> {
+    let mut calls = Vec::new();
+    let mut push = |target: &str, api_name: &str| {
+      calls.push((
+        "runtime".to_string(),
+        "inspect".to_string(),
+        target.to_string(),
+        api_name.to_string(),
+      ));
+    };
+    let create_hook = "node:async_hooks.createHook";
+    let execution_async_resource = "node:async_hooks.executionAsyncResource";
+    let enable = "node:async_hooks.AsyncHook.enable";
+    let disable = "node:async_hooks.AsyncHook.disable";
+    match operation.operation_id {
+      "async-hooks-create-hook" => {
+        push("async-hooks", create_hook);
+        push("async-hooks", enable);
+        push("async-resource", execution_async_resource);
+        push("async-hooks", disable);
+      }
+      "async-hooks-execution-async-resource" => {
+        push("async-hooks", create_hook);
+        push("async-hooks", enable);
+        push("async-resource", execution_async_resource);
+        push("async-hooks", disable);
+      }
+      "async-hook-disable" => {
+        push("async-hooks", create_hook);
+        push("async-hooks", enable);
+        push("async-hooks", disable);
+      }
+      "async-hook-enable" => {
+        push("async-hooks", create_hook);
+        push("async-hooks", enable);
+        push("async-hooks", disable);
+      }
+      _ => panic!(
+        "unknown public async_hooks fixture operation {}",
+        operation.operation_id
+      ),
+    }
+    calls
+  }
+
+  fn rev2_public_async_hooks_prepare_guard_count(
+    operation: &Rev2V8FixtureOperation,
+  ) -> usize {
+    match operation.operation_id {
+      "async-hook-disable" => 2,
+      "async-hooks-create-hook"
+      | "async-hooks-execution-async-resource"
+      | "async-hook-enable" => 1,
+      _ => panic!(
+        "unknown public async_hooks fixture operation {}",
+        operation.operation_id
+      ),
+    }
+  }
+
+  fn rev2_public_async_hooks_denied_guard_count(
+    operation: &Rev2V8FixtureOperation,
+  ) -> usize {
+    match operation.operation_id {
+      "async-hooks-create-hook" => 4,
+      "async-hook-disable" | "async-hook-enable" => 2,
+      "async-hooks-execution-async-resource" => 1,
+      _ => panic!(
+        "unknown public async_hooks fixture operation {}",
+        operation.operation_id
+      ),
+    }
+  }
+
+  fn rev2_public_async_hooks_expected_denied_cycle_guard_calls(
+    operation: &Rev2V8FixtureOperation,
+  ) -> Vec<(String, String, String, String)> {
+    let mut expected =
+      rev2_public_async_hooks_expected_positive_guard_calls(operation);
+    let prepare_count = rev2_public_async_hooks_prepare_guard_count(operation);
+    let denied_call = (
+      "runtime".to_string(),
+      "inspect".to_string(),
+      operation.denied_target.to_string(),
+      rev2_public_wrapper_guard_api_name(operation).to_string(),
+    );
+    for offset in 0..rev2_public_async_hooks_denied_guard_count(operation) {
+      expected.insert(prepare_count + offset, denied_call.clone());
+    }
+    expected
+  }
+
+  fn run_rev2_public_async_hooks_positive_control(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let before = rev2_v8_fixture_canaries();
+    prepare_rev2_public_async_hooks_fixture_state(runtime, root, operation);
+    cleanup_rev2_public_async_hooks_fixture_state(runtime, root, operation);
+    let after = rev2_v8_fixture_canaries();
+    let expected =
+      rev2_public_async_hooks_expected_positive_guard_calls(operation);
+    assert_eq!(
+      after.public_wrapper_guard_calls,
+      before.public_wrapper_guard_calls + expected.len(),
+      "{} ambient async_hooks control crossed an inexact number of guards",
+      operation.operation_id
+    );
+    let observed = {
+      let calls = PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap();
+      calls[before.public_wrapper_guard_calls..].to_vec()
+    };
+    assert_eq!(
+      observed, expected,
+      "{} ambient async_hooks control used an inexact guard sequence",
+      operation.operation_id
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before.public_wrapper_guard_calls,
+        ..after
+      },
+      before,
+      "{} ambient async_hooks control crossed unrelated native work",
+      operation.operation_id
+    );
+    execute(
+      runtime,
+      "file:///rev2_public_async_hooks_fixture_positive_clean.js",
+      r#"
+      if ("rev2AsyncHooksState" in globalThis) {
+        throw new Error("ambient async_hooks control retained fixture state");
+      }
+      "#
+      .to_string(),
     );
   }
 
@@ -4499,6 +5452,152 @@ mod native_capsec_tests {
     );
   }
 
+  fn run_rev2_public_async_hooks_denied_cycle(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    case_kind: &str,
+    mode: &str,
+  ) {
+    let sequence_start =
+      PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.load(Ordering::SeqCst);
+    prepare_rev2_public_async_hooks_fixture_state(runtime, root, operation);
+    let expected_prepare_calls =
+      rev2_public_async_hooks_prepare_guard_count(operation);
+    assert_eq!(
+      PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.load(Ordering::SeqCst),
+      sequence_start + expected_prepare_calls,
+      "{} preparation crossed an inexact async_hooks guard sequence",
+      operation.operation_id
+    );
+
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    let before = rev2_v8_fixture_canaries();
+    deny_rev2_public_async_hooks_fixture_operation(runtime, operation);
+    let after = rev2_v8_fixture_canaries();
+    let denied_guard_count =
+      rev2_public_async_hooks_denied_guard_count(operation);
+    assert_eq!(
+      after.public_wrapper_guard_calls,
+      before.public_wrapper_guard_calls + denied_guard_count,
+      "{} crossed an inexact number of async_hooks denial guards in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    for call_index in
+      before.public_wrapper_guard_calls..after.public_wrapper_guard_calls
+    {
+      assert_exact_public_wrapper_guard_call(operation, call_index);
+    }
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before.public_wrapper_guard_calls,
+        ..after
+      },
+      before,
+      "{} changed async hook state or unrelated native work before denial in {case_kind}/{mode}",
+      operation.operation_id
+    );
+
+    cleanup_rev2_public_async_hooks_fixture_state(runtime, root, operation);
+    let observed = {
+      let calls = PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap();
+      calls[sequence_start..].to_vec()
+    };
+    assert_eq!(
+      observed,
+      rev2_public_async_hooks_expected_denied_cycle_guard_calls(operation),
+      "{} prepare/deny/cleanup used an inexact async_hooks guard sequence",
+      operation.operation_id
+    );
+    execute(
+      runtime,
+      "file:///rev2_public_async_hooks_fixture_denied_cycle_clean.js",
+      r#"
+      if ("rev2AsyncHooksState" in globalThis) {
+        throw new Error("async_hooks denied cycle retained fixture state");
+      }
+      "#
+      .to_string(),
+    );
+  }
+
+  fn run_rev2_public_async_hooks_fixture_mode(
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    case_kind: &str,
+    mode: &str,
+  ) {
+    reset_rev2_v8_fixture_canaries();
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _tokio_guard = tokio_runtime.enter();
+    let mut runtime = new_public_v8_wrapper_runtime();
+    assert_public_async_hooks_guard_precedes_wrapper_work(operation);
+    load_public_async_hooks_wrapper(&mut runtime, root);
+
+    if case_kind == "staged-barrier:cleanup" {
+      run_rev2_public_async_hooks_positive_control(
+        &mut runtime,
+        root,
+        operation,
+      );
+    }
+
+    let denied_cycles_start =
+      PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.load(Ordering::SeqCst);
+    run_rev2_public_async_hooks_denied_cycle(
+      &mut runtime,
+      root,
+      operation,
+      case_kind,
+      mode,
+    );
+    if case_kind == "staged-barrier:cleanup" {
+      run_rev2_public_async_hooks_denied_cycle(
+        &mut runtime,
+        root,
+        operation,
+        case_kind,
+        mode,
+      );
+    }
+    let denied_cycles_end =
+      PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.load(Ordering::SeqCst);
+    let expected_cycle =
+      rev2_public_async_hooks_expected_denied_cycle_guard_calls(operation);
+    let mut expected = expected_cycle.clone();
+    if case_kind == "staged-barrier:cleanup" {
+      expected.extend(expected_cycle);
+    }
+    let observed = {
+      let calls = PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap();
+      calls[denied_cycles_start..denied_cycles_end].to_vec()
+    };
+    assert_eq!(
+      observed, expected,
+      "{} did not append the exact fresh post-cleanup denied sequence",
+      operation.operation_id
+    );
+
+    if case_kind == "staged-barrier:cancellation" {
+      run_rev2_public_async_hooks_positive_control(
+        &mut runtime,
+        root,
+        operation,
+      );
+    }
+    assert_rev2_v8_fixture_terminal_clean(operation.operation_id, mode);
+    drop(runtime);
+    assert_eq!(
+      GC_PROFILER_ACTIVE_STATE_COUNT.load(Ordering::SeqCst),
+      0,
+      "{} retained unrelated native profiler state after async_hooks runtime disposal in {mode}",
+      operation.operation_id
+    );
+  }
+
   fn run_rev2_public_diagnostics_fixture_mode(
     root: &Path,
     operation: &Rev2V8FixtureOperation,
@@ -4689,6 +5788,28 @@ mod native_capsec_tests {
       REV2_V8_FIXTURE_MODES.contains(&mode),
       "fixture mode is not exact"
     );
+    if matches!(
+      operation.operation_id,
+      "async-hooks-create-hook"
+        | "async-hooks-execution-async-resource"
+        | "async-hook-disable"
+        | "async-hook-enable"
+    ) {
+      // @ref LLP 0019#runtime-and-memory-inspection [tests] -- Exercise only
+      // the public async-hooks inspection surface.
+      // @ref LLP 0019#pre-promotion-conformance-candidate-execution
+      // [constrained-by] -- Load the actual ext:deno_node/async_hooks.ts
+      // public facade. Public createHook creates every exercised hook, the
+      // shared test guard records exact runtime:inspect tuples, and behavioral
+      // canaries close the closure-private hook array without exposing its
+      // separate no-guard internal hook class or factory. This is
+      // development-only candidate output, not a receipt, evidence artifact,
+      // external report, or promotion input.
+      run_rev2_public_async_hooks_fixture_mode(
+        root, operation, case_kind, mode,
+      );
+      return rev2_v8_fixture_assertions(operation, case_kind);
+    }
     if operation.operation_id.starts_with("diagnostics-") {
       // @ref LLP 0019#runtime-and-memory-inspection [tests] -- Execute the
       // actual ext:deno_node/diagnostics_channel.js public facade. The

@@ -33,12 +33,17 @@ const {
   setAsyncContext,
 } = core;
 
+interface HookInstance {
+  enable(): HookInstance;
+  disable(): HookInstance;
+}
+
 interface ActiveHooks {
-  array: AsyncHook[];
+  array: HookInstance[];
   // deno-lint-ignore camelcase
   call_depth: number;
   // deno-lint-ignore camelcase
-  tmp_array: AsyncHook[] | null;
+  tmp_array: HookInstance[] | null;
   // deno-lint-ignore camelcase
   tmp_fields: number[] | null;
 }
@@ -297,7 +302,7 @@ function emitInitNative(
   }
 }
 
-function getHookArrays(): [AsyncHook[], number[] | Uint32Array] {
+function getHookArrays(): [HookInstance[], number[] | Uint32Array] {
   if (active_hooks.call_depth === 0) {
     return [active_hooks.array, async_hook_fields];
   }
@@ -411,136 +416,184 @@ function hasAsyncIdStack() {
 
 type Fn = (...args: unknown[]) => unknown;
 
-// Domain tracking is an implementation detail of the Node compatibility
-// layer. Keep its hook on a closure-private path so a user-created AsyncHook
-// cannot be enabled later by a less-trusted principal without a fresh check.
-const internalHookToken = { __proto__: null };
+interface HookCallbacks {
+  init?: Fn;
+  before?: Fn;
+  after?: Fn;
+  destroy?: Fn;
+  promiseResolve?: Fn;
+}
+
 const hookStates = new SafeWeakMap();
 
-class AsyncHook {
-  constructor({
+function initializeHook(hook: HookInstance, callbacks: HookCallbacks) {
+  const {
     init,
     before,
     after,
     destroy,
     promiseResolve,
-  }: {
-    init: Fn;
-    before: Fn;
-    after: Fn;
-    destroy: Fn;
-    promiseResolve: Fn;
-  }, trustedToken?: object) {
-    if (init !== undefined && typeof init !== "function") {
-      throw new ERR_ASYNC_CALLBACK("hook.init");
-    }
-    if (before !== undefined && typeof before !== "function") {
-      throw new ERR_ASYNC_CALLBACK("hook.before");
-    }
-    if (after !== undefined && typeof after !== "function") {
-      throw new ERR_ASYNC_CALLBACK("hook.after");
-    }
-    if (destroy !== undefined && typeof destroy !== "function") {
-      throw new ERR_ASYNC_CALLBACK("hook.destroy");
-    }
-    if (promiseResolve !== undefined && typeof promiseResolve !== "function") {
-      throw new ERR_ASYNC_CALLBACK("hook.promiseResolve");
-    }
+  } = callbacks;
+  if (init !== undefined && typeof init !== "function") {
+    throw new ERR_ASYNC_CALLBACK("hook.init");
+  }
+  if (before !== undefined && typeof before !== "function") {
+    throw new ERR_ASYNC_CALLBACK("hook.before");
+  }
+  if (after !== undefined && typeof after !== "function") {
+    throw new ERR_ASYNC_CALLBACK("hook.after");
+  }
+  if (destroy !== undefined && typeof destroy !== "function") {
+    throw new ERR_ASYNC_CALLBACK("hook.destroy");
+  }
+  if (promiseResolve !== undefined && typeof promiseResolve !== "function") {
+    throw new ERR_ASYNC_CALLBACK("hook.promiseResolve");
+  }
 
-    hookStates.set(this, {
-      __proto__: null,
-      init,
-      before,
-      after,
-      destroy,
-      promiseResolve,
-      trustedInternal: trustedToken === internalHookToken,
-    });
+  hookStates.set(hook, {
+    __proto__: null,
+    init,
+    before,
+    after,
+    destroy,
+    promiseResolve,
+  });
+}
+
+function enableHook(hook: HookInstance) {
+  const state = hookStates.get(hook);
+
+  // The set of callbacks for a hook should be the same regardless of whether
+  // enable()/disable() are run during their execution. The following
+  // references are reassigned to the tmp arrays if a hook is currently being
+  // processed.
+  // deno-lint-ignore camelcase
+  const { 0: hooks_array, 1: hook_fields } = getHookArrays();
+
+  // Each hook is only allowed to be added once.
+  if (ArrayPrototypeIncludes(hooks_array, hook)) {
+    return hook;
+  }
+
+  // deno-lint-ignore camelcase
+  const prev_kTotals = hook_fields[kTotals];
+
+  // createHook() has already enforced that the callbacks are all functions,
+  // so here simply increment the count of whether each callbacks exists or
+  // not.
+  hook_fields[kTotals] = hook_fields[kInit] += +!!state.init;
+  hook_fields[kTotals] += hook_fields[kBefore] += +!!state.before;
+  hook_fields[kTotals] += hook_fields[kAfter] += +!!state.after;
+  hook_fields[kTotals] += hook_fields[kDestroy] += +!!state.destroy;
+  hook_fields[kTotals] += hook_fields[kPromiseResolve] += +!!state
+    .promiseResolve;
+  ArrayPrototypePush(hooks_array, hook);
+
+  if (prev_kTotals === 0 && hook_fields[kTotals] > 0) {
+    enableHooks();
+  }
+
+  // TODO(kt3k): Uncomment the below
+  // updatePromiseHookMode();
+
+  return hook;
+}
+
+function disableHook(hook: HookInstance) {
+  const state = hookStates.get(hook);
+
+  // deno-lint-ignore camelcase
+  const { 0: hooks_array, 1: hook_fields } = getHookArrays();
+
+  const index = ArrayPrototypeIndexOf(hooks_array, hook);
+  if (index === -1) {
+    return hook;
+  }
+
+  // deno-lint-ignore camelcase
+  const prev_kTotals = hook_fields[kTotals];
+
+  hook_fields[kTotals] = hook_fields[kInit] -= +!!state.init;
+  hook_fields[kTotals] += hook_fields[kBefore] -= +!!state.before;
+  hook_fields[kTotals] += hook_fields[kAfter] -= +!!state.after;
+  hook_fields[kTotals] += hook_fields[kDestroy] -= +!!state.destroy;
+  hook_fields[kTotals] += hook_fields[kPromiseResolve] -= +!!state
+    .promiseResolve;
+  ArrayPrototypeSplice(hooks_array, index, 1);
+
+  if (prev_kTotals > 0 && hook_fields[kTotals] === 0) {
+    disableHooks();
+  }
+
+  return hook;
+}
+
+// The public factory has already crossed the same guard before it uses this
+// token. Keeping the token closure-private prevents a constructor recovered
+// through `hook.constructor` from bypassing the constructor guard.
+const publicHookFactoryToken = { __proto__: null };
+
+class AsyncHook implements HookInstance {
+  constructor(callbacks: HookCallbacks, factoryToken?: object) {
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    if (factoryToken !== publicHookFactoryToken) {
+      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        "async-hooks",
+        "node:async_hooks.createHook",
+      );
+    }
+    initializeHook(this, callbacks);
   }
 
   enable() {
-    const state = hookStates.get(this);
-    if (!state.trustedInternal) {
-      op_oden_guard_deny_only_surface(
-        "runtime",
-        "inspect",
-        "async-hooks",
-        "node:async_hooks.AsyncHook.enable",
-      );
-    }
-
-    // The set of callbacks for a hook should be the same regardless of whether
-    // enable()/disable() are run during their execution. The following
-    // references are reassigned to the tmp arrays if a hook is currently being
-    // processed.
-    // deno-lint-ignore camelcase
-    const { 0: hooks_array, 1: hook_fields } = getHookArrays();
-
-    // Each hook is only allowed to be added once.
-    if (ArrayPrototypeIncludes(hooks_array, this)) {
-      return this;
-    }
-
-    // deno-lint-ignore camelcase
-    const prev_kTotals = hook_fields[kTotals];
-
-    // createHook() has already enforced that the callbacks are all functions,
-    // so here simply increment the count of whether each callbacks exists or
-    // not.
-    hook_fields[kTotals] = hook_fields[kInit] += +!!state.init;
-    hook_fields[kTotals] += hook_fields[kBefore] += +!!state.before;
-    hook_fields[kTotals] += hook_fields[kAfter] += +!!state.after;
-    hook_fields[kTotals] += hook_fields[kDestroy] += +!!state.destroy;
-    hook_fields[kTotals] += hook_fields[kPromiseResolve] += +!!state
-      .promiseResolve;
-    ArrayPrototypePush(hooks_array, this);
-
-    if (prev_kTotals === 0 && hook_fields[kTotals] > 0) {
-      enableHooks();
-    }
-
-    // TODO(kt3k): Uncomment the below
-    // updatePromiseHookMode();
-
-    return this;
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "async-hooks",
+      "node:async_hooks.AsyncHook.enable",
+    );
+    return enableHook(this);
   }
 
   disable() {
-    const state = hookStates.get(this);
-    if (!state.trustedInternal) {
-      op_oden_guard_deny_only_surface(
-        "runtime",
-        "inspect",
-        "async-hooks",
-        "node:async_hooks.AsyncHook.disable",
-      );
-    }
-
-    // deno-lint-ignore camelcase
-    const { 0: hooks_array, 1: hook_fields } = getHookArrays();
-
-    const index = ArrayPrototypeIndexOf(hooks_array, this);
-    if (index === -1) {
-      return this;
-    }
-
-    // deno-lint-ignore camelcase
-    const prev_kTotals = hook_fields[kTotals];
-
-    hook_fields[kTotals] = hook_fields[kInit] -= +!!state.init;
-    hook_fields[kTotals] += hook_fields[kBefore] -= +!!state.before;
-    hook_fields[kTotals] += hook_fields[kAfter] -= +!!state.after;
-    hook_fields[kTotals] += hook_fields[kDestroy] -= +!!state.destroy;
-    hook_fields[kTotals] += hook_fields[kPromiseResolve] -= +!!state
-      .promiseResolve;
-    ArrayPrototypeSplice(hooks_array, index, 1);
-
-    if (prev_kTotals > 0 && hook_fields[kTotals] === 0) {
-      disableHooks();
-    }
-
-    return this;
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "async-hooks",
+      "node:async_hooks.AsyncHook.disable",
+    );
+    return disableHook(this);
   }
+}
+
+function createPublicHook(callbacks: HookCallbacks) {
+  return new AsyncHook(callbacks, publicHookFactoryToken);
+}
+
+// Domain tracking is a closure-private Node-compatibility implementation
+// detail. Its class and no-guard method implementations are never exposed
+// through the public async_hooks facade or a public hook's prototype chain.
+// @ref LLP 0019#runtime-and-memory-inspection [implements]
+class InternalAsyncHook implements HookInstance {
+  constructor(callbacks: HookCallbacks) {
+    initializeHook(this, callbacks);
+  }
+
+  enable() {
+    return enableHook(this);
+  }
+
+  disable() {
+    return disableHook(this);
+  }
+}
+
+function createInternalHook(callbacks: HookCallbacks) {
+  return new InternalAsyncHook(callbacks);
 }
 
 return {
@@ -562,8 +615,8 @@ return {
   defaultTriggerAsyncIdScope,
   enabledHooksExist,
   hasAsyncIdStack,
-  AsyncHook,
-  internalHookToken,
+  createPublicHook,
+  createInternalHook,
   registerDestroyHook,
   async_id_symbol,
   trigger_async_id_symbol,

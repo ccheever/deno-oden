@@ -9,7 +9,7 @@ const {
   validateObject,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const {
-  AsyncHook,
+  createPublicHook,
   emitAfter,
   emitBefore,
   emitDestroy: emitDestroyHook,
@@ -298,7 +298,7 @@ const asyncWrapProviders = ObjectFreeze({
   VERIFYREQUEST: 62,
 });
 
-// Use the AsyncHook from the internal module
+// Construct public hooks only through the guarded internal factory.
 function createHook(callbacks: {
   init?: (
     asyncId: number,
@@ -311,6 +311,7 @@ function createHook(callbacks: {
   destroy?: (asyncId: number) => void;
   promiseResolve?: (asyncId: number) => void;
 }) {
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
   // Async hook callbacks observe activity across every principal in the shared
   // isolate, so the initial profile closes registration as runtime inspection.
   op_oden_guard_deny_only_surface(
@@ -319,7 +320,7 @@ function createHook(callbacks: {
     "async-hooks",
     "node:async_hooks.createHook",
   );
-  return new AsyncHook(callbacks);
+  return createPublicHook(callbacks);
 }
 
 return {
