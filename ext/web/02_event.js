@@ -1117,6 +1117,20 @@ class EventTarget {
 
 webidl.configureInterface(EventTarget);
 const EventTargetPrototype = EventTarget.prototype;
+const EventTargetPrototypeDispatchEvent = EventTargetPrototype.dispatchEvent;
+
+// Internal runtime consumers may dispatch a public event while retaining only
+// its closure-private cancellation result. The public Event itself must not
+// become an authority channel into later trusted routing.
+// @ref LLP 0019#runtime-and-memory-inspection [implements]
+function dispatchEventWithPrivateCancellation(target, dispatchedEvent) {
+  FunctionPrototypeCall(
+    EventTargetPrototypeDispatchEvent,
+    target,
+    dispatchedEvent,
+  );
+  return dispatchedEvent[_canceledFlag];
+}
 
 defineEnumerableProps(EventTarget, [
   "addEventListener",
@@ -1643,44 +1657,81 @@ let reportExceptionStackedCalls = 0;
 // https://html.spec.whatwg.org/#report-the-exception
 function reportException(error) {
   reportExceptionStackedCalls++;
-  const jsError = core.destructureError(error);
-  const message = jsError.exceptionMessage;
-  let filename = "";
-  let lineno = 0;
-  let colno = 0;
-  if (jsError.frames.length > 0) {
-    filename = jsError.frames[0].fileName;
-    lineno = jsError.frames[0].lineNumber;
-    colno = jsError.frames[0].columnNumber;
-  } else {
-    const jsError = core.destructureError(new Error());
-    const frames = jsError.frames;
-    for (let i = 0; i < frames.length; ++i) {
-      const frame = frames[i];
-      if (
-        typeof frame.fileName == "string" &&
-        !StringPrototypeStartsWith(frame.fileName, "ext:")
-      ) {
-        filename = frame.fileName;
-        lineno = frame.lineNumber;
-        colno = frame.columnNumber;
-        break;
+  try {
+    const jsError = core.destructureError(error);
+    const message = jsError.exceptionMessage;
+    let filename = "";
+    let lineno = 0;
+    let colno = 0;
+    if (jsError.frames.length > 0) {
+      filename = jsError.frames[0].fileName;
+      lineno = jsError.frames[0].lineNumber;
+      colno = jsError.frames[0].columnNumber;
+    } else {
+      const jsError = core.destructureError(new Error());
+      const frames = jsError.frames;
+      for (let i = 0; i < frames.length; ++i) {
+        const frame = frames[i];
+        if (
+          typeof frame.fileName == "string" &&
+          !StringPrototypeStartsWith(frame.fileName, "ext:")
+        ) {
+          filename = frame.fileName;
+          lineno = frame.lineNumber;
+          colno = frame.columnNumber;
+          break;
+        }
       }
     }
+    const event = new ErrorEvent("error", {
+      cancelable: true,
+      message,
+      filename,
+      lineno,
+      colno,
+      error,
+    });
+    // Avoid recursing `reportException()` via error handlers more than once.
+    if (reportExceptionStackedCalls > 1) {
+      core.reportUnhandledException(error);
+    } else {
+      let processHandled = false;
+      try {
+        FunctionPrototypeCall(
+          EventTargetPrototypeDispatchEvent,
+          globalThis_,
+          event,
+        );
+      } finally {
+        // node:process installs this callback in the closure-private runtime
+        // internals object. It must never be stored in the public global
+        // EventTarget listener table, where getEventListeners() or symbol
+        // enumeration could recover a trusted exception-dispatch function.
+        // Public listeners receive the ErrorEvent, but the separately
+        // authorized process route receives the exact lexical error and runs
+        // even when dispatch cleanup throws. Its consumed result stays in this
+        // closure rather than a mutable public Event property.
+        // @ref LLP 0019#runtime-and-memory-inspection [implements]
+        const nodeProcessErrorCallback = internals.nodeProcessErrorCallback;
+        if (typeof nodeProcessErrorCallback === "function") {
+          try {
+            processHandled = !!FunctionPrototypeCall(
+              nodeProcessErrorCallback,
+              internals,
+              error,
+            );
+          } catch (callbackError) {
+            reportException(callbackError);
+          }
+        }
+      }
+      if (!processHandled && !event[_canceledFlag]) {
+        core.reportUnhandledException(error);
+      }
+    }
+  } finally {
+    reportExceptionStackedCalls--;
   }
-  const event = new ErrorEvent("error", {
-    cancelable: true,
-    message,
-    filename,
-    lineno,
-    colno,
-    error,
-  });
-  // Avoid recursing `reportException()` via error handlers more than once.
-  if (reportExceptionStackedCalls > 1 || globalThis_.dispatchEvent(event)) {
-    core.reportUnhandledException(error);
-  }
-  reportExceptionStackedCalls--;
 }
 
 function checkThis(thisArg) {
@@ -1705,6 +1756,7 @@ return {
   CustomEvent,
   defineEventHandler,
   dispatch,
+  dispatchEventWithPrivateCancellation,
   ErrorEvent,
   Event,
   eventTargetData,

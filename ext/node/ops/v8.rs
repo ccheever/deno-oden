@@ -1345,6 +1345,8 @@ mod native_capsec_tests {
   const REV2_V8_FIXTURE_MODE_ENV: &str = "ODEN_REV2_V8_FIXTURE_MODE";
   const REV2_V8_FIXTURE_REPORT_PREFIX: &str =
     "ODEN_REV2_V8_INSPECTION_FIXTURE_REPORT ";
+  const REV2_V8_FIXTURE_CHILD_COMPLETION_PREFIX: &str =
+    "ODEN_REV2_V8_INSPECTION_FIXTURE_CHILD_COMPLETE ";
   const REV2_V8_FIXTURE_TEST: &str =
     "ops::v8::native_capsec_tests::rev2_v8_inspection_fixture_case";
   const REV2_V8_FIXTURE_MODES: &[&str] = &["permissive", "audit", "enforce"];
@@ -2017,6 +2019,12 @@ mod native_capsec_tests {
   static PUBLIC_V8_WRAPPER_GUARD_CALLS: Mutex<
     Vec<(String, String, String, String)>,
   > = Mutex::new(Vec::new());
+  static PROCESS_SIGNAL_BIND_COUNT: AtomicUsize = AtomicUsize::new(0);
+  static PROCESS_SIGNAL_INTERNAL_BIND_COUNT: AtomicUsize = AtomicUsize::new(0);
+  static PROCESS_SIGNAL_POLL_COUNT: AtomicUsize = AtomicUsize::new(0);
+  static PROCESS_SIGNAL_UNBIND_COUNT: AtomicUsize = AtomicUsize::new(0);
+  static PROCESS_SIGNAL_NEXT_RID: AtomicUsize = AtomicUsize::new(1);
+  static PROCESS_SIGNAL_FAIL_NEXT_UNBIND: AtomicBool = AtomicBool::new(false);
 
   #[cfg(test)]
   #[op2(fast, stack_trace)]
@@ -2047,22 +2055,141 @@ mod native_capsec_tests {
     panic!("process fixture reached unrelated thread CPU usage work")
   }
 
+  #[op2(fast, stack_trace)]
+  #[smi]
+  fn op_signal_bind(#[string] _signal: &str) -> u32 {
+    PROCESS_SIGNAL_BIND_COUNT.fetch_add(1, Ordering::SeqCst);
+    PROCESS_SIGNAL_NEXT_RID.fetch_add(1, Ordering::SeqCst) as u32
+  }
+
+  #[op2(fast)]
+  #[smi]
+  fn op_signal_bind_internal(#[string] _signal: &str) -> u32 {
+    PROCESS_SIGNAL_INTERNAL_BIND_COUNT.fetch_add(1, Ordering::SeqCst);
+    PROCESS_SIGNAL_NEXT_RID.fetch_add(1, Ordering::SeqCst) as u32
+  }
+
+  #[op2]
+  async fn op_signal_poll(#[smi] _rid: u32) -> bool {
+    PROCESS_SIGNAL_POLL_COUNT.fetch_add(1, Ordering::SeqCst);
+    std::future::pending::<bool>().await
+  }
+
+  #[op2(fast)]
+  fn op_signal_unbind(#[smi] _rid: u32) -> Result<(), JsErrorBox> {
+    PROCESS_SIGNAL_UNBIND_COUNT.fetch_add(1, Ordering::SeqCst);
+    if PROCESS_SIGNAL_FAIL_NEXT_UNBIND.swap(false, Ordering::SeqCst) {
+      return Err(JsErrorBox::generic(
+        "injected process signal unbind failure",
+      ));
+    }
+    Ok(())
+  }
+
   deno_core::extension!(
     public_v8_wrapper_guard_test_ext,
-    ops = [op_oden_guard_deny_only_surface, op_current_thread_cpu_usage],
+    ops = [op_oden_guard_deny_only_surface, op_current_thread_cpu_usage,],
+    esm_entry_point =
+      "ext:public_v8_wrapper_guard_test_ext/process_events_test_bridge.js",
+    esm = [
+      "ext:public_v8_wrapper_guard_test_ext/process_events_test_bridge.js" = {
+        source = r#"
+          import { internals, primordials } from "ext:core/mod.js";
+
+          const {
+            ObjectCreate,
+            ObjectDefineProperty,
+            ObjectFreeze,
+            ReflectApply,
+          } = primordials;
+
+          const bridge = ObjectCreate(null);
+          ObjectDefineProperty(bridge, "dispatchUnhandledRejection", {
+            __proto__: null,
+            configurable: false,
+            enumerable: true,
+            value(reason, promise) {
+              const callback = internals.nodeProcessUnhandledRejectionCallback;
+              if (typeof callback !== "function") {
+                throw new Error(
+                  "node process unhandled-rejection callback was absent",
+                );
+              }
+              return ReflectApply(
+                  callback,
+                  internals,
+                  [promise, reason],
+                )
+                ? 1
+                : 0;
+            },
+            writable: false,
+          });
+          ObjectDefineProperty(bridge, "dispatchGlobalError", {
+            __proto__: null,
+            configurable: false,
+            enumerable: true,
+            value(error) {
+              const callback = internals.nodeProcessErrorCallback;
+              if (typeof callback !== "function") {
+                throw new Error(
+                  "node process global error listener was absent",
+                );
+              }
+              return ReflectApply(callback, internals, [error]) ? 1 : 0;
+            },
+            writable: false,
+          });
+          ObjectDefineProperty(bridge, "installTrustedProcessEventTable", {
+            __proto__: null,
+            configurable: false,
+            enumerable: true,
+            value(table) {
+              const token = internals.nodeProcessTrustedToken;
+              const replace =
+                internals.nodeProcessReplaceEventTableInternal;
+              if (token === undefined || typeof replace !== "function") {
+                throw new Error(
+                  "trusted process event-table fixture channel was absent",
+                );
+              }
+              return ReflectApply(replace, internals, [token, table]);
+            },
+            writable: false,
+          });
+          ObjectDefineProperty(
+            globalThis,
+            "__rev2ProcessUnhandledRejectionFixture",
+            {
+              __proto__: null,
+              configurable: false,
+              enumerable: false,
+              value: ObjectFreeze(bridge),
+              writable: false,
+            },
+          );
+        "#
+      },
+    ],
     state = |state| {
       state.put::<PermissionsContainer>(native_test_permissions(false));
     }
   );
 
   // The real node:os wrapper loaded by process.report references this lazy
-  // script, but the focused deno_node unit-test runtime does not otherwise
-  // depend on deno_os. None of its ops are exercised by the report fields
-  // below; the script supplies only the actual osUptime export expected while
-  // node:os evaluates.
+  // scripts, but the focused deno_node unit-test runtime does not otherwise
+  // depend on deno_os. None of their ops are exercised by these fixtures; the
+  // scripts supply the actual osUptime export and immutable signal functions
+  // that node:process captures while evaluating.
   deno_core::extension!(
     deno_os,
-    lazy_loaded_js = [dir "../os", "30_os.js"]
+    ops = [
+      op_signal_bind,
+      op_signal_bind_internal,
+      op_signal_poll,
+      op_signal_unbind,
+    ],
+    lazy_loaded_js = [dir "../os", "30_os.js", "40_signals.js"]
   );
 
   fn execute(runtime: &mut JsRuntime, name: &'static str, source: String) {
@@ -2468,6 +2595,12 @@ mod native_capsec_tests {
     GC_PROFILER_CALLBACK_INSTALL_COUNT.store(0, Ordering::SeqCst);
     GC_PROFILER_STOP_WORK_COUNT.store(0, Ordering::SeqCst);
     GC_PROFILER_ACTIVE_STATE_COUNT.store(0, Ordering::SeqCst);
+    PROCESS_SIGNAL_BIND_COUNT.store(0, Ordering::SeqCst);
+    PROCESS_SIGNAL_INTERNAL_BIND_COUNT.store(0, Ordering::SeqCst);
+    PROCESS_SIGNAL_POLL_COUNT.store(0, Ordering::SeqCst);
+    PROCESS_SIGNAL_UNBIND_COUNT.store(0, Ordering::SeqCst);
+    PROCESS_SIGNAL_NEXT_RID.store(1, Ordering::SeqCst);
+    PROCESS_SIGNAL_FAIL_NEXT_UNBIND.store(false, Ordering::SeqCst);
   }
 
   fn rev2_v8_fixture_canaries() -> Rev2V8FixtureCanaries {
@@ -2585,11 +2718,11 @@ mod native_capsec_tests {
   }
 
   fn new_public_v8_wrapper_runtime() -> JsRuntime {
-    new_public_v8_wrapper_runtime_with_extra_extensions(Vec::new())
+    new_public_v8_wrapper_runtime_with_extra_extensions(vec![deno_os::init()])
   }
 
   fn new_public_process_wrapper_runtime() -> JsRuntime {
-    new_public_v8_wrapper_runtime_with_extra_extensions(vec![deno_os::init()])
+    new_public_v8_wrapper_runtime()
   }
 
   fn load_public_v8_wrapper(runtime: &mut JsRuntime, root: &Path) {
@@ -2598,6 +2731,16 @@ mod native_capsec_tests {
       runtime,
       "file:///rev2_public_v8_fixture_load.js",
       r#"
+      if (Deno.errors === undefined) {
+        Object.defineProperty(Deno, "errors", {
+          __proto__: null,
+          configurable: true,
+          value: Object.freeze({
+            __proto__: null,
+            NotCapable: class NotCapable extends Error {},
+          }),
+        });
+      }
       {
         const webUrl =
           Deno.core.loadExtScript("ext:deno_web/00_url.js");
@@ -3291,6 +3434,7 @@ mod native_capsec_tests {
       r#"
       {
         const core = Deno.core;
+        let mutableDenoSignalCalls = 0;
         if (core.build.target !== "unknown") {
           throw new Error("process event fixture build info was already set");
         }
@@ -3316,15 +3460,115 @@ mod native_capsec_tests {
           networkInterfaces() {
             return [];
           },
+          addSignalListener() {
+            mutableDenoSignalCalls++;
+          },
+          removeSignalListener() {
+            mutableDenoSignalCalls++;
+          },
         });
 
-        const processNamespace = core.createLazyLoader("node:process")();
-        const processObject = processNamespace.default;
         const { EventEmitter } = core.loadExtScript(
           "ext:deno_node/_events.mjs",
         );
+        const retainedPoisonedEvents = Object.create(null);
+        const originalEventEmitterInit = EventEmitter.init;
+        let poisonedInitCalls = 0;
+        let poisonedStorageCalls = 0;
+        let poisonedMethodAccessorCalls = 0;
+        const poisonedDescriptors = new Map();
+        const storageNames = ["_events", "_eventsCount", "_maxListeners"];
+        for (const name of storageNames) {
+          const descriptor = Reflect.getOwnPropertyDescriptor(
+            EventEmitter.prototype,
+            name,
+          );
+          poisonedDescriptors.set(name, descriptor);
+          Object.defineProperty(EventEmitter.prototype, name, {
+            __proto__: null,
+            configurable: true,
+            get() {
+              poisonedStorageCalls++;
+              return name === "_events"
+                ? retainedPoisonedEvents
+                : descriptor?.value;
+            },
+            set(_value) {
+              poisonedStorageCalls++;
+            },
+          });
+        }
+        const poisonedMethodNames = [
+          "on",
+          "off",
+          "emit",
+          "prependListener",
+          "once",
+          "prependOnceListener",
+          "addListener",
+          "removeListener",
+          "removeAllListeners",
+          "listeners",
+          "rawListeners",
+          "listenerCount",
+        ];
+        for (const name of poisonedMethodNames) {
+          const descriptor = Reflect.getOwnPropertyDescriptor(
+            EventEmitter.prototype,
+            name,
+          );
+          poisonedDescriptors.set(name, descriptor);
+          Object.defineProperty(EventEmitter.prototype, name, {
+            __proto__: null,
+            configurable: true,
+            get() {
+              poisonedMethodAccessorCalls++;
+              return descriptor?.value;
+            },
+            set(_value) {
+              poisonedMethodAccessorCalls++;
+            },
+          });
+        }
+        EventEmitter.init = function () {
+          poisonedInitCalls++;
+        };
+        let processNamespace;
+        try {
+          processNamespace = core.createLazyLoader("node:process")();
+        } finally {
+          EventEmitter.init = originalEventEmitterInit;
+          for (const [name, descriptor] of poisonedDescriptors) {
+            Reflect.defineProperty(
+              EventEmitter.prototype,
+              name,
+              descriptor,
+            );
+          }
+        }
+        const processObject = processNamespace.default;
+        const exceptionFixture =
+          globalThis.__rev2ProcessUnhandledRejectionFixture;
+        function poisonedExceptionListener() {}
+        retainedPoisonedEvents.uncaughtException = poisonedExceptionListener;
+        if (
+          poisonedInitCalls !== 0 ||
+          poisonedStorageCalls !== 0 ||
+          poisonedMethodAccessorCalls !== 0 ||
+          processObject.rawListeners("uncaughtException").includes(
+            poisonedExceptionListener,
+          )
+        ) {
+          throw new Error(
+            "lazy process initialization trusted poisoned EventEmitter state",
+          );
+        }
         const sentinelEvent = "rev2-fixture-sentinel";
         const ordinaryEvent = "rev2-fixture-ordinary";
+        const reentrantAccessorEvent = "rev2-fixture-reentrant-accessor";
+        const reentrantValueEvent = "rev2-fixture-reentrant-value";
+        const getterAccessorEvent = Symbol("rev2-fixture-getter-accessor");
+        const setterAccessorEvent = Symbol("rev2-fixture-setter-accessor");
         function sentinelListener() {}
         function ordinaryListener() {}
         let exceptionDeliveryCount = 0;
@@ -3337,6 +3581,67 @@ mod native_capsec_tests {
         let table;
         let guardedTable;
         let prepared = false;
+        let getterAccessorReceiver;
+        let setterAccessorReceiver;
+        let reentrantAccessorMode;
+        let reentrantAccessorReceiver;
+        let reentrantValueMode;
+        let reentrantValueReceiver;
+        function reenterProtectedProcessEventSurface(mode, targetEvent) {
+          if (mode === "table") {
+            Reflect.defineProperty(
+              processObject._events,
+              "removeListener",
+              {
+                __proto__: null,
+                value: candidateListener,
+                writable: true,
+                enumerable: true,
+                configurable: true,
+              },
+            );
+          } else if (mode === "emission") {
+            processObject.emit(
+              "removeListener",
+              targetEvent,
+              ordinaryListener,
+            );
+          } else {
+            throw new Error("process event reentrant mode was absent");
+          }
+        }
+        function getterAccessor() {
+          getterAccessorReceiver = this;
+          return this;
+        }
+        function setterAccessor() {
+          setterAccessorReceiver = this;
+        }
+        function reentrantAccessor() {
+          reentrantAccessorReceiver = this;
+          reenterProtectedProcessEventSurface(
+            reentrantAccessorMode,
+            reentrantAccessorEvent,
+          );
+          return ordinaryListener;
+        }
+        const reentrantValueListener = new Proxy(
+          function reentrantValueListenerTarget() {},
+          {
+            __proto__: null,
+            get(target, property, receiver) {
+              if (property === "listener") {
+                reentrantValueReceiver = receiver;
+                reenterProtectedProcessEventSurface(
+                  reentrantValueMode,
+                  reentrantValueEvent,
+                );
+                return ordinaryListener;
+              }
+              return Reflect.get(target, property, receiver);
+            },
+          },
+        );
         const commits = {
           __proto__: null,
           replacement: 0,
@@ -3356,15 +3661,19 @@ mod native_capsec_tests {
           return count;
         }
 
-        function installTable(nextTable) {
-          processObject._events = nextTable;
-          processObject._eventsCount = 0;
+        function installTable(nextTable = undefined, trusted = false) {
+          nextTable ??= Object.create(null);
+          if (trusted) {
+            exceptionFixture.installTrustedProcessEventTable(nextTable);
+          } else {
+            processObject._events = nextTable;
+          }
           table = nextTable;
           guardedTable = processObject._events;
           processObject.on(sentinelEvent, sentinelListener);
         }
 
-        installTable(Object.create(null));
+        installTable(undefined, true);
 
         const facade = Object.freeze({
           __proto__: null,
@@ -3419,6 +3728,101 @@ mod native_capsec_tests {
             );
             commits.sensitive++;
             return result;
+          },
+          sensitiveAccessorGetterReceiver() {
+            const accessorReceiver =
+              processObject._events[getterAccessorEvent];
+            const result = accessorReceiver.uncaughtException;
+            commits.sensitive++;
+            return result;
+          },
+          sensitiveAccessorSetterReceiver() {
+            processObject._events[setterAccessorEvent] = candidateListener;
+            setterAccessorReceiver.uncaughtException = candidateListener;
+            commits.sensitive++;
+          },
+          sensitiveGetPrototypeOf() {
+            const result = Reflect.getPrototypeOf(processObject._events);
+            commits.sensitive++;
+            return result;
+          },
+          sensitiveSetPrototypeOf() {
+            const prototype = Object.create(null);
+            prototype.uncaughtException = candidateListener;
+            const result = Reflect.setPrototypeOf(
+              processObject._events,
+              prototype,
+            );
+            commits.sensitive++;
+            return result;
+          },
+          sensitiveIsExtensible() {
+            const result = Reflect.isExtensible(processObject._events);
+            commits.sensitive++;
+            return result;
+          },
+          sensitivePreventExtensions() {
+            const result = Reflect.preventExtensions(processObject._events);
+            commits.sensitive++;
+            return result;
+          },
+          sensitiveFreeze() {
+            const result = Object.freeze(processObject._events);
+            commits.sensitive++;
+            return result;
+          },
+          sensitiveSeal() {
+            const result = Object.seal(processObject._events);
+            commits.sensitive++;
+            return result;
+          },
+          sensitiveTrustedTableReentrancy() {
+            reentrantAccessorMode = "table";
+            try {
+              processObject.off(
+                reentrantAccessorEvent,
+                candidateListener,
+              );
+              commits.sensitive++;
+            } finally {
+              reentrantAccessorMode = undefined;
+            }
+          },
+          sensitiveTrustedEmissionReentrancy() {
+            reentrantAccessorMode = "emission";
+            try {
+              processObject.off(
+                reentrantAccessorEvent,
+                candidateListener,
+              );
+              commits.sensitive++;
+            } finally {
+              reentrantAccessorMode = undefined;
+            }
+          },
+          sensitiveReturnedTableReentrancy() {
+            reentrantValueMode = "table";
+            try {
+              processObject.off(
+                reentrantValueEvent,
+                candidateListener,
+              );
+              commits.sensitive++;
+            } finally {
+              reentrantValueMode = undefined;
+            }
+          },
+          sensitiveReturnedEmissionReentrancy() {
+            reentrantValueMode = "emission";
+            try {
+              processObject.off(
+                reentrantValueEvent,
+                candidateListener,
+              );
+              commits.sensitive++;
+            } finally {
+              reentrantValueMode = undefined;
+            }
           },
           borrowedRemoveException() {
             Reflect.apply(
@@ -3556,20 +3960,93 @@ mod native_capsec_tests {
           const expectedEventCount = 1 + expectedExceptionCount +
             expectedMetaCount;
           const keys = Reflect.ownKeys(table);
+          const accessorsSeeded = primarySeeded &&
+            operationId === "process-events-sensitive-table";
+          const getterDescriptor = Reflect.getOwnPropertyDescriptor(
+            table,
+            getterAccessorEvent,
+          );
+          const setterDescriptor = Reflect.getOwnPropertyDescriptor(
+            table,
+            setterAccessorEvent,
+          );
+          const reentrantDescriptor = Reflect.getOwnPropertyDescriptor(
+            table,
+            reentrantAccessorEvent,
+          );
+          const reentrantValueDescriptor = Reflect.getOwnPropertyDescriptor(
+            table,
+            reentrantValueEvent,
+          );
+          const accessorStateIsExact = accessorsSeeded
+            ? getterDescriptor?.get === getterAccessor &&
+              getterDescriptor?.set === undefined &&
+              getterDescriptor.enumerable === true &&
+              getterDescriptor.configurable === true &&
+              setterDescriptor?.get === undefined &&
+              setterDescriptor?.set === setterAccessor &&
+              setterDescriptor.enumerable === true &&
+              setterDescriptor.configurable === true &&
+              reentrantDescriptor?.get === reentrantAccessor &&
+              reentrantDescriptor?.set === undefined &&
+              reentrantDescriptor.enumerable === true &&
+              reentrantDescriptor.configurable === true &&
+              reentrantValueDescriptor?.value === reentrantValueListener &&
+              reentrantValueDescriptor.writable === true &&
+              reentrantValueDescriptor.enumerable === true &&
+              reentrantValueDescriptor.configurable === true &&
+              getterAccessorReceiver === guardedTable &&
+              setterAccessorReceiver === guardedTable &&
+              reentrantAccessorReceiver === guardedTable &&
+              reentrantAccessorMode === undefined &&
+              reentrantValueReceiver === reentrantValueListener &&
+              reentrantValueMode === undefined
+            : getterDescriptor === undefined &&
+              setterDescriptor === undefined &&
+              reentrantDescriptor === undefined &&
+              reentrantValueDescriptor === undefined &&
+              getterAccessorReceiver === undefined &&
+              setterAccessorReceiver === undefined &&
+              reentrantAccessorReceiver === undefined &&
+              reentrantAccessorMode === undefined &&
+              reentrantValueReceiver === undefined &&
+              reentrantValueMode === undefined;
           if (
             exceptionCount !== expectedExceptionCount ||
             metaCount !== expectedMetaCount ||
             countExactListener("uncaughtException", candidateListener) !== 0 ||
             exceptionDeliveryCount !== 0 ||
-            keys.length !== expectedEventCount ||
+            Object.getPrototypeOf(table) !== null ||
+            !Object.isExtensible(table) ||
+            !accessorStateIsExact ||
+            keys.length !== expectedEventCount + (accessorsSeeded ? 4 : 0) ||
             !keys.includes(sentinelEvent) ||
+            accessorsSeeded !== keys.includes(getterAccessorEvent) ||
+            accessorsSeeded !== keys.includes(setterAccessorEvent) ||
+            accessorsSeeded !== keys.includes(reentrantAccessorEvent) ||
+            accessorsSeeded !== keys.includes(reentrantValueEvent) ||
             (expectedExceptionCount === 1) !==
               keys.includes("uncaughtException") ||
-            (expectedMetaCount === 1) !== keys.includes("newListener") ||
-            processObject._eventsCount !== expectedEventCount
+            (expectedMetaCount === 1) !== keys.includes("newListener")
           ) {
             throw new Error(
-              `${operationId}/${phase} retained inexact process event state`,
+              `${operationId}/${phase} retained inexact process event state: ` +
+                JSON.stringify({
+                  accessorStateIsExact,
+                  exceptionCount,
+                  exceptionDeliveryCount,
+                  expectedEventCount,
+                  expectedExceptionCount,
+                  expectedMetaCount,
+                  extensible: Object.isExtensible(table),
+                  keys: keys.map((key) => String(key)),
+                  metaCount,
+                  prototypeIsNull: Object.getPrototypeOf(table) === null,
+                  sentinelCount: countExactListener(
+                    sentinelEvent,
+                    sentinelListener,
+                  ),
+                }),
             );
           }
           assertCounters(operationId, phase);
@@ -3585,6 +4062,37 @@ mod native_capsec_tests {
             if (operationId === "process-events-sensitive-table") {
               processObject.on("uncaughtException", exceptionListener);
               processObject.on("newListener", metaListener);
+              if (
+                !Reflect.defineProperty(table, getterAccessorEvent, {
+                  __proto__: null,
+                  get: getterAccessor,
+                  enumerable: true,
+                  configurable: true,
+                }) ||
+                !Reflect.defineProperty(table, setterAccessorEvent, {
+                  __proto__: null,
+                  set: setterAccessor,
+                  enumerable: true,
+                  configurable: true,
+                }) ||
+                !Reflect.defineProperty(table, reentrantAccessorEvent, {
+                  __proto__: null,
+                  get: reentrantAccessor,
+                  enumerable: true,
+                  configurable: true,
+                }) ||
+                !Reflect.defineProperty(table, reentrantValueEvent, {
+                  __proto__: null,
+                  value: reentrantValueListener,
+                  writable: true,
+                  enumerable: true,
+                  configurable: true,
+                })
+              ) {
+                throw new Error(
+                  "process event accessor fixture could not be seeded",
+                );
+              }
             } else if (
               operationId === "process-remove-listener-forwarder-runtime"
             ) {
@@ -3613,6 +4121,16 @@ mod native_capsec_tests {
             if (operationId === "process-events-replacement") {
               facade.replaceEvents();
             } else if (operationId === "process-events-sensitive-table") {
+              Reflect.deleteProperty(table, getterAccessorEvent);
+              Reflect.deleteProperty(table, setterAccessorEvent);
+              Reflect.deleteProperty(table, reentrantAccessorEvent);
+              Reflect.deleteProperty(table, reentrantValueEvent);
+              getterAccessorReceiver = undefined;
+              setterAccessorReceiver = undefined;
+              reentrantAccessorReceiver = undefined;
+              reentrantAccessorMode = undefined;
+              reentrantValueReceiver = undefined;
+              reentrantValueMode = undefined;
               processObject.off("uncaughtException", exceptionListener);
               processObject.off("newListener", metaListener);
             } else if (
@@ -3690,6 +4208,355 @@ mod native_capsec_tests {
             prepared = false;
             assertState(operationId, "clean");
           },
+          assertSignalContract() {
+            if (prepared) {
+              throw new Error("process signal fixture remained prepared");
+            }
+            assertState("process-events-sensitive-table", "clean");
+            processObject.off(sentinelEvent, sentinelListener);
+
+            function staleExceptionOne() {}
+            function staleExceptionTwo() {}
+            processObject.on("uncaughtException", staleExceptionOne);
+            processObject.on("uncaughtException", staleExceptionTwo);
+            const selfGuard = processObject._events;
+            processObject._events = selfGuard;
+            const selfSnapshot = processObject._events.uncaughtException;
+            selfSnapshot.length = 0;
+            if (
+              processObject._events !== selfGuard ||
+              processObject.listenerCount("uncaughtException") !== 2
+            ) {
+              throw new Error(
+                "process event-table self-assignment exposed owned listeners",
+              );
+            }
+            processObject._events = Object.create(null);
+            let staleGuardRefused = false;
+            try {
+              processObject._events = selfGuard;
+            } catch (error) {
+              staleGuardRefused = error instanceof TypeError;
+            }
+            processObject._events = new Proxy(selfGuard, {
+              __proto__: null,
+            });
+            let nestedStaleReadRefused = false;
+            try {
+              void processObject._events.uncaughtException;
+            } catch (error) {
+              nestedStaleReadRefused = error instanceof TypeError;
+            }
+            if (!staleGuardRefused || !nestedStaleReadRefused) {
+              throw new Error("stale process event-table guard was reusable");
+            }
+            processObject._events = Object.create(null);
+
+            function seededSignalOne() {}
+            function seededSignalTwo() {}
+            const seededSignalListeners = [
+              seededSignalOne,
+              seededSignalTwo,
+            ];
+            const seededSignalTable = Object.create(null);
+            seededSignalTable.SIGUSR2 = seededSignalListeners;
+            processObject._events = seededSignalTable;
+            let seededSignalRemovalRefused = false;
+            try {
+              processObject.off("SIGUSR2", seededSignalTwo);
+            } catch (error) {
+              seededSignalRemovalRefused = error instanceof TypeError;
+            }
+            if (
+              !seededSignalRemovalRefused ||
+              seededSignalListeners.length !== 2 ||
+              seededSignalListeners[0] !== seededSignalOne ||
+              seededSignalListeners[1] !== seededSignalTwo
+            ) {
+              throw new Error(
+                "unregistered process signal table mutated before refusal",
+              );
+            }
+            processObject._events = Object.create(null);
+            processObject.on(ordinaryEvent, ordinaryListener);
+            processObject.off(ordinaryEvent, ordinaryListener);
+
+            const delivered = [];
+            function duplicate(signal) {
+              delivered.push(`duplicate:${signal}`);
+            }
+            function prepended(signal) {
+              delivered.push(`prepended:${signal}`);
+            }
+            function once(signal) {
+              delivered.push(`once:${signal}`);
+            }
+            function borrowed(signal) {
+              delivered.push(`borrowed:${signal}`);
+            }
+
+            processObject.on("SIGUSR2", duplicate);
+            processObject.on("SIGUSR2", duplicate);
+            processObject.prependListener("SIGUSR2", prepended);
+            let mutableLifecycleForwarderCalls = 0;
+            const ownOnDescriptor = Reflect.getOwnPropertyDescriptor(
+              processObject,
+              "on",
+            );
+            Object.defineProperty(processObject, "on", {
+              __proto__: null,
+              configurable: true,
+              value() {
+                mutableLifecycleForwarderCalls++;
+                return this;
+              },
+              writable: true,
+            });
+            try {
+              Reflect.apply(
+                EventEmitter.prototype.once,
+                processObject,
+                ["SIGUSR2", once],
+              );
+            } finally {
+              if (ownOnDescriptor === undefined) {
+                Reflect.deleteProperty(processObject, "on");
+              } else {
+                Reflect.defineProperty(
+                  processObject,
+                  "on",
+                  ownOnDescriptor,
+                );
+              }
+            }
+            Reflect.apply(
+              EventEmitter.prototype.on,
+              processObject,
+              ["SIGUSR2", borrowed],
+            );
+            function tamperedOnce() {}
+            const ownPrependDescriptor = Reflect.getOwnPropertyDescriptor(
+              processObject,
+              "prependListener",
+            );
+            Object.defineProperty(processObject, "prependListener", {
+              __proto__: null,
+              configurable: true,
+              value() {
+                mutableLifecycleForwarderCalls++;
+                return this;
+              },
+              writable: true,
+            });
+            try {
+              Reflect.apply(
+                EventEmitter.prototype.prependOnceListener,
+                processObject,
+                ["SIGUSR2", tamperedOnce],
+              );
+            } finally {
+              if (ownPrependDescriptor === undefined) {
+                Reflect.deleteProperty(processObject, "prependListener");
+              } else {
+                Reflect.defineProperty(
+                  processObject,
+                  "prependListener",
+                  ownPrependDescriptor,
+                );
+              }
+            }
+            const rawTamperedOnce = processObject.rawListeners("SIGUSR2")[0];
+            rawTamperedOnce.listener = borrowed;
+            if (
+              mutableLifecycleForwarderCalls !== 0 ||
+              processObject.listeners("SIGUSR2")[0] !== tamperedOnce
+            ) {
+              throw new Error(
+                "borrowed lexical once used mutable forwarding or provenance",
+              );
+            }
+            processObject.off("SIGUSR2", tamperedOnce);
+            const exposedList = processObject._events.SIGUSR2;
+            const exposedDescriptor = Reflect.getOwnPropertyDescriptor(
+              processObject._events,
+              "SIGUSR2",
+            );
+            if (
+              !Array.isArray(exposedList) ||
+              !Array.isArray(exposedDescriptor?.value) ||
+              exposedList === exposedDescriptor.value
+            ) {
+              throw new Error("protected signal listener snapshots were absent");
+            }
+            exposedList.length = 0;
+            exposedDescriptor.value.length = 0;
+            let replacementRefused = false;
+            let directMutationRefused = false;
+            try {
+              processObject._events = Object.create(null);
+            } catch (error) {
+              replacementRefused = error instanceof TypeError;
+            }
+            try {
+              processObject._events.SIGUSR2 = borrowed;
+            } catch (error) {
+              directMutationRefused = error instanceof TypeError;
+            }
+            const listeners = processObject.listeners("SIGUSR2");
+            if (
+              !replacementRefused ||
+              !directMutationRefused ||
+              listeners.length !== 5 ||
+              listeners[0] !== prepended ||
+              listeners[1] !== duplicate ||
+              listeners[2] !== duplicate ||
+              listeners[3] !== once ||
+              listeners[4] !== borrowed
+            ) {
+              throw new Error(
+                "process signal listener order or duplicates were collapsed",
+              );
+            }
+            if (!processObject.emit("SIGUSR2", "SIGUSR2")) {
+              throw new Error("process signal table was not emitted");
+            }
+            if (
+              delivered.join("|") !==
+                "prepended:SIGUSR2|duplicate:SIGUSR2|duplicate:SIGUSR2|once:SIGUSR2|borrowed:SIGUSR2" ||
+              processObject.listenerCount("SIGUSR2") !== 4
+            ) {
+              throw new Error(
+                "process signal once/order delivery was inexact",
+              );
+            }
+            Reflect.apply(
+              EventEmitter.prototype.removeListener,
+              processObject,
+              ["SIGUSR2", duplicate],
+            );
+            if (processObject.listenerCount("SIGUSR2") !== 3) {
+              throw new Error("borrowed signal removal was inexact");
+            }
+            Reflect.apply(
+              EventEmitter.prototype.removeAllListeners,
+              processObject,
+              ["SIGUSR2"],
+            );
+            if (
+              processObject.listenerCount("SIGUSR2") !== 0 ||
+              mutableDenoSignalCalls !== 0
+            ) {
+              throw new Error(
+                "signal cleanup used mutable Deno state or retained listeners",
+              );
+            }
+            processObject._events = Object.create(null);
+            processObject.on(ordinaryEvent, ordinaryListener);
+            processObject.off(ordinaryEvent, ordinaryListener);
+          },
+          assertSignalUnbindFailureContract() {
+            if (prepared) {
+              throw new Error("process signal fixture remained prepared");
+            }
+            let delivered = 0;
+            function retainedAfterFailure() {
+              delivered++;
+            }
+            processObject.on("SIGUSR1", retainedAfterFailure);
+            Object.preventExtensions(processObject._events);
+            let unbindFailed = false;
+            try {
+              processObject.off("SIGUSR1", retainedAfterFailure);
+            } catch (error) {
+              unbindFailed = error instanceof Error &&
+                error.message.includes("injected process signal unbind failure");
+            }
+            if (
+              !unbindFailed ||
+              processObject.listenerCount("SIGUSR1") !== 1 ||
+              processObject.listeners("SIGUSR1")[0] !== retainedAfterFailure ||
+              !processObject.emit("SIGUSR1", "SIGUSR1") ||
+              delivered !== 1
+            ) {
+              throw new Error(
+                "failed process signal unbind did not restore exact state",
+              );
+            }
+            processObject.off("SIGUSR1", retainedAfterFailure);
+            if (processObject.listenerCount("SIGUSR1") !== 0) {
+              throw new Error("process signal unbind retry retained listener");
+            }
+            processObject._events = Object.create(null);
+          },
+          assertSignalAdditionPreflightContract() {
+            if (prepared) {
+              throw new Error("process signal fixture remained prepared");
+            }
+            Object.preventExtensions(processObject._events);
+            function refusedSignalAddition() {}
+            let additionRefused = false;
+            try {
+              processObject.on("SIGUSR1", refusedSignalAddition);
+            } catch (error) {
+              additionRefused = error instanceof TypeError;
+            }
+            if (
+              !additionRefused ||
+              processObject.listenerCount("SIGUSR1") !== 0
+            ) {
+              throw new Error(
+                "inextensible process signal table crossed native bind",
+              );
+            }
+            processObject._events = Object.create(null);
+            processObject.on(ordinaryEvent, ordinaryListener);
+            processObject.off(ordinaryEvent, ordinaryListener);
+          },
+          assertMixedOwnKeysContract() {
+            let hasCalls = 0;
+            let ownKeysCalls = 0;
+            const mixedKeys = [
+              "uncaughtException",
+              "unhandledRejection",
+              "newListener",
+              "removeListener",
+              "SIGUSR1",
+              "SIGUSR2",
+            ];
+            const proxy = new Proxy(Object.create(null), {
+              __proto__: null,
+              has() {
+                hasCalls++;
+                return false;
+              },
+              ownKeys() {
+                ownKeysCalls++;
+                // The outer guarded Proxy takes the first snapshot. V8 then
+                // queries the Proxy target once more for invariant checking;
+                // make that second result disagree so the test proves only
+                // the exact returned snapshot is exposed and guarded.
+                return ownKeysCalls === 1 ? mixedKeys : ["ordinary"];
+              },
+            });
+            processObject._events = proxy;
+            const observed = Reflect.ownKeys(processObject._events);
+            if (
+              hasCalls !== 0 ||
+              ownKeysCalls !== 2 ||
+              observed.length !== mixedKeys.length ||
+              observed.some((key, index) => key !== mixedKeys[index])
+            ) {
+              throw new Error(
+                "mixed process ownKeys did not use one exact returned-key snapshot: " +
+                  JSON.stringify({
+                    hasCalls,
+                    observed,
+                    ownKeysCalls,
+                  }),
+              );
+            }
+            processObject._events = Object.create(null);
+          },
         });
 
         function isExactFrozenNullFacade(value, keys) {
@@ -3728,6 +4595,18 @@ mod native_capsec_tests {
           "sensitiveHas",
           "sensitiveOwnKeys",
           "sensitiveDescriptor",
+          "sensitiveAccessorGetterReceiver",
+          "sensitiveAccessorSetterReceiver",
+          "sensitiveGetPrototypeOf",
+          "sensitiveSetPrototypeOf",
+          "sensitiveIsExtensible",
+          "sensitivePreventExtensions",
+          "sensitiveFreeze",
+          "sensitiveSeal",
+          "sensitiveTrustedTableReentrancy",
+          "sensitiveTrustedEmissionReentrancy",
+          "sensitiveReturnedTableReentrancy",
+          "sensitiveReturnedEmissionReentrancy",
           "borrowedRemoveException",
           "borrowedRemoveMeta",
           "borrowedEmitException",
@@ -3745,6 +4624,10 @@ mod native_capsec_tests {
           "prepareMetaOnlyOwnKeys",
           "assertMetaOnlyOwnKeysDenied",
           "cleanupMetaOnlyOwnKeys",
+          "assertSignalContract",
+          "assertSignalUnbindFailureContract",
+          "assertSignalAdditionPreflightContract",
+          "assertMixedOwnKeysContract",
         ];
         const forbiddenKeys = [
           "process",
@@ -3763,6 +4646,11 @@ mod native_capsec_tests {
           typeof EventEmitter !== "function" ||
           !isExactFrozenNullFacade(facade, facadeKeys) ||
           !isExactFrozenNullFacade(controller, controllerKeys) ||
+          !isExactFrozenNullFacade(exceptionFixture, [
+            "dispatchUnhandledRejection",
+            "dispatchGlobalError",
+            "installTrustedProcessEventTable",
+          ]) ||
           forbiddenKeys.some((key) => key in facade || key in controller)
         ) {
           throw new Error("the exact process event fixture facade did not load");
@@ -3794,25 +4682,6 @@ mod native_capsec_tests {
     &operation[..end]
   }
 
-  fn assert_exact_process_guarded_suffix(
-    source: &str,
-    operation_id: &str,
-    start_anchor: &str,
-    end_anchor: &str,
-    exact_guarded_suffix: &str,
-  ) {
-    let operation = exact_process_source_block(
-      source,
-      operation_id,
-      start_anchor,
-      end_anchor,
-    );
-    assert!(
-      operation.contains(exact_guarded_suffix),
-      "{operation_id} lost its exact untrusted guard-before-work suffix"
-    );
-  }
-
   fn assert_exact_process_guard_prefix_before_work(
     source: &str,
     operation_id: &str,
@@ -3840,11 +4709,69 @@ mod native_capsec_tests {
     );
   }
 
+  fn exact_process_reflect_call_offsets(source: &str) -> Vec<usize> {
+    source
+      .match_indices("Reflect")
+      .filter_map(|(index, _)| {
+        let suffix = &source[index..];
+        let name_len = suffix
+          .bytes()
+          .take_while(|byte| byte.is_ascii_alphabetic())
+          .count();
+        (suffix.as_bytes().get(name_len) == Some(&b'(')).then_some(index)
+      })
+      .collect()
+  }
+
+  fn assert_all_exact_process_reflect_work_after_guard(
+    source: &str,
+    operation_id: &str,
+    start_anchor: &str,
+    end_anchor: &str,
+    exact_guard_prefix: &str,
+    expected_calls: &[(&str, usize)],
+  ) {
+    let operation = exact_process_source_block(
+      source,
+      operation_id,
+      start_anchor,
+      end_anchor,
+    );
+    let guard_end = operation
+      .find(exact_guard_prefix)
+      .map(|index| index + exact_guard_prefix.len())
+      .unwrap_or_else(|| panic!("{operation_id} lost its exact guard prefix"));
+    let reflect_calls = exact_process_reflect_call_offsets(operation);
+    let expected_count: usize =
+      expected_calls.iter().map(|(_, count)| *count).sum();
+    assert_eq!(
+      reflect_calls.len(),
+      expected_count,
+      "{operation_id} contains an unenumerated raw Reflect call"
+    );
+    for (exact_call, expected_call_count) in expected_calls {
+      assert_eq!(
+        operation.matches(exact_call).count(),
+        *expected_call_count,
+        "{operation_id} changed an exact raw Reflect call form"
+      );
+    }
+    for work_index in reflect_calls {
+      assert!(
+        guard_end <= work_index,
+        "{operation_id} performs raw Reflect work before its complete guard prefix"
+      );
+    }
+  }
+
   fn assert_public_process_event_guard_precedes_wrapper_work(
     operation: &Rev2V8FixtureOperation,
   ) {
     let process_source = include_str!("../polyfills/process.ts");
     let event_emitter_source = include_str!("../polyfills/_events.mjs");
+    let os_signal_source = include_str!("../../os/40_signals.js");
+    let web_event_source = include_str!("../../web/02_event.js");
+    let runtime_main_source = include_str!("../../../runtime/js/99_main.js");
     let event_table_start = process_source
       .find("function wrapProcessEvents(store: any) {")
       .expect("process event-table wrapper is present");
@@ -3863,8 +4790,7 @@ mod native_capsec_tests {
       "process-events",
       "process._events=set",
     );
-    processEventsStore = value;
-    guardedProcessEvents = wrapProcessEvents(value);
+    replaceProcessEventTable(process, value);
   },"#;
         assert_eq!(
           process_source
@@ -3879,38 +4805,188 @@ mod native_capsec_tests {
         );
       }
       "process-events-sensitive-table" => {
+        assert_eq!(
+          event_table_source
+            .matches("ReflectGet(target, property, receiver)")
+            .count(),
+          1,
+          "process event-table reads must retain the guarded proxy receiver"
+        );
+        assert_eq!(
+          event_table_source
+            .matches("ReflectSet(target, property, value, receiver)")
+            .count(),
+          1,
+          "process event-table writes must retain the guarded proxy receiver"
+        );
+        assert!(
+          !event_table_source.contains("ReflectGet(target, property, target)")
+            && !event_table_source
+              .contains("ReflectSet(target, property, value, target)"),
+          "process event-table accessors must never receive the raw backing table"
+        );
+        assert!(
+          !process_source.contains("trustedProcessMetaTableAccess")
+            && !process_source.contains("trustedProcessEventAccess")
+            && !process_source.contains("hasTrustedMetaTableAccess")
+            && !process_source
+              .contains("withNonReentrantTrustedMetaTableAccess"),
+          "process event-table authority must never occupy ambient state"
+        );
+        assert!(
+          process_source.contains("processEventTableAccess = ObjectFreeze({",)
+            && process_source
+              .contains("trustedProcessEventTableAccess = ObjectFreeze({",)
+            && process_source
+              .contains("setEventTableAccess(process, processEventTableAccess);",)
+            && process_source
+              .contains("return addEventListenerWithTableAccess(",)
+            && process_source
+              .contains("return removeEventListenerWithTableAccess(",)
+            && event_emitter_source
+              .contains("function addEventListenerWithTableAccess(",)
+            && event_emitter_source
+              .contains("function removeEventListenerWithTableAccess(",)
+            && event_emitter_source.contains(
+              "eventTableAccess ??= WeakMapPrototypeGet(lexicalEventTableAccesses, target);",
+            ),
+          "process EventEmitter mutation lost its closure-private lexical table protocol"
+        );
+        let lexical_access_start = process_source
+          .find("function requireCurrentProcessEventTable(store, guarded) {")
+          .expect("process event-table identity reconciliation is present");
+        let lexical_access_end = process_source[lexical_access_start..]
+          .find("ObjectDefineProperty(process, \"_events\", {")
+          .map(|offset| lexical_access_start + offset)
+          .expect("process event-table lexical protocol terminator is present");
+        let lexical_access_source =
+          &process_source[lexical_access_start..lexical_access_end];
+        assert!(
+          process_source.contains("const coreIsProxy = core.isProxy;")
+            && process_source.contains(
+              "const trustedProcessEventTables = new SafeWeakSet<object>();",
+            )
+            && lexical_access_source.contains(
+              "!trustedProcessEventTables.has(store) || coreIsProxy(store)",
+            )
+            && lexical_access_source.contains(
+              "function validateDenseProcessEventListenerArray(",
+            )
+            && lexical_access_source.contains(
+              "function snapshotDirectProcessEventListeners(",
+            )
+            && lexical_access_source.contains(
+              "const written = ReflectSet(table, property, storedValue, table);",
+            )
+            && lexical_access_source.contains(
+              "const deleted = ReflectDeleteProperty(table, property);",
+            )
+            && lexical_access_source.contains(
+              "const descriptor = ReflectGetOwnPropertyDescriptor(store, property);",
+            )
+            && lexical_access_source.contains(
+              "return snapshotDirectProcessEventListeners(table, property, handler);",
+            )
+            && lexical_access_source.contains(
+              "return synchronizeDirectProcessEventCount(target, table);",
+            )
+            && lexical_access_source.contains(
+              "return replaceEmptyProcessEventTable(target, table, value);",
+            ),
+          "lexical table access lost owned-table qualification, descriptor-only snapshots, guarded public mutation, or count/replacement reconciliation"
+        );
+        let get_trap = exact_process_source_block(
+          event_table_source,
+          operation.operation_id,
+          "    get(target, property, receiver) {",
+          "    set(target, property, value, receiver) {",
+        );
+        assert_eq!(
+          exact_process_reflect_call_offsets(get_trap).len(),
+          1,
+          "process event-table get trap contains an alternate raw Reflect call"
+        );
+        assert_eq!(
+          get_trap
+            .matches("ReflectGet(target, property, receiver)")
+            .count(),
+          1,
+          "process event-table get trap changed its exact guarded receiver form"
+        );
         let exact_own_keys_guard = r#"      op_oden_guard_deny_only_surface(
         "runtime",
         "inspect",
         "process-events",
         "process._events.ownKeys",
       );"#;
-        for raw_observation in ["ReflectHas(target", "ReflectOwnKeys(target)"] {
-          assert_exact_process_guard_prefix_before_work(
-            event_table_source,
-            operation.operation_id,
-            "    ownKeys(target) {",
-            "    getOwnPropertyDescriptor(target, property) {",
-            exact_own_keys_guard,
-            raw_observation,
-          );
-        }
-        let traps = [
+        assert_all_exact_process_reflect_work_after_guard(
+          event_table_source,
+          operation.operation_id,
+          "    ownKeys(target) {",
+          "    getOwnPropertyDescriptor(target, property) {",
+          exact_own_keys_guard,
+          &[("ReflectOwnKeys(target)", 1)],
+        );
+        let guarded_traps = [
           (
-            "    get(target, property) {",
-            "    set(target, property, value) {",
+            r#"      guardProcessExceptionEvent(property, "process._events.get");"#,
+            "    set(target, property, value, receiver) {",
             r#"      guardProcessExceptionEvent(property, "process._events.get");
       guardProcessMetaEvent(property, "process._events.get");
-      guardProcessSignalEvent(property, "inspect", "process._events.get");
-      return ReflectGet(target, property, target);"#,
+      guardProcessSignalEvent(property, "inspect", "process._events.get");"#,
+            "ReflectGet(target, property, receiver)",
           ),
           (
-            "    set(target, property, value) {",
-            "    defineProperty(target, property, descriptor) {",
+            "    set(target, property, value, receiver) {",
+            "    getPrototypeOf(target) {",
             r#"      guardProcessExceptionEvent(property, "process._events.set");
       guardProcessMetaEvent(property, "process._events.set");
-      guardProcessSignalEvent(property, "control", "process._events.set");
-      return ReflectSet(target, property, value, target);"#,
+      guardProcessSignalEvent(property, "control", "process._events.set");"#,
+            "ReflectSet(target, property, value, receiver)",
+          ),
+          (
+            "    getPrototypeOf(target) {",
+            "    setPrototypeOf(target, prototype) {",
+            r#"      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        "process-events",
+        "process._events.getPrototypeOf",
+      );"#,
+            "ReflectGetPrototypeOf(target)",
+          ),
+          (
+            "    setPrototypeOf(target, prototype) {",
+            "    isExtensible(target) {",
+            r#"      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        "process-events",
+        "process._events.setPrototypeOf",
+      );"#,
+            "ReflectGetPrototypeOf(target)",
+          ),
+          (
+            "    isExtensible(target) {",
+            "    preventExtensions(target) {",
+            r#"      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        "process-events",
+        "process._events.isExtensible",
+      );"#,
+            "ReflectIsExtensible(target)",
+          ),
+          (
+            "    preventExtensions(target) {",
+            "    defineProperty(target, property, descriptor) {",
+            r#"      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        "process-events",
+        "process._events.preventExtensions",
+      );"#,
+            "ReflectPreventExtensions(target)",
           ),
           (
             "    defineProperty(target, property, descriptor) {",
@@ -3921,8 +4997,8 @@ mod native_capsec_tests {
         property,
         "control",
         "process._events.defineProperty",
-      );
-      return ReflectDefineProperty(target, property, descriptor);"#,
+      );"#,
+            "ReflectDefineProperty(target, property, descriptor)",
           ),
           (
             "    deleteProperty(target, property) {",
@@ -3933,33 +5009,16 @@ mod native_capsec_tests {
         property,
         "control",
         "process._events.deleteProperty",
-      );
-      return ReflectDeleteProperty(target, property);"#,
+      );"#,
+            "ReflectDeleteProperty(target, property)",
           ),
           (
             "    has(target, property) {",
             "    ownKeys(target) {",
             r#"      guardProcessExceptionEvent(property, "process._events.has");
       guardProcessMetaEvent(property, "process._events.has");
-      guardProcessSignalEvent(property, "inspect", "process._events.has");
-      return ReflectHas(target, property);"#,
-          ),
-          (
-            "    ownKeys(target) {",
-            "    getOwnPropertyDescriptor(target, property) {",
-            r#"      if (protectedEvent !== undefined) {
-        guardProcessExceptionEvent(
-          protectedEvent,
-          "process._events.ownKeys",
-        );
-      }
-      if (
-        ReflectHas(target, "newListener") ||
-        ReflectHas(target, "removeListener")
-      ) {
-        guardProcessMetaEvent("newListener", "process._events.ownKeys");
-      }
-      const keys = ReflectOwnKeys(target);"#,
+      guardProcessSignalEvent(property, "inspect", "process._events.has");"#,
+            "ReflectHas(target, property)",
           ),
           (
             "    getOwnPropertyDescriptor(target, property) {",
@@ -3976,33 +5035,406 @@ mod native_capsec_tests {
         property,
         "inspect",
         "process._events.getOwnPropertyDescriptor",
-      );
-      return ReflectGetOwnPropertyDescriptor(target, property);"#,
+      );"#,
+            "ReflectGetOwnPropertyDescriptor(target, property)",
           ),
         ];
-        for (start_anchor, end_anchor, exact_guarded_suffix) in traps {
-          assert_exact_process_guarded_suffix(
+        for (start_anchor, end_anchor, exact_guard_prefix, work_anchor) in
+          guarded_traps
+        {
+          assert_all_exact_process_reflect_work_after_guard(
             event_table_source,
             operation.operation_id,
             start_anchor,
             end_anchor,
-            exact_guarded_suffix,
+            exact_guard_prefix,
+            &[(work_anchor, 1)],
           );
         }
-        let borrowed_removal = r#"function removeListenerExact(target, type, listener) {
-  checkListener(listener);
+        let protected_direct_mutation_refusal = r#"      if (
+        isProtectedProcessExceptionEvent(property) ||
+        isProcessSignalEvent(property)
+      ) {
+        throw new TypeError(
+          "direct protected process-table mutation is refused",
+        );
+      }"#;
+        let exact_prototype_refusal = r#"      if (prototype !== ReflectGetPrototypeOf(target)) {
+        throw new TypeError(
+          "process event-table prototype mutation is refused",
+        );
+      }
+      return true;"#;
+        assert_eq!(
+          event_table_source
+            .matches(protected_direct_mutation_refusal)
+            .count(),
+          3,
+          "set, defineProperty, and deleteProperty must all refuse direct protected process-table mutation after their guards"
+        );
+        assert!(
+          event_table_source.contains(exact_prototype_refusal)
+            && !event_table_source.contains("ReflectSetPrototypeOf"),
+          "process event-table prototype mutation must be observation-only after admission and refuse every actual change"
+        );
+        let add_listener_source = exact_process_source_block(
+          event_emitter_source,
+          operation.operation_id,
+          "function _addListener(",
+          "function addEventListenerWithTableAccess(",
+        );
+        let delivery_commit = add_listener_source
+          .find("trackEventListener(target, type, listener, delivery);")
+          .expect("EventEmitter addition lost delivery-provenance commit");
+        let listener_added_commit = add_listener_source
+          .find("eventTableAccess?.listenerAdded?.(target, events, type, listener);")
+          .expect("EventEmitter addition lost post-commit process bookkeeping");
+        let listener_leak_check = add_listener_source
+          .find("if (existing !== undefined) {")
+          .expect("EventEmitter addition lost post-commit listener leak check");
+        assert_eq!(
+          add_listener_source
+            .matches("eventTableAccess?.listenerAdded?.")
+            .count(),
+          1,
+          "EventEmitter addition must commit process bookkeeping exactly once"
+        );
+        assert!(
+          delivery_commit < listener_added_commit
+            && listener_added_commit < listener_leak_check,
+          "process listener-add bookkeeping must follow storage/provenance commit and precede later user-observable leak work"
+        );
+        let remove_listener_source = exact_process_source_block(
+          event_emitter_source,
+          operation.operation_id,
+          "function removeListenerExact(",
+          "function removeEventListenerWithTableAccess(",
+        );
+        let exact_single_listener_removal_commit = r#"      deleteEventTableValue(events, type, eventTableAccess);
+      const remaining = decrementEventTableCount(
+        target,
+        events,
+        eventTableAccess,
+      );
+      eventTableAccess.listenerRemoved?.(target, events, type, list);
+      if (remaining === 0) {"#;
+        let exact_list_listener_removal_commit = r#"    if (list.length === 1) {
+      setEventTableValue(events, type, list[0], eventTableAccess);
+    }
 
-  const events = target._events;
+    eventTableAccess?.listenerRemoved?.(target, events, type, removed);
+
+    if (
+      getLifecycleEventTableValue("#;
+        assert_eq!(
+          remove_listener_source
+            .matches("listenerRemoved?.(target, events, type")
+            .count(),
+          2,
+          "EventEmitter removal must commit process bookkeeping on both exact-listener branches"
+        );
+        assert!(
+          remove_listener_source.contains(exact_single_listener_removal_commit)
+            && remove_listener_source
+              .contains(exact_list_listener_removal_commit),
+          "process listener-removal bookkeeping must follow exact mutation and precede table replacement or public lifecycle delivery"
+        );
+        assert!(
+          !process_source
+            .contains("addProcessListenerInternal(process, \"newListener\"",)
+            && !process_source.contains(
+              "addProcessListenerInternal(process, \"removeListener\"",
+            ),
+          "process exception bookkeeping must not reside in replaceable public lifecycle-listener entries"
+        );
+        let borrowed_removal = r#"function removeListenerExact(
+  target,
+  type,
+  listener,
+  eventTableAccess = undefined,
+  preflight = true,
+) {
+  eventTableAccess ??= WeakMapPrototypeGet(lexicalEventTableAccesses, target);
+  checkListener(listener);
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    if (preflight) {
+      eventTableAccess.preflightType(type, "removeListener");
+    }
+  }
+
+  const events = getEventTable(target, eventTableAccess);
   if (events === undefined) {
     return target;
   }
 
-  const list = events[type];"#;
+  const list = getEventTableValue(events, type, eventTableAccess);"#;
         assert!(
           process_source.contains(
             "Borrowing EventEmitter.prototype must not bypass the process-specific",
-          ) && event_emitter_source.contains(borrowed_removal),
-          "borrowed EventEmitter removal no longer reaches the guarded process event table before mutation"
+          ) && event_emitter_source.contains(borrowed_removal)
+            && event_emitter_source.contains(
+              "? target._events\n    : eventTableAccess.current(target);",
+            )
+            && event_emitter_source.contains(
+              "eventTableAccess ??= WeakMapPrototypeGet(lexicalEventTableAccesses, target);",
+            ),
+          "borrowed EventEmitter removal no longer normalizes, preflights, and selects the lexical process table before mutation"
+        );
+        let trusted_meta_emission = r#"      expected.listener === args[1]
+    ) {
+      trustedProcessMetaEmission = undefined;
+      trustedMetaEmission = true;"#;
+        assert!(
+          process_source.contains(trusted_meta_emission)
+            && process_source
+              .contains("? trustedProcessEventTableAccess\n        : processEventTableAccess",)
+            && event_emitter_source
+              .contains("function emitEventWithTableAccess(",),
+          "trusted lifecycle emission must bind the exact listener, consume before dispatch, and select the direct lexical table protocol"
+        );
+        assert!(
+          process_source.contains(
+            "removeProcessListenerInternal(target, event, wrapped, true);",
+          ) && process_source.contains(
+            "finishProcessSignalRemoval(property, registration, true);",
+          ) && process_source.contains(
+            "removeSignalListenerInternal: removeDenoSignalListenerInternal,",
+          ) && process_source
+            .contains("dispatcher: () => emitProcessSignalInternal(event),",)
+            && process_source.contains(
+              "} catch (error) {\n      fired = false;\n      throw error;",
+            )
+            && process_source
+              .contains("processOnceListenerOriginals.set(wrapped, listener);",)
+            && process_source
+              .contains("ObjectDefineProperty(wrapped, \"listener\", {",),
+          "protected process once removal must select direct lexical cleanup, recover after refusal, and retain pollution-safe wrapper provenance"
+        );
+        let signal_removal = exact_process_source_block(
+          os_signal_source,
+          operation.operation_id,
+          "function removeSignalListenerImpl(",
+          "function addSignalListener(signo, listener) {",
+        );
+        let native_unbind = signal_removal
+          .find("unbindSignal(rid);")
+          .expect("signal removal lost its native unbind");
+        let listener_delete = signal_removal
+          .find("SetPrototypeDelete(sigData.listeners, listener);")
+          .expect("signal removal lost its exact listener deletion");
+        assert!(
+          native_unbind < listener_delete
+            && process_source.contains(
+              "prepareProcessSignalRemoval(property, listenerCount);",
+            )
+            && event_emitter_source.contains(
+              "preparedRemoval,\n      );\n      deleteEventTableValue(events, type, eventTableAccess);",
+            ),
+          "process signal removal must validate first, keep the dispatcher published until native unbind commits, and mutate the exact direct table only after teardown succeeds"
+        );
+        let exact_internal_exception_emit = r#"let processExceptionDispatchDepth = 0;
+function emitProcessExceptionInternal(event: string, ...args: unknown[]) {
+  processExceptionDispatchDepth++;
+  try {
+    return emitEventWithTableAccess(
+      process,
+      event,
+      args,
+      trustedProcessEventTableAccess,
+    );
+  } finally {
+    processExceptionDispatchDepth--;
+  }
+}"#;
+        let exact_internal_exception_count = r#"function processExceptionListenerCountInternal(event: string) {
+  return eventListenerCountWithTableAccess(
+    process,
+    event,
+    undefined,
+    trustedProcessEventTableAccess,
+  );
+}"#;
+        assert!(
+          process_source.contains(exact_internal_exception_emit)
+            && process_source.contains(exact_internal_exception_count)
+            && process_source.contains(
+              "if (processExceptionListenerCountInternal(\"unhandledRejection\") === 0)",
+            )
+            && process_source.contains(
+              "if (!isOwnedDirectProcessEventTable(guardedProcessEvents)) return false;",
+            )
+            && !process_source.contains(
+              "process.listenerCount(\"unhandledRejection\")",
+            )
+            && !process_source.contains("ArrayPrototypeConcat"),
+          "internal process exception dispatch/count must use direct lexical snapshots without concat, mutable public dispatch, or ambient one-shot table authority"
+        );
+        let exact_process_error_callback = r#"function processOnError(error: unknown) {
+  if (typeof fatalExceptionHandler === "function") {
+    return !!fatalExceptionHandler(error);
+  } else {
+    // Exit code 6: _fatalException is not a function
+    // (kInvalidFatalExceptionMonkeyPatching in Node.js)
+    process.exitCode = 6;
+  }
+  return false;
+}"#;
+        let exact_hidden_error_slot = r#"ObjectDefineProperty(internals, "nodeProcessErrorCallback", {
+  __proto__: null,
+  configurable: false,
+  enumerable: false,
+  value: undefined,
+  writable: true,
+});"#;
+        let exact_capture_table_preflight = r#"  if (_uncaughtExceptionCaptureFn !== null) {
+    throw new ERR_UNCAUGHT_EXCEPTION_CAPTURE_ALREADY_SET();
+  }
+  requireDirectProcessEventTable(guardedProcessEvents);
+  _uncaughtExceptionCaptureFn = fn;
+  synchronizeListeners();"#;
+        assert!(
+          process_source.contains(exact_process_error_callback)
+            && process_source.contains(exact_hidden_error_slot)
+            && process_source.contains(exact_capture_table_preflight)
+            && process_source
+              .contains("internals.nodeProcessErrorCallback = processOnError;")
+            && process_source
+              .contains("internals.nodeProcessErrorCallback = undefined;",)
+            && !process_source.contains(
+              "globalThis.addEventListener(\"error\", processOnError)",
+            )
+            && !process_source.contains(
+              "globalThis.removeEventListener(\"error\", processOnError)",
+            )
+            && process_source.contains(
+              "if (!trustedReplacement && _uncaughtExceptionCaptureFn !== null) {",
+            )
+            && process_source.contains(
+              "process event table cannot be replaced with an active uncaught-exception capture callback",
+            )
+            && process_source.contains(
+              "if (!trustedReplacement && processExceptionDispatchDepth !== 0) {",
+            )
+            && process_source.contains(
+              "process event table cannot be replaced during trusted exception dispatch",
+            ),
+          "process fatal-error routing must use only the closure-private consumed-result callback slot"
+        );
+        let web_report_exception = exact_process_source_block(
+          web_event_source,
+          operation.operation_id,
+          "function reportException(error) {",
+          "function checkThis(thisArg) {",
+        );
+        let authentic_web_dispatch = web_report_exception
+          .find("EventTargetPrototypeDispatchEvent,")
+          .expect("web exception routing lost its retained dispatch method");
+        let hidden_process_callback = web_report_exception
+          .find("const nodeProcessErrorCallback = internals.nodeProcessErrorCallback;")
+          .expect("web exception routing lost its closure-private process callback");
+        let lexical_error_delivery = web_report_exception
+          .find("processHandled = !!FunctionPrototypeCall(")
+          .expect("web exception routing lost its private consumed result");
+        let private_fallback = web_report_exception
+          .find("if (!processHandled && !event[_canceledFlag]) {")
+          .expect("web exception routing lost its private fallback decision");
+        assert!(
+          web_event_source.contains(
+            "const EventTargetPrototypeDispatchEvent = EventTargetPrototype.dispatchEvent;",
+          ) && authentic_web_dispatch < hidden_process_callback
+            && hidden_process_callback < lexical_error_delivery
+            && lexical_error_delivery < private_fallback
+            && web_report_exception.contains(
+              "      } finally {\n        // node:process installs this callback",
+            )
+            && web_report_exception.contains(
+              "              internals,\n              error,\n            );",
+            )
+            && web_report_exception.contains(
+              "    }\n  } finally {\n    reportExceptionStackedCalls--;\n  }\n}",
+            )
+            && !web_report_exception.contains("globalThis_.dispatchEvent")
+            && !web_report_exception.contains("event.defaultPrevented")
+            && !web_report_exception.contains(
+              "              internals,\n              event,\n            );",
+            ),
+          "web exception routing must dispatch authentically, invoke the hidden process route in finally with the lexical error, decide fallback from closure-private state, and always clear recursion state"
+        );
+        let exact_private_event_dispatch = r#"function dispatchEventWithPrivateCancellation(target, dispatchedEvent) {
+  FunctionPrototypeCall(
+    EventTargetPrototypeDispatchEvent,
+    target,
+    dispatchedEvent,
+  );
+  return dispatchedEvent[_canceledFlag];
+}"#;
+        let runtime_unhandled_rejection = exact_process_source_block(
+          runtime_main_source,
+          operation.operation_id,
+          "function processUnhandledPromiseRejection(promise, reason) {",
+          "function processRejectionHandled(promise, reason) {",
+        );
+        let runtime_handled_rejection = exact_process_source_block(
+          runtime_main_source,
+          operation.operation_id,
+          "function processRejectionHandled(promise, reason) {",
+          "function dispatchLoadEvent() {",
+        );
+        let public_unhandled_dispatch = runtime_unhandled_rejection
+          .find("publiclyHandled = event.dispatchEventWithPrivateCancellation(")
+          .expect(
+            "runtime unhandled-rejection route lost private cancellation",
+          );
+        let private_unhandled_dispatch = runtime_unhandled_rejection
+          .find(
+            "const callback = internals.nodeProcessUnhandledRejectionCallback;",
+          )
+          .expect("runtime unhandled-rejection route lost Node callback");
+        let exact_unhandled_lexical_delivery = "processHandled = !!ReflectApply(callback, internals, [promise, reason]);";
+        assert!(
+          web_event_source.contains(exact_private_event_dispatch)
+            && runtime_main_source.contains(
+              "const event = core.loadExtScript(\"ext:deno_web/02_event.js\");",
+            )
+            && public_unhandled_dispatch < private_unhandled_dispatch
+            && runtime_unhandled_rejection
+              .contains(exact_unhandled_lexical_delivery)
+            && runtime_unhandled_rejection.contains(
+              "  } finally {\n    // Public listeners receive the PromiseRejectionEvent",
+            )
+            && runtime_unhandled_rejection
+              .contains("return publiclyHandled || processHandled;")
+            && !runtime_unhandled_rejection
+              .contains("globalThis_.dispatchEvent(rejectionEvent)")
+            && !runtime_unhandled_rejection.contains("defaultPrevented")
+            && !runtime_unhandled_rejection.contains("callback(rejectionEvent)")
+            && runtime_handled_rejection.contains(
+              "event.dispatchEventWithPrivateCancellation(\n      globalThis_,\n      rejectionHandledEvent,\n    );",
+            )
+            && runtime_handled_rejection.contains(
+              "  } finally {\n    // Preserve Web-before-Node ordering",
+            )
+            && runtime_handled_rejection.contains(
+              "ReflectApply(callback, internals, [promise, reason]);",
+            )
+            && !runtime_handled_rejection
+              .contains("globalThis_.dispatchEvent(rejectionHandledEvent)")
+            && !runtime_handled_rejection
+              .contains("callback(rejectionHandledEvent)")
+            && process_source.contains(
+              "internals.nodeProcessUnhandledRejectionCallback = (promise, reason) => {",
+            )
+            && process_source.contains(
+              "internals.nodeProcessRejectionHandledCallback = (promise, reason) => {",
+            )
+            && !process_source.contains(
+              "internals.nodeProcessUnhandledRejectionCallback = (event) => {",
+            )
+            && !process_source.contains(
+              "internals.nodeProcessRejectionHandledCallback = (event) => {",
+            ),
+          "runtime promise-rejection routing must dispatch authentically, always deliver exact lexical inputs to Node after public dispatch, and retain cancellation/consumption privately"
         );
         let borrowed_emission = r#"function snapshotProtectedEventState(target, type) {
   const events = target._events;
@@ -4015,64 +5447,62 @@ mod native_capsec_tests {
   }
   const handler = events[type];"#;
         let protected_emit_dispatch = r#"EventEmitter.prototype.emit = function emit(type, ...args) {
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    this,
+  );
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    eventTableAccess.preflightType(type, "emit");
+    return emitEventWithTableAccess(this, type, args, eventTableAccess);
+  }
   if (isProtectedEventEmitter(this)) {
     return emitProtectedEvent(this, type, args);
   }"#;
         assert!(
           event_emitter_source.contains(borrowed_emission)
             && event_emitter_source.contains(protected_emit_dispatch),
-          "borrowed EventEmitter emission no longer reaches the guarded process event table before listener delivery"
+          "borrowed process EventEmitter emission no longer selects the normalized lexical snapshot before listener delivery"
         );
       }
       "process-add-listener-forwarder-runtime" => {
         assert!(
           process_source.contains(
-            r#"Process.prototype.addListener = function (
-  // deno-lint-ignore no-explicit-any
-  this: any,
-  event: string,
-  // deno-lint-ignore no-explicit-any
-  listener: (...args: any[]) => void,
-) {
-  return this.on(event, listener);
-};"#,
+            "defineProcessPrototypeMethod(\"addListener\", Process.prototype.on);",
           ),
-          "process.addListener no longer forwards exactly through process.on"
+          "process.addListener no longer retains the exact guarded process.on alias"
         );
         assert_exact_process_guard_prefix_before_work(
           process_source,
           operation.operation_id,
-          "Process.prototype.on = function (",
-          "Process.prototype.off = function (",
+          "defineProcessPrototypeMethod(\"on\", function on(",
+          "defineProcessPrototypeMethod(\"off\", function off(",
           r#") {
-  guardProcessExceptionEvent(event, "process.on");
-  guardProcessMetaEvent(event, "process.on");"#,
-          "addProcessListenerInternal(this, event, listener, false);",
+  validateFunction(listener, "listener");
+  const eventKey = normalizeProcessEventKey(event);
+  guardProcessExceptionEvent(eventKey, "process.on");
+  guardProcessMetaEvent(eventKey, "process.on");"#,
+          "addProcessListenerInternal(this, eventKey, listener, false);",
         );
       }
       "process-remove-listener-forwarder-runtime" => {
         assert!(
           process_source.contains(
-            r#"Process.prototype.removeListener = function (
-  // deno-lint-ignore no-explicit-any
-  this: any,
-  event: string, // deno-lint-ignore no-explicit-any
-  listener: (...args: any[]) => void,
-) {
-  return this.off(event, listener);
-};"#,
+            "defineProcessPrototypeMethod(\"removeListener\", Process.prototype.off);",
           ),
-          "process.removeListener no longer forwards exactly through process.off"
+          "process.removeListener no longer retains the exact guarded process.off alias"
         );
         assert_exact_process_guard_prefix_before_work(
           process_source,
           operation.operation_id,
-          "Process.prototype.off = function (",
-          "Process.prototype.emit = function (",
+          "defineProcessPrototypeMethod(\"off\", function off(",
+          "defineProcessPrototypeMethod(\"emit\", function emit(",
           r#") {
-  guardProcessExceptionEvent(event, "process.off");
-  guardProcessMetaEvent(event, "process.off");"#,
-          "removeProcessListenerInternal(this, event, listener);",
+  validateFunction(listener, "listener");
+  const eventKey = normalizeProcessEventKey(event);
+  guardProcessExceptionEvent(eventKey, "process.off");
+  guardProcessMetaEvent(eventKey, "process.off");"#,
+          "removeProcessListenerInternal(this, eventKey, listener);",
         );
       }
       _ => panic!(
@@ -5076,8 +6506,20 @@ process._getActiveHandles = getActiveHandles;"#
               "process._events.getOwnPropertyDescriptor",
             ),
             ("uncaughtException", "process._events.get"),
-            ("uncaughtException", "process._events.get"),
-            ("newListener", "process._events.get"),
+            ("uncaughtException", "process._events.set"),
+            ("process-events", "process._events.getPrototypeOf"),
+            ("process-events", "process._events.setPrototypeOf"),
+            ("process-events", "process._events.isExtensible"),
+            ("process-events", "process._events.preventExtensions"),
+            ("process-events", "process._events.preventExtensions"),
+            ("process-events", "process._events.preventExtensions"),
+            ("removeListener", "process._events.defineProperty"),
+            ("removeListener", "process.emit(removeListener)"),
+            ("removeListener", "process._events.defineProperty"),
+            ("removeListener", "process.emit(removeListener)"),
+            ("uncaughtException", "EventEmitter.emit"),
+            ("uncaughtException", "EventEmitter.removeListener"),
+            ("newListener", "EventEmitter.removeListener"),
           ]);
         }
         guards
@@ -5197,16 +6639,80 @@ process._getActiveHandles = getActiveHandles;"#
                 "process._events.getOwnPropertyDescriptor",
               ],
               [
-                "borrowedEmitException",
+                "sensitiveAccessorGetterReceiver",
                 "uncaughtException",
                 "process._events.get",
               ],
               [
+                "sensitiveAccessorSetterReceiver",
+                "uncaughtException",
+                "process._events.set",
+              ],
+              [
+                "sensitiveGetPrototypeOf",
+                "process-events",
+                "process._events.getPrototypeOf",
+              ],
+              [
+                "sensitiveSetPrototypeOf",
+                "process-events",
+                "process._events.setPrototypeOf",
+              ],
+              [
+                "sensitiveIsExtensible",
+                "process-events",
+                "process._events.isExtensible",
+              ],
+              [
+                "sensitivePreventExtensions",
+                "process-events",
+                "process._events.preventExtensions",
+              ],
+              [
+                "sensitiveFreeze",
+                "process-events",
+                "process._events.preventExtensions",
+              ],
+              [
+                "sensitiveSeal",
+                "process-events",
+                "process._events.preventExtensions",
+              ],
+              [
+                "sensitiveTrustedTableReentrancy",
+                "removeListener",
+                "process._events.defineProperty",
+              ],
+              [
+                "sensitiveTrustedEmissionReentrancy",
+                "removeListener",
+                "process.emit(removeListener)",
+              ],
+              [
+                "sensitiveReturnedTableReentrancy",
+                "removeListener",
+                "process._events.defineProperty",
+              ],
+              [
+                "sensitiveReturnedEmissionReentrancy",
+                "removeListener",
+                "process.emit(removeListener)",
+              ],
+              [
+                "borrowedEmitException",
+                "uncaughtException",
+                "EventEmitter.emit",
+              ],
+              [
                 "borrowedRemoveException",
                 "uncaughtException",
-                "process._events.get",
+                "EventEmitter.removeListener",
               ],
-              ["borrowedRemoveMeta", "newListener", "process._events.get"],
+              [
+                "borrowedRemoveMeta",
+                "newListener",
+                "EventEmitter.removeListener",
+              ],
             ];
             if (!{complete_sensitive_table}) attempts = attempts.slice(0, 1);
           }} else if (
@@ -7786,6 +9292,7 @@ process._getActiveHandles = getActiveHandles;"#
       return;
     }
 
+    let prepare_guards = [("newListener", "process.on")];
     let before_prepare = rev2_v8_fixture_canaries();
     prepare_rev2_public_process_event_meta_only_own_keys(
       runtime, root, operation,
@@ -7793,13 +9300,13 @@ process._getActiveHandles = getActiveHandles;"#
     let after_prepare = rev2_v8_fixture_canaries();
     assert_eq!(
       after_prepare.public_wrapper_guard_calls,
-      before_prepare.public_wrapper_guard_calls + 1,
+      before_prepare.public_wrapper_guard_calls + prepare_guards.len(),
       "{} crossed an inexact number of meta-only preparation guards in {case_kind}/{mode}",
       operation.operation_id
     );
     assert_rev2_public_process_event_guard_sequence(
       before_prepare.public_wrapper_guard_calls,
-      &[("newListener", "process.on")],
+      &prepare_guards,
       operation,
       "meta-only root preparation",
     );
@@ -7841,6 +9348,7 @@ process._getActiveHandles = getActiveHandles;"#
       runtime, root, operation,
     );
 
+    let cleanup_guards = [("newListener", "process.off")];
     let before_cleanup = rev2_v8_fixture_canaries();
     cleanup_rev2_public_process_event_meta_only_own_keys(
       runtime, root, operation,
@@ -7848,13 +9356,13 @@ process._getActiveHandles = getActiveHandles;"#
     let after_cleanup = rev2_v8_fixture_canaries();
     assert_eq!(
       after_cleanup.public_wrapper_guard_calls,
-      before_cleanup.public_wrapper_guard_calls + 1,
+      before_cleanup.public_wrapper_guard_calls + cleanup_guards.len(),
       "{} crossed an inexact number of meta-only cleanup guards in {case_kind}/{mode}",
       operation.operation_id
     );
     assert_rev2_public_process_event_guard_sequence(
       before_cleanup.public_wrapper_guard_calls,
-      &[("newListener", "process.off")],
+      &cleanup_guards,
       operation,
       "meta-only root cleanup",
     );
@@ -7872,12 +9380,652 @@ process._getActiveHandles = getActiveHandles;"#
     );
   }
 
+  fn run_rev2_public_process_signal_contract(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    assert_eq!(
+      operation.operation_id, "process-events-sensitive-table",
+      "process signal contract requires the sensitive-table operation"
+    );
+    set_actor(root, "main.ts");
+    execute(
+      runtime,
+      "file:///rev2_public_process_signal_contract.js",
+      "rev2ProcessEventsController.assertSignalContract();".to_string(),
+    );
+    assert_eq!(
+      PROCESS_SIGNAL_BIND_COUNT.load(Ordering::SeqCst),
+      1,
+      "process signal duplicates, prepending, or borrowed additions rebound the native signal"
+    );
+    assert_eq!(
+      PROCESS_SIGNAL_INTERNAL_BIND_COUNT.load(Ordering::SeqCst),
+      0,
+      "public process signal registration used the trusted bind path"
+    );
+    assert_eq!(
+      PROCESS_SIGNAL_UNBIND_COUNT.load(Ordering::SeqCst),
+      1,
+      "process signal once/borrowed/remove-all cleanup did not unbind exactly once"
+    );
+    PROCESS_SIGNAL_FAIL_NEXT_UNBIND.store(true, Ordering::SeqCst);
+    execute(
+      runtime,
+      "file:///rev2_public_process_signal_addition_preflight_contract.js",
+      "rev2ProcessEventsController.assertSignalAdditionPreflightContract();"
+        .to_string(),
+    );
+    assert!(
+      PROCESS_SIGNAL_FAIL_NEXT_UNBIND.load(Ordering::SeqCst),
+      "inextensible process signal addition bound before exact table preflight"
+    );
+    assert_eq!(
+      PROCESS_SIGNAL_BIND_COUNT.load(Ordering::SeqCst),
+      1,
+      "refused process signal addition crossed native bind"
+    );
+    assert_eq!(
+      PROCESS_SIGNAL_UNBIND_COUNT.load(Ordering::SeqCst),
+      1,
+      "refused process signal addition reached rollback unbind"
+    );
+    execute(
+      runtime,
+      "file:///rev2_public_process_signal_unbind_failure_contract.js",
+      "rev2ProcessEventsController.assertSignalUnbindFailureContract();"
+        .to_string(),
+    );
+    assert!(
+      !PROCESS_SIGNAL_FAIL_NEXT_UNBIND.load(Ordering::SeqCst),
+      "process signal removal did not reach the injected native unbind failure"
+    );
+    assert_eq!(
+      PROCESS_SIGNAL_BIND_COUNT.load(Ordering::SeqCst),
+      2,
+      "process signal unbind retry rebound or skipped the exact native registration"
+    );
+    assert_eq!(
+      PROCESS_SIGNAL_INTERNAL_BIND_COUNT.load(Ordering::SeqCst),
+      0,
+      "public process signal unbind retry crossed the trusted bind path"
+    );
+    assert_eq!(
+      PROCESS_SIGNAL_UNBIND_COUNT.load(Ordering::SeqCst),
+      3,
+      "process signal unbind failure and retry did not make two exact attempts"
+    );
+
+    let guard_start = PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.load(Ordering::SeqCst);
+    execute(
+      runtime,
+      "file:///rev2_public_process_mixed_own_keys_contract.js",
+      "rev2ProcessEventsController.assertMixedOwnKeysContract();".to_string(),
+    );
+    let observed = {
+      let calls = PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap();
+      calls[guard_start..].to_vec()
+    };
+    assert_eq!(
+      observed,
+      vec![
+        (
+          "runtime".to_string(),
+          "inspect".to_string(),
+          "process-events".to_string(),
+          "process._events=set".to_string(),
+        ),
+        (
+          "runtime".to_string(),
+          "inspect".to_string(),
+          "process-events".to_string(),
+          "process._events.ownKeys".to_string(),
+        ),
+        (
+          "runtime".to_string(),
+          "inspect".to_string(),
+          "uncaughtException".to_string(),
+          "process._events.ownKeys".to_string(),
+        ),
+        (
+          "runtime".to_string(),
+          "inspect".to_string(),
+          "unhandledRejection".to_string(),
+          "process._events.ownKeys".to_string(),
+        ),
+        (
+          "runtime".to_string(),
+          "inspect".to_string(),
+          "newListener".to_string(),
+          "process._events.ownKeys".to_string(),
+        ),
+        (
+          "runtime".to_string(),
+          "inspect".to_string(),
+          "removeListener".to_string(),
+          "process._events.ownKeys".to_string(),
+        ),
+        (
+          "process".to_string(),
+          "signal".to_string(),
+          "inspect:SIGUSR1".to_string(),
+          "process._events.ownKeys".to_string(),
+        ),
+        (
+          "process".to_string(),
+          "signal".to_string(),
+          "inspect:SIGUSR2".to_string(),
+          "process._events.ownKeys".to_string(),
+        ),
+        (
+          "runtime".to_string(),
+          "inspect".to_string(),
+          "process-events".to_string(),
+          "process._events=set".to_string(),
+        ),
+      ],
+      "mixed process ownKeys did not guard every exact returned protected key"
+    );
+  }
+
+  fn run_rev2_public_process_unhandled_rejection_listener_count_poison_contract(
+    root: &Path,
+  ) {
+    reset_rev2_v8_fixture_canaries();
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _tokio_guard = tokio_runtime.enter();
+    let mut runtime = new_public_process_wrapper_runtime();
+    set_actor(root, "main.ts");
+    let target = compiled_rev2_v8_fixture_target().expect(
+      "process unhandled-rejection fixtures require an exact supported host",
+    );
+    execute(
+      &mut runtime,
+      "file:///rev2_public_process_unhandled_rejection_listener_count_poison_contract.js",
+      r#"
+      {
+        const core = Deno.core;
+        if (core.build.target !== "unknown") {
+          throw new Error(
+            "process rejection fixture build info was already set",
+          );
+        }
+        core.setBuildInfo("__REV2_PROCESS_REJECTION_TARGET__");
+        globalThis.Deno = Object.freeze({
+          __proto__: null,
+          core,
+          build: core.build,
+          pid: 4242,
+          ppid: 4241,
+          env: Object.freeze({
+            __proto__: null,
+            get() {
+              return undefined;
+            },
+          }),
+          cwd() {
+            return "/rev2-process-rejection-fixture";
+          },
+          hostname() {
+            return "rev2-process-rejection-host";
+          },
+          networkInterfaces() {
+            return [];
+          },
+          addSignalListener() {},
+          removeSignalListener() {},
+        });
+
+        let mutableGlobalEventListenerCalls = 0;
+        let leakedGlobalErrorListener;
+        globalThis.addEventListener = function (type, listener) {
+          mutableGlobalEventListenerCalls++;
+          leakedGlobalErrorListener = [type, listener];
+        };
+        globalThis.removeEventListener = function (type, listener) {
+          mutableGlobalEventListenerCalls++;
+          leakedGlobalErrorListener = [type, listener];
+        };
+        const webEvent = core.loadExtScript("ext:deno_web/02_event.js");
+        const publicErrorTarget = new webEvent.EventTarget();
+        const authenticGlobalAddEventListener =
+          publicErrorTarget.addEventListener;
+        const authenticGlobalRemoveEventListener =
+          publicErrorTarget.removeEventListener;
+        let mutableGlobalDispatchCalls = 0;
+        publicErrorTarget.dispatchEvent = function () {
+          mutableGlobalDispatchCalls++;
+          throw new Error(
+            "mutable global dispatchEvent received exception authority",
+          );
+        };
+        webEvent.saveGlobalThisReference(publicErrorTarget);
+
+        const processObject =
+          core.createLazyLoader("node:process")().default;
+        const bridge =
+          globalThis.__rev2ProcessUnhandledRejectionFixture;
+        const bridgeKeys = Reflect.ownKeys(bridge);
+        if (
+          bridge === null ||
+          typeof bridge !== "object" ||
+          Object.getPrototypeOf(bridge) !== null ||
+          !Object.isFrozen(bridge) ||
+          bridgeKeys.length !== 3 ||
+          bridgeKeys[0] !== "dispatchUnhandledRejection" ||
+          bridgeKeys[1] !== "dispatchGlobalError" ||
+          bridgeKeys[2] !== "installTrustedProcessEventTable" ||
+          typeof bridge.dispatchUnhandledRejection !== "function" ||
+          typeof bridge.dispatchGlobalError !== "function" ||
+          typeof bridge.installTrustedProcessEventTable !== "function" ||
+          "internals" in bridge ||
+          "token" in bridge ||
+          "__proto__" in bridge
+        ) {
+          throw new Error(
+            "process rejection fixture bridge was not exact",
+          );
+        }
+
+        function refusedDirectListener() {}
+        let directSetRefused = false;
+        let directDefineRefused = false;
+        let directPrototypeRefused = false;
+        try {
+          processObject._events.uncaughtException =
+            refusedDirectListener;
+        } catch (error) {
+          directSetRefused = error instanceof TypeError;
+        }
+        try {
+          Reflect.defineProperty(
+            processObject._events,
+            "unhandledRejection",
+            {
+              __proto__: null,
+              configurable: true,
+              enumerable: true,
+              value: refusedDirectListener,
+              writable: true,
+            },
+          );
+        } catch (error) {
+          directDefineRefused = error instanceof TypeError;
+        }
+        try {
+          Reflect.setPrototypeOf(
+            processObject._events,
+            Object.create(null),
+          );
+        } catch (error) {
+          directPrototypeRefused = error instanceof TypeError;
+        }
+
+        let listenerCountPoisonCalls = 0;
+        const monitorDeliveries = [];
+        const uncaughtDeliveries = [];
+        function monitorListener(reason, origin) {
+          monitorDeliveries.push([reason, origin]);
+        }
+        function uncaughtListener(reason, origin) {
+          uncaughtDeliveries.push([reason, origin]);
+        }
+        const ownListenerCountDescriptor =
+          Reflect.getOwnPropertyDescriptor(
+            processObject,
+            "listenerCount",
+          );
+        const retainedRawListeners = processObject.rawListeners;
+        const monitorOnlyReason = new Error(
+          "rev2 monitor-only unhandled rejection",
+        );
+        const consumedReason = new Error(
+          "rev2 consumed unhandled rejection",
+        );
+        const monitorOnlyError = new Error(
+          "rev2 monitor-only global error",
+        );
+        const consumedError = new Error(
+          "rev2 consumed global error",
+        );
+        const monitorOnlyPromise = Object.freeze({
+          __proto__: null,
+          fixture: "monitor-only",
+        });
+        const consumedPromise = Object.freeze({
+          __proto__: null,
+          fixture: "consumed",
+        });
+
+        processObject.on(
+          "uncaughtExceptionMonitor",
+          monitorListener,
+        );
+        let armedDirectDeleteRefused = false;
+        try {
+          Reflect.deleteProperty(
+            processObject._events,
+            "uncaughtExceptionMonitor",
+          );
+        } catch (error) {
+          armedDirectDeleteRefused = error instanceof TypeError;
+        }
+        Object.defineProperty(processObject, "listenerCount", {
+          __proto__: null,
+          configurable: true,
+          enumerable: true,
+          value() {
+            listenerCountPoisonCalls++;
+            return 1;
+          },
+          writable: true,
+        });
+        try {
+          const monitorOnlyErrorPreventions =
+            bridge.dispatchGlobalError(monitorOnlyError);
+          if (
+            monitorOnlyErrorPreventions !== 0 ||
+            monitorDeliveries.length !== 1 ||
+            monitorDeliveries[0][0] !== monitorOnlyError ||
+            monitorDeliveries[0][1] !== "uncaughtException" ||
+            uncaughtDeliveries.length !== 0
+          ) {
+            throw new Error(
+              "poisoned globals changed the monitor-only error branch",
+            );
+          }
+
+          const monitorOnlyPreventions =
+            bridge.dispatchUnhandledRejection(
+              monitorOnlyReason,
+              monitorOnlyPromise,
+            );
+          if (
+            monitorOnlyPreventions !== 0 ||
+            monitorDeliveries.length !== 2 ||
+            monitorDeliveries[1][0] !== monitorOnlyReason ||
+            monitorDeliveries[1][1] !== "unhandledRejection" ||
+            uncaughtDeliveries.length !== 0
+          ) {
+            throw new Error(
+              "listenerCount poisoning suppressed the monitor-only fatal branch",
+            );
+          }
+
+          processObject.on("uncaughtException", uncaughtListener);
+          let publicErrorListenerCalls = 0;
+          function cancelAndPoisonPublicError(event) {
+            publicErrorListenerCalls++;
+            event.preventDefault();
+            Object.defineProperty(event, "error", {
+              __proto__: null,
+              configurable: true,
+              get() {
+                throw new Error("public ErrorEvent.error poison ran");
+              },
+            });
+          }
+          Reflect.apply(
+            authenticGlobalAddEventListener,
+            publicErrorTarget,
+            ["error", cancelAndPoisonPublicError],
+          );
+          try {
+            webEvent.reportException(consumedError);
+          } finally {
+            Reflect.apply(
+              authenticGlobalRemoveEventListener,
+              publicErrorTarget,
+              ["error", cancelAndPoisonPublicError],
+            );
+          }
+          if (
+            publicErrorListenerCalls !== 1 ||
+            mutableGlobalDispatchCalls !== 0 ||
+            monitorDeliveries.length !== 3 ||
+            monitorDeliveries[2][0] !== consumedError ||
+            monitorDeliveries[2][1] !== "uncaughtException" ||
+            uncaughtDeliveries.length !== 1 ||
+            uncaughtDeliveries[0][0] !== consumedError ||
+            uncaughtDeliveries[0][1] !== "uncaughtException"
+          ) {
+            throw new Error(
+              "poisoned globals changed the consumed error branch",
+            );
+          }
+
+          const consumedPreventions =
+            bridge.dispatchUnhandledRejection(
+              consumedReason,
+              consumedPromise,
+            );
+          if (
+            consumedPreventions !== 1 ||
+            monitorDeliveries.length !== 4 ||
+            monitorDeliveries[3][0] !== consumedReason ||
+            monitorDeliveries[3][1] !== "unhandledRejection" ||
+            uncaughtDeliveries.length !== 2 ||
+            uncaughtDeliveries[1][0] !== consumedReason ||
+            uncaughtDeliveries[1][1] !== "unhandledRejection"
+          ) {
+            throw new Error(
+              "listenerCount poisoning changed the consumed fatal branch",
+            );
+          }
+        } finally {
+          if (ownListenerCountDescriptor === undefined) {
+            Reflect.deleteProperty(processObject, "listenerCount");
+          } else {
+            Reflect.defineProperty(
+              processObject,
+              "listenerCount",
+              ownListenerCountDescriptor,
+            );
+          }
+          processObject.off("uncaughtException", uncaughtListener);
+          processObject.off(
+            "uncaughtExceptionMonitor",
+            monitorListener,
+          );
+        }
+
+        const reentrantMonitorError = new Error(
+          "rev2 reentrant monitor replacement refusal",
+        );
+        let reentrantMonitorDeliveries = 0;
+        let reentrantMonitorReplacementRefused = false;
+        function reentrantMonitor(reason, origin) {
+          if (
+            reason !== reentrantMonitorError ||
+            origin !== "uncaughtException"
+          ) {
+            throw new Error(
+              "reentrant monitor received an inexact exception",
+            );
+          }
+          reentrantMonitorDeliveries++;
+          try {
+            processObject._events = Object.create(null);
+          } catch (error) {
+            reentrantMonitorReplacementRefused = error instanceof TypeError;
+          }
+        }
+        processObject.on("uncaughtExceptionMonitor", reentrantMonitor);
+        const reentrantMonitorPreventions =
+          bridge.dispatchGlobalError(reentrantMonitorError);
+        processObject.off("uncaughtExceptionMonitor", reentrantMonitor);
+
+        const captureError = new Error(
+          "rev2 capture callback replacement refusal",
+        );
+        let captureDeliveries = 0;
+        function captureListener(error) {
+          if (error !== captureError) {
+            throw new Error(
+              "capture callback received an inexact error",
+            );
+          }
+          captureDeliveries++;
+        }
+        processObject.setUncaughtExceptionCaptureCallback(
+          captureListener,
+        );
+        let captureReplacementRefused = false;
+        try {
+          processObject._events = Object.create(null);
+        } catch (error) {
+          captureReplacementRefused = error instanceof TypeError;
+        }
+        const capturePreventions = bridge.dispatchGlobalError(captureError);
+        processObject.setUncaughtExceptionCaptureCallback(null);
+
+        processObject.on("uncaughtException", uncaughtListener);
+        processObject._events = Object.create(null);
+        const replacementDirectFatalHandled = processObject._fatalException(
+          new Error("direct fatal dispatch after public table replacement"),
+          false,
+        );
+        let replacementClearedGlobalErrorListener = false;
+        let replacementClearedUnhandledRejectionCallback = false;
+        try {
+          bridge.dispatchGlobalError(new Error("stale global error"));
+        } catch (error) {
+          replacementClearedGlobalErrorListener =
+            error instanceof Error &&
+            error.message === "node process global error listener was absent";
+        }
+        try {
+          bridge.dispatchUnhandledRejection(
+            new Error("stale unhandled rejection"),
+            Object.freeze({ __proto__: null }),
+          );
+        } catch (error) {
+          replacementClearedUnhandledRejectionCallback =
+            error instanceof Error &&
+            error.message ===
+              "node process unhandled-rejection callback was absent";
+        }
+        let captureAfterReplacementRefused = false;
+        try {
+          processObject.setUncaughtExceptionCaptureCallback(
+            captureListener,
+          );
+        } catch (error) {
+          captureAfterReplacementRefused = error instanceof TypeError;
+        }
+        function ordinaryListener() {}
+        processObject.on("rev2-requalification", ordinaryListener);
+        processObject.off("rev2-requalification", ordinaryListener);
+        const requalifiedCaptureError = new Error(
+          "rev2 requalified capture callback",
+        );
+        let requalifiedCaptureDeliveries = 0;
+        processObject.setUncaughtExceptionCaptureCallback((error) => {
+          if (error !== requalifiedCaptureError) {
+            throw new Error(
+              "requalified capture callback received an inexact error",
+            );
+          }
+          requalifiedCaptureDeliveries++;
+        });
+        const requalifiedCapturePreventions =
+          bridge.dispatchGlobalError(requalifiedCaptureError);
+        processObject.setUncaughtExceptionCaptureCallback(null);
+        let requalifiedMonitorDeliveries = 0;
+        function requalifiedMonitor(reason, origin) {
+          if (
+            reason.message !== "requalified unhandled rejection" ||
+            origin !== "unhandledRejection"
+          ) {
+            throw new Error(
+              "requalified exception routing changed reason or origin",
+            );
+          }
+          requalifiedMonitorDeliveries++;
+        }
+        processObject.on(
+          "uncaughtExceptionMonitor",
+          requalifiedMonitor,
+        );
+        const requalifiedPreventions =
+          bridge.dispatchUnhandledRejection(
+            new Error("requalified unhandled rejection"),
+            Object.freeze({ __proto__: null }),
+          );
+        processObject.off(
+          "uncaughtExceptionMonitor",
+          requalifiedMonitor,
+        );
+        if (
+          !directSetRefused ||
+          !directDefineRefused ||
+          !directPrototypeRefused ||
+          !armedDirectDeleteRefused ||
+          listenerCountPoisonCalls !== 0 ||
+          mutableGlobalEventListenerCalls !== 0 ||
+          mutableGlobalDispatchCalls !== 0 ||
+          leakedGlobalErrorListener !== undefined ||
+          reentrantMonitorPreventions !== 0 ||
+          reentrantMonitorDeliveries !== 1 ||
+          !reentrantMonitorReplacementRefused ||
+          !captureReplacementRefused ||
+          capturePreventions !== 1 ||
+          captureDeliveries !== 1 ||
+          !captureAfterReplacementRefused ||
+          replacementDirectFatalHandled !== false ||
+          !replacementClearedGlobalErrorListener ||
+          !replacementClearedUnhandledRejectionCallback ||
+          requalifiedCapturePreventions !== 1 ||
+          requalifiedCaptureDeliveries !== 1 ||
+          requalifiedPreventions !== 0 ||
+          requalifiedMonitorDeliveries !== 1 ||
+          Reflect.apply(
+              retainedRawListeners,
+              processObject,
+              ["uncaughtException"],
+            ).length !== 0 ||
+          Reflect.apply(
+              retainedRawListeners,
+              processObject,
+              ["uncaughtExceptionMonitor"],
+            ).length !== 0
+        ) {
+          throw new Error(
+            "runtime rejection dispatch used mutable listenerCount or retained listeners",
+          );
+        }
+      }
+      "#
+      .replace("__REV2_PROCESS_REJECTION_TARGET__", target),
+    );
+    let observed = PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap().clone();
+    assert!(
+      observed
+        .iter()
+        .all(|(_, _, _, api_name)| api_name != "process.listenerCount"),
+      "internal unhandled-rejection dispatch crossed the mutable public process.listenerCount guard"
+    );
+    drop(runtime);
+  }
+
   fn run_rev2_public_process_event_fixture_mode(
     root: &Path,
     operation: &Rev2V8FixtureOperation,
     case_kind: &str,
     mode: &str,
   ) {
+    if operation.operation_id == "process-events-sensitive-table"
+      && case_kind == "deny-only-closed-or-absent"
+      && mode == "permissive"
+    {
+      run_rev2_public_process_unhandled_rejection_listener_count_poison_contract(
+        root,
+      );
+    }
     reset_rev2_v8_fixture_canaries();
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
       .enable_all()
@@ -7889,7 +10037,7 @@ process._getActiveHandles = getActiveHandles;"#
     assert_public_process_event_guard_precedes_wrapper_work(operation);
     assert_rev2_public_process_event_guard_sequence(
       0,
-      &[("process-events", "process._events=set")],
+      &[("uncaughtException", "process.rawListeners")],
       operation,
       "isolated public-wrapper loading",
     );
@@ -8029,6 +10177,13 @@ process._getActiveHandles = getActiveHandles;"#
         operation,
         true,
       );
+    }
+
+    if operation.operation_id == "process-events-sensitive-table"
+      && case_kind == "deny-only-closed-or-absent"
+      && mode == "permissive"
+    {
+      run_rev2_public_process_signal_contract(&mut runtime, root, operation);
     }
 
     assert_rev2_v8_fixture_terminal_clean(operation.operation_id, mode);
@@ -8686,6 +10841,57 @@ process._getActiveHandles = getActiveHandles;"#
     std::io::stderr().write_all(line.as_bytes()).unwrap();
   }
 
+  fn rev2_v8_fixture_child_completion_line(
+    operation_id: &str,
+    case_kind: &str,
+    target: &str,
+    mode: &str,
+  ) -> String {
+    let test_json =
+      deno_core::serde_json::to_string(REV2_V8_FIXTURE_TEST).unwrap();
+    let operation_json =
+      deno_core::serde_json::to_string(operation_id).unwrap();
+    let case_kind_json = deno_core::serde_json::to_string(case_kind).unwrap();
+    let target_json = deno_core::serde_json::to_string(target).unwrap();
+    let mode_json = deno_core::serde_json::to_string(mode).unwrap();
+    format!(
+      r#"{REV2_V8_FIXTURE_CHILD_COMPLETION_PREFIX}{{"schema":"oden/capsec-native-v8-inspection-fixture-child-completion/1","test":{test_json},"operationId":{operation_json},"caseKind":{case_kind_json},"target":{target_json},"mode":{mode_json}}}"#
+    )
+  }
+
+  fn validate_and_strip_rev2_v8_fixture_child_completion(
+    stdout: &str,
+    stderr: &str,
+    expected_line: &str,
+  ) -> Result<String, &'static str> {
+    if stdout.contains(REV2_V8_FIXTURE_CHILD_COMPLETION_PREFIX) {
+      return Err("native fixture child completion appeared on stdout");
+    }
+    if stderr
+      .matches(REV2_V8_FIXTURE_CHILD_COMPLETION_PREFIX)
+      .count()
+      != 1
+    {
+      return Err(
+        "native fixture child stderr did not contain exactly one completion marker",
+      );
+    }
+    if stderr.lines().filter(|line| *line == expected_line).count() != 1 {
+      return Err(
+        "native fixture child stderr lacked one exact completion line",
+      );
+    }
+    let exact_line = format!("{expected_line}\n");
+    if stderr.matches(&exact_line).count() != 1 {
+      return Err("native fixture child completion was not newline bounded");
+    }
+    let stripped = stderr.replacen(&exact_line, "", 1);
+    if stripped.contains(REV2_V8_FIXTURE_CHILD_COMPLETION_PREFIX) {
+      return Err("native fixture child completion remained after stripping");
+    }
+    Ok(stripped)
+  }
+
   fn rev2_v8_fixture_report_line(
     operation: &Rev2V8FixtureOperation,
     case_kind: &str,
@@ -8780,6 +10986,44 @@ process._getActiveHandles = getActiveHandles;"#
       )
       .is_err()
     );
+    let completion = rev2_v8_fixture_child_completion_line(
+      operation.operation_id,
+      "deny-only-closed-or-absent",
+      "aarch64-apple-darwin",
+      "enforce",
+    );
+    assert_eq!(
+      validate_and_strip_rev2_v8_fixture_child_completion(
+        "running 1 test\n",
+        &format!("before\n{completion}\nafter\n"),
+        &completion,
+      ),
+      Ok("before\nafter\n".to_string())
+    );
+    assert!(
+      validate_and_strip_rev2_v8_fixture_child_completion(
+        &format!("{completion}\n"),
+        "",
+        &completion,
+      )
+      .is_err()
+    );
+    assert!(
+      validate_and_strip_rev2_v8_fixture_child_completion(
+        "",
+        &format!("{completion} trailing\n"),
+        &completion,
+      )
+      .is_err()
+    );
+    assert!(
+      validate_and_strip_rev2_v8_fixture_child_completion(
+        "",
+        &format!("{completion}\n{completion}\n"),
+        &completion,
+      )
+      .is_err()
+    );
   }
 
   #[test]
@@ -8804,6 +11048,13 @@ process._getActiveHandles = getActiveHandles;"#
         assertions,
         rev2_v8_fixture_assertions(operation, &case_kind)
       );
+      let completion = rev2_v8_fixture_child_completion_line(
+        &operation_id,
+        &case_kind,
+        &target,
+        &mode,
+      ) + "\n";
+      std::io::stderr().write_all(completion.as_bytes()).unwrap();
       return;
     }
 
@@ -8858,7 +11109,25 @@ process._getActiveHandles = getActiveHandles;"#
           bounded_debug_output(&String::from_utf8_lossy(&output.stderr)),
         );
         let stdout = String::from_utf8(output.stdout).unwrap();
-        let stderr = String::from_utf8(output.stderr).unwrap();
+        let stderr_with_completion = String::from_utf8(output.stderr).unwrap();
+        let expected_completion = rev2_v8_fixture_child_completion_line(
+          &operation_id,
+          &case_kind,
+          &target,
+          mode,
+        );
+        let stderr = validate_and_strip_rev2_v8_fixture_child_completion(
+          &stdout,
+          &stderr_with_completion,
+          &expected_completion,
+        )
+        .unwrap_or_else(|reason| {
+          panic!(
+            "Rev2 V8 fixture child supplied inexact completion evidence for {target}/{operation_id}/{case_kind}/{mode}: {reason}\nstdout={}\nstderr={}",
+            bounded_debug_output(&stdout),
+            bounded_debug_output(&stderr_with_completion),
+          )
+        });
         assert!(
           !stdout.contains(REV2_V8_FIXTURE_REPORT_PREFIX)
             && !stderr.contains(REV2_V8_FIXTURE_REPORT_PREFIX),

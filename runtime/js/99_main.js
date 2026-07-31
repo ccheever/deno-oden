@@ -565,25 +565,25 @@ function processUnhandledPromiseRejection(promise, reason) {
     },
   );
 
-  // Note that the handler may throw, causing a recursive "error" event
-  globalThis_.dispatchEvent(rejectionEvent);
-
-  // If event was not yet prevented, try handing it off to Node compat layer
-  // (if it was initialized)
-  if (
-    !rejectionEvent.defaultPrevented &&
-    typeof internals.nodeProcessUnhandledRejectionCallback !== "undefined"
-  ) {
-    internals.nodeProcessUnhandledRejectionCallback(rejectionEvent);
+  let publiclyHandled = false;
+  let processHandled = false;
+  try {
+    publiclyHandled = event.dispatchEventWithPrivateCancellation(
+      globalThis_,
+      rejectionEvent,
+    );
+  } finally {
+    // Public listeners receive the PromiseRejectionEvent, but the Node
+    // compatibility route receives only the exact lexical inputs. It runs
+    // regardless of public cancellation or dispatch cleanup failure, and its
+    // consumed result never occupies a mutable public Event property.
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    const callback = internals.nodeProcessUnhandledRejectionCallback;
+    if (typeof callback === "function") {
+      processHandled = !!ReflectApply(callback, internals, [promise, reason]);
+    }
   }
-
-  // If event was not prevented (or "unhandledrejection" listeners didn't
-  // throw) we will let Rust side handle it.
-  if (rejectionEvent.defaultPrevented) {
-    return true;
-  }
-
-  return false;
+  return publiclyHandled || processHandled;
 }
 
 function processRejectionHandled(promise, reason) {
@@ -592,11 +592,19 @@ function processRejectionHandled(promise, reason) {
     { promise, reason },
   );
 
-  // Note that the handler may throw, causing a recursive "error" event
-  globalThis_.dispatchEvent(rejectionHandledEvent);
-
-  if (typeof internals.nodeProcessRejectionHandledCallback !== "undefined") {
-    internals.nodeProcessRejectionHandledCallback(rejectionHandledEvent);
+  try {
+    event.dispatchEventWithPrivateCancellation(
+      globalThis_,
+      rejectionHandledEvent,
+    );
+  } finally {
+    // Preserve Web-before-Node ordering without allowing the public event to
+    // replace the exact lexical rejection inputs delivered to Node.
+    // @ref LLP 0019#runtime-and-memory-inspection [implements]
+    const callback = internals.nodeProcessRejectionHandledCallback;
+    if (typeof callback === "function") {
+      ReflectApply(callback, internals, [promise, reason]);
+    }
   }
 }
 

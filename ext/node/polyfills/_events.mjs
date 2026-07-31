@@ -115,7 +115,15 @@ const kMaxEventTargetListenersWarned = Symbol(
 const eventListenerDeliveryHooks = new SafeWeakMap();
 const genuineOnceWrappers = new SafeWeakMap();
 const trackedEventListeners = new SafeWeakMap();
+const lexicalEventTableAccesses = new SafeWeakMap();
 const trustedEventListenerRegistrations = [];
+
+function setEventTableAccess(target, eventTableAccess) {
+  if (eventTableAccess === undefined) {
+    throw new Error("EventEmitter lexical table access is required");
+  }
+  WeakMapPrototypeSet(lexicalEventTableAccesses, target, eventTableAccess);
+}
 
 // Trust belongs to one exact internal registration, never to a reusable
 // function identity. The token is consumed while preparing that registration,
@@ -495,6 +503,42 @@ EventEmitter.init = function (opts) {
   }
 };
 
+// Process is evaluated lazily and can load after package code has obtained and
+// modified the public EventEmitter constructor/prototype. Give that subsystem
+// one captured descriptor-only initializer so it never calls mutable
+// EventEmitter.init or traverses attacker-defined inherited storage accessors.
+// @ref LLP 0019#runtime-and-memory-inspection [implements]
+function initializeEventEmitterStorage(target) {
+  ObjectDefineProperty(target, "_events", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    value: ObjectCreate(null),
+    writable: true,
+  });
+  ObjectDefineProperty(target, "_eventsCount", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    value: 0,
+    writable: true,
+  });
+  ObjectDefineProperty(target, "_maxListeners", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    value: undefined,
+    writable: true,
+  });
+  ObjectDefineProperty(target, kCapture, {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    value: false,
+    writable: true,
+  });
+}
+
 function addCatch(
   that,
   promise,
@@ -794,6 +838,15 @@ function emitProtectedEvent(target, type, args) {
  * @returns {boolean}
  */
 EventEmitter.prototype.emit = function emit(type, ...args) {
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    this,
+  );
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    eventTableAccess.preflightType(type, "emit");
+    return emitEventWithTableAccess(this, type, args, eventTableAccess);
+  }
   if (isProtectedEventEmitter(this)) {
     return emitProtectedEvent(this, type, args);
   }
@@ -835,7 +888,10 @@ EventEmitter.prototype.emit = function emit(type, ...args) {
 };
 const EventEmitterPublicEmit = EventEmitter.prototype.emit;
 
-function emitLifecycleMetaEvent(target, type, ...args) {
+function emitLifecycleMetaEvent(target, type, eventTableAccess, ...args) {
+  if (eventTableAccess !== undefined) {
+    return eventTableAccess.emitLifecycle(target, type, args);
+  }
   const deliveryHook = WeakMapPrototypeGet(
     eventListenerDeliveryHooks,
     target,
@@ -845,6 +901,77 @@ function emitLifecycleMetaEvent(target, type, ...args) {
     return FunctionPrototypeApply(EventEmitterPublicEmit, target, args);
   }
   return FunctionPrototypeApply(target.emit, target, args);
+}
+
+function getEventTable(target, eventTableAccess) {
+  return eventTableAccess === undefined
+    ? target._events
+    : eventTableAccess.current(target);
+}
+
+function getEventTableValue(events, type, eventTableAccess) {
+  return eventTableAccess === undefined
+    ? events[type]
+    : eventTableAccess.get(events, type);
+}
+
+function getLifecycleEventTableValue(events, type, eventTableAccess) {
+  return eventTableAccess === undefined
+    ? events[type]
+    : eventTableAccess.getLifecycle(events, type);
+}
+
+function setEventTableValue(events, type, value, eventTableAccess) {
+  if (eventTableAccess === undefined) {
+    events[type] = value;
+    return value;
+  }
+  return eventTableAccess.set(events, type, value);
+}
+
+function deleteEventTableValue(events, type, eventTableAccess) {
+  return eventTableAccess === undefined
+    ? delete events[type]
+    : eventTableAccess.delete(events, type);
+}
+
+function eventTableListenerMatches(
+  events,
+  type,
+  stored,
+  listener,
+  eventTableAccess,
+) {
+  const genuineOnceListener = typeof stored === "function"
+    ? WeakMapPrototypeGet(genuineOnceWrappers, stored)
+    : undefined;
+  if (genuineOnceListener !== undefined) {
+    return stored === listener || genuineOnceListener === listener;
+  }
+  return eventTableAccess === undefined
+    ? listenerMatches(stored, listener)
+    : eventTableAccess.listenerMatches(events, type, stored, listener);
+}
+
+function unwrapEventTableListener(events, type, listener, eventTableAccess) {
+  const genuineOnceListener = typeof listener === "function"
+    ? WeakMapPrototypeGet(genuineOnceWrappers, listener)
+    : undefined;
+  if (genuineOnceListener !== undefined) return genuineOnceListener;
+  if (eventTableAccess === undefined) return listener.listener || listener;
+  return eventTableAccess.unwrapListener(events, type, listener);
+}
+
+function incrementEventTableCount(target, events, eventTableAccess) {
+  return eventTableAccess === undefined
+    ? ++target._eventsCount
+    : eventTableAccess.incrementCount(target, events);
+}
+
+function decrementEventTableCount(target, events, eventTableAccess) {
+  return eventTableAccess === undefined
+    ? --target._eventsCount
+    : eventTableAccess.decrementCount(target, events);
 }
 
 // Authorize the exact listener before protected EventEmitter mutation clears
@@ -875,12 +1002,23 @@ function prepareEventListenerRegistration(target, type, listener) {
   return { delivery, listener, target, type };
 }
 
-function _addListener(target, type, listener, prepend, prepared = undefined) {
+function _addListener(
+  target,
+  type,
+  listener,
+  prepend,
+  prepared = undefined,
+  eventTableAccess = undefined,
+) {
+  eventTableAccess ??= WeakMapPrototypeGet(lexicalEventTableAccesses, target);
   let m;
   let events;
   let existing;
 
   checkListener(listener);
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+  }
   if (
     prepared !== undefined &&
     (prepared.target !== target || prepared.type !== type ||
@@ -889,14 +1027,20 @@ function _addListener(target, type, listener, prepend, prepared = undefined) {
     throw new Error("prepared EventEmitter listener identity changed");
   }
 
-  events = target._events;
+  events = getEventTable(target, eventTableAccess);
   if (events === undefined) {
+    if (eventTableAccess !== undefined) {
+      throw new Error("internal process event table is absent");
+    }
     events = target._events = ObjectCreate(null);
     target._eventsCount = 0;
   } else {
     // To avoid recursion in the case that type === "newListener"! Before
     // adding it to the listeners, first emit "newListener".
-    if (events.newListener !== undefined) {
+    if (
+      getLifecycleEventTableValue(events, "newListener", eventTableAccess) !==
+        undefined
+    ) {
       const protectedTarget = isProtectedEventEmitter(target);
       const onceListener = protectedTarget
         ? WeakMapPrototypeGet(genuineOnceWrappers, listener)
@@ -904,16 +1048,19 @@ function _addListener(target, type, listener, prepend, prepared = undefined) {
       emitLifecycleMetaEvent(
         target,
         "newListener",
+        eventTableAccess,
         type,
         onceListener ??
-          (protectedTarget ? listener : listener.listener ?? listener),
+          (eventTableAccess === undefined
+            ? (protectedTarget ? listener : listener.listener ?? listener)
+            : eventTableAccess.unwrapListener(events, type, listener)),
       );
 
       // Re-assign `events` because a newListener handler could have caused the
       // this._events to be assigned to a new object
-      events = target._events;
+      events = getEventTable(target, eventTableAccess);
     }
-    existing = events[type];
+    existing = getEventTableValue(events, type, eventTableAccess);
   }
 
   let delivery = prepared?.delivery;
@@ -933,29 +1080,66 @@ function _addListener(target, type, listener, prepend, prepared = undefined) {
       delivery?.preflight();
     }
   }
+  const preparedAddition = eventTableAccess?.prepareAddition?.(
+    target,
+    events,
+    type,
+    listener,
+  );
+  try {
+    if (existing === undefined) {
+      // Optimize the case of one listener. Don't need the extra array object.
+      setEventTableValue(events, type, listener, eventTableAccess);
+      incrementEventTableCount(target, events, eventTableAccess);
+    } else if (typeof existing === "function") {
+      // Adding the second element, need to change to array.
+      existing = setEventTableValue(
+        events,
+        type,
+        prepend ? [listener, existing] : [existing, listener],
+        eventTableAccess,
+      );
+    } else {
+      // If we've already got an array, just append.
+      eventTableAccess?.prepareListMutation(events, type, existing);
+      if (prepend) {
+        ArrayPrototypeUnshift(existing, listener);
+      } else {
+        ArrayPrototypePush(existing, listener);
+      }
+      eventTableAccess?.finishListMutation(events, type, existing);
+    }
+  } catch (error) {
+    eventTableAccess?.cancelAddition?.(
+      target,
+      events,
+      type,
+      listener,
+      preparedAddition,
+    );
+    throw error;
+  }
+
+  // Record delivery provenance only after the table/list mutation succeeds.
+  // A false-returning or throwing Proxy write must not leave an authorized
+  // recipient record for a listener that was never registered.
   if (delivery !== undefined) {
     trackEventListener(target, type, listener, delivery);
   }
 
-  if (existing === undefined) {
-    // Optimize the case of one listener. Don't need the extra array object.
-    events[type] = listener;
-    ++target._eventsCount;
-  } else {
-    if (typeof existing === "function") {
-      // Adding the second element, need to change to array.
-      existing = events[type] = prepend
-        ? [listener, existing]
-        : [existing, listener];
-      // If we've already got an array, just append.
-    } else if (prepend) {
-      ArrayPrototypeUnshift(existing, listener);
-    } else {
-      ArrayPrototypePush(existing, listener);
-    }
+  // Process-global exception/rejection bookkeeping is a closure-owned
+  // consequence of the committed listener mutation, not a public
+  // `newListener` recipient. Run it only after both storage and delivery
+  // provenance commit so a throwing/reentrant public lifecycle listener or a
+  // refused table write cannot manufacture host routing state.
+  eventTableAccess?.listenerAdded?.(target, events, type, listener);
 
+  if (existing !== undefined) {
     // Check for listener leak
-    m = _getMaxListeners(target);
+    m = eventTableAccess?.checkListenerLeak() === false
+      ? 0
+      : _getMaxListeners(target);
+    eventTableAccess?.reconcile(events);
     if (m > 0 && existing.length > m && !existing.warned) {
       existing.warned = true;
       // No error code for this since it is a Warning
@@ -972,10 +1156,142 @@ function _addListener(target, type, listener, prepend, prepared = undefined) {
       w.count = existing.length;
       // deno-lint-ignore no-process-global
       process.emitWarning(w);
+      eventTableAccess?.reconcile(events);
     }
   }
 
   return target;
+}
+
+function addEventListenerWithTableAccess(
+  target,
+  type,
+  listener,
+  prepend,
+  eventTableAccess,
+) {
+  if (eventTableAccess === undefined) {
+    throw new Error("internal EventEmitter table access is required");
+  }
+  return _addListener(
+    target,
+    type,
+    listener,
+    prepend,
+    undefined,
+    eventTableAccess,
+  );
+}
+
+function snapshotEventListenersWithTableAccess(
+  target,
+  type,
+  eventTableAccess,
+) {
+  if (eventTableAccess === undefined) {
+    throw new Error("internal EventEmitter table access is required");
+  }
+  const events = getEventTable(target, eventTableAccess);
+  const handler = getEventTableValue(events, type, eventTableAccess);
+  return {
+    events,
+    listeners: handler === undefined
+      ? undefined
+      : eventTableAccess.snapshot(events, type, handler),
+  };
+}
+
+function emitEventWithTableAccess(target, type, args, eventTableAccess) {
+  const state = snapshotEventListenersWithTableAccess(
+    target,
+    type,
+    eventTableAccess,
+  );
+  if (type === "error") {
+    const errorMonitorState = snapshotEventListenersWithTableAccess(
+      target,
+      kErrorMonitor,
+      eventTableAccess,
+    );
+    if (errorMonitorState.listeners !== undefined) {
+      emitPreparedEvent(
+        target,
+        kErrorMonitor,
+        args,
+        prepareCapturedEventDeliveryForTarget(
+          target,
+          kErrorMonitor,
+          errorMonitorState.listeners,
+        ),
+      );
+    }
+    if (state.listeners === undefined) {
+      return throwUnhandledErrorEvent(args);
+    }
+  }
+  if (state.listeners === undefined) return false;
+  return emitPreparedEvent(
+    target,
+    type,
+    args,
+    prepareCapturedEventDeliveryForTarget(target, type, state.listeners),
+  );
+}
+
+function eventListenersWithTableAccess(
+  target,
+  type,
+  unwrap,
+  eventTableAccess,
+) {
+  const { events, listeners } = snapshotEventListenersWithTableAccess(
+    target,
+    type,
+    eventTableAccess,
+  );
+  if (listeners === undefined) return [];
+  if (!unwrap) {
+    return eventTableAccess.finishPublicListeners?.(listeners) ?? listeners;
+  }
+  for (let index = 0; index < listeners.length; index++) {
+    listeners[index] = unwrapEventTableListener(
+      events,
+      type,
+      listeners[index],
+      eventTableAccess,
+    );
+  }
+  return eventTableAccess.finishPublicListeners?.(listeners) ?? listeners;
+}
+
+function eventListenerCountWithTableAccess(
+  target,
+  type,
+  listener,
+  eventTableAccess,
+) {
+  const { events, listeners } = snapshotEventListenersWithTableAccess(
+    target,
+    type,
+    eventTableAccess,
+  );
+  if (listeners === undefined) return 0;
+  if (listener === undefined) return listeners.length;
+  let count = 0;
+  for (let index = 0; index < listeners.length; index++) {
+    if (
+      eventTableListenerMatches(
+        events,
+        type,
+        listeners[index],
+        listener,
+        eventTableAccess,
+      )
+    ) {
+      count++;
+    }
+  }
+  return count;
 }
 
 /**
@@ -985,6 +1301,15 @@ function _addListener(target, type, listener, prepend, prepared = undefined) {
  * @returns {EventEmitter}
  */
 EventEmitter.prototype.addListener = function addListener(type, listener) {
+  checkListener(listener);
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    this,
+  );
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    eventTableAccess.preflightType(type, "addListener");
+  }
   const protectedTarget = isProtectedEventEmitter(this);
   const trustedRegistration = findTrustedEventListenerRegistration(
     this,
@@ -1015,6 +1340,15 @@ EventEmitter.prototype.prependListener = function prependListener(
   type,
   listener,
 ) {
+  checkListener(listener);
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    this,
+  );
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    eventTableAccess.preflightType(type, "prependListener");
+  }
   const protectedTarget = isProtectedEventEmitter(this);
   const trustedRegistration = findTrustedEventListenerRegistration(
     this,
@@ -1034,7 +1368,17 @@ EventEmitter.prototype.prependListener = function prependListener(
 
 function onceWrapper() {
   if (!this.fired) {
-    if (isProtectedEventEmitter(this.target)) {
+    const eventTableAccess = WeakMapPrototypeGet(
+      lexicalEventTableAccesses,
+      this.target,
+    );
+    if (eventTableAccess !== undefined) {
+      eventTableAccess.removeOnce(
+        this.target,
+        this.type,
+        this.wrapFn,
+      );
+    } else if (isProtectedEventEmitter(this.target)) {
       // A protected emitter can outlive the code that registered this wrapper.
       // Never redispatch through a package-replaceable lifecycle method while
       // running with the original listener's captured context.
@@ -1063,7 +1407,13 @@ function onceWrapper() {
 function _onceWrap(target, type, listener) {
   const state = { fired: false, wrapFn: undefined, target, type, listener };
   const wrapped = FunctionPrototypeBind(onceWrapper, state);
-  wrapped.listener = listener;
+  ObjectDefineProperty(wrapped, "listener", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    value: listener,
+    writable: true,
+  });
   WeakMapPrototypeSet(genuineOnceWrappers, wrapped, listener);
   state.wrapFn = wrapped;
   return wrapped;
@@ -1077,6 +1427,14 @@ function _onceWrap(target, type, listener) {
  */
 EventEmitter.prototype.once = function once(type, listener) {
   checkListener(listener);
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    this,
+  );
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    eventTableAccess.preflightType(type, "once");
+  }
 
   if (isProtectedEventEmitter(this)) {
     const wrapped = _onceWrap(this, type, listener);
@@ -1094,6 +1452,10 @@ EventEmitter.prototype.once = function once(type, listener) {
         _addListener(this, type, wrapped, false, prepared)
       );
     }
+  } else if (eventTableAccess !== undefined) {
+    // A lexical table target must never redispatch through a mutable public
+    // lifecycle alias after its exact key has been normalized and guarded.
+    _addListener(this, type, _onceWrap(this, type, listener), false);
   } else {
     this.on(type, _onceWrap(this, type, listener));
   }
@@ -1112,6 +1474,14 @@ EventEmitter.prototype.prependOnceListener = function prependOnceListener(
   listener,
 ) {
   checkListener(listener);
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    this,
+  );
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    eventTableAccess.preflightType(type, "prependOnceListener");
+  }
 
   if (isProtectedEventEmitter(this)) {
     const wrapped = _onceWrap(this, type, listener);
@@ -1119,6 +1489,10 @@ EventEmitter.prototype.prependOnceListener = function prependOnceListener(
     runWithoutAsyncContext(() =>
       _addListener(this, type, wrapped, true, prepared)
     );
+  } else if (eventTableAccess !== undefined) {
+    // Preserve the same lexical mutation boundary as once(); a package-owned
+    // prependListener replacement is not process event-table authority.
+    _addListener(this, type, _onceWrap(this, type, listener), true);
   } else {
     this.prependListener(type, _onceWrap(this, type, listener));
   }
@@ -1143,38 +1517,132 @@ EventEmitter.prototype.removeListener = function removeListener(
   return removeListenerExact(this, type, listener);
 };
 
-function removeListenerExact(target, type, listener) {
+function removeListenerExact(
+  target,
+  type,
+  listener,
+  eventTableAccess = undefined,
+  preflight = true,
+) {
+  eventTableAccess ??= WeakMapPrototypeGet(lexicalEventTableAccesses, target);
   checkListener(listener);
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    if (preflight) {
+      eventTableAccess.preflightType(type, "removeListener");
+    }
+  }
 
-  const events = target._events;
+  const events = getEventTable(target, eventTableAccess);
   if (events === undefined) {
     return target;
   }
 
-  const list = events[type];
+  const list = getEventTableValue(events, type, eventTableAccess);
   if (list === undefined) {
     return target;
   }
 
-  if (listenerMatches(list, listener)) {
-    if (--target._eventsCount === 0) {
-      target._events = ObjectCreate(null);
+  if (
+    eventTableListenerMatches(
+      events,
+      type,
+      list,
+      listener,
+      eventTableAccess,
+    )
+  ) {
+    if (eventTableAccess === undefined) {
+      if (--target._eventsCount === 0) {
+        target._events = ObjectCreate(null);
+      } else {
+        deleteEventTableValue(events, type, eventTableAccess);
+        if (
+          getLifecycleEventTableValue(
+            events,
+            "removeListener",
+            eventTableAccess,
+          ) !==
+            undefined
+        ) {
+          emitLifecycleMetaEvent(
+            target,
+            "removeListener",
+            eventTableAccess,
+            type,
+            list.listener || listener,
+          );
+        }
+      }
     } else {
-      delete events[type];
-      if (events.removeListener) {
+      // The process-specific lexical protocol must never let the public,
+      // writable `_eventsCount` choose which table is replaced. Delete only
+      // the exact key from the exact table captured above, then permit the
+      // protocol to replace that table only if it independently proves that
+      // the same table is now empty. A listener Proxy/accessor may have run
+      // while matching `list`, so reconcile immediately before mutation.
+      eventTableAccess.prepareValueMutation?.(events, type, list);
+      eventTableAccess.reconcile(events);
+      const preparedRemoval = eventTableAccess.prepareRemoval?.(
+        target,
+        events,
+        type,
+        list,
+      );
+      // Commit native/lexical bookkeeping before the infallible direct-table
+      // delete. A failed final signal unbind therefore leaves the exact entry
+      // present even when the owned table has been made non-extensible.
+      eventTableAccess.finishRemoval?.(
+        target,
+        type,
+        list,
+        preparedRemoval,
+      );
+      deleteEventTableValue(events, type, eventTableAccess);
+      const remaining = decrementEventTableCount(
+        target,
+        events,
+        eventTableAccess,
+      );
+      eventTableAccess.listenerRemoved?.(target, events, type, list);
+      if (remaining === 0) {
+        eventTableAccess.replace(target, events, ObjectCreate(null));
+      } else if (
+        getLifecycleEventTableValue(
+          events,
+          "removeListener",
+          eventTableAccess,
+        ) !==
+          undefined
+      ) {
         emitLifecycleMetaEvent(
           target,
           "removeListener",
+          eventTableAccess,
           type,
-          list.listener || listener,
+          unwrapEventTableListener(
+            events,
+            type,
+            list,
+            eventTableAccess,
+          ),
         );
       }
     }
   } else if (typeof list !== "function") {
+    eventTableAccess?.prepareListMutation(events, type, list);
     let position = -1;
 
     for (let i = list.length - 1; i >= 0; i--) {
-      if (listenerMatches(list[i], listener)) {
+      if (
+        eventTableListenerMatches(
+          events,
+          type,
+          list[i],
+          listener,
+          eventTableAccess,
+        )
+      ) {
         position = i;
         break;
       }
@@ -1184,21 +1652,119 @@ function removeListenerExact(target, type, listener) {
       return target;
     }
 
+    eventTableAccess?.prepareListMutation(events, type, list);
+    const removed = list[position];
+    const preparedRemoval = eventTableAccess?.prepareRemoval?.(
+      target,
+      events,
+      type,
+      removed,
+    );
+    eventTableAccess?.finishRemoval?.(
+      target,
+      type,
+      removed,
+      preparedRemoval,
+    );
+
     if (position === 0) {
       ArrayPrototypeShift(list);
     } else {
       spliceOne(list, position);
     }
+    eventTableAccess?.finishListMutation(events, type, list);
 
     if (list.length === 1) {
-      events[type] = list[0];
+      setEventTableValue(events, type, list[0], eventTableAccess);
     }
 
-    if (events.removeListener !== undefined) {
-      emitLifecycleMetaEvent(target, "removeListener", type, listener);
+    eventTableAccess?.listenerRemoved?.(target, events, type, removed);
+
+    if (
+      getLifecycleEventTableValue(
+        events,
+        "removeListener",
+        eventTableAccess,
+      ) !==
+        undefined
+    ) {
+      emitLifecycleMetaEvent(
+        target,
+        "removeListener",
+        eventTableAccess,
+        type,
+        listener,
+      );
     }
   }
 
+  return target;
+}
+
+function removeEventListenerWithTableAccess(
+  target,
+  type,
+  listener,
+  eventTableAccess,
+  preflight = true,
+) {
+  if (eventTableAccess === undefined) {
+    throw new Error("internal EventEmitter table access is required");
+  }
+  return removeListenerExact(
+    target,
+    type,
+    listener,
+    eventTableAccess,
+    preflight,
+  );
+}
+
+function removeAllEventListenersWithTableAccess(
+  target,
+  type,
+  eventTableAccess,
+  preflight = false,
+) {
+  if (preflight) {
+    eventTableAccess.preflightType(type, "removeAllListeners");
+  }
+  const { listeners } = snapshotEventListenersWithTableAccess(
+    target,
+    type,
+    eventTableAccess,
+  );
+  if (listeners === undefined) return target;
+  for (let index = listeners.length - 1; index >= 0; index--) {
+    removeListenerExact(
+      target,
+      type,
+      listeners[index],
+      eventTableAccess,
+      false,
+    );
+  }
+  return target;
+}
+
+function removeEveryEventListenerWithTableAccess(target, eventTableAccess) {
+  const events = getEventTable(target, eventTableAccess);
+  const keys = eventTableAccess.keys(events);
+  for (const key of new SafeArrayIterator(keys)) {
+    if (key === "removeListener") continue;
+    removeAllEventListenersWithTableAccess(
+      target,
+      key,
+      eventTableAccess,
+      true,
+    );
+  }
+  removeAllEventListenersWithTableAccess(
+    target,
+    "removeListener",
+    eventTableAccess,
+    true,
+  );
   return target;
 }
 
@@ -1208,7 +1774,8 @@ const EventEmitterPublicOn = EventEmitter.prototype.on;
 const EventEmitterPublicOnce = EventEmitter.prototype.once;
 const EventEmitterPublicPrependListener =
   EventEmitter.prototype.prependListener;
-const EventEmitterPublicRemoveListener = EventEmitter.prototype.removeListener;
+const EventEmitterPublicRemoveListener =
+  EventEmitter.prototype.removeListener;
 
 function isEventEmitterPublicOnce(callback) {
   return callback === EventEmitterPublicOnce;
@@ -1254,6 +1821,23 @@ function removeEventEmitterListener(target, type, listener) {
 EventEmitter.prototype.removeAllListeners = function removeAllListeners(
   type,
 ) {
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    this,
+  );
+  if (eventTableAccess !== undefined) {
+    if (arguments.length !== 0) {
+      type = eventTableAccess.normalizeType(type);
+      eventTableAccess.preflightType(type, "removeAllListeners");
+    }
+    return arguments.length === 0
+      ? removeEveryEventListenerWithTableAccess(this, eventTableAccess)
+      : removeAllEventListenersWithTableAccess(
+        this,
+        type,
+        eventTableAccess,
+      );
+  }
   if (isProtectedEventEmitter(this)) {
     const hasType = arguments.length !== 0;
     return runWithoutAsyncContext(() =>
@@ -1364,6 +1948,23 @@ function removeAllEventEmitterListeners(target, type, hasType = true) {
 }
 
 function _listeners(target, type, unwrap) {
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    target,
+  );
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    eventTableAccess.preflightType(
+      type,
+      unwrap ? "listeners" : "rawListeners",
+    );
+    return eventListenersWithTableAccess(
+      target,
+      type,
+      unwrap,
+      eventTableAccess,
+    );
+  }
   const read = () => {
     const events = target._events;
 
@@ -1452,9 +2053,25 @@ EventEmitter.prototype.listenerCount = function listenerCount(
   type,
   listener,
 ) {
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    this,
+  );
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    eventTableAccess.preflightType(type, "listenerCount");
+    return eventListenerCountWithTableAccess(
+      this,
+      type,
+      listener,
+      eventTableAccess,
+    );
+  }
   const read = () =>
     FunctionPrototypeCall(_listenerCount, this, type, listener);
-  return isProtectedEventEmitter(this) ? runWithoutAsyncContext(read) : read();
+  return isProtectedEventEmitter(this)
+    ? runWithoutAsyncContext(read)
+    : read();
 };
 const EventEmitterPublicListenerCount = EventEmitter.prototype.listenerCount;
 
@@ -1467,6 +2084,20 @@ const EventEmitterPublicListenerCount = EventEmitter.prototype.listenerCount;
  * @returns {number}
  */
 function listenerCount(emitter, type) {
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    emitter,
+  );
+  if (eventTableAccess !== undefined) {
+    type = eventTableAccess.normalizeType(type);
+    eventTableAccess.preflightType(type, "listenerCount");
+    return eventListenerCountWithTableAccess(
+      emitter,
+      type,
+      undefined,
+      eventTableAccess,
+    );
+  }
   if (isProtectedEventEmitter(emitter)) {
     return runWithoutAsyncContext(() =>
       FunctionPrototypeCall(_listenerCount, emitter, type)
@@ -1487,8 +2118,19 @@ function listenerCount(emitter, type) {
  * @returns {any[]}
  */
 EventEmitter.prototype.eventNames = function eventNames() {
-  const read = () => this._eventsCount > 0 ? ReflectOwnKeys(this._events) : [];
-  return isProtectedEventEmitter(this) ? runWithoutAsyncContext(read) : read();
+  const eventTableAccess = WeakMapPrototypeGet(
+    lexicalEventTableAccesses,
+    this,
+  );
+  if (eventTableAccess !== undefined) {
+    const events = eventTableAccess.current(this);
+    return eventTableAccess.keys(events);
+  }
+  const read = () =>
+    this._eventsCount > 0 ? ReflectOwnKeys(this._events) : [];
+  return isProtectedEventEmitter(this)
+    ? runWithoutAsyncContext(read)
+    : read();
 };
 
 function arrayClone(arr) {
@@ -1622,7 +2264,8 @@ function onceInternal(emitter, name, options) {
 
   const promise = new Promise((resolve, reject) => {
     const hasErrorListener = name !== "error" &&
-      (WeakMapPrototypeGet(eventListenerDeliveryHooks, emitter) !== undefined ||
+      (WeakMapPrototypeGet(eventListenerDeliveryHooks, emitter) !==
+          undefined ||
         typeof emitter.once === "function");
     const errorListener = (err) => {
       eventTargetAgnosticRemoveListener(emitter, name, resolver);
@@ -2169,10 +2812,12 @@ const protectedEventEmitterOnce = EventEmitter.prototype.once;
 
 return {
   addAbortListener,
+  addEventListenerWithTableAccess,
   addEventEmitterListener,
   captureRejectionSymbol,
   default: EventEmitter,
   defaultMaxListeners,
+  emitEventWithTableAccess,
   errorMonitor,
   EventEmitter,
   get EventEmitterAsyncResource() {
@@ -2180,6 +2825,7 @@ return {
   },
   getEventListeners,
   getMaxListeners,
+  initializeEventEmitterStorage,
   isEventEmitterPublicLifecycleMethod,
   isEventEmitterPublicEmit,
   isEventEmitterPublicListenerCount,
@@ -2187,6 +2833,8 @@ return {
   kEvents,
   kFirstEventParam,
   listenerCount,
+  eventListenerCountWithTableAccess,
+  eventListenersWithTableAccess,
   on,
   once,
   protectedEventEmitterEmit,
@@ -2198,8 +2846,12 @@ return {
   emitPreparedEvent,
   prepareEventListenerDelivery,
   removeAllEventEmitterListeners,
+  removeAllEventListenersWithTableAccess,
+  removeEveryEventListenerWithTableAccess,
+  removeEventListenerWithTableAccess,
   removeEventEmitterListener,
   setDefaultEventListenerDeliveryHook,
+  setEventTableAccess,
   setEventListenerDeliveryHook,
 };
 })();

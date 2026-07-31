@@ -14,6 +14,7 @@ const {
   SafeSetIterator,
   SetPrototypeAdd,
   SetPrototypeDelete,
+  SetPrototypeHas,
   TypeError,
 } = primordials;
 
@@ -82,12 +83,21 @@ function removeSignalListenerImpl(signo, listener, trustedInternal) {
   }
 
   const sigData = getSignalData(signo);
-  SetPrototypeDelete(sigData.listeners, listener);
-
-  if (sigData.listeners.size === 0 && sigData.rid) {
-    unbindSignal(sigData.rid);
+  const removesLastListener = sigData.listeners.size === 1 &&
+    SetPrototypeHas(sigData.listeners, listener);
+  if ((sigData.listeners.size === 0 || removesLastListener) && sigData.rid) {
+    // Keep the dispatcher published until native resource teardown commits.
+    // If op_signal_unbind fails, both the rid and exact listener Set remain
+    // unchanged and the caller can retry without creating split-brain state.
+    // @ref LLP 0019#system-information-and-process-mutation [implements]
+    const rid = sigData.rid;
+    unbindSignal(rid);
+    if (sigData.rid !== rid) {
+      throw new TypeError("Signal resource changed during removal");
+    }
     sigData.rid = undefined;
   }
+  SetPrototypeDelete(sigData.listeners, listener);
 }
 
 function addSignalListener(signo, listener) {
