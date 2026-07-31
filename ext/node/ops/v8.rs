@@ -3327,7 +3327,10 @@ mod native_capsec_tests {
         const ordinaryEvent = "rev2-fixture-ordinary";
         function sentinelListener() {}
         function ordinaryListener() {}
-        function exceptionListener() {}
+        let exceptionDeliveryCount = 0;
+        function exceptionListener() {
+          exceptionDeliveryCount++;
+        }
         function metaListener() {}
         function candidateListener() {}
 
@@ -3433,6 +3436,18 @@ mod native_capsec_tests {
             );
             commits.sensitive++;
           },
+          borrowedEmitException() {
+            const result = Reflect.apply(
+              EventEmitter.prototype.emit,
+              processObject,
+              [
+                "uncaughtException",
+                new Error("rev2 denied borrowed emit"),
+              ],
+            );
+            commits.sensitive++;
+            return result;
+          },
           addListenerForwarder() {
             const result = processObject.addListener(
               "uncaughtException",
@@ -3519,21 +3534,25 @@ mod native_capsec_tests {
               `${operationId}/${phase} changed the guarded event table`,
             );
           }
-          const seeded = phase === "denied" && (
+          const primarySeeded = phase === "denied" && (
             operationId === "process-events-sensitive-table" ||
             operationId === "process-remove-listener-forwarder-runtime"
           );
+          const metaOnlySeeded = phase === "meta-only-own-keys";
           const exceptionCount = countExactListener(
             "uncaughtException",
             exceptionListener,
           );
           const metaCount = countExactListener("newListener", metaListener);
-          const expectedExceptionCount = seeded ? 1 : 0;
-          const expectedMetaCount = seeded &&
-              (operationId === "process-events-sensitive-table" ||
-                operationId === "process-remove-listener-forwarder-runtime")
-            ? 1
-            : 0;
+          const expectedExceptionCount = primarySeeded ? 1 : 0;
+          const expectedMetaCount =
+            (primarySeeded &&
+                (operationId === "process-events-sensitive-table" ||
+                  operationId ===
+                    "process-remove-listener-forwarder-runtime")) ||
+              metaOnlySeeded
+              ? 1
+              : 0;
           const expectedEventCount = 1 + expectedExceptionCount +
             expectedMetaCount;
           const keys = Reflect.ownKeys(table);
@@ -3541,6 +3560,7 @@ mod native_capsec_tests {
             exceptionCount !== expectedExceptionCount ||
             metaCount !== expectedMetaCount ||
             countExactListener("uncaughtException", candidateListener) !== 0 ||
+            exceptionDeliveryCount !== 0 ||
             keys.length !== expectedEventCount ||
             !keys.includes(sentinelEvent) ||
             (expectedExceptionCount === 1) !==
@@ -3635,6 +3655,41 @@ mod native_capsec_tests {
             }
             assertState(operationId, "post-cleanup-denied");
           },
+          prepareMetaOnlyOwnKeys(operationId) {
+            if (
+              operationId !== "process-events-sensitive-table" || prepared
+            ) {
+              throw new Error(
+                "process event meta-only fixture was inexactly prepared",
+              );
+            }
+            assertState(operationId, "clean");
+            processObject.on("newListener", metaListener);
+            prepared = true;
+            assertState(operationId, "meta-only-own-keys");
+          },
+          assertMetaOnlyOwnKeysDenied(operationId) {
+            if (
+              operationId !== "process-events-sensitive-table" || !prepared
+            ) {
+              throw new Error(
+                "process event meta-only fixture was not prepared",
+              );
+            }
+            assertState(operationId, "meta-only-own-keys");
+          },
+          cleanupMetaOnlyOwnKeys(operationId) {
+            if (
+              operationId !== "process-events-sensitive-table" || !prepared
+            ) {
+              throw new Error(
+                "process event meta-only fixture was not prepared for cleanup",
+              );
+            }
+            processObject.off("newListener", metaListener);
+            prepared = false;
+            assertState(operationId, "clean");
+          },
         });
 
         function isExactFrozenNullFacade(value, keys) {
@@ -3675,6 +3730,7 @@ mod native_capsec_tests {
           "sensitiveDescriptor",
           "borrowedRemoveException",
           "borrowedRemoveMeta",
+          "borrowedEmitException",
           "addListenerForwarder",
           "addMetaListenerForwarder",
           "removeListenerForwarder",
@@ -3686,6 +3742,9 @@ mod native_capsec_tests {
           "cleanup",
           "assertClean",
           "assertPostCleanupDenied",
+          "prepareMetaOnlyOwnKeys",
+          "assertMetaOnlyOwnKeysDenied",
+          "cleanupMetaOnlyOwnKeys",
         ];
         const forbiddenKeys = [
           "process",
@@ -3820,6 +3879,22 @@ mod native_capsec_tests {
         );
       }
       "process-events-sensitive-table" => {
+        let exact_own_keys_guard = r#"      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        "process-events",
+        "process._events.ownKeys",
+      );"#;
+        for raw_observation in ["ReflectHas(target", "ReflectOwnKeys(target)"] {
+          assert_exact_process_guard_prefix_before_work(
+            event_table_source,
+            operation.operation_id,
+            "    ownKeys(target) {",
+            "    getOwnPropertyDescriptor(target, property) {",
+            exact_own_keys_guard,
+            raw_observation,
+          );
+        }
         let traps = [
           (
             "    get(target, property) {",
@@ -3928,6 +4003,25 @@ mod native_capsec_tests {
             "Borrowing EventEmitter.prototype must not bypass the process-specific",
           ) && event_emitter_source.contains(borrowed_removal),
           "borrowed EventEmitter removal no longer reaches the guarded process event table before mutation"
+        );
+        let borrowed_emission = r#"function snapshotProtectedEventState(target, type) {
+  const events = target._events;
+  if (events === undefined) {
+    return {
+      errorMonitor: false,
+      hasErrorListener: false,
+      listeners: undefined,
+    };
+  }
+  const handler = events[type];"#;
+        let protected_emit_dispatch = r#"EventEmitter.prototype.emit = function emit(type, ...args) {
+  if (isProtectedEventEmitter(this)) {
+    return emitProtectedEvent(this, type, args);
+  }"#;
+        assert!(
+          event_emitter_source.contains(borrowed_emission)
+            && event_emitter_source.contains(protected_emit_dispatch),
+          "borrowed EventEmitter emission no longer reaches the guarded process event table before listener delivery"
         );
       }
       "process-add-listener-forwarder-runtime" => {
@@ -4976,11 +5070,12 @@ process._getActiveHandles = getActiveHandles;"#
             ("uncaughtException", "process._events.defineProperty"),
             ("uncaughtException", "process._events.deleteProperty"),
             ("uncaughtException", "process._events.has"),
-            ("uncaughtException", "process._events.ownKeys"),
+            ("process-events", "process._events.ownKeys"),
             (
               "uncaughtException",
               "process._events.getOwnPropertyDescriptor",
             ),
+            ("uncaughtException", "process._events.get"),
             ("uncaughtException", "process._events.get"),
             ("newListener", "process._events.get"),
           ]);
@@ -5093,13 +5188,18 @@ process._getActiveHandles = getActiveHandles;"#
               ["sensitiveHas", "uncaughtException", "process._events.has"],
               [
                 "sensitiveOwnKeys",
-                "uncaughtException",
+                "process-events",
                 "process._events.ownKeys",
               ],
               [
                 "sensitiveDescriptor",
                 "uncaughtException",
                 "process._events.getOwnPropertyDescriptor",
+              ],
+              [
+                "borrowedEmitException",
+                "uncaughtException",
+                "process._events.get",
               ],
               [
                 "borrowedRemoveException",
@@ -5211,6 +5311,96 @@ process._getActiveHandles = getActiveHandles;"#
       runtime,
       "file:///rev2_public_process_events_fixture_clean_state.js",
       format!("rev2ProcessEventsController.{method}({operation_id_json});"),
+    );
+  }
+
+  fn prepare_rev2_public_process_event_meta_only_own_keys(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    assert_eq!(
+      operation.operation_id, "process-events-sensitive-table",
+      "meta-only ownKeys preparation requires the sensitive-table operation"
+    );
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    execute(
+      runtime,
+      "file:///rev2_public_process_events_fixture_meta_only_prepare.js",
+      format!(
+        "rev2ProcessEventsController.prepareMetaOnlyOwnKeys({operation_id_json});"
+      ),
+    );
+  }
+
+  fn deny_rev2_public_process_event_meta_only_own_keys(
+    runtime: &mut JsRuntime,
+    root: &Path,
+  ) {
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    execute(
+      runtime,
+      "file:///rev2_public_process_events_fixture_meta_only_denied.js",
+      r#"
+      {
+        let denied = false;
+        try {
+          rev2ProcessEvents.sensitiveOwnKeys();
+        } catch (error) {
+          const message = String(error);
+          const expected =
+            "principal set [denied-native] may not use deny-only runtime:inspect:process-events";
+          if (!message.includes(expected)) {
+            throw new Error(
+              `meta-only process._events.ownKeys used the wrong actor or boundary: ${message}`,
+            );
+          }
+          denied = true;
+        }
+        if (!denied) {
+          throw new Error(
+            "meta-only process._events.ownKeys reached raw table inspection",
+          );
+        }
+      }
+      "#
+      .to_string(),
+    );
+  }
+
+  fn assert_rev2_public_process_event_meta_only_own_keys_denied_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    execute(
+      runtime,
+      "file:///rev2_public_process_events_fixture_meta_only_denied_state.js",
+      format!(
+        "rev2ProcessEventsController.assertMetaOnlyOwnKeysDenied({operation_id_json});"
+      ),
+    );
+  }
+
+  fn cleanup_rev2_public_process_event_meta_only_own_keys(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    execute(
+      runtime,
+      "file:///rev2_public_process_events_fixture_meta_only_cleanup.js",
+      format!(
+        "rev2ProcessEventsController.cleanupMetaOnlyOwnKeys({operation_id_json});"
+      ),
     );
   }
 
@@ -7585,6 +7775,103 @@ process._getActiveHandles = getActiveHandles;"#
     );
   }
 
+  fn run_rev2_public_process_event_meta_only_own_keys(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    case_kind: &str,
+    mode: &str,
+  ) {
+    if operation.operation_id != "process-events-sensitive-table" {
+      return;
+    }
+
+    let before_prepare = rev2_v8_fixture_canaries();
+    prepare_rev2_public_process_event_meta_only_own_keys(
+      runtime, root, operation,
+    );
+    let after_prepare = rev2_v8_fixture_canaries();
+    assert_eq!(
+      after_prepare.public_wrapper_guard_calls,
+      before_prepare.public_wrapper_guard_calls + 1,
+      "{} crossed an inexact number of meta-only preparation guards in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_rev2_public_process_event_guard_sequence(
+      before_prepare.public_wrapper_guard_calls,
+      &[("newListener", "process.on")],
+      operation,
+      "meta-only root preparation",
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before_prepare.public_wrapper_guard_calls,
+        ..after_prepare
+      },
+      before_prepare,
+      "{} meta-only preparation crossed unrelated native work in {case_kind}/{mode}",
+      operation.operation_id
+    );
+
+    let before_denial = rev2_v8_fixture_canaries();
+    deny_rev2_public_process_event_meta_only_own_keys(runtime, root);
+    let after_denial = rev2_v8_fixture_canaries();
+    assert_eq!(
+      after_denial.public_wrapper_guard_calls,
+      before_denial.public_wrapper_guard_calls + 1,
+      "{} crossed an inexact number of meta-only denial guards in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_rev2_public_process_event_guard_sequence(
+      before_denial.public_wrapper_guard_calls,
+      &[("process-events", "process._events.ownKeys")],
+      operation,
+      "meta-only denied ownKeys",
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before_denial.public_wrapper_guard_calls,
+        ..after_denial
+      },
+      before_denial,
+      "{} meta-only denial changed process event state or unrelated native work in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_rev2_public_process_event_meta_only_own_keys_denied_state(
+      runtime, root, operation,
+    );
+
+    let before_cleanup = rev2_v8_fixture_canaries();
+    cleanup_rev2_public_process_event_meta_only_own_keys(
+      runtime, root, operation,
+    );
+    let after_cleanup = rev2_v8_fixture_canaries();
+    assert_eq!(
+      after_cleanup.public_wrapper_guard_calls,
+      before_cleanup.public_wrapper_guard_calls + 1,
+      "{} crossed an inexact number of meta-only cleanup guards in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_rev2_public_process_event_guard_sequence(
+      before_cleanup.public_wrapper_guard_calls,
+      &[("newListener", "process.off")],
+      operation,
+      "meta-only root cleanup",
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before_cleanup.public_wrapper_guard_calls,
+        ..after_cleanup
+      },
+      before_cleanup,
+      "{} meta-only cleanup crossed unrelated native work in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_rev2_public_process_event_fixture_clean_state(
+      runtime, root, operation, false,
+    );
+  }
+
   fn run_rev2_public_process_event_fixture_mode(
     root: &Path,
     operation: &Rev2V8FixtureOperation,
@@ -7692,6 +7979,14 @@ process._getActiveHandles = getActiveHandles;"#
       root,
       operation,
       false,
+    );
+
+    run_rev2_public_process_event_meta_only_own_keys(
+      &mut runtime,
+      root,
+      operation,
+      case_kind,
+      mode,
     );
 
     if case_kind == "staged-barrier:cleanup" {
@@ -8213,10 +8508,12 @@ process._getActiveHandles = getActiveHandles;"#
     if rev2_process_fixture_is_events(operation) {
       // @ref LLP 0019#runtime-and-memory-inspection [tests] -- Exercise the
       // actual public node:process event-table setter, guarded Proxy traps,
-      // and addListener/removeListener forwarders. Closure-private raw-table
-      // canaries prove denial precedes authority-bearing observation/delivery
-      // or retained mutation; the fixture exposes neither process, its table,
-      // EventEmitter prototypes, nor the trusted token/internal helpers.
+      // and addListener/removeListener forwarders. The frozen facade and
+      // controller omit raw process/table/EventEmitter/token/internal handles;
+      // closure-private canaries prove denial precedes observation, delivery,
+      // or retained mutation. Deno.core remains installed as the trusted
+      // fixture loader, so this narrows the authored harness surface and does
+      // not establish guest confinement.
       // @ref LLP 0019#pre-promotion-conformance-candidate-execution
       // [constrained-by] -- This isolated development harness emits only the
       // existing process-local candidate report. It authenticates no

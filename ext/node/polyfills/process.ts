@@ -1389,6 +1389,17 @@ function wrapProcessEvents(store: any) {
       return ReflectHas(target, property);
     },
     ownKeys(target) {
+      // Even deciding which protected key-specific guard applies observes the
+      // shared raw event table. Close that generic observation before any
+      // ReflectHas/ReflectOwnKeys probe; the later bounded guards retain the
+      // exact protected key or signal classification after root admission.
+      // @ref LLP 0019#runtime-and-memory-inspection [implements]
+      op_oden_guard_deny_only_surface(
+        "runtime",
+        "inspect",
+        "process-events",
+        "process._events.ownKeys",
+      );
       let protectedEvent;
       if (ReflectHas(target, "uncaughtException")) {
         protectedEvent = "uncaughtException";
