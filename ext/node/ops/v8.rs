@@ -2055,6 +2055,7 @@ mod native_capsec_tests {
     panic!("process fixture reached unrelated thread CPU usage work")
   }
 
+  #[cfg(test)]
   #[op2(fast, stack_trace)]
   #[smi]
   fn op_signal_bind(#[string] _signal: &str) -> u32 {
