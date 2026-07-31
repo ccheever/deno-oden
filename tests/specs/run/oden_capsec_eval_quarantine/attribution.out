@@ -16,6 +16,8 @@ good-eval: s3cret
 replay-vm-same-context: DENIED:NotCapable
 [WILDCARD]replay-original-after-vm: s3cret
 vm-same-context-inner-eval: DENIED:NotCapable
+vm-strings-false-function: DENIED:EvalError
+vm-strings-false-eval: DENIED:EvalError
 replay-vm-cross-context: DENIED:NotCapable
 [WILDCARD]replay-original-after-context: s3cret
 worker-root-eval: s3cret

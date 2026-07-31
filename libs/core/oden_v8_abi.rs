@@ -15,6 +15,16 @@
 
 use std::ffi::c_void;
 
+// rusty_v8 reserves two physical Context embedder-data fields before the
+// logical slot numbers exposed by Context::{get,set}_embedder_data.
+const RUSTY_V8_INTERNAL_CONTEXT_SLOT_COUNT: u32 = 2;
+
+unsafe extern "C" {
+  fn v8__Context__GetNumberOfEmbedderDataFields(
+    context: *const v8::Context,
+  ) -> u32;
+}
+
 /// ABI mirror of V8 14.9's `StackTrace::ScriptData`.
 ///
 /// V8 deliberately reports the root script ID in `id` for eval frames. Oden
@@ -163,6 +173,38 @@ pub(crate) unsafe fn set_modify_code_generation_from_strings_callback(
   };
 }
 
+fn context_embedder_data_field_count(context: v8::Local<v8::Context>) -> u32 {
+  // This is rusty_v8's existing C wrapper around V8's public bounded field
+  // count. Unlike Context::get_embedder_data, it never reads a requested field
+  // and is therefore safe when a logical slot has not been materialized.
+  unsafe { v8__Context__GetNumberOfEmbedderDataFields(&*context) }
+}
+
+/// Return whether rusty_v8 has materialized one logical Context embedder slot.
+///
+/// Context::get_embedder_data performs an unchecked inline field read in
+/// release builds, despite its Option result. Callers must prove the logical
+/// slot exists through this helper before every read.
+///
+/// @ref LLP 0019#workers-vm-wasi-and-native-code [implements] -- Dynamic
+/// compilation callbacks can receive main, secondary, or node:vm contexts;
+/// missing attribution/endowment metadata must remain a bounded state rather
+/// than an out-of-range V8 field access.
+pub(crate) fn context_embedder_data_slot_is_materialized(
+  context: v8::Local<v8::Context>,
+  logical_slot: i32,
+) -> bool {
+  let Ok(logical_slot) = u32::try_from(logical_slot) else {
+    return false;
+  };
+  let Some(physical_slot) =
+    logical_slot.checked_add(RUSTY_V8_INTERNAL_CONTEXT_SLOT_COUNT)
+  else {
+    return false;
+  };
+  context_embedder_data_field_count(context) > physical_slot
+}
+
 /// Capture the current JavaScript functions and their native contexts.
 ///
 /// V8 writes local handles into the caller-provided storage. The returned
@@ -244,5 +286,40 @@ mod tests {
         "if (eval('1 + 1') !== 42) throw new Error('source was not modified');",
       )
       .unwrap();
+  }
+
+  #[test]
+  fn logical_context_embedder_slots_are_bounded_exactly() {
+    let mut runtime = crate::JsRuntime::new(crate::RuntimeOptions::default());
+    v8::scope!(let scope, runtime.v8_isolate());
+    let context = v8::Context::new(scope, Default::default());
+
+    assert_eq!(context_embedder_data_field_count(context), 0);
+    assert!(!context_embedder_data_slot_is_materialized(context, -1));
+    assert!(!context_embedder_data_slot_is_materialized(context, 0));
+    assert!(!context_embedder_data_slot_is_materialized(
+      context,
+      i32::MAX
+    ));
+
+    let identity = v8::String::new(scope, "fixture-context-id").unwrap();
+    context.set_embedder_data(5, identity.into());
+    assert_eq!(
+      context_embedder_data_field_count(context),
+      RUSTY_V8_INTERNAL_CONTEXT_SLOT_COUNT + 6
+    );
+    assert!(context_embedder_data_slot_is_materialized(context, 5));
+    assert!(!context_embedder_data_slot_is_materialized(context, 6));
+
+    let disabled = v8::Boolean::new(scope, false);
+    context.set_embedder_data(6, disabled.into());
+    assert_eq!(
+      context_embedder_data_field_count(context),
+      RUSTY_V8_INTERNAL_CONTEXT_SLOT_COUNT + 7
+    );
+    assert!(context_embedder_data_slot_is_materialized(context, 5));
+    assert!(context_embedder_data_slot_is_materialized(context, 6));
+
+    context.clear_all_slots();
   }
 }

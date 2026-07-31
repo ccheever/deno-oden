@@ -69,6 +69,23 @@ console.log(
   ),
 );
 
+// @ref LLP 0019#workers-vm-wasi-and-native-code [tests] — Oden's isolate-wide
+// callback must preserve node:vm's own strings:false denial for a secondary
+// context that has no Oden attribution slots.
+const stringsDisabledContext = vm.createContext({}, {
+  codeGeneration: { strings: false },
+});
+console.log(
+  "vm-strings-false-function:",
+  attempt(() =>
+    vm.runInContext("Function('return 42')()", stringsDisabledContext)
+  ),
+);
+console.log(
+  "vm-strings-false-eval:",
+  attempt(() => vm.runInContext("eval('40 + 2')", stringsDisabledContext)),
+);
+
 // Replay guard 2: an eval frame in a fresh node:vm context carries the copied
 // sourceURL and V8's eval bit, but lacks Oden's unforgeable context tag.
 const crossContext = good.deferredWithNonce();

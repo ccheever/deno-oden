@@ -540,22 +540,62 @@ fn random_hex_identity(prefix: &str) -> Option<String> {
   Some(identity)
 }
 
-fn context_id(
-  scope: &mut v8::PinScope,
-  context: v8::Local<v8::Context>,
+fn context_id<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  context: v8::Local<'s, v8::Context>,
 ) -> Option<String> {
-  let value = context.get_embedder_data(scope, ODEN_EVAL_CONTEXT_SLOT)?;
+  let value =
+    materialized_context_embedder_data(scope, context, ODEN_EVAL_CONTEXT_SLOT)?;
   let value = v8::Local::<v8::String>::try_from(value).ok()?;
   Some(value.to_rust_string_lossy(scope))
 }
 
-fn dynamic_endowments_enabled(
-  scope: &mut v8::PinScope,
-  context: v8::Local<v8::Context>,
-) -> bool {
-  context
-    .get_embedder_data(scope, ODEN_EVAL_ENDOWMENT_SLOT)
-    .is_some_and(|value| value.is_true())
+/// Read one logical rusty_v8 Context embedder slot only after proving its
+/// physical field exists.
+///
+/// @ref LLP 0019#workers-vm-wasi-and-native-code [implements] -- The dynamic
+/// compilation callback also receives secondary and node:vm contexts. Their
+/// missing Oden metadata is a fail-closed/attribution-only state, never license
+/// for an unchecked V8 embedder-field read.
+fn materialized_context_embedder_data<'s>(
+  scope: &mut v8::PinScope<'s, '_, ()>,
+  context: v8::Local<'s, v8::Context>,
+  logical_slot: i32,
+) -> Option<v8::Local<'s, v8::Value>> {
+  if !crate::oden_v8_abi::context_embedder_data_slot_is_materialized(
+    context,
+    logical_slot,
+  ) {
+    return None;
+  }
+  context.get_embedder_data(scope, logical_slot)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DynamicEndowmentState {
+  Unmanaged,
+  AttributionOnly,
+  Enabled,
+}
+
+fn dynamic_endowment_state<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  context: v8::Local<'s, v8::Context>,
+) -> DynamicEndowmentState {
+  let Some(value) = materialized_context_embedder_data(
+    scope,
+    context,
+    ODEN_EVAL_ENDOWMENT_SLOT,
+  ) else {
+    return DynamicEndowmentState::Unmanaged;
+  };
+  if value.is_true() {
+    DynamicEndowmentState::Enabled
+  } else if value.is_false() {
+    DynamicEndowmentState::AttributionOnly
+  } else {
+    DynamicEndowmentState::Unmanaged
+  }
 }
 
 /// Attribution-only contexts may preserve the original source when metadata
@@ -568,6 +608,19 @@ fn allow_unmodified_source(compartment_active: bool) -> bool {
 
 pub(crate) fn enable_dynamic_endowments(scope: &mut v8::PinScope<'_, '_>) {
   let context = scope.get_current_context();
+  if dynamic_endowment_state(scope, context) == DynamicEndowmentState::Unmanaged
+  {
+    // Contexts not created by JsRuntime (notably node:vm) do not carry Oden
+    // attribution metadata. Materialize the identity slot before marking the
+    // context active so its inevitable missing identity is a bounded,
+    // fail-closed state.
+    let missing_identity: v8::Local<v8::Value> = v8::undefined(scope).into();
+    context.set_embedder_data(ODEN_EVAL_CONTEXT_SLOT, missing_identity);
+  }
+  // Setting the marker must never leave a foreign context on V8's
+  // unconditional fast path: that path bypasses this isolate's callback and
+  // therefore bypasses both attribution and compartment rewriting.
+  context.set_allow_generation_from_strings(false);
   let enabled = v8::Boolean::new(scope, true);
   context.set_embedder_data(ODEN_EVAL_ENDOWMENT_SLOT, enabled.into());
 }
@@ -592,8 +645,9 @@ fn prepare_compartment_alias(
   scope: &mut v8::PinScope,
   context: v8::Local<v8::Context>,
   context_id: &str,
+  compartment_active: bool,
 ) -> CompartmentAlias {
-  if !dynamic_endowments_enabled(scope, context) {
+  if !compartment_active {
     return CompartmentAlias::Off;
   }
   let Some(alias_name) = context_alias_name(context_id) else {
@@ -767,7 +821,18 @@ fn modify_code_generation<'s>(
 ) -> ModifyCodeGenerationFromStringsResult<'s> {
   let scope = pin!(unsafe { v8::CallbackScope::new(context) });
   let scope = &mut scope.init();
-  let compartment_active = dynamic_endowments_enabled(scope, context);
+  let endowment_state = dynamic_endowment_state(scope, context);
+  if endowment_state == DynamicEndowmentState::Unmanaged {
+    // V8 calls this callback only after the context disabled its unconditional
+    // string-codegen fast path. An unmanaged/malformed context must not turn
+    // that denial back into permission (notably node:vm
+    // codeGeneration.strings:false).
+    return ModifyCodeGenerationFromStringsResult {
+      codegen_allowed: false,
+      modified_source: None,
+    };
+  }
+  let compartment_active = endowment_state == DynamicEndowmentState::Enabled;
   let Some(context_id) = context_id(scope, context) else {
     return ModifyCodeGenerationFromStringsResult {
       codegen_allowed: allow_unmodified_source(compartment_active),
@@ -796,7 +861,12 @@ fn modify_code_generation<'s>(
     };
   };
 
-  let source = match prepare_compartment_alias(scope, context, &context_id) {
+  let source = match prepare_compartment_alias(
+    scope,
+    context,
+    &context_id,
+    compartment_active,
+  ) {
     CompartmentAlias::Off => source,
     CompartmentAlias::Ready(alias_name) => {
       let rust_source = source.to_rust_string_lossy(scope);
@@ -902,12 +972,31 @@ pub(crate) fn maybe_enable_for_context(
     // subsequently marked for dynamic endowments must still reach the callback
     // and fail closed on its missing identity. Marker-off contexts continue to
     // allow their original source, preserving the attribution-only behavior.
-    context.set_allow_generation_from_strings(false);
-    if let Some(context_id) = random_hex_identity(EVAL_CONTEXT_PREFIX)
-      && let Some(value) = v8::String::new(scope, &context_id)
-    {
-      context.set_embedder_data(ODEN_EVAL_CONTEXT_SLOT, value.into());
-    }
+    initialize_context_attribution(scope, context, || {
+      random_hex_identity(EVAL_CONTEXT_PREFIX)
+    });
+  }
+}
+
+fn initialize_context_attribution(
+  scope: &mut v8::PinScope<'_, '_, ()>,
+  context: v8::Local<v8::Context>,
+  identity: impl FnOnce() -> Option<String>,
+) {
+  // Materialize both exact logical slots before disabling V8's unconditional
+  // fast path. rusty_v8's field-count growth initializes intervening storage
+  // but its get_embedder_data contract still requires that the requested slot
+  // itself was set.
+  let missing_identity: v8::Local<v8::Value> = v8::undefined(scope).into();
+  context.set_embedder_data(ODEN_EVAL_CONTEXT_SLOT, missing_identity);
+  let disabled = v8::Boolean::new(scope, false);
+  context.set_embedder_data(ODEN_EVAL_ENDOWMENT_SLOT, disabled.into());
+  context.set_allow_generation_from_strings(false);
+
+  if let Some(context_id) = identity()
+    && let Some(value) = v8::String::new(scope, &context_id)
+  {
+    context.set_embedder_data(ODEN_EVAL_CONTEXT_SLOT, value.into());
   }
 }
 
@@ -954,6 +1043,231 @@ mod tests {
       is_wasm: false,
       promise_index: None,
     }
+  }
+
+  fn install_actual_codegen_callback(runtime: &mut crate::JsRuntime) {
+    unsafe {
+      crate::oden_v8_abi::set_modify_code_generation_from_strings_callback(
+        runtime.v8_isolate(),
+        code_generation_callback,
+      );
+    }
+  }
+
+  fn assert_dynamic_script_denied(
+    scope: &mut v8::PinScope<'_, '_>,
+    source: &str,
+  ) {
+    v8::tc_scope!(let tc_scope, scope);
+    let source = v8::String::new(tc_scope, source).unwrap();
+    let script = v8::Script::compile(tc_scope, source, None).unwrap();
+    assert!(script.run(tc_scope).is_none());
+    assert!(tc_scope.has_caught());
+    let exception = tc_scope.exception().unwrap();
+    let message = exception
+      .to_string(tc_scope)
+      .unwrap()
+      .to_rust_string_lossy(tc_scope);
+    assert!(
+      message.contains("Code generation from strings disallowed"),
+      "unexpected dynamic-code denial: {message}"
+    );
+  }
+
+  #[test]
+  fn missing_identity_preserves_attribution_only_but_armed_context_denies() {
+    let mut runtime = crate::JsRuntime::new(crate::RuntimeOptions::default());
+    install_actual_codegen_callback(&mut runtime);
+    let context = runtime.main_context();
+    {
+      v8::scope!(let scope, runtime.v8_isolate());
+      let context = v8::Local::new(scope, &context);
+      initialize_context_attribution(scope, context, || None);
+      let scope = &mut v8::ContextScope::new(scope, context);
+      assert_eq!(
+        dynamic_endowment_state(scope, context),
+        DynamicEndowmentState::AttributionOnly
+      );
+      assert_eq!(context_id(scope, context), None);
+    }
+
+    runtime
+      .execute_script(
+        "file:///missing-attribution-identity.js",
+        "if (Function('return 42')() !== 42) throw new Error('changed');",
+      )
+      .unwrap();
+
+    {
+      v8::scope!(let scope, runtime.v8_isolate());
+      let context = v8::Local::new(scope, &context);
+      let scope = &mut v8::ContextScope::new(scope, context);
+      enable_dynamic_endowments(scope);
+      assert_eq!(
+        dynamic_endowment_state(scope, context),
+        DynamicEndowmentState::Enabled
+      );
+      assert_eq!(context_id(scope, context), None);
+    }
+    let error = runtime
+      .execute_script(
+        "file:///armed-missing-attribution-identity.js",
+        "Function('return 42')()",
+      )
+      .unwrap_err();
+    assert!(
+      error
+        .to_string()
+        .contains("Code generation from strings disallowed"),
+      "unexpected armed missing-identity denial: {error}"
+    );
+  }
+
+  #[test]
+  fn identity_only_old_crash_shape_is_bounded_and_denied() {
+    let mut runtime = crate::JsRuntime::new(crate::RuntimeOptions::default());
+    install_actual_codegen_callback(&mut runtime);
+    let context = runtime.main_context();
+    {
+      v8::scope!(let scope, runtime.v8_isolate());
+      let context = v8::Local::new(scope, &context);
+      let identity =
+        v8::String::new(scope, "oden-eval-0123456789abcdef0123456789abcdef")
+          .unwrap();
+      context.set_embedder_data(ODEN_EVAL_CONTEXT_SLOT, identity.into());
+      context.set_allow_generation_from_strings(false);
+      let scope = &mut v8::ContextScope::new(scope, context);
+      assert_eq!(
+        dynamic_endowment_state(scope, context),
+        DynamicEndowmentState::Unmanaged
+      );
+      assert_eq!(
+        context_id(scope, context).as_deref(),
+        Some("oden-eval-0123456789abcdef0123456789abcdef")
+      );
+    }
+
+    for _ in 0..1000 {
+      let error = runtime
+        .execute_script(
+          "file:///identity-only-old-crash-shape.js",
+          "Function('return 42')()",
+        )
+        .unwrap_err();
+      assert!(
+        error
+          .to_string()
+          .contains("Code generation from strings disallowed"),
+        "unexpected identity-only denial: {error}"
+      );
+    }
+  }
+
+  #[test]
+  fn managed_context_materializes_both_slots_before_dynamic_codegen() {
+    let mut runtime = crate::JsRuntime::new(crate::RuntimeOptions::default());
+    install_actual_codegen_callback(&mut runtime);
+    let context = runtime.main_context();
+    {
+      v8::scope!(let scope, runtime.v8_isolate());
+      let context = v8::Local::new(scope, &context);
+      initialize_context_attribution(scope, context, || {
+        Some("oden-eval-0123456789abcdef0123456789abcdef".to_string())
+      });
+      let scope = &mut v8::ContextScope::new(scope, context);
+      assert!(
+        crate::oden_v8_abi::context_embedder_data_slot_is_materialized(
+          context,
+          ODEN_EVAL_CONTEXT_SLOT,
+        )
+      );
+      assert!(
+        crate::oden_v8_abi::context_embedder_data_slot_is_materialized(
+          context,
+          ODEN_EVAL_ENDOWMENT_SLOT,
+        )
+      );
+      assert_eq!(
+        dynamic_endowment_state(scope, context),
+        DynamicEndowmentState::AttributionOnly
+      );
+    }
+
+    runtime
+      .execute_script(
+        "file:///managed-attribution-only.js",
+        "if (eval('40 + 2') !== 42) throw new Error('changed');",
+      )
+      .unwrap();
+  }
+
+  #[test]
+  fn unmanaged_node_vm_shaped_context_keeps_string_codegen_denied() {
+    let mut runtime = crate::JsRuntime::new(crate::RuntimeOptions::default());
+    install_actual_codegen_callback(&mut runtime);
+
+    v8::scope!(let scope, runtime.v8_isolate());
+    let context = v8::Context::new(scope, Default::default());
+    unsafe {
+      context.set_aligned_pointer_in_embedder_data(1, std::ptr::null_mut());
+      context.set_aligned_pointer_in_embedder_data(2, std::ptr::null_mut());
+      context.set_aligned_pointer_in_embedder_data(3, std::ptr::null_mut());
+    }
+    context.clear_all_slots();
+    context.set_allow_generation_from_strings(false);
+    assert!(
+      !crate::oden_v8_abi::context_embedder_data_slot_is_materialized(
+        context,
+        ODEN_EVAL_CONTEXT_SLOT,
+      )
+    );
+    assert!(
+      !crate::oden_v8_abi::context_embedder_data_slot_is_materialized(
+        context,
+        ODEN_EVAL_ENDOWMENT_SLOT,
+      )
+    );
+
+    let scope = &mut v8::ContextScope::new(scope, context);
+    assert_eq!(
+      dynamic_endowment_state(scope, context),
+      DynamicEndowmentState::Unmanaged
+    );
+    assert_dynamic_script_denied(scope, "Function('return 42')()");
+    assert_dynamic_script_denied(scope, "eval('40 + 2')");
+  }
+
+  #[test]
+  fn arming_unmanaged_context_disables_codegen_fast_path() {
+    let mut runtime = crate::JsRuntime::new(crate::RuntimeOptions::default());
+    install_actual_codegen_callback(&mut runtime);
+
+    v8::scope!(let scope, runtime.v8_isolate());
+    let context = v8::Context::new(scope, Default::default());
+    assert!(context.is_code_generation_from_strings_allowed());
+    assert!(
+      !crate::oden_v8_abi::context_embedder_data_slot_is_materialized(
+        context,
+        ODEN_EVAL_CONTEXT_SLOT,
+      )
+    );
+    assert!(
+      !crate::oden_v8_abi::context_embedder_data_slot_is_materialized(
+        context,
+        ODEN_EVAL_ENDOWMENT_SLOT,
+      )
+    );
+
+    let scope = &mut v8::ContextScope::new(scope, context);
+    enable_dynamic_endowments(scope);
+    assert!(!context.is_code_generation_from_strings_allowed());
+    assert_eq!(
+      dynamic_endowment_state(scope, context),
+      DynamicEndowmentState::Enabled
+    );
+    assert_eq!(context_id(scope, context), None);
+    assert_dynamic_script_denied(scope, "Function('return 42')()");
+    assert_dynamic_script_denied(scope, "eval('40 + 2')");
   }
 
   #[test]
