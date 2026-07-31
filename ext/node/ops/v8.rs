@@ -1827,6 +1827,46 @@ mod native_capsec_tests {
       cleanup_assertion: "ambient-write-report-remains-side-effect-free",
       post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-process-report-write-work",
     },
+    Rev2V8FixtureOperation {
+      operation_id: "process-events-replacement",
+      edge_id: "diagnostic-route:ext/node/polyfills/process.ts#Process._events-replacement",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/process.ts#Process._events-replacement:complete",
+      denied_target: "process-events",
+      authorization_assertion: "guard-precedes-process-event-table-replacement",
+      denied_no_work_assertion: "denied-attempt-adds-no-process-event-table-replacement",
+      cleanup_assertion: "explicit-root-event-table-replacement-restores-usable-process-event-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-process-event-table-replacement",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "process-events-sensitive-table",
+      edge_id: "diagnostic-route:ext/node/polyfills/process.ts#Process._events-sensitive-table",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/process.ts#Process._events-sensitive-table:complete",
+      denied_target: "uncaughtException",
+      authorization_assertion: "guard-precedes-process-sensitive-event-table-observation-or-mutation",
+      denied_no_work_assertion: "denied-attempt-adds-no-process-sensitive-event-table-observation-or-mutation",
+      cleanup_assertion: "explicit-root-event-table-cleanup-restores-usable-process-event-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-process-sensitive-event-table-observation-or-mutation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "process-add-listener-forwarder-runtime",
+      edge_id: "diagnostic-route:ext/node/polyfills/process.ts#Process.addListener-forwarder-runtime",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/process.ts#Process.addListener-forwarder-runtime:complete",
+      denied_target: "uncaughtException",
+      authorization_assertion: "guard-precedes-process-exception-listener-addition",
+      denied_no_work_assertion: "denied-attempt-adds-no-process-exception-listener-addition",
+      cleanup_assertion: "explicit-root-listener-removal-restores-process-event-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-process-exception-listener-addition",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "process-remove-listener-forwarder-runtime",
+      edge_id: "diagnostic-route:ext/node/polyfills/process.ts#Process.removeListener-forwarder-runtime",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/process.ts#Process.removeListener-forwarder-runtime:complete",
+      denied_target: "uncaughtException",
+      authorization_assertion: "guard-precedes-process-exception-listener-removal",
+      denied_no_work_assertion: "denied-attempt-adds-no-process-exception-listener-removal",
+      cleanup_assertion: "explicit-root-listener-removal-restores-process-event-state",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-process-exception-listener-removal",
+    },
   ];
 
   struct NativeV8TestRoot(PathBuf, Option<tempfile::TempDir>);
@@ -3241,6 +3281,713 @@ mod native_capsec_tests {
     );
   }
 
+  fn load_public_process_events_wrapper(runtime: &mut JsRuntime, root: &Path) {
+    set_actor(root, "main.ts");
+    let target = compiled_rev2_v8_fixture_target()
+      .expect("process event fixtures require an exact supported host");
+    execute(
+      runtime,
+      "file:///rev2_public_process_events_fixture_load.js",
+      r#"
+      {
+        const core = Deno.core;
+        if (core.build.target !== "unknown") {
+          throw new Error("process event fixture build info was already set");
+        }
+        core.setBuildInfo("__REV2_PROCESS_EVENTS_TARGET__");
+        globalThis.Deno = Object.freeze({
+          __proto__: null,
+          core,
+          build: core.build,
+          pid: 4242,
+          ppid: 4241,
+          env: Object.freeze({
+            __proto__: null,
+            get() {
+              return undefined;
+            },
+          }),
+          cwd() {
+            return "/rev2-process-events-fixture";
+          },
+          hostname() {
+            return "rev2-process-events-host";
+          },
+          networkInterfaces() {
+            return [];
+          },
+        });
+
+        const processNamespace = core.createLazyLoader("node:process")();
+        const processObject = processNamespace.default;
+        const { EventEmitter } = core.loadExtScript(
+          "ext:deno_node/_events.mjs",
+        );
+        const sentinelEvent = "rev2-fixture-sentinel";
+        const ordinaryEvent = "rev2-fixture-ordinary";
+        function sentinelListener() {}
+        function ordinaryListener() {}
+        function exceptionListener() {}
+        function metaListener() {}
+        function candidateListener() {}
+
+        let table;
+        let guardedTable;
+        let prepared = false;
+        const commits = {
+          __proto__: null,
+          replacement: 0,
+          sensitive: 0,
+          addition: 0,
+          removal: 0,
+        };
+
+        function countExactListener(event, listener) {
+          const value = table[event];
+          if (value === listener) return 1;
+          if (!Array.isArray(value)) return 0;
+          let count = 0;
+          for (const entry of value) {
+            if (entry === listener) count++;
+          }
+          return count;
+        }
+
+        function installTable(nextTable) {
+          processObject._events = nextTable;
+          processObject._eventsCount = 0;
+          table = nextTable;
+          guardedTable = processObject._events;
+          processObject.on(sentinelEvent, sentinelListener);
+        }
+
+        installTable(Object.create(null));
+
+        const facade = Object.freeze({
+          __proto__: null,
+          replaceEvents() {
+            installTable(Object.create(null));
+            commits.replacement++;
+          },
+          sensitiveGet() {
+            const result = processObject._events.uncaughtException;
+            commits.sensitive++;
+            return result;
+          },
+          sensitiveSet() {
+            processObject._events.uncaughtException = candidateListener;
+            commits.sensitive++;
+          },
+          sensitiveDefineProperty() {
+            Reflect.defineProperty(
+              processObject._events,
+              "uncaughtException",
+              {
+                __proto__: null,
+                value: candidateListener,
+                writable: true,
+                enumerable: true,
+                configurable: true,
+              },
+            );
+            commits.sensitive++;
+          },
+          sensitiveDeleteProperty() {
+            Reflect.deleteProperty(
+              processObject._events,
+              "uncaughtException",
+            );
+            commits.sensitive++;
+          },
+          sensitiveHas() {
+            const result = "uncaughtException" in processObject._events;
+            commits.sensitive++;
+            return result;
+          },
+          sensitiveOwnKeys() {
+            const result = Reflect.ownKeys(processObject._events);
+            commits.sensitive++;
+            return result;
+          },
+          sensitiveDescriptor() {
+            const result = Reflect.getOwnPropertyDescriptor(
+              processObject._events,
+              "uncaughtException",
+            );
+            commits.sensitive++;
+            return result;
+          },
+          borrowedRemoveException() {
+            Reflect.apply(
+              EventEmitter.prototype.removeListener,
+              processObject,
+              ["uncaughtException", exceptionListener],
+            );
+            commits.sensitive++;
+          },
+          borrowedRemoveMeta() {
+            Reflect.apply(
+              EventEmitter.prototype.removeListener,
+              processObject,
+              ["newListener", metaListener],
+            );
+            commits.sensitive++;
+          },
+          addListenerForwarder() {
+            const result = processObject.addListener(
+              "uncaughtException",
+              exceptionListener,
+            );
+            if (result !== processObject) {
+              throw new Error("process.addListener returned an inexact receiver");
+            }
+            commits.addition++;
+          },
+          addMetaListenerForwarder() {
+            const result = processObject.addListener(
+              "newListener",
+              metaListener,
+            );
+            if (result !== processObject) {
+              throw new Error(
+                "process.addListener meta forwarder returned an inexact receiver",
+              );
+            }
+            commits.addition++;
+          },
+          removeListenerForwarder() {
+            const result = processObject.removeListener(
+              "uncaughtException",
+              exceptionListener,
+            );
+            if (result !== processObject) {
+              throw new Error(
+                "process.removeListener returned an inexact receiver",
+              );
+            }
+            commits.removal++;
+          },
+          removeMetaListenerForwarder() {
+            const result = processObject.removeListener(
+              "newListener",
+              metaListener,
+            );
+            if (result !== processObject) {
+              throw new Error(
+                "process.removeListener meta forwarder returned an inexact receiver",
+              );
+            }
+            commits.removal++;
+          },
+        });
+
+        function assertCounters(operationId, phase) {
+          let replacement = 0;
+          let addition = 0;
+          let removal = 0;
+          if (phase === "clean" || phase === "post-cleanup-denied") {
+            if (operationId === "process-events-replacement") {
+              replacement = 1;
+            } else if (
+              operationId === "process-add-listener-forwarder-runtime"
+            ) {
+              addition = 2;
+            } else if (
+              operationId === "process-remove-listener-forwarder-runtime"
+            ) {
+              removal = 2;
+            }
+          }
+          if (
+            commits.replacement !== replacement ||
+            commits.sensitive !== 0 ||
+            commits.addition !== addition ||
+            commits.removal !== removal
+          ) {
+            throw new Error(
+              `${operationId}/${phase} retained inexact process event work`,
+            );
+          }
+        }
+
+        function assertState(operationId, phase) {
+          if (
+            processObject._events !== guardedTable ||
+            countExactListener(sentinelEvent, sentinelListener) !== 1
+          ) {
+            throw new Error(
+              `${operationId}/${phase} changed the guarded event table`,
+            );
+          }
+          const seeded = phase === "denied" && (
+            operationId === "process-events-sensitive-table" ||
+            operationId === "process-remove-listener-forwarder-runtime"
+          );
+          const exceptionCount = countExactListener(
+            "uncaughtException",
+            exceptionListener,
+          );
+          const metaCount = countExactListener("newListener", metaListener);
+          const expectedExceptionCount = seeded ? 1 : 0;
+          const expectedMetaCount = seeded &&
+              (operationId === "process-events-sensitive-table" ||
+                operationId === "process-remove-listener-forwarder-runtime")
+            ? 1
+            : 0;
+          const expectedEventCount = 1 + expectedExceptionCount +
+            expectedMetaCount;
+          const keys = Reflect.ownKeys(table);
+          if (
+            exceptionCount !== expectedExceptionCount ||
+            metaCount !== expectedMetaCount ||
+            countExactListener("uncaughtException", candidateListener) !== 0 ||
+            keys.length !== expectedEventCount ||
+            !keys.includes(sentinelEvent) ||
+            (expectedExceptionCount === 1) !==
+              keys.includes("uncaughtException") ||
+            (expectedMetaCount === 1) !== keys.includes("newListener") ||
+            processObject._eventsCount !== expectedEventCount
+          ) {
+            throw new Error(
+              `${operationId}/${phase} retained inexact process event state`,
+            );
+          }
+          assertCounters(operationId, phase);
+        }
+
+        const controller = Object.freeze({
+          __proto__: null,
+          prepare(operationId) {
+            if (prepared) {
+              throw new Error("process event fixture was already prepared");
+            }
+            assertState(operationId, "initial");
+            if (operationId === "process-events-sensitive-table") {
+              processObject.on("uncaughtException", exceptionListener);
+              processObject.on("newListener", metaListener);
+            } else if (
+              operationId === "process-remove-listener-forwarder-runtime"
+            ) {
+              processObject.on("uncaughtException", exceptionListener);
+              processObject.on("newListener", metaListener);
+            } else if (
+              operationId !== "process-events-replacement" &&
+              operationId !== "process-add-listener-forwarder-runtime"
+            ) {
+              throw new Error(
+                `unknown process event fixture operation ${operationId}`,
+              );
+            }
+            prepared = true;
+          },
+          assertDenied(operationId) {
+            if (!prepared) {
+              throw new Error("process event fixture was not prepared");
+            }
+            assertState(operationId, "denied");
+          },
+          cleanup(operationId) {
+            if (!prepared) {
+              throw new Error("process event fixture was not prepared");
+            }
+            if (operationId === "process-events-replacement") {
+              facade.replaceEvents();
+            } else if (operationId === "process-events-sensitive-table") {
+              processObject.off("uncaughtException", exceptionListener);
+              processObject.off("newListener", metaListener);
+            } else if (
+              operationId === "process-add-listener-forwarder-runtime"
+            ) {
+              facade.addListenerForwarder();
+              facade.addMetaListenerForwarder();
+              processObject.off("uncaughtException", exceptionListener);
+              processObject.off("newListener", metaListener);
+            } else if (
+              operationId === "process-remove-listener-forwarder-runtime"
+            ) {
+              facade.removeListenerForwarder();
+              facade.removeMetaListenerForwarder();
+            } else {
+              throw new Error(
+                `unknown process event fixture operation ${operationId}`,
+              );
+            }
+            processObject.on(ordinaryEvent, ordinaryListener);
+            if (countExactListener(ordinaryEvent, ordinaryListener) !== 1) {
+              throw new Error("ordinary process event addition was unusable");
+            }
+            processObject.off(ordinaryEvent, ordinaryListener);
+            if (countExactListener(ordinaryEvent, ordinaryListener) !== 0) {
+              throw new Error("ordinary process event cleanup was unusable");
+            }
+            prepared = false;
+            assertState(operationId, "clean");
+          },
+          assertClean(operationId) {
+            if (prepared) {
+              throw new Error("process event fixture remained prepared");
+            }
+            assertState(operationId, "clean");
+          },
+          assertPostCleanupDenied(operationId) {
+            if (prepared) {
+              throw new Error("process event fixture was re-prepared");
+            }
+            assertState(operationId, "post-cleanup-denied");
+          },
+        });
+
+        function isExactFrozenNullFacade(value, keys) {
+          if (
+            value === null ||
+            typeof value !== "object" ||
+            Object.getPrototypeOf(value) !== null ||
+            !Object.isFrozen(value)
+          ) {
+            return false;
+          }
+          const ownKeys = Reflect.ownKeys(value);
+          if (
+            ownKeys.length !== keys.length ||
+            ownKeys.some((key, index) => key !== keys[index])
+          ) {
+            return false;
+          }
+          return ownKeys.every((key) => {
+            const descriptor = Object.getOwnPropertyDescriptor(value, key);
+            return descriptor !== undefined &&
+              "value" in descriptor &&
+              descriptor.enumerable === true &&
+              descriptor.configurable === false &&
+              descriptor.writable === false &&
+              typeof descriptor.value === "function";
+          });
+        }
+
+        const facadeKeys = [
+          "replaceEvents",
+          "sensitiveGet",
+          "sensitiveSet",
+          "sensitiveDefineProperty",
+          "sensitiveDeleteProperty",
+          "sensitiveHas",
+          "sensitiveOwnKeys",
+          "sensitiveDescriptor",
+          "borrowedRemoveException",
+          "borrowedRemoveMeta",
+          "addListenerForwarder",
+          "addMetaListenerForwarder",
+          "removeListenerForwarder",
+          "removeMetaListenerForwarder",
+        ];
+        const controllerKeys = [
+          "prepare",
+          "assertDenied",
+          "cleanup",
+          "assertClean",
+          "assertPostCleanupDenied",
+        ];
+        const forbiddenKeys = [
+          "process",
+          "events",
+          "EventEmitter",
+          "constructor",
+          "prototype",
+          "internals",
+          "token",
+          "__proto__",
+        ];
+        if (
+          processObject === null ||
+          typeof processObject !== "object" ||
+          processObject !== processNamespace.default ||
+          typeof EventEmitter !== "function" ||
+          !isExactFrozenNullFacade(facade, facadeKeys) ||
+          !isExactFrozenNullFacade(controller, controllerKeys) ||
+          forbiddenKeys.some((key) => key in facade || key in controller)
+        ) {
+          throw new Error("the exact process event fixture facade did not load");
+        }
+        globalThis.rev2ProcessEvents = facade;
+        globalThis.rev2ProcessEventsController = controller;
+      }
+      "#
+      .replace("__REV2_PROCESS_EVENTS_TARGET__", target),
+    );
+  }
+
+  fn exact_process_source_block<'a>(
+    source: &'a str,
+    operation_id: &str,
+    start_anchor: &str,
+    end_anchor: &str,
+  ) -> &'a str {
+    assert_eq!(
+      source.matches(start_anchor).count(),
+      1,
+      "{operation_id} source anchor is not unique"
+    );
+    let start = source.find(start_anchor).unwrap();
+    let operation = &source[start..];
+    let end = operation
+      .find(end_anchor)
+      .unwrap_or_else(|| panic!("{operation_id} source terminator is absent"));
+    &operation[..end]
+  }
+
+  fn assert_exact_process_guarded_suffix(
+    source: &str,
+    operation_id: &str,
+    start_anchor: &str,
+    end_anchor: &str,
+    exact_guarded_suffix: &str,
+  ) {
+    let operation = exact_process_source_block(
+      source,
+      operation_id,
+      start_anchor,
+      end_anchor,
+    );
+    assert!(
+      operation.contains(exact_guarded_suffix),
+      "{operation_id} lost its exact untrusted guard-before-work suffix"
+    );
+  }
+
+  fn assert_exact_process_guard_prefix_before_work(
+    source: &str,
+    operation_id: &str,
+    start_anchor: &str,
+    end_anchor: &str,
+    exact_guard_prefix: &str,
+    work_anchor: &str,
+  ) {
+    let operation = exact_process_source_block(
+      source,
+      operation_id,
+      start_anchor,
+      end_anchor,
+    );
+    let guard_end = operation
+      .find(exact_guard_prefix)
+      .map(|index| index + exact_guard_prefix.len())
+      .unwrap_or_else(|| panic!("{operation_id} lost its exact guard prefix"));
+    let work_index = operation
+      .find(work_anchor)
+      .unwrap_or_else(|| panic!("{operation_id} lost its first work anchor"));
+    assert!(
+      guard_end <= work_index,
+      "{operation_id} no longer guards before its first authority-bearing work"
+    );
+  }
+
+  fn assert_public_process_event_guard_precedes_wrapper_work(
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let process_source = include_str!("../polyfills/process.ts");
+    let event_emitter_source = include_str!("../polyfills/_events.mjs");
+    let event_table_start = process_source
+      .find("function wrapProcessEvents(store: any) {")
+      .expect("process event-table wrapper is present");
+    let event_table_end = process_source[event_table_start..]
+      .find("guardedProcessEvents = wrapProcessEvents(processEventsStore);")
+      .map(|offset| event_table_start + offset)
+      .expect("process event-table wrapper terminator is present");
+    let event_table_source =
+      &process_source[event_table_start..event_table_end];
+    match operation.operation_id {
+      "process-events-replacement" => {
+        let exact_setter = r#"  set(value) {
+    op_oden_guard_deny_only_surface(
+      "runtime",
+      "inspect",
+      "process-events",
+      "process._events=set",
+    );
+    processEventsStore = value;
+    guardedProcessEvents = wrapProcessEvents(value);
+  },"#;
+        assert_eq!(
+          process_source
+            .matches("ObjectDefineProperty(process, \"_events\", {")
+            .count(),
+          1,
+          "process event-table replacement property is not unique"
+        );
+        assert!(
+          process_source.contains(exact_setter),
+          "process event-table replacement no longer guards before retained replacement state"
+        );
+      }
+      "process-events-sensitive-table" => {
+        let traps = [
+          (
+            "    get(target, property) {",
+            "    set(target, property, value) {",
+            r#"      guardProcessExceptionEvent(property, "process._events.get");
+      guardProcessMetaEvent(property, "process._events.get");
+      guardProcessSignalEvent(property, "inspect", "process._events.get");
+      return ReflectGet(target, property, target);"#,
+          ),
+          (
+            "    set(target, property, value) {",
+            "    defineProperty(target, property, descriptor) {",
+            r#"      guardProcessExceptionEvent(property, "process._events.set");
+      guardProcessMetaEvent(property, "process._events.set");
+      guardProcessSignalEvent(property, "control", "process._events.set");
+      return ReflectSet(target, property, value, target);"#,
+          ),
+          (
+            "    defineProperty(target, property, descriptor) {",
+            "    deleteProperty(target, property) {",
+            r#"      guardProcessExceptionEvent(property, "process._events.defineProperty");
+      guardProcessMetaEvent(property, "process._events.defineProperty");
+      guardProcessSignalEvent(
+        property,
+        "control",
+        "process._events.defineProperty",
+      );
+      return ReflectDefineProperty(target, property, descriptor);"#,
+          ),
+          (
+            "    deleteProperty(target, property) {",
+            "    has(target, property) {",
+            r#"      guardProcessExceptionEvent(property, "process._events.deleteProperty");
+      guardProcessMetaEvent(property, "process._events.deleteProperty");
+      guardProcessSignalEvent(
+        property,
+        "control",
+        "process._events.deleteProperty",
+      );
+      return ReflectDeleteProperty(target, property);"#,
+          ),
+          (
+            "    has(target, property) {",
+            "    ownKeys(target) {",
+            r#"      guardProcessExceptionEvent(property, "process._events.has");
+      guardProcessMetaEvent(property, "process._events.has");
+      guardProcessSignalEvent(property, "inspect", "process._events.has");
+      return ReflectHas(target, property);"#,
+          ),
+          (
+            "    ownKeys(target) {",
+            "    getOwnPropertyDescriptor(target, property) {",
+            r#"      if (protectedEvent !== undefined) {
+        guardProcessExceptionEvent(
+          protectedEvent,
+          "process._events.ownKeys",
+        );
+      }
+      if (
+        ReflectHas(target, "newListener") ||
+        ReflectHas(target, "removeListener")
+      ) {
+        guardProcessMetaEvent("newListener", "process._events.ownKeys");
+      }
+      const keys = ReflectOwnKeys(target);"#,
+          ),
+          (
+            "    getOwnPropertyDescriptor(target, property) {",
+            "  });",
+            r#"      guardProcessExceptionEvent(
+        property,
+        "process._events.getOwnPropertyDescriptor",
+      );
+      guardProcessMetaEvent(
+        property,
+        "process._events.getOwnPropertyDescriptor",
+      );
+      guardProcessSignalEvent(
+        property,
+        "inspect",
+        "process._events.getOwnPropertyDescriptor",
+      );
+      return ReflectGetOwnPropertyDescriptor(target, property);"#,
+          ),
+        ];
+        for (start_anchor, end_anchor, exact_guarded_suffix) in traps {
+          assert_exact_process_guarded_suffix(
+            event_table_source,
+            operation.operation_id,
+            start_anchor,
+            end_anchor,
+            exact_guarded_suffix,
+          );
+        }
+        let borrowed_removal = r#"function removeListenerExact(target, type, listener) {
+  checkListener(listener);
+
+  const events = target._events;
+  if (events === undefined) {
+    return target;
+  }
+
+  const list = events[type];"#;
+        assert!(
+          process_source.contains(
+            "Borrowing EventEmitter.prototype must not bypass the process-specific",
+          ) && event_emitter_source.contains(borrowed_removal),
+          "borrowed EventEmitter removal no longer reaches the guarded process event table before mutation"
+        );
+      }
+      "process-add-listener-forwarder-runtime" => {
+        assert!(
+          process_source.contains(
+            r#"Process.prototype.addListener = function (
+  // deno-lint-ignore no-explicit-any
+  this: any,
+  event: string,
+  // deno-lint-ignore no-explicit-any
+  listener: (...args: any[]) => void,
+) {
+  return this.on(event, listener);
+};"#,
+          ),
+          "process.addListener no longer forwards exactly through process.on"
+        );
+        assert_exact_process_guard_prefix_before_work(
+          process_source,
+          operation.operation_id,
+          "Process.prototype.on = function (",
+          "Process.prototype.off = function (",
+          r#") {
+  guardProcessExceptionEvent(event, "process.on");
+  guardProcessMetaEvent(event, "process.on");"#,
+          "addProcessListenerInternal(this, event, listener, false);",
+        );
+      }
+      "process-remove-listener-forwarder-runtime" => {
+        assert!(
+          process_source.contains(
+            r#"Process.prototype.removeListener = function (
+  // deno-lint-ignore no-explicit-any
+  this: any,
+  event: string, // deno-lint-ignore no-explicit-any
+  listener: (...args: any[]) => void,
+) {
+  return this.off(event, listener);
+};"#,
+          ),
+          "process.removeListener no longer forwards exactly through process.off"
+        );
+        assert_exact_process_guard_prefix_before_work(
+          process_source,
+          operation.operation_id,
+          "Process.prototype.off = function (",
+          "Process.prototype.emit = function (",
+          r#") {
+  guardProcessExceptionEvent(event, "process.off");
+  guardProcessMetaEvent(event, "process.off");"#,
+          "removeProcessListenerInternal(this, event, listener);",
+        );
+      }
+      _ => panic!(
+        "unknown public process event fixture operation {}",
+        operation.operation_id
+      ),
+    }
+  }
+
   fn assert_public_process_guard_precedes_wrapper_work(
     operation: &Rev2V8FixtureOperation,
   ) {
@@ -3717,6 +4464,9 @@ process._getActiveHandles = getActiveHandles;"#
       "process-get-active-resource-names" => "process.getActiveResourcesInfo",
       "process-report-get-report" => "process.report.getReport",
       "process-report-write-report" => "process.report.writeReport",
+      "process-events-replacement" => "process._events=set",
+      "process-add-listener-forwarder-runtime" => "process.on",
+      "process-remove-listener-forwarder-runtime" => "process.off",
       _ => operation.denied_target,
     }
   }
@@ -3750,6 +4500,18 @@ process._getActiveHandles = getActiveHandles;"#
       "process-get-active-handles"
         | "process-get-active-requests"
         | "process-get-active-resource-names"
+    )
+  }
+
+  fn rev2_process_fixture_is_events(
+    operation: &Rev2V8FixtureOperation,
+  ) -> bool {
+    matches!(
+      operation.operation_id,
+      "process-events-replacement"
+        | "process-events-sensitive-table"
+        | "process-add-listener-forwarder-runtime"
+        | "process-remove-listener-forwarder-runtime"
     )
   }
 
@@ -4146,6 +4908,309 @@ process._getActiveHandles = getActiveHandles;"#
       before.public_wrapper_guard_calls,
       expected_guard_calls,
       "positive control",
+    );
+  }
+
+  fn assert_rev2_public_process_event_guard_sequence(
+    start: usize,
+    expected: &[(&str, &str)],
+    operation: &Rev2V8FixtureOperation,
+    context: &str,
+  ) {
+    let expected = expected
+      .iter()
+      .map(|(target, api_name)| {
+        (
+          "runtime".to_string(),
+          "inspect".to_string(),
+          (*target).to_string(),
+          (*api_name).to_string(),
+        )
+      })
+      .collect::<Vec<_>>();
+    let observed = {
+      let calls = PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap();
+      calls[start..].to_vec()
+    };
+    assert_eq!(
+      observed, expected,
+      "{} used an inexact process event guard sequence during {context}",
+      operation.operation_id
+    );
+  }
+
+  fn rev2_public_process_event_prepare_guards(
+    operation: &Rev2V8FixtureOperation,
+  ) -> &'static [(&'static str, &'static str)] {
+    match operation.operation_id {
+      "process-events-replacement"
+      | "process-add-listener-forwarder-runtime" => &[],
+      "process-events-sensitive-table" => &[
+        ("uncaughtException", "process.on"),
+        ("newListener", "process.on"),
+      ],
+      "process-remove-listener-forwarder-runtime" => &[
+        ("uncaughtException", "process.on"),
+        ("newListener", "process.on"),
+      ],
+      _ => panic!(
+        "unknown public process event fixture operation {}",
+        operation.operation_id
+      ),
+    }
+  }
+
+  fn rev2_public_process_event_denied_guards(
+    operation: &Rev2V8FixtureOperation,
+    complete_sensitive_table: bool,
+  ) -> Vec<(&'static str, &'static str)> {
+    match operation.operation_id {
+      "process-events-replacement" => {
+        vec![("process-events", "process._events=set")]
+      }
+      "process-events-sensitive-table" => {
+        let mut guards = vec![("uncaughtException", "process._events.get")];
+        if complete_sensitive_table {
+          guards.extend([
+            ("uncaughtException", "process._events.set"),
+            ("uncaughtException", "process._events.defineProperty"),
+            ("uncaughtException", "process._events.deleteProperty"),
+            ("uncaughtException", "process._events.has"),
+            ("uncaughtException", "process._events.ownKeys"),
+            (
+              "uncaughtException",
+              "process._events.getOwnPropertyDescriptor",
+            ),
+            ("uncaughtException", "process._events.get"),
+            ("newListener", "process._events.get"),
+          ]);
+        }
+        guards
+      }
+      "process-add-listener-forwarder-runtime" => {
+        vec![
+          ("uncaughtException", "process.on"),
+          ("newListener", "process.on"),
+        ]
+      }
+      "process-remove-listener-forwarder-runtime" => {
+        vec![
+          ("uncaughtException", "process.off"),
+          ("newListener", "process.off"),
+        ]
+      }
+      _ => panic!(
+        "unknown public process event fixture operation {}",
+        operation.operation_id
+      ),
+    }
+  }
+
+  fn rev2_public_process_event_cleanup_guards(
+    operation: &Rev2V8FixtureOperation,
+  ) -> &'static [(&'static str, &'static str)] {
+    match operation.operation_id {
+      "process-events-replacement" => {
+        &[("process-events", "process._events=set")]
+      }
+      "process-events-sensitive-table" => &[
+        ("uncaughtException", "process.off"),
+        ("newListener", "process.off"),
+      ],
+      "process-add-listener-forwarder-runtime" => &[
+        ("uncaughtException", "process.on"),
+        ("newListener", "process.on"),
+        ("uncaughtException", "process.off"),
+        ("newListener", "process.off"),
+      ],
+      "process-remove-listener-forwarder-runtime" => &[
+        ("uncaughtException", "process.off"),
+        ("newListener", "process.off"),
+      ],
+      _ => panic!(
+        "unknown public process event fixture operation {}",
+        operation.operation_id
+      ),
+    }
+  }
+
+  fn prepare_rev2_public_process_event_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    execute(
+      runtime,
+      "file:///rev2_public_process_events_fixture_prepare.js",
+      format!(
+        r#"
+        rev2ProcessEventsController.prepare({operation_id_json});
+        "#
+      ),
+    );
+  }
+
+  fn deny_rev2_public_process_event_fixture_operation(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    complete_sensitive_table: bool,
+  ) {
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    execute(
+      runtime,
+      "file:///rev2_public_process_events_fixture_denied.js",
+      format!(
+        r#"
+        {{
+          const operationId = {operation_id_json};
+          let attempts;
+          if (operationId === "process-events-replacement") {{
+            attempts = [[
+              "replaceEvents",
+              "process-events",
+              "process._events=set",
+            ]];
+          }} else if (operationId === "process-events-sensitive-table") {{
+            attempts = [
+              ["sensitiveGet", "uncaughtException", "process._events.get"],
+              ["sensitiveSet", "uncaughtException", "process._events.set"],
+              [
+                "sensitiveDefineProperty",
+                "uncaughtException",
+                "process._events.defineProperty",
+              ],
+              [
+                "sensitiveDeleteProperty",
+                "uncaughtException",
+                "process._events.deleteProperty",
+              ],
+              ["sensitiveHas", "uncaughtException", "process._events.has"],
+              [
+                "sensitiveOwnKeys",
+                "uncaughtException",
+                "process._events.ownKeys",
+              ],
+              [
+                "sensitiveDescriptor",
+                "uncaughtException",
+                "process._events.getOwnPropertyDescriptor",
+              ],
+              [
+                "borrowedRemoveException",
+                "uncaughtException",
+                "process._events.get",
+              ],
+              ["borrowedRemoveMeta", "newListener", "process._events.get"],
+            ];
+            if (!{complete_sensitive_table}) attempts = attempts.slice(0, 1);
+          }} else if (
+            operationId === "process-add-listener-forwarder-runtime"
+          ) {{
+            attempts = [
+              [
+                "addListenerForwarder",
+                "uncaughtException",
+                "process.on",
+              ],
+              ["addMetaListenerForwarder", "newListener", "process.on"],
+            ];
+          }} else if (
+            operationId === "process-remove-listener-forwarder-runtime"
+          ) {{
+            attempts = [
+              [
+                "removeListenerForwarder",
+                "uncaughtException",
+                "process.off",
+              ],
+              ["removeMetaListenerForwarder", "newListener", "process.off"],
+            ];
+          }} else {{
+            throw new Error(
+              `unknown process event fixture operation ${{operationId}}`,
+            );
+          }}
+          for (const [method, target, apiName] of attempts) {{
+            let denied = false;
+            try {{
+              rev2ProcessEvents[method]();
+            }} catch (error) {{
+              const message = String(error);
+              const expected =
+                `principal set [denied-native] may not use deny-only runtime:inspect:${{target}}`;
+              if (!message.includes(expected)) {{
+                throw new Error(
+                  `${{operationId}}/${{apiName}} used the wrong actor or boundary: ${{message}}`,
+                );
+              }}
+              denied = true;
+            }}
+            if (!denied) {{
+              throw new Error(
+                `${{operationId}}/${{apiName}} reached process event work`,
+              );
+            }}
+          }}
+        }}
+        "#
+      ),
+    );
+  }
+
+  fn assert_rev2_public_process_event_fixture_denied_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    execute(
+      runtime,
+      "file:///rev2_public_process_events_fixture_denied_state.js",
+      format!("rev2ProcessEventsController.assertDenied({operation_id_json});"),
+    );
+  }
+
+  fn cleanup_rev2_public_process_event_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    execute(
+      runtime,
+      "file:///rev2_public_process_events_fixture_cleanup.js",
+      format!("rev2ProcessEventsController.cleanup({operation_id_json});"),
+    );
+  }
+
+  fn assert_rev2_public_process_event_fixture_clean_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    post_cleanup_denied: bool,
+  ) {
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    let method = if post_cleanup_denied {
+      "assertPostCleanupDenied"
+    } else {
+      "assertClean"
+    };
+    execute(
+      runtime,
+      "file:///rev2_public_process_events_fixture_clean_state.js",
+      format!("rev2ProcessEventsController.{method}({operation_id_json});"),
     );
   }
 
@@ -6520,6 +7585,167 @@ process._getActiveHandles = getActiveHandles;"#
     );
   }
 
+  fn run_rev2_public_process_event_fixture_mode(
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    case_kind: &str,
+    mode: &str,
+  ) {
+    reset_rev2_v8_fixture_canaries();
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _tokio_guard = tokio_runtime.enter();
+    let mut runtime = new_public_process_wrapper_runtime();
+    load_public_process_events_wrapper(&mut runtime, root);
+    assert_public_process_event_guard_precedes_wrapper_work(operation);
+    assert_rev2_public_process_event_guard_sequence(
+      0,
+      &[("process-events", "process._events=set")],
+      operation,
+      "isolated public-wrapper loading",
+    );
+
+    let prepare_start =
+      PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.load(Ordering::SeqCst);
+    prepare_rev2_public_process_event_fixture_state(
+      &mut runtime,
+      root,
+      operation,
+    );
+    assert_rev2_public_process_event_guard_sequence(
+      prepare_start,
+      rev2_public_process_event_prepare_guards(operation),
+      operation,
+      "root preparation",
+    );
+
+    let before = rev2_v8_fixture_canaries();
+    deny_rev2_public_process_event_fixture_operation(
+      &mut runtime,
+      root,
+      operation,
+      true,
+    );
+    let after = rev2_v8_fixture_canaries();
+    let denied_guards =
+      rev2_public_process_event_denied_guards(operation, true);
+    assert_eq!(
+      after.public_wrapper_guard_calls,
+      before.public_wrapper_guard_calls + denied_guards.len(),
+      "{} crossed an inexact number of process event denial guards in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_rev2_public_process_event_guard_sequence(
+      before.public_wrapper_guard_calls,
+      &denied_guards,
+      operation,
+      "denied operation",
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before.public_wrapper_guard_calls,
+        ..after
+      },
+      before,
+      "{} changed process event state or unrelated native work before denial in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_rev2_public_process_event_fixture_denied_state(
+      &mut runtime,
+      root,
+      operation,
+    );
+
+    let before_cleanup = rev2_v8_fixture_canaries();
+    cleanup_rev2_public_process_event_fixture_state(
+      &mut runtime,
+      root,
+      operation,
+    );
+    let after_cleanup = rev2_v8_fixture_canaries();
+    let cleanup_guards = rev2_public_process_event_cleanup_guards(operation);
+    assert_eq!(
+      after_cleanup.public_wrapper_guard_calls,
+      before_cleanup.public_wrapper_guard_calls + cleanup_guards.len(),
+      "{} crossed an inexact number of process event cleanup guards in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_rev2_public_process_event_guard_sequence(
+      before_cleanup.public_wrapper_guard_calls,
+      cleanup_guards,
+      operation,
+      "explicit root cleanup",
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before_cleanup.public_wrapper_guard_calls,
+        ..after_cleanup
+      },
+      before_cleanup,
+      "{} cleanup crossed unrelated native work in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_rev2_public_process_event_fixture_clean_state(
+      &mut runtime,
+      root,
+      operation,
+      false,
+    );
+
+    if case_kind == "staged-barrier:cleanup" {
+      let before_post_cleanup = rev2_v8_fixture_canaries();
+      deny_rev2_public_process_event_fixture_operation(
+        &mut runtime,
+        root,
+        operation,
+        false,
+      );
+      let after_post_cleanup = rev2_v8_fixture_canaries();
+      let post_cleanup_guards =
+        rev2_public_process_event_denied_guards(operation, false);
+      assert_eq!(
+        after_post_cleanup.public_wrapper_guard_calls,
+        before_post_cleanup.public_wrapper_guard_calls
+          + post_cleanup_guards.len(),
+        "{} crossed an inexact number of post-cleanup process event denial guards in {mode}",
+        operation.operation_id
+      );
+      assert_rev2_public_process_event_guard_sequence(
+        before_post_cleanup.public_wrapper_guard_calls,
+        &post_cleanup_guards,
+        operation,
+        "post-cleanup denied operation",
+      );
+      assert_eq!(
+        Rev2V8FixtureCanaries {
+          public_wrapper_guard_calls: before_post_cleanup
+            .public_wrapper_guard_calls,
+          ..after_post_cleanup
+        },
+        before_post_cleanup,
+        "{} post-cleanup denial changed process event state or unrelated native work in {mode}",
+        operation.operation_id
+      );
+      assert_rev2_public_process_event_fixture_clean_state(
+        &mut runtime,
+        root,
+        operation,
+        true,
+      );
+    }
+
+    assert_rev2_v8_fixture_terminal_clean(operation.operation_id, mode);
+    drop(runtime);
+    assert_eq!(
+      GC_PROFILER_ACTIVE_STATE_COUNT.load(Ordering::SeqCst),
+      0,
+      "{} retained unrelated native profiler state after process event runtime disposal in {mode}",
+      operation.operation_id
+    );
+  }
+
   fn run_rev2_public_process_fixture_mode(
     root: &Path,
     operation: &Rev2V8FixtureOperation,
@@ -6984,6 +8210,23 @@ process._getActiveHandles = getActiveHandles;"#
       REV2_V8_FIXTURE_MODES.contains(&mode),
       "fixture mode is not exact"
     );
+    if rev2_process_fixture_is_events(operation) {
+      // @ref LLP 0019#runtime-and-memory-inspection [tests] -- Exercise the
+      // actual public node:process event-table setter, guarded Proxy traps,
+      // and addListener/removeListener forwarders. Closure-private raw-table
+      // canaries prove denial precedes authority-bearing observation/delivery
+      // or retained mutation; the fixture exposes neither process, its table,
+      // EventEmitter prototypes, nor the trusted token/internal helpers.
+      // @ref LLP 0019#pre-promotion-conformance-candidate-execution
+      // [constrained-by] -- This isolated development harness emits only the
+      // existing process-local candidate report. It authenticates no
+      // execution, changes no cell or backend status, advertises no profile,
+      // and grants no production or release authority.
+      run_rev2_public_process_event_fixture_mode(
+        root, operation, case_kind, mode,
+      );
+      return rev2_v8_fixture_assertions(operation, case_kind);
+    }
     if matches!(
       operation.operation_id,
       "process-get-active-handles"
