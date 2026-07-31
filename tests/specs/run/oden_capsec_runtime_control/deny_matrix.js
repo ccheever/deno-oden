@@ -212,7 +212,9 @@ try {
     ? "DENIED"
     : "LEAKED";
   result.processSignalUnchanged = result.processSignalOn === "DENIED" &&
+      result.processSignalOnce === "DENIED" &&
       result.processSignalPrepend === "DENIED" &&
+      result.processSignalPrependOnce === "DENIED" &&
       result.processSignalRemove === "DENIED" &&
       result.processSignalRemoveAll === "DENIED" &&
       result.processSignalEmit === "DENIED" &&
