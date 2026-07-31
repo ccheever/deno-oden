@@ -1777,6 +1777,56 @@ mod native_capsec_tests {
       cleanup_assertion: "explicit-root-resource-destroy-callback-and-hook-disable",
       post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-async-hook-array-insertion",
     },
+    Rev2V8FixtureOperation {
+      operation_id: "process-get-active-handles",
+      edge_id: "diagnostic-route:ext/node/polyfills/internal/process/active_resources.ts#getActiveHandles",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/internal/process/active_resources.ts#getActiveHandles:complete",
+      denied_target: "process:active-handles",
+      authorization_assertion: "guard-precedes-active-handle-observation",
+      denied_no_work_assertion: "denied-attempt-adds-no-active-handle-observation",
+      cleanup_assertion: "root-unregister-removes-tracked-handle",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-active-handle-observation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "process-get-active-requests",
+      edge_id: "diagnostic-route:ext/node/polyfills/internal/process/active_resources.ts#getActiveRequests",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/internal/process/active_resources.ts#getActiveRequests:complete",
+      denied_target: "process:active-requests",
+      authorization_assertion: "guard-precedes-active-request-observation",
+      denied_no_work_assertion: "denied-attempt-adds-no-active-request-observation",
+      cleanup_assertion: "root-unregister-removes-tracked-request",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-active-request-observation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "process-get-active-resource-names",
+      edge_id: "diagnostic-route:ext/node/polyfills/internal/process/active_resources.ts#getActiveResourceNames",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/internal/process/active_resources.ts#getActiveResourceNames:complete",
+      denied_target: "process:active-resources",
+      authorization_assertion: "guard-precedes-active-resource-name-observation",
+      denied_no_work_assertion: "denied-attempt-adds-no-active-resource-name-observation",
+      cleanup_assertion: "root-unregister-removes-all-tracked-resource-names",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-active-resource-name-observation",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "process-report-get-report",
+      edge_id: "diagnostic-route:ext/node/polyfills/internal/process/report.ts#getReport",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/internal/process/report.ts#getReport:complete",
+      denied_target: "node:process.report.getReport",
+      authorization_assertion: "guard-precedes-process-report-construction-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-process-report-construction-work",
+      cleanup_assertion: "ambient-report-construction-remains-usable-with-exact-work-canaries",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-process-report-construction-work",
+    },
+    Rev2V8FixtureOperation {
+      operation_id: "process-report-write-report",
+      edge_id: "diagnostic-route:ext/node/polyfills/internal/process/report.ts#writeReport",
+      requirement_id: "fixture-requirement:diagnostic-route:ext/node/polyfills/internal/process/report.ts#writeReport:complete",
+      denied_target: "node:process.report.writeReport",
+      authorization_assertion: "guard-precedes-process-report-write-work",
+      denied_no_work_assertion: "denied-attempt-adds-no-process-report-write-work",
+      cleanup_assertion: "ambient-write-report-remains-side-effect-free",
+      post_cleanup_no_work_assertion: "post-cleanup-denial-adds-no-process-report-write-work",
+    },
   ];
 
   struct NativeV8TestRoot(PathBuf, Option<tempfile::TempDir>);
@@ -1948,12 +1998,31 @@ mod native_capsec_tests {
     )
   }
 
+  // node:process imports this runtime-owned worker metric op even though the
+  // five focused wrappers never call process.threadCpuUsage(). The isolated
+  // deno_node unit runtime supplies a link-only test stub so the actual public
+  // module can evaluate; any fixture call into it hard-fails.
+  #[op2(fast)]
+  fn op_current_thread_cpu_usage() {
+    panic!("process fixture reached unrelated thread CPU usage work")
+  }
+
   deno_core::extension!(
     public_v8_wrapper_guard_test_ext,
-    ops = [op_oden_guard_deny_only_surface],
+    ops = [op_oden_guard_deny_only_surface, op_current_thread_cpu_usage],
     state = |state| {
       state.put::<PermissionsContainer>(native_test_permissions(false));
     }
+  );
+
+  // The real node:os wrapper loaded by process.report references this lazy
+  // script, but the focused deno_node unit-test runtime does not otherwise
+  // depend on deno_os. None of its ops are exercised by the report fields
+  // below; the script supplies only the actual osUptime export expected while
+  // node:os evaluates.
+  deno_core::extension!(
+    deno_os,
+    lazy_loaded_js = [dir "../os", "30_os.js"]
   );
 
   fn execute(runtime: &mut JsRuntime, name: &'static str, source: String) {
@@ -2405,7 +2474,7 @@ mod native_capsec_tests {
     ),
     deno_error::JsErrorBox,
   > {
-    if !specifier.ends_with(".ts") {
+    if !specifier.ends_with(".ts") && !specifier.starts_with("node:") {
       return Ok((source, None));
     }
     let specifier_url = deno_core::url::Url::parse(&specifier).unwrap();
@@ -2439,26 +2508,32 @@ mod native_capsec_tests {
     Ok((output.text.into(), None))
   }
 
-  fn new_public_v8_wrapper_runtime() -> JsRuntime {
+  fn new_public_v8_wrapper_runtime_with_extra_extensions(
+    extra_extensions: Vec<deno_core::Extension>,
+  ) -> JsRuntime {
     let fs: deno_fs::FileSystemRc = Rc::new(deno_fs::RealFs);
+    let mut extensions = vec![
+      deno_webidl::deno_webidl::init(),
+      deno_web::deno_web::init(
+        deno_web::BlobStore::default_arc(),
+        Default::default(),
+        Default::default(),
+        deno_web::InMemoryBroadcastChannel::default(),
+      ),
+    ];
+    extensions.extend(extra_extensions);
+    extensions.extend([
+      deno_io::deno_io::init(Some(Default::default())),
+      deno_fs::deno_fs::init(fs.clone()),
+      crate::deno_node::init::<
+        DenoInNpmPackageChecker,
+        NpmResolver<sys_traits::impls::RealSys>,
+        sys_traits::impls::RealSys,
+      >(None, fs),
+      public_v8_wrapper_guard_test_ext::init(),
+    ]);
     let runtime = JsRuntime::new(RuntimeOptions {
-      extensions: vec![
-        deno_webidl::deno_webidl::init(),
-        deno_web::deno_web::init(
-          deno_web::BlobStore::default_arc(),
-          Default::default(),
-          Default::default(),
-          deno_web::InMemoryBroadcastChannel::default(),
-        ),
-        deno_io::deno_io::init(Some(Default::default())),
-        deno_fs::deno_fs::init(fs.clone()),
-        crate::deno_node::init::<
-          DenoInNpmPackageChecker,
-          NpmResolver<sys_traits::impls::RealSys>,
-          sys_traits::impls::RealSys,
-        >(None, fs),
-        public_v8_wrapper_guard_test_ext::init(),
-      ],
+      extensions,
       extension_transpiler: Some(Rc::new(transpile_public_v8_fixture_source)),
       ..Default::default()
     });
@@ -2467,6 +2542,14 @@ mod native_capsec_tests {
       .borrow_mut()
       .put::<PermissionsContainer>(native_test_permissions(true));
     runtime
+  }
+
+  fn new_public_v8_wrapper_runtime() -> JsRuntime {
+    new_public_v8_wrapper_runtime_with_extra_extensions(Vec::new())
+  }
+
+  fn new_public_process_wrapper_runtime() -> JsRuntime {
+    new_public_v8_wrapper_runtime_with_extra_extensions(vec![deno_os::init()])
   }
 
   fn load_public_v8_wrapper(runtime: &mut JsRuntime, root: &Path) {
@@ -2699,6 +2782,579 @@ mod native_capsec_tests {
       assert!(
         internal_source.contains(inherited_constructor_prefix),
         "recovered public AsyncHook constructor no longer guards before callback reads or hook-state initialization"
+      );
+    }
+  }
+
+  fn load_public_process_active_resources_wrapper(
+    runtime: &mut JsRuntime,
+    root: &Path,
+  ) {
+    set_actor(root, "main.ts");
+    let target = compiled_rev2_v8_fixture_target().expect(
+      "process active-resource fixtures require an exact supported host",
+    );
+    execute(
+      runtime,
+      "file:///rev2_public_process_active_resources_fixture_load.js",
+      r#"
+      {
+        const core = Deno.core;
+        if (core.build.target !== "unknown") {
+          throw new Error(
+            "process active-resource fixture build info was already set",
+          );
+        }
+        core.setBuildInfo("__REV2_PROCESS_ACTIVE_TARGET__");
+        globalThis.Deno = Object.freeze({
+          __proto__: null,
+          core,
+          build: core.build,
+          pid: 4242,
+          ppid: 4241,
+          env: Object.freeze({
+            __proto__: null,
+            get() {
+              return undefined;
+            },
+          }),
+          cwd() {
+            return "/rev2-process-active-fixture";
+          },
+          hostname() {
+            return "rev2-process-active-host";
+          },
+          networkInterfaces() {
+            return [];
+          },
+        });
+        const activeResources = core.loadExtScript(
+          "ext:deno_node/internal/process/active_resources.ts",
+        );
+        const processNamespace =
+          core.createLazyLoader("node:process")();
+        const processObject = processNamespace.default;
+        let handle;
+        let request;
+        let retiredHandle;
+        let retiredRequest;
+        const facadeKeys = [
+          "getActiveHandles",
+          "getActiveRequests",
+          "getActiveResourceNames",
+        ];
+        function isExactFrozenNullFacade(value, keys) {
+          if (
+            value === null ||
+            typeof value !== "object" ||
+            Object.getPrototypeOf(value) !== null ||
+            !Object.isFrozen(value)
+          ) {
+            return false;
+          }
+          const ownKeys = Reflect.ownKeys(value);
+          if (
+            ownKeys.length !== keys.length ||
+            ownKeys.some((key, index) => key !== keys[index])
+          ) {
+            return false;
+          }
+          return ownKeys.every((key) => {
+            const descriptor = Object.getOwnPropertyDescriptor(value, key);
+            return descriptor !== undefined &&
+              "value" in descriptor &&
+              descriptor.enumerable === true &&
+              descriptor.configurable === false &&
+              descriptor.writable === false;
+          });
+        }
+        const facade = Object.freeze({
+          __proto__: null,
+          getActiveHandles: processObject._getActiveHandles,
+          getActiveRequests: processObject._getActiveRequests,
+          getActiveResourceNames: processObject.getActiveResourcesInfo,
+        });
+        const controller = Object.freeze({
+          __proto__: null,
+          seed() {
+            if (handle !== undefined || request !== undefined) {
+              throw new Error("active-resource fixture was already seeded");
+            }
+            handle = Object.freeze({
+              __proto__: null,
+              marker: "rev2-handle",
+            });
+            request = Object.freeze({
+              __proto__: null,
+              marker: "rev2-request",
+            });
+            activeResources.registerActiveHandle(
+              handle,
+              "Rev2FixtureHandleWrap",
+            );
+            activeResources.registerActiveRequest(
+              request,
+              "Rev2FixtureRequestWrap",
+            );
+          },
+          clear() {
+            if (handle === undefined || request === undefined) {
+              throw new Error("active-resource fixture was not seeded");
+            }
+            activeResources.unregisterActiveHandle(handle);
+            activeResources.unregisterActiveRequest(request);
+            retiredHandle = handle;
+            retiredRequest = request;
+            handle = undefined;
+            request = undefined;
+          },
+          assertState(seeded) {
+            if (
+              typeof seeded !== "boolean" ||
+              (seeded && (handle === undefined || request === undefined)) ||
+              (!seeded && (handle !== undefined || request !== undefined))
+            ) {
+              throw new Error("active-resource fixture state is inexact");
+            }
+          },
+          assertResult(operationId, result, seeded) {
+            if (
+              typeof operationId !== "string" ||
+              typeof seeded !== "boolean" ||
+              !Array.isArray(result) ||
+              Object.getPrototypeOf(result) !== Array.prototype
+            ) {
+              throw new Error("active-resource wrapper result shape is inexact");
+            }
+            function countExact(value) {
+              let count = 0;
+              for (const entry of result) {
+                if (entry === value) {
+                  count++;
+                }
+              }
+              return count;
+            }
+            if (operationId === "process-get-active-handles") {
+              const fixtureCount = countExact(
+                seeded ? handle : retiredHandle,
+              );
+              if (
+                (seeded && fixtureCount === 1) ||
+                (!seeded &&
+                  retiredHandle !== undefined &&
+                  fixtureCount === 0)
+              ) {
+                return;
+              }
+              throw new Error(
+                `active-handle wrapper retained an inexact fixture count: ${fixtureCount}`,
+              );
+            }
+            if (operationId === "process-get-active-requests") {
+              const fixtureCount = countExact(
+                seeded ? request : retiredRequest,
+              );
+              if (
+                (seeded && fixtureCount === 1) ||
+                (!seeded &&
+                  retiredRequest !== undefined &&
+                  fixtureCount === 0)
+              ) {
+                return;
+              }
+              throw new Error(
+                `active-request wrapper retained an inexact fixture count: ${fixtureCount}`,
+              );
+            }
+            if (operationId === "process-get-active-resource-names") {
+              if (result.some((name) => typeof name !== "string")) {
+                throw new Error(
+                  "active-resource name wrapper returned a non-string name",
+                );
+              }
+              const handleCount = countExact("Rev2FixtureHandleWrap");
+              const requestCount = countExact("Rev2FixtureRequestWrap");
+              const ordered = result.indexOf("Rev2FixtureHandleWrap") <
+                result.indexOf("Rev2FixtureRequestWrap");
+              if (
+                (seeded &&
+                  handleCount === 1 &&
+                  requestCount === 1 &&
+                  ordered) ||
+                (!seeded && handleCount === 0 && requestCount === 0)
+              ) {
+                return;
+              }
+              throw new Error(
+                `active-resource name wrapper retained inexact fixture counts: ${handleCount}/${requestCount}`,
+              );
+            }
+            throw new Error(
+              `unknown active-resource fixture operation ${operationId}`,
+            );
+          },
+        });
+        const controllerKeys = [
+          "seed",
+          "clear",
+          "assertState",
+          "assertResult",
+        ];
+        if (
+          !isExactFrozenNullFacade(facade, facadeKeys) ||
+          !isExactFrozenNullFacade(controller, controllerKeys) ||
+          processObject === null ||
+          typeof processObject !== "object" ||
+          facade.getActiveHandles !== activeResources.getActiveHandles ||
+          facade.getActiveRequests !== activeResources.getActiveRequests ||
+          facade.getActiveResourceNames !==
+            processNamespace.getActiveResourcesInfo ||
+          processObject.getActiveResourcesInfo !==
+            processNamespace.getActiveResourcesInfo ||
+          "constructor" in facade ||
+          "prototype" in facade ||
+          "__proto__" in facade ||
+          "registerActiveHandle" in facade ||
+          "registerActiveRequest" in facade ||
+          "unregisterActiveHandle" in facade ||
+          "unregisterActiveRequest" in facade
+        ) {
+          throw new Error(
+            "the exact process active-resource facade did not load",
+          );
+        }
+        const inherited = Object.create(facade);
+        const constructorLaundered = Object.create(null);
+        Object.defineProperties(constructorLaundered, {
+          getActiveHandles: {
+            value: facade.getActiveHandles,
+            enumerable: true,
+          },
+          getActiveRequests: {
+            value: facade.getActiveRequests,
+            enumerable: true,
+          },
+          getActiveResourceNames: {
+            value: facade.getActiveResourceNames,
+            enumerable: true,
+          },
+          constructor: {
+            value: function FixtureConstructor() {},
+            enumerable: true,
+          },
+        });
+        Object.freeze(constructorLaundered);
+        const prototypeLaundered = Object.freeze(Object.create(
+          { getActiveHandles: facade.getActiveHandles },
+          {
+            getActiveRequests: {
+              value: facade.getActiveRequests,
+              enumerable: true,
+            },
+            getActiveResourceNames: {
+              value: facade.getActiveResourceNames,
+              enumerable: true,
+            },
+          },
+        ));
+        if (
+          isExactFrozenNullFacade(inherited, facadeKeys) ||
+          isExactFrozenNullFacade(constructorLaundered, facadeKeys) ||
+          isExactFrozenNullFacade(prototypeLaundered, facadeKeys)
+        ) {
+          throw new Error(
+            "active-resource facade admitted inherited or constructor/prototype laundering",
+          );
+        }
+        globalThis.rev2ProcessActiveResources = facade;
+        globalThis.rev2ProcessActiveResourcesController = controller;
+      }
+      "#
+      .replace("__REV2_PROCESS_ACTIVE_TARGET__", target),
+    );
+  }
+
+  fn load_public_process_report_wrapper(runtime: &mut JsRuntime, root: &Path) {
+    set_actor(root, "main.ts");
+    let target = compiled_rev2_v8_fixture_target()
+      .expect("process report fixtures require an exact supported host");
+    execute(
+      runtime,
+      "file:///rev2_public_process_report_fixture_load.js",
+      r#"
+      {
+        const core = Deno.core;
+        if (core.build.target !== "unknown") {
+          throw new Error("process report fixture build info was already set");
+        }
+        core.setBuildInfo("__REV2_PROCESS_REPORT_TARGET__");
+        const work = {
+          __proto__: null,
+          cwdCalls: 0,
+          hostnameCalls: 0,
+          networkInterfaceCalls: 0,
+        };
+        const fixtureDeno = Object.freeze({
+          __proto__: null,
+          core,
+          build: core.build,
+          pid: 4242,
+          ppid: 4241,
+          env: Object.freeze({
+            __proto__: null,
+            get() {
+              return undefined;
+            },
+          }),
+          cwd() {
+            work.cwdCalls++;
+            return "/rev2-process-report-fixture";
+          },
+          hostname() {
+            work.hostnameCalls++;
+            return "rev2-process-report-host";
+          },
+          networkInterfaces() {
+            work.networkInterfaceCalls++;
+            return [];
+          },
+        });
+        globalThis.Deno = fixtureDeno;
+        const processNamespace =
+          core.createLazyLoader("node:process")();
+        const processObject = processNamespace.default;
+        const reportModule = core.loadExtScript(
+          "ext:deno_node/internal/process/report.ts",
+        );
+        const facadeKeys = ["getReport", "writeReport"];
+        function isExactFrozenNullFacade(value, keys) {
+          if (
+            value === null ||
+            typeof value !== "object" ||
+            Object.getPrototypeOf(value) !== null ||
+            !Object.isFrozen(value)
+          ) {
+            return false;
+          }
+          const ownKeys = Reflect.ownKeys(value);
+          if (
+            ownKeys.length !== keys.length ||
+            ownKeys.some((key, index) => key !== keys[index])
+          ) {
+            return false;
+          }
+          return ownKeys.every((key) => {
+            const descriptor = Object.getOwnPropertyDescriptor(value, key);
+            return descriptor !== undefined &&
+              "value" in descriptor &&
+              descriptor.enumerable === true &&
+              descriptor.configurable === false &&
+              descriptor.writable === false;
+          });
+        }
+        const facade = Object.freeze({
+          __proto__: null,
+          getReport: processObject.report.getReport,
+          writeReport: processObject.report.writeReport,
+        });
+        const controller = Object.freeze({
+          __proto__: null,
+          reset() {
+            work.cwdCalls = 0;
+            work.hostnameCalls = 0;
+            work.networkInterfaceCalls = 0;
+          },
+          assertCounts(cwdCalls, hostnameCalls, networkInterfaceCalls) {
+            if (
+              !Number.isSafeInteger(cwdCalls) ||
+              !Number.isSafeInteger(hostnameCalls) ||
+              !Number.isSafeInteger(networkInterfaceCalls) ||
+              work.cwdCalls !== cwdCalls ||
+              work.hostnameCalls !== hostnameCalls ||
+              work.networkInterfaceCalls !== networkInterfaceCalls
+            ) {
+              throw new Error("process report work canaries are inexact");
+            }
+          },
+        });
+        const controllerKeys = ["reset", "assertCounts"];
+        if (
+          !isExactFrozenNullFacade(facade, facadeKeys) ||
+          !isExactFrozenNullFacade(controller, controllerKeys) ||
+          processObject === null ||
+          typeof processObject !== "object" ||
+          facade.getReport !== reportModule.report.getReport ||
+          facade.writeReport !== reportModule.report.writeReport ||
+          processObject.report !== reportModule.report ||
+          Object.getPrototypeOf(fixtureDeno) !== null ||
+          !Object.isFrozen(fixtureDeno) ||
+          "constructor" in facade ||
+          "prototype" in facade ||
+          "__proto__" in facade ||
+          "report" in facade ||
+          "filename" in facade ||
+          "directory" in facade
+        ) {
+          throw new Error("the exact process report facade did not load");
+        }
+        const inherited = Object.create(facade);
+        const constructorLaundered = Object.create(null);
+        Object.defineProperties(constructorLaundered, {
+          getReport: {
+            value: facade.getReport,
+            enumerable: true,
+          },
+          writeReport: {
+            value: facade.writeReport,
+            enumerable: true,
+          },
+          constructor: {
+            value: function FixtureConstructor() {},
+            enumerable: true,
+          },
+        });
+        Object.freeze(constructorLaundered);
+        const prototypeLaundered = Object.freeze(Object.create(
+          { getReport: facade.getReport },
+          {
+            writeReport: {
+              value: facade.writeReport,
+              enumerable: true,
+            },
+          },
+        ));
+        if (
+          isExactFrozenNullFacade(inherited, facadeKeys) ||
+          isExactFrozenNullFacade(constructorLaundered, facadeKeys) ||
+          isExactFrozenNullFacade(prototypeLaundered, facadeKeys)
+        ) {
+          throw new Error(
+            "process report facade admitted inherited or constructor/prototype laundering",
+          );
+        }
+        globalThis.rev2ProcessReport = facade;
+        globalThis.rev2ProcessReportController = controller;
+      }
+      "#
+      .replace("__REV2_PROCESS_REPORT_TARGET__", target),
+    );
+  }
+
+  fn assert_public_process_guard_precedes_wrapper_work(
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let active_source =
+      include_str!("../polyfills/internal/process/active_resources.ts");
+    let process_source = include_str!("../polyfills/process.ts");
+    let report_source = include_str!("../polyfills/internal/process/report.ts");
+    let (scope, operation_anchor, exact_guard_prefix) =
+      match operation.operation_id {
+        "process-get-active-handles" => (
+          active_source,
+          "function getActiveHandles() {",
+          r#"function getActiveHandles() {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "process:active-handles",
+    "process._getActiveHandles",
+  );
+  return snapshot(activeHandles);"#,
+        ),
+        "process-get-active-requests" => (
+          active_source,
+          "function getActiveRequests() {",
+          r#"function getActiveRequests() {
+  // Resource snapshots reveal handles and operations owned by other package
+  // principals in the shared isolate.
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "process:active-requests",
+    "process._getActiveRequests",
+  );
+  return snapshot(activeRequests);"#,
+        ),
+        "process-get-active-resource-names" => (
+          process_source,
+          "export function getActiveResourcesInfo(): string[] {",
+          r#"export function getActiveResourcesInfo(): string[] {
+  // Resource, stdio terminal, and timer snapshots reveal process-wide
+  // activity. Invoke the guarded resource-name helper first so the registered
+  // boundary denies before any component is observed, then preserve the
+  // public result order with its saved names.
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  const activeResourceNames = getActiveResourceNames();
+  const result: string[] = [];"#,
+        ),
+        "process-report-get-report" => (
+          report_source,
+          "function getReport(_err) {",
+          r#"function getReport(_err) {
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "node:process.report.getReport",
+    "process.report.getReport",
+  );
+  const os = lazyOs();"#,
+        ),
+        "process-report-write-report" => (
+          report_source,
+          "function writeReport(_filename, _err) {",
+          r#"function writeReport(_filename, _err) {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "node:process.report.writeReport",
+    "process.report.writeReport",
+  );
+  return "";"#,
+        ),
+        _ => panic!(
+          "unknown public process fixture operation {}",
+          operation.operation_id
+        ),
+      };
+    assert_eq!(
+      scope.matches(operation_anchor).count(),
+      1,
+      "{} process wrapper source anchor is not unique",
+      operation.operation_id
+    );
+    assert!(
+      scope.contains(exact_guard_prefix),
+      "{} no longer guards before its first observable work",
+      operation.operation_id
+    );
+    if operation.operation_id == "process-get-active-resource-names" {
+      assert!(
+        active_source.contains(
+          r#"function getActiveResourceNames() {
+  op_oden_guard_deny_only_surface(
+    "runtime",
+    "inspect",
+    "process:active-resources",
+    "process.getActiveResourcesInfo",
+  );
+  const names: string[] = [];"#
+        ),
+        "{} no longer retains the exact direct-internal guard",
+        operation.operation_id
+      );
+    }
+    if rev2_process_fixture_is_active_resources(operation) {
+      assert!(
+        process_source.contains(
+          r#"process.getActiveResourcesInfo = getActiveResourcesInfo;
+process._getActiveRequests = getActiveRequests;
+process._getActiveHandles = getActiveHandles;"#
+        ),
+        "{} public process facade selection drifted",
+        operation.operation_id
       );
     }
   }
@@ -3056,6 +3712,11 @@ mod native_capsec_tests {
       }
       "async-hook-disable" => "node:async_hooks.AsyncHook.disable",
       "async-hook-enable" => "node:async_hooks.AsyncHook.enable",
+      "process-get-active-handles" => "process._getActiveHandles",
+      "process-get-active-requests" => "process._getActiveRequests",
+      "process-get-active-resource-names" => "process.getActiveResourcesInfo",
+      "process-report-get-report" => "process.report.getReport",
+      "process-report-write-report" => "process.report.writeReport",
       _ => operation.denied_target,
     }
   }
@@ -3078,6 +3739,413 @@ mod native_capsec_tests {
       ),
       "{} used an inexact public guard tuple",
       operation.operation_id
+    );
+  }
+
+  fn rev2_process_fixture_is_active_resources(
+    operation: &Rev2V8FixtureOperation,
+  ) -> bool {
+    matches!(
+      operation.operation_id,
+      "process-get-active-handles"
+        | "process-get-active-requests"
+        | "process-get-active-resource-names"
+    )
+  }
+
+  fn rev2_process_report_fixture_path(root: &Path) -> PathBuf {
+    root.join("must-not-write-process-report.json")
+  }
+
+  fn prepare_rev2_public_process_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "main.ts");
+    if rev2_process_fixture_is_active_resources(operation) {
+      execute(
+        runtime,
+        "file:///rev2_public_process_fixture_prepare_active.js",
+        r#"
+        rev2ProcessActiveResourcesController.seed();
+        rev2ProcessActiveResourcesController.assertState(true);
+        "#
+        .to_string(),
+      );
+    } else {
+      execute(
+        runtime,
+        "file:///rev2_public_process_fixture_prepare_report.js",
+        r#"
+        rev2ProcessReportController.reset();
+        rev2ProcessReportController.assertCounts(0, 0, 0);
+        "#
+        .to_string(),
+      );
+      assert_native_v8_fixture_path_absent(
+        &rev2_process_report_fixture_path(root),
+        "process report fixture preparation",
+      );
+    }
+  }
+
+  fn assert_rev2_public_process_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    active_resources_seeded: bool,
+    context: &'static str,
+  ) {
+    if rev2_process_fixture_is_active_resources(operation) {
+      execute(
+        runtime,
+        context,
+        format!(
+          "rev2ProcessActiveResourcesController.assertState({active_resources_seeded});"
+        ),
+      );
+    } else {
+      execute(
+        runtime,
+        context,
+        "rev2ProcessReportController.assertCounts(0, 0, 0);".to_string(),
+      );
+      assert_native_v8_fixture_path_absent(
+        &rev2_process_report_fixture_path(root),
+        "process report denied-state canary",
+      );
+    }
+  }
+
+  fn deny_rev2_public_process_fixture_operation(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    set_actor(root, "node_modules/denied-native/index.cjs");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    let denied_target_json =
+      deno_core::serde_json::to_string(operation.denied_target).unwrap();
+    let report_path_json = deno_core::serde_json::to_string(
+      &rev2_process_report_fixture_path(root).to_string_lossy(),
+    )
+    .unwrap();
+    execute(
+      runtime,
+      "file:///rev2_public_process_fixture_denied.js",
+      format!(
+        r#"
+        {{
+          const operationId = {operation_id_json};
+          const reportPath = {report_path_json};
+          function invoke() {{
+            switch (operationId) {{
+              case "process-get-active-handles":
+                return rev2ProcessActiveResources.getActiveHandles();
+              case "process-get-active-requests":
+                return rev2ProcessActiveResources.getActiveRequests();
+              case "process-get-active-resource-names":
+                return rev2ProcessActiveResources.getActiveResourceNames();
+              case "process-report-get-report":
+                return rev2ProcessReport.getReport(undefined);
+              case "process-report-write-report":
+                return rev2ProcessReport.writeReport(reportPath, undefined);
+              default:
+                throw new Error(
+                  `unknown process fixture operation ${{operationId}}`,
+                );
+            }}
+          }}
+          let denied = false;
+          try {{
+            invoke();
+          }} catch (error) {{
+            const message = String(error);
+            const expected =
+              `principal set [denied-native] may not use deny-only runtime:inspect:${{{denied_target_json}}}`;
+            if (!message.includes(expected)) {{
+              throw new Error(
+                `${{operationId}} used the wrong actor or boundary: ${{message}}`,
+              );
+            }}
+            denied = true;
+          }}
+          if (!denied) {{
+            throw new Error(`${{operationId}} reached process wrapper work`);
+          }}
+        }}
+        "#
+      ),
+    );
+  }
+
+  fn call_rev2_public_process_active_resources(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    seeded: bool,
+    name: &'static str,
+  ) {
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    execute(
+      runtime,
+      name,
+      format!(
+        r#"
+        {{
+          const operationId = {operation_id_json};
+          let result;
+          switch (operationId) {{
+            case "process-get-active-handles":
+              result = rev2ProcessActiveResources.getActiveHandles();
+              break;
+            case "process-get-active-requests":
+              result = rev2ProcessActiveResources.getActiveRequests();
+              break;
+            case "process-get-active-resource-names":
+              result = rev2ProcessActiveResources.getActiveResourceNames();
+              break;
+            default:
+              throw new Error(
+                `unknown active-resource fixture operation ${{operationId}}`,
+              );
+          }}
+          rev2ProcessActiveResourcesController.assertResult(
+            operationId,
+            result,
+            {seeded},
+          );
+          rev2ProcessActiveResourcesController.assertState({seeded});
+        }}
+        "#
+      ),
+    );
+  }
+
+  fn call_rev2_public_process_report(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    name: &'static str,
+  ) {
+    set_actor(root, "main.ts");
+    let operation_id_json =
+      deno_core::serde_json::to_string(operation.operation_id).unwrap();
+    let report_path = rev2_process_report_fixture_path(root);
+    assert_native_v8_fixture_path_absent(
+      &report_path,
+      "before ambient process report control",
+    );
+    let report_path_json =
+      deno_core::serde_json::to_string(&report_path.to_string_lossy()).unwrap();
+    execute(
+      runtime,
+      name,
+      format!(
+        r#"
+        {{
+          const operationId = {operation_id_json};
+          const reportPath = {report_path_json};
+          rev2ProcessReportController.reset();
+          if (operationId === "process-report-get-report") {{
+            const result = rev2ProcessReport.getReport(undefined);
+            if (
+              result === null ||
+              typeof result !== "object" ||
+              result.header === null ||
+              typeof result.header !== "object" ||
+              result.header.reportVersion !== 3 ||
+              result.header.event !== "JavaScript API" ||
+              result.header.trigger !== "GetReport" ||
+              result.header.processId !== 4242 ||
+              result.header.cwd !== "/rev2-process-report-fixture" ||
+              result.header.host !== "rev2-process-report-host" ||
+              !Array.isArray(result.header.cpus) ||
+              result.header.networkInterfaces === null ||
+              typeof result.header.networkInterfaces !== "object" ||
+              Object.keys(result.header.networkInterfaces).length !== 0 ||
+              !Array.isArray(result.workers) ||
+              result.workers.length !== 0
+            ) {{
+              throw new Error(
+                "ambient process getReport returned an inexact report",
+              );
+            }}
+            rev2ProcessReportController.assertCounts(1, 1, 1);
+          }} else if (operationId === "process-report-write-report") {{
+            const result = rev2ProcessReport.writeReport(
+              reportPath,
+              undefined,
+            );
+            if (result !== "") {{
+              throw new Error(
+                "ambient process writeReport returned an inexact result",
+              );
+            }}
+            rev2ProcessReportController.assertCounts(0, 0, 0);
+          }} else {{
+            throw new Error(
+              `unknown process report fixture operation ${{operationId}}`,
+            );
+          }}
+          rev2ProcessReportController.reset();
+          rev2ProcessReportController.assertCounts(0, 0, 0);
+        }}
+        "#
+      ),
+    );
+    assert_native_v8_fixture_path_absent(
+      &report_path,
+      "after ambient process report control",
+    );
+  }
+
+  fn cleanup_rev2_public_process_fixture_state(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) -> usize {
+    if rev2_process_fixture_is_active_resources(operation) {
+      call_rev2_public_process_active_resources(
+        runtime,
+        root,
+        operation,
+        true,
+        "file:///rev2_public_process_fixture_cleanup_seeded.js",
+      );
+      set_actor(root, "main.ts");
+      execute(
+        runtime,
+        "file:///rev2_public_process_fixture_clear.js",
+        r#"
+        rev2ProcessActiveResourcesController.clear();
+        rev2ProcessActiveResourcesController.assertState(false);
+        "#
+        .to_string(),
+      );
+      call_rev2_public_process_active_resources(
+        runtime,
+        root,
+        operation,
+        false,
+        "file:///rev2_public_process_fixture_cleanup_empty.js",
+      );
+      2
+    } else {
+      call_rev2_public_process_report(
+        runtime,
+        root,
+        operation,
+        "file:///rev2_public_process_fixture_cleanup_report.js",
+      );
+      1
+    }
+  }
+
+  fn assert_rev2_public_process_guard_sequence(
+    operation: &Rev2V8FixtureOperation,
+    start: usize,
+    expected_count: usize,
+    context: &str,
+  ) {
+    let expected_call = (
+      "runtime".to_string(),
+      "inspect".to_string(),
+      operation.denied_target.to_string(),
+      rev2_public_wrapper_guard_api_name(operation).to_string(),
+    );
+    let expected = vec![expected_call; expected_count];
+    let observed = {
+      let calls = PUBLIC_V8_WRAPPER_GUARD_CALLS.lock().unwrap();
+      calls[start..].to_vec()
+    };
+    assert_eq!(
+      observed, expected,
+      "{} used an inexact process wrapper guard sequence during {context}",
+      operation.operation_id
+    );
+  }
+
+  fn run_rev2_public_process_positive_control(
+    runtime: &mut JsRuntime,
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+  ) {
+    let before = rev2_v8_fixture_canaries();
+    if rev2_process_fixture_is_active_resources(operation) {
+      set_actor(root, "main.ts");
+      execute(
+        runtime,
+        "file:///rev2_public_process_fixture_positive_seed.js",
+        r#"
+        rev2ProcessActiveResourcesController.seed();
+        rev2ProcessActiveResourcesController.assertState(true);
+        "#
+        .to_string(),
+      );
+      call_rev2_public_process_active_resources(
+        runtime,
+        root,
+        operation,
+        true,
+        "file:///rev2_public_process_fixture_positive_seeded.js",
+      );
+      set_actor(root, "main.ts");
+      execute(
+        runtime,
+        "file:///rev2_public_process_fixture_positive_clear.js",
+        r#"
+        rev2ProcessActiveResourcesController.clear();
+        rev2ProcessActiveResourcesController.assertState(false);
+        "#
+        .to_string(),
+      );
+      call_rev2_public_process_active_resources(
+        runtime,
+        root,
+        operation,
+        false,
+        "file:///rev2_public_process_fixture_positive_empty.js",
+      );
+    } else {
+      call_rev2_public_process_report(
+        runtime,
+        root,
+        operation,
+        "file:///rev2_public_process_fixture_positive_report.js",
+      );
+    }
+    let after = rev2_v8_fixture_canaries();
+    let expected_guard_calls =
+      if rev2_process_fixture_is_active_resources(operation) {
+        2
+      } else {
+        1
+      };
+    assert_eq!(
+      after.public_wrapper_guard_calls,
+      before.public_wrapper_guard_calls + expected_guard_calls,
+      "{} ambient process control crossed an inexact number of guards",
+      operation.operation_id
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before.public_wrapper_guard_calls,
+        ..after
+      },
+      before,
+      "{} ambient process control crossed unrelated native work",
+      operation.operation_id
+    );
+    assert_rev2_public_process_guard_sequence(
+      operation,
+      before.public_wrapper_guard_calls,
+      expected_guard_calls,
+      "positive control",
     );
   }
 
@@ -5452,6 +6520,134 @@ mod native_capsec_tests {
     );
   }
 
+  fn run_rev2_public_process_fixture_mode(
+    root: &Path,
+    operation: &Rev2V8FixtureOperation,
+    case_kind: &str,
+    mode: &str,
+  ) {
+    reset_rev2_v8_fixture_canaries();
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _tokio_guard = tokio_runtime.enter();
+    let mut runtime = new_public_process_wrapper_runtime();
+    assert_public_process_guard_precedes_wrapper_work(operation);
+    if rev2_process_fixture_is_active_resources(operation) {
+      load_public_process_active_resources_wrapper(&mut runtime, root);
+    } else {
+      load_public_process_report_wrapper(&mut runtime, root);
+    }
+
+    if case_kind == "staged-barrier:cleanup" {
+      run_rev2_public_process_positive_control(&mut runtime, root, operation);
+    }
+
+    let sequence_start =
+      PUBLIC_V8_WRAPPER_GUARD_CALL_COUNT.load(Ordering::SeqCst);
+    prepare_rev2_public_process_fixture_state(&mut runtime, root, operation);
+    let before = rev2_v8_fixture_canaries();
+    deny_rev2_public_process_fixture_operation(&mut runtime, root, operation);
+    let after = rev2_v8_fixture_canaries();
+    assert_eq!(
+      after.public_wrapper_guard_calls,
+      before.public_wrapper_guard_calls + 1,
+      "{} did not cross exactly one process guard in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_exact_public_wrapper_guard_call(
+      operation,
+      before.public_wrapper_guard_calls,
+    );
+    assert_eq!(
+      Rev2V8FixtureCanaries {
+        public_wrapper_guard_calls: before.public_wrapper_guard_calls,
+        ..after
+      },
+      before,
+      "{} changed process wrapper state or unrelated native work before denial in {case_kind}/{mode}",
+      operation.operation_id
+    );
+    assert_rev2_public_process_fixture_state(
+      &mut runtime,
+      root,
+      operation,
+      rev2_process_fixture_is_active_resources(operation),
+      "file:///rev2_public_process_fixture_denied_state.js",
+    );
+
+    let cleanup_guard_calls =
+      cleanup_rev2_public_process_fixture_state(&mut runtime, root, operation);
+    assert_rev2_public_process_fixture_state(
+      &mut runtime,
+      root,
+      operation,
+      false,
+      "file:///rev2_public_process_fixture_clean_state.js",
+    );
+
+    let post_cleanup_denial = case_kind == "staged-barrier:cleanup";
+    if post_cleanup_denial {
+      let before_post_cleanup = rev2_v8_fixture_canaries();
+      deny_rev2_public_process_fixture_operation(&mut runtime, root, operation);
+      let after_post_cleanup = rev2_v8_fixture_canaries();
+      assert_eq!(
+        after_post_cleanup.public_wrapper_guard_calls,
+        before_post_cleanup.public_wrapper_guard_calls + 1,
+        "{} post-cleanup denial did not cross exactly one process guard in {mode}",
+        operation.operation_id
+      );
+      assert_exact_public_wrapper_guard_call(
+        operation,
+        before_post_cleanup.public_wrapper_guard_calls,
+      );
+      assert_eq!(
+        Rev2V8FixtureCanaries {
+          public_wrapper_guard_calls: before_post_cleanup
+            .public_wrapper_guard_calls,
+          ..after_post_cleanup
+        },
+        before_post_cleanup,
+        "{} post-cleanup denial reached process wrapper work or unrelated native work in {mode}",
+        operation.operation_id
+      );
+      assert_rev2_public_process_fixture_state(
+        &mut runtime,
+        root,
+        operation,
+        false,
+        "file:///rev2_public_process_fixture_post_cleanup_denied_state.js",
+      );
+    }
+
+    assert_rev2_public_process_guard_sequence(
+      operation,
+      sequence_start,
+      1 + cleanup_guard_calls + usize::from(post_cleanup_denial),
+      "prepare/deny/behavioral-cleanup/post-cleanup denial",
+    );
+
+    if case_kind == "staged-barrier:cancellation" {
+      run_rev2_public_process_positive_control(&mut runtime, root, operation);
+    }
+    assert_rev2_public_process_fixture_state(
+      &mut runtime,
+      root,
+      operation,
+      false,
+      "file:///rev2_public_process_fixture_terminal_state.js",
+    );
+    assert_rev2_v8_fixture_terminal_clean(operation.operation_id, mode);
+    drop(runtime);
+    assert_eq!(
+      GC_PROFILER_ACTIVE_STATE_COUNT.load(Ordering::SeqCst),
+      0,
+      "{} retained unrelated native profiler state after process wrapper runtime disposal in {mode}",
+      operation.operation_id
+    );
+  }
+
   fn run_rev2_public_async_hooks_denied_cycle(
     runtime: &mut JsRuntime,
     root: &Path,
@@ -5788,6 +6984,26 @@ mod native_capsec_tests {
       REV2_V8_FIXTURE_MODES.contains(&mode),
       "fixture mode is not exact"
     );
+    if matches!(
+      operation.operation_id,
+      "process-get-active-handles"
+        | "process-get-active-requests"
+        | "process-get-active-resource-names"
+        | "process-report-get-report"
+        | "process-report-write-report"
+    ) {
+      // @ref LLP 0019#runtime-and-memory-inspection [tests] -- Execute the
+      // actual internal process active-resource/report scripts behind their
+      // frozen null-prototype public facades. Primitive exact inputs cross the
+      // shared test guard; behavioral resource teardown and report work
+      // canaries prove the guard precedes observation/construction.
+      // @ref LLP 0019#pre-promotion-conformance-candidate-execution
+      // [constrained-by] -- This emits process-local development output only.
+      // It is explicitly non-evidence, authenticates no execution, promotes
+      // no cell, advertises no profile, and supplies no production authority.
+      run_rev2_public_process_fixture_mode(root, operation, case_kind, mode);
+      return rev2_v8_fixture_assertions(operation, case_kind);
+    }
     if matches!(
       operation.operation_id,
       "async-hooks-create-hook"

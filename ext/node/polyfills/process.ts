@@ -521,11 +521,17 @@ function getStdioActiveResources(): string[] {
 }
 
 export function getActiveResourcesInfo(): string[] {
+  // Resource, stdio terminal, and timer snapshots reveal process-wide
+  // activity. Invoke the guarded resource-name helper first so the registered
+  // boundary denies before any component is observed, then preserve the
+  // public result order with its saved names.
+  // @ref LLP 0019#runtime-and-memory-inspection [implements]
+  const activeResourceNames = getActiveResourceNames();
   const result: string[] = [];
   for (const name of new SafeArrayIterator(getStdioActiveResources())) {
     ArrayPrototypePush(result, name);
   }
-  for (const name of new SafeArrayIterator(getActiveResourceNames())) {
+  for (const name of new SafeArrayIterator(activeResourceNames)) {
     ArrayPrototypePush(result, name);
   }
   for (const name of new SafeArrayIterator(getTimerActiveResourcesInfo())) {
